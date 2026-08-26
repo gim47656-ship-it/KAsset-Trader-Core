@@ -7,7 +7,11 @@ import pytest
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
-from app.extensions.kasset.api.paper_schemas import OrderRequest, RiskAssessment
+from app.extensions.kasset.api.paper_schemas import (
+    AmendRequest,
+    OrderRequest,
+    RiskAssessment,
+)
 from app.extensions.kasset.api.runtime_state import runtime_state
 
 
@@ -178,3 +182,55 @@ async def test_paper_cancel_and_kill_switch_guards(
 
     assert exc_info.value.code == "KILL_SWITCH_ON"
     assert submit_db.added == []
+
+
+@pytest.mark.asyncio
+async def test_paper_crossing_amend_keeps_total_quantity_when_fill_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = FakeSession()
+    order = SimpleNamespace(
+        client_order_id="client-order-1",
+        order_type="LIMIT",
+        status="PARTIALLY_FILLED",
+        market="KRX",
+        symbol="005930",
+        side="BUY",
+        quantity=Decimal("5"),
+        filled_quantity=Decimal("2"),
+        limit_price=Decimal("60000"),
+    )
+    monkeypatch.setattr(paper_orders, "get", AsyncMock(return_value=order))
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "resolve_account",
+        AsyncMock(return_value=_account()),
+    )
+    monkeypatch.setattr(runtime_state, "assert_order_allowed", AsyncMock())
+    monkeypatch.setattr(paper_orders, "preview", AsyncMock(return_value=_approved()))
+    monkeypatch.setattr(paper_account_adapter, "quote", AsyncMock(return_value=_quote()))
+    fill = AsyncMock(
+        side_effect=MobileApiError(
+            409,
+            "BROKER_ERROR",
+            "PAPER 주문을 실행하지 못했습니다.",
+        )
+    )
+    monkeypatch.setattr(paper_orders, "_fill", fill)
+
+    with pytest.raises(MobileApiError):
+        await paper_orders.amend(
+            db,  # type: ignore[arg-type]
+            "order-1",
+            AmendRequest(quantity="6", limitPrice="80000"),
+        )
+
+    assert order.quantity == Decimal("6")
+    assert order.limit_price == Decimal("80000")
+    assert db.commit_count == 1
+    fill.assert_awaited_once_with(
+        db,
+        order,
+        Decimal("70000"),
+        fill_quantity=Decimal("4"),
+    )

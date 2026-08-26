@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.paper import iso_z
 from app.extensions.kasset.api.schemas import Broker, BrokerCapabilities
 from app.services.brokers.nhplug.gating import mock_enabled
 
@@ -60,7 +61,7 @@ class AndroidBrokerRegistry:
         if record is not None:
             credential_id = record.id
             last_verified_at = (
-                record.last_verified_at.isoformat()
+                iso_z(record.last_verified_at)
                 if record.last_verified_at is not None
                 else None
             )
@@ -74,6 +75,7 @@ class AndroidBrokerRegistry:
                 account_no_masked = credential_vault.mask(revealed.account_no)
         return Broker(
             provider="NH",
+            display_name="NH투자증권 PLUG",
             connected=(
                 last_verified_at is not None and credential_readable and mock_enabled()
             ),

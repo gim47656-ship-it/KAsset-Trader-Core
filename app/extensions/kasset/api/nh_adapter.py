@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -16,6 +17,7 @@ from app.extensions.kasset.api.credential_vault import (
     credential_vault,
 )
 from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.paper import iso_z
 from app.extensions.kasset.api.paper_schemas import (
     Balance,
     CashBalance,
@@ -32,6 +34,8 @@ from app.services.brokers.nhplug.errors import (
     NHPlugMockError,
 )
 from app.services.brokers.nhplug.gating import mock_enabled
+
+_KRX_SYMBOL_RE = re.compile(r"^\d{6}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +77,7 @@ class NHAndroidAdapter:
                 "NH PLUG 모의투자 잔고를 조회하지 못했습니다.",
             ) from err
         summary = _object_block(payload, "Output_0")
-        updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        updated_at = iso_z()
         return Balance(
             broker="NH",
             account_id=context.credential.credential_id,
@@ -103,7 +107,7 @@ class NHAndroidAdapter:
                 "NH_POSITIONS_FAILED",
                 "NH PLUG 모의투자 보유종목을 조회하지 못했습니다.",
             ) from err
-        updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        updated_at = iso_z()
         positions: list[Position] = []
         for row in _array_block(payload, "Output_1"):
             quantity = _decimal_string(row, "itg_bnc_qty")
@@ -131,9 +135,18 @@ class NHAndroidAdapter:
         return PositionsResponse(positions=positions)
 
     async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
-        context = await self.prepare_read(db)
         normalized_market = market.strip().upper()
         normalized_symbol = symbol.strip()
+        if (
+            normalized_market != "KRX"
+            or _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is None
+        ):
+            raise MobileApiError(
+                422,
+                "VALIDATION_ERROR",
+                "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
+            )
+        context = await self.prepare_read(db)
         try:
             payload = await context.client.fetch_quote(
                 market=normalized_market,
@@ -164,7 +177,7 @@ class NHAndroidAdapter:
         )
         name_value = row.get("iem_nm")
         name = name_value.strip() if isinstance(name_value, str) else None
-        as_of = datetime.now(UTC).replace(microsecond=0).isoformat()
+        as_of = iso_z()
         return Quote(
             broker="NH",
             market=normalized_market,

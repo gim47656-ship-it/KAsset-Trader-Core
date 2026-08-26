@@ -17,7 +17,7 @@ from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_adapter
-from app.extensions.kasset.api.paper import paper_account_adapter
+from app.extensions.kasset.api.paper import iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
     AiStatus,
@@ -285,6 +285,8 @@ async def list_orders(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> OrdersResponse:
+    if broker.strip().upper() == "NH":
+        return OrdersResponse(orders=[])
     _require_paper(broker)
     statuses = (
         {item.strip().upper() for item in status_filter.split(",") if item.strip()}
@@ -335,6 +337,8 @@ async def fills(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> FillsResponse:
+    if broker.strip().upper() == "NH":
+        return FillsResponse(fills=[])
     _require_paper(broker)
     return await paper_orders.list_fills(db, limit=limit)
 
@@ -349,7 +353,7 @@ async def risk_policy(
         max_order_ratio=format(state.max_order_ratio, "f"),
         max_symbol_ratio=format(state.max_symbol_ratio, "f"),
         allow_short_sell=False,
-        updated_at=state.updated_at.isoformat(),
+        updated_at=iso_z(state.updated_at),
     )
 
 

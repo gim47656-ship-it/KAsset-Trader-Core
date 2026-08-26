@@ -227,12 +227,18 @@ class PaperOrderFacade:
             )
             if self._crosses(order.side, limit_price, Decimal(quote.price)):
                 remaining = quantity - Decimal(order.filled_quantity)
-                order.quantity = remaining
-                await db.commit()
-                await self._fill(db, order, Decimal(quote.price))
-                order.quantity = quantity
-                await db.commit()
-                await db.refresh(order)
+                if remaining == 0:
+                    order.status = "FILLED"
+                    await db.commit()
+                    await db.refresh(order)
+                else:
+                    await db.commit()
+                    await self._fill(
+                        db,
+                        order,
+                        Decimal(quote.price),
+                        fill_quantity=remaining,
+                    )
             else:
                 await db.commit()
                 await db.refresh(order)
@@ -305,8 +311,19 @@ class PaperOrderFacade:
         )
 
     async def _fill(
-        self, db: AsyncSession, order: AndroidPaperOrder, market_price: Decimal
+        self,
+        db: AsyncSession,
+        order: AndroidPaperOrder,
+        market_price: Decimal,
+        *,
+        fill_quantity: Decimal | None = None,
     ) -> None:
+        prior_filled = Decimal(order.filled_quantity)
+        execution_quantity = (
+            fill_quantity
+            if fill_quantity is not None
+            else Decimal(order.quantity) - prior_filled
+        )
         service = PaperTradingService(db)
         try:
             await service.execute_order(
@@ -314,7 +331,7 @@ class PaperOrderFacade:
                 symbol=order.symbol,
                 side=order.side.lower(),
                 order_type=("market" if order.order_type == "MARKET" else "limit"),
-                quantity=order.quantity,
+                quantity=execution_quantity,
                 price=(market_price if order.order_type == "LIMIT" else None),
                 reason="KAsset Android PAPER",
                 correlation_id=order.id,
@@ -337,9 +354,21 @@ class PaperOrderFacade:
             raise MobileApiError(
                 500, "BROKER_ERROR", "PAPER 체결 결과를 확인하지 못했습니다."
             )
-        order.status = "FILLED"
-        order.filled_quantity = order.quantity
-        order.average_fill_price = trade.price
+        total_filled = prior_filled + execution_quantity
+        previous_average = order.average_fill_price
+        order.status = (
+            "FILLED" if total_filled == Decimal(order.quantity) else "PARTIALLY_FILLED"
+        )
+        order.filled_quantity = total_filled
+        order.average_fill_price = (
+            (
+                (Decimal(previous_average) * prior_filled)
+                + (Decimal(trade.price) * execution_quantity)
+            )
+            / total_filled
+            if prior_filled > 0 and previous_average is not None
+            else trade.price
+        )
         order.paper_trade_id = trade.id
         await db.commit()
         await db.refresh(order)
