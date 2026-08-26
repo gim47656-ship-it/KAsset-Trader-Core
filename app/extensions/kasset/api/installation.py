@@ -7,12 +7,13 @@ from fastapi.responses import JSONResponse
 
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paths import is_android_compat_path
-from app.extensions.kasset.api.router import router
+from app.extensions.kasset.api.router import public_router, router
 
 
 def install_android_compat_api(app: FastAPI) -> None:
     """Install the isolated Android contract without changing existing APIs."""
 
+    app.include_router(public_router)
     app.include_router(router)
 
     @app.exception_handler(MobileApiError)
