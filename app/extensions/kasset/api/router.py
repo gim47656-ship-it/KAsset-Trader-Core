@@ -16,6 +16,7 @@ from app.extensions.kasset.api.auth import (
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.nh_adapter import nh_adapter
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
@@ -41,6 +42,7 @@ from app.extensions.kasset.api.schemas import (
     AiRelayStatus,
     Broker,
     BrokersResponse,
+    BrokerVerifyResponse,
     CredentialRequest,
     DatabaseStatus,
     HealthResponse,
@@ -107,12 +109,13 @@ async def register_broker_credential(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Broker:
     _require_nh(provider)
-    await credential_vault.store_nh(
+    credential = await credential_vault.store_nh(
         db,
         app_key=request.app_key,
         app_secret=request.app_secret,
         account_no=request.account_no,
     )
+    await nh_adapter.invalidate_auth_cache(credential.id)
     return await broker_registry.get_broker(db, "NH")
 
 
@@ -126,8 +129,24 @@ async def delete_broker_credential(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     _require_nh(provider)
-    await credential_vault.delete_nh(db)
+    credential_id = await credential_vault.delete_nh(db)
+    await nh_adapter.invalidate_auth_cache(credential_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/brokers/{provider}/verify", response_model=BrokerVerifyResponse)
+async def verify_broker(
+    provider: str,
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BrokerVerifyResponse:
+    _require_nh(provider)
+    checked_at = await nh_adapter.verify(db)
+    return BrokerVerifyResponse(
+        connected=True,
+        checked_at=checked_at.isoformat().replace("+00:00", "Z"),
+        message="NH PLUG 모의투자 계좌 연결을 확인했습니다.",
+    )
 
 
 @router.get("/system/status", response_model=SystemStatus)

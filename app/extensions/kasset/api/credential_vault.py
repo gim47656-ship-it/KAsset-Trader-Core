@@ -31,6 +31,7 @@ class RevealedBrokerCredential:
     app_secret: str = field(repr=False)
     account_no: str = field(repr=False)
     created_at: datetime
+    updated_at: datetime
     last_verified_at: datetime | None
 
 
@@ -121,15 +122,19 @@ class CredentialVault:
                 field_name="account_no",
             ),
             created_at=record.created_at,
+            updated_at=record.updated_at,
             last_verified_at=record.last_verified_at,
         )
 
-    async def delete_nh(self, db: AsyncSession) -> None:
+    async def delete_nh(self, db: AsyncSession) -> str | None:
         async with self._write_lock:
             record = await self.record(db, "NH", for_update=True)
-            if record is not None:
-                await db.delete(record)
-                await db.commit()
+            if record is None:
+                return None
+            credential_id = record.id
+            await db.delete(record)
+            await db.commit()
+            return credential_id
 
     async def mark_verified(
         self, db: AsyncSession, *, checked_at: datetime

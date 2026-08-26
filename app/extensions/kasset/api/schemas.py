@@ -76,6 +76,12 @@ class BrokersResponse(AndroidWireModel):
     brokers: list[Broker]
 
 
+class BrokerVerifyResponse(AndroidWireModel):
+    connected: bool
+    checked_at: str
+    message: str
+
+
 class DatabaseStatus(AndroidWireModel):
     status: str
     migration_revision: str | None = None
