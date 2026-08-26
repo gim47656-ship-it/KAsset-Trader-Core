@@ -2,6 +2,8 @@
 
 KAsset Skills are AI-assisted analysis modules. They may produce structured evidence, opinions, or `TradeProposal` objects, but they do **not** have broker execution authority.
 
+Runtime implementations live under `app/extensions/kasset/skills/`; this top-level directory documents the Skill/SOP catalog and future skill packs.
+
 ## Planned skills
 
 ```text
@@ -17,6 +19,8 @@ skills/
 ├─ post-trade-review/
 └─ forecast-calibration/
 ```
+
+The first runtime implementation is `technical_analysis`, backed by the shared dual-provider contract in `app/extensions/kasset/ai/`.
 
 ## Required output boundary
 
