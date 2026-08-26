@@ -260,6 +260,7 @@ async def preview_order(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RiskAssessment:
+    _require_order_capable(request.broker)
     return await paper_orders.preview(db, request)
 
 
@@ -270,6 +271,7 @@ async def submit_order(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrderEnvelope:
+    _require_order_capable(request.broker)
     envelope, replay = await paper_orders.submit(db, request)
     response.status_code = status.HTTP_200_OK if replay else status.HTTP_201_CREATED
     return envelope
@@ -306,7 +308,10 @@ async def cancel_order(
     order_id: str,
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    broker: Annotated[str | None, Query()] = None,
 ) -> OrderEnvelope:
+    if broker is not None:
+        _require_order_capable(broker)
     return await paper_orders.cancel(db, order_id)
 
 
@@ -316,7 +321,10 @@ async def amend_order(
     request: AmendRequest,
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    broker: Annotated[str | None, Query()] = None,
 ) -> OrderEnvelope:
+    if broker is not None:
+        _require_order_capable(broker)
     return await paper_orders.amend(db, order_id, request)
 
 
@@ -375,6 +383,14 @@ def _require_paper(provider: str) -> None:
         raise MobileApiError(
             409, "BROKER_NOT_CONNECTED", "선택한 브로커가 연결되지 않았습니다."
         )
+
+
+def _require_order_capable(provider: str) -> None:
+    if provider.strip().upper() == "NH":
+        raise MobileApiError(
+            409, "BROKER_READ_ONLY", "NH PLUG는 현재 모의 Read-Only 단계입니다."
+        )
+    _require_paper(provider)
 
 
 def _require_nh(provider: str) -> None:
