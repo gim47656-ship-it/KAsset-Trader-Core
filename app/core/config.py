@@ -704,9 +704,9 @@ class Settings(BaseSettings):
     PAIRING_SECRET: SecretStr | None = None
     KASSET_MOBILE_USERNAME: str = "kasset-mobile"
     KASSET_SERVER_VERSION: str = "2.3-R1"
+    CREDENTIAL_MASTER_KEY: SecretStr | None = None
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False
-
 
     # JWT Authentication settings
     SECRET_KEY: str

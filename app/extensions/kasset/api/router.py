@@ -14,6 +14,7 @@ from app.extensions.kasset.api.auth import (
     mobile_auth,
 )
 from app.extensions.kasset.api.broker_registry import broker_registry
+from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
@@ -38,7 +39,9 @@ from app.extensions.kasset.api.paper_schemas import (
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.api.schemas import (
     AiRelayStatus,
+    Broker,
     BrokersResponse,
+    CredentialRequest,
     DatabaseStatus,
     HealthResponse,
     PairRequest,
@@ -55,7 +58,6 @@ router = APIRouter(prefix="/api/v1", tags=["kasset-android"])
 @public_router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse()
-
 
 
 @router.post("/auth/pair", response_model=SessionTokens)
@@ -91,8 +93,41 @@ async def revoke(
 @router.get("/brokers", response_model=BrokersResponse)
 async def brokers(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BrokersResponse:
-    return BrokersResponse(brokers=broker_registry.list_brokers())
+    return BrokersResponse(brokers=await broker_registry.list_brokers(db))
+
+
+@router.post("/brokers/{provider}/credential", response_model=Broker)
+@router.post("/brokers/{provider}/credentials", response_model=Broker)
+async def register_broker_credential(
+    provider: str,
+    request: CredentialRequest,
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Broker:
+    _require_nh(provider)
+    await credential_vault.store_nh(
+        db,
+        app_key=request.app_key,
+        app_secret=request.app_secret,
+        account_no=request.account_no,
+    )
+    return await broker_registry.get_broker(db, "NH")
+
+
+@router.delete("/brokers/{provider}/credential", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/brokers/{provider}/credentials", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_broker_credential(
+    provider: str,
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    _require_nh(provider)
+    await credential_vault.delete_nh(db)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/system/status", response_model=SystemStatus)
@@ -104,15 +139,12 @@ async def system_status(
 
 
 async def _build_system_status(db: AsyncSession) -> SystemStatus:
-    registered = broker_registry.list_brokers()
+    registered = await broker_registry.list_brokers(db)
     state = await runtime_state.get(db)
     return SystemStatus(
         server_version=settings.KASSET_SERVER_VERSION,
         server_time=(
-            datetime.now(UTC)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z")
+            datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         ),
         database=DatabaseStatus(status="ok"),
         trading_mode=state.trading_mode,
@@ -319,3 +351,9 @@ def _require_paper(provider: str) -> None:
             409, "BROKER_NOT_CONNECTED", "선택한 브로커가 연결되지 않았습니다."
         )
 
+
+def _require_nh(provider: str) -> None:
+    if provider.strip().upper() != "NH":
+        raise MobileApiError(
+            501, "BROKER_NOT_IMPLEMENTED", "해당 브로커 연결은 아직 지원하지 않습니다."
+        )

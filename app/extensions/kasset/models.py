@@ -64,10 +64,16 @@ class AndroidRuntimeState(Base):
         Text, nullable=False, default="PAPER", server_default="PAPER"
     )
     max_order_ratio: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4), nullable=False, default=Decimal("0.1000"), server_default="0.1000"
+        Numeric(8, 4),
+        nullable=False,
+        default=Decimal("0.1000"),
+        server_default="0.1000",
     )
     max_symbol_ratio: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4), nullable=False, default=Decimal("0.2500"), server_default="0.2500"
+        Numeric(8, 4),
+        nullable=False,
+        default=Decimal("0.2500"),
+        server_default="0.2500",
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -75,3 +81,23 @@ class AndroidRuntimeState(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class BrokerCredential(Base):
+    __tablename__ = "kasset_broker_credentials"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    provider: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    encrypted_app_key: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_app_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_account_no: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))

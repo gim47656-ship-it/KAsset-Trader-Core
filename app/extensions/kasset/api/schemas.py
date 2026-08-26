@@ -26,6 +26,12 @@ class RefreshRequest(AndroidWireModel):
     refresh_token: str = Field(alias="refreshToken", min_length=1)
 
 
+class CredentialRequest(AndroidWireModel):
+    app_key: str = Field(min_length=1, max_length=2048)
+    app_secret: str = Field(min_length=1, max_length=2048)
+    account_no: str = Field(min_length=1, max_length=2048)
+
+
 class SessionTokens(AndroidWireModel):
     access_token: str = Field(alias="accessToken")
     refresh_token: str = Field(alias="refreshToken")
