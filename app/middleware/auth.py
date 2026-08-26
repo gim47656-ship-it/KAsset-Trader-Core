@@ -12,6 +12,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.auth.web_router import get_current_user_from_session
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.extensions.kasset.api.paths import is_android_compat_path
 from app.routers.deprecated_pages import LEGACY_PREFIXES
 
 
@@ -266,6 +267,12 @@ class AuthMiddleware:
                     status_code=401,
                     content={"detail": "Invalid Telegram callback token"},
                 )
+            return None
+
+        # KAsset Android endpoints own explicit Bearer/pairing authentication.
+        # Bypass only their exact route boundary; unrelated /api/v1 routes keep
+        # the existing session-cookie policy below.
+        if is_android_compat_path(path):
             return None
 
         # Allow public paths

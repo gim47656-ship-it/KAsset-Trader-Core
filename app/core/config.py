@@ -700,6 +700,11 @@ class Settings(BaseSettings):
     DAILY_SCAN_FNG_HIGH: int = 80
     DAILY_SCAN_TOP_COINS_COUNT: int = 30
 
+    # KAsset Android pairing facade. The pairing secret is never persisted or logged.
+    PAIRING_SECRET: SecretStr | None = None
+    KASSET_MOBILE_USERNAME: str = "kasset-mobile"
+    KASSET_SERVER_VERSION: str = "2.3-R1"
+
     # JWT Authentication settings
     SECRET_KEY: str
     ALGORITHM: Literal["HS256", "HS384", "HS512"] = "HS256"

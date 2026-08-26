@@ -19,6 +19,7 @@ from app.auth.web_router import router as web_auth_router
 from app.core.config import settings
 from app.core.logging_config import configure_dependency_log_levels
 from app.core.taskiq_broker import broker
+from app.extensions.kasset.api.installation import install_android_compat_api
 from app.middleware.auth import AuthMiddleware
 from app.middleware.csrf import TemplateFormCSRFMiddleware
 from app.monitoring.sentry import capture_exception, init_sentry
@@ -186,6 +187,7 @@ def create_app() -> FastAPI:
         )
 
     # Include routers
+    install_android_compat_api(app)
     app.include_router(auth_router)
     app.include_router(web_auth_router)
     app.include_router(admin_router)
