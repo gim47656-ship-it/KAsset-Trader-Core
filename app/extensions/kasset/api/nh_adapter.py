@@ -16,7 +16,12 @@ from app.extensions.kasset.api.credential_vault import (
     credential_vault,
 )
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.paper_schemas import Balance, CashBalance
+from app.extensions.kasset.api.paper_schemas import (
+    Balance,
+    CashBalance,
+    Position,
+    PositionsResponse,
+)
 from app.services.brokers.nhplug.account_guard import MockAccountAllowlist
 from app.services.brokers.nhplug.auth import NHPlugAuthClient
 from app.services.brokers.nhplug.client import NHPlugMockClient
@@ -84,6 +89,45 @@ class NHAndroidAdapter:
             unrealized_pnl=_decimal_string(summary, "tot_eal_pls"),
             updated_at=updated_at,
         )
+
+    async def positions(self, db: AsyncSession) -> PositionsResponse:
+        context = await self.prepare_read(db)
+        try:
+            payload = await context.client.fetch_balance(
+                act_no=context.credential.account_no
+            )
+        except (NHPlugMockError, httpx.HTTPError) as err:
+            raise MobileApiError(
+                502,
+                "NH_POSITIONS_FAILED",
+                "NH PLUG 모의투자 보유종목을 조회하지 못했습니다.",
+            ) from err
+        updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        positions: list[Position] = []
+        for row in _array_block(payload, "Output_1"):
+            quantity = _decimal_string(row, "itg_bnc_qty")
+            if Decimal(quantity) == 0:
+                continue
+            name_value = row.get("iem_nm")
+            name = name_value.strip() if isinstance(name_value, str) else None
+            positions.append(
+                Position(
+                    broker="NH",
+                    account_id=context.credential.credential_id,
+                    market="KRX",
+                    symbol=_required_string(row, "iem_cd"),
+                    name=name or None,
+                    currency="KRW",
+                    quantity=quantity,
+                    average_price=_decimal_string(row, "phs_pr"),
+                    current_price=_decimal_string(row, "now_pr"),
+                    market_value=_decimal_string(row, "eal_amt"),
+                    unrealized_pnl=_decimal_string(row, "eal_pls_amt"),
+                    unrealized_pnl_rate=_decimal_string(row, "pft_rt"),
+                    updated_at=updated_at,
+                )
+            )
+        return PositionsResponse(positions=positions)
 
     async def prepare_read(self, db: AsyncSession) -> VerifiedNHClient:
         return await self._prepare_client(db, require_prior_verification=True)
@@ -197,6 +241,28 @@ def _decimal_string(row: dict[str, Any], field_name: str) -> str:
             "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
         )
     return format(number, "f")
+
+
+def _array_block(payload: dict[str, Any], name: str) -> list[dict[str, Any]]:
+    block = payload.get(name, [])
+    if not isinstance(block, list) or not all(isinstance(row, dict) for row in block):
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    return block
+
+
+def _required_string(row: dict[str, Any], field_name: str) -> str:
+    value = row.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    return value.strip()
 
 
 nh_adapter = NHAndroidAdapter()
