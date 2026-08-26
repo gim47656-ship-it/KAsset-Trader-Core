@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +16,7 @@ from app.extensions.kasset.api.credential_vault import (
     credential_vault,
 )
 from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.paper_schemas import Balance, CashBalance
 from app.services.brokers.nhplug.account_guard import MockAccountAllowlist
 from app.services.brokers.nhplug.auth import NHPlugAuthClient
 from app.services.brokers.nhplug.client import NHPlugMockClient
@@ -50,6 +53,37 @@ class NHAndroidAdapter:
         checked_at = datetime.now(UTC).replace(microsecond=0)
         await credential_vault.mark_verified(db, checked_at=checked_at)
         return checked_at
+
+    async def balance(self, db: AsyncSession) -> Balance:
+        context = await self.prepare_read(db)
+        try:
+            payload = await context.client.fetch_balance(
+                act_no=context.credential.account_no
+            )
+        except (NHPlugMockError, httpx.HTTPError) as err:
+            raise MobileApiError(
+                502,
+                "NH_BALANCE_FAILED",
+                "NH PLUG 모의투자 잔고를 조회하지 못했습니다.",
+            ) from err
+        summary = _object_block(payload, "Output_0")
+        updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        return Balance(
+            broker="NH",
+            account_id=context.credential.credential_id,
+            base_currency="KRW",
+            cash=[
+                CashBalance(
+                    currency="KRW",
+                    cash=_decimal_string(summary, "dca"),
+                    available=_decimal_string(summary, "orr_pbl_amt"),
+                )
+            ],
+            evaluation_amount=_decimal_string(summary, "tot_eal_amt"),
+            total_assets=_decimal_string(summary, "tot_aet_amt"),
+            unrealized_pnl=_decimal_string(summary, "tot_eal_pls"),
+            updated_at=updated_at,
+        )
 
     async def prepare_read(self, db: AsyncSession) -> VerifiedNHClient:
         return await self._prepare_client(db, require_prior_verification=True)
@@ -127,6 +161,42 @@ class NHAndroidAdapter:
                 auth_client,
             )
             return auth_client
+
+
+def _object_block(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    block = payload.get(name)
+    if not isinstance(block, dict):
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    return block
+
+
+def _decimal_string(row: dict[str, Any], field_name: str) -> str:
+    value = row.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    try:
+        number = Decimal(str(value).replace(",", "").strip())
+    except InvalidOperation as err:
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        ) from err
+    if not number.is_finite():
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    return format(number, "f")
 
 
 nh_adapter = NHAndroidAdapter()

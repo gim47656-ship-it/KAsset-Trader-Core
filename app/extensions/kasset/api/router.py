@@ -212,6 +212,8 @@ async def account_balance(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Balance:
+    if broker.strip().upper() == "NH":
+        return await nh_adapter.balance(db)
     _require_paper(broker)
     return await paper_account_adapter.balance(db)
 
