@@ -238,6 +238,8 @@ async def market_quote(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Quote:
+    if broker.strip().upper() == "NH":
+        return await nh_adapter.quote(db, market=market, symbol=symbol)
     _require_paper(broker)
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
 

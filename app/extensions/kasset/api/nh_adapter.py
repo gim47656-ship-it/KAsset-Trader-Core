@@ -21,6 +21,7 @@ from app.extensions.kasset.api.paper_schemas import (
     CashBalance,
     Position,
     PositionsResponse,
+    Quote,
 )
 from app.services.brokers.nhplug.account_guard import MockAccountAllowlist
 from app.services.brokers.nhplug.auth import NHPlugAuthClient
@@ -128,6 +129,55 @@ class NHAndroidAdapter:
                 )
             )
         return PositionsResponse(positions=positions)
+
+    async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
+        context = await self.prepare_read(db)
+        normalized_market = market.strip().upper()
+        normalized_symbol = symbol.strip()
+        try:
+            payload = await context.client.fetch_quote(
+                market=normalized_market,
+                symbol=normalized_symbol,
+            )
+        except (NHPlugMockError, httpx.HTTPError) as err:
+            raise MobileApiError(
+                502,
+                "NH_QUOTE_FAILED",
+                "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
+            ) from err
+        row = _object_block(payload, "Output_0")
+        response_symbol = _required_string(row, "iem_cd")
+        if response_symbol != normalized_symbol:
+            raise MobileApiError(
+                502,
+                "NH_RESPONSE_INVALID",
+                "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+            )
+        price = Decimal(_decimal_string(row, "stck_prpr"))
+        change = _signed_change(
+            Decimal(_decimal_string(row, "prdy_vrss")),
+            row.get("prdy_vrss_sign"),
+        )
+        change_rate = _signed_change(
+            Decimal(_decimal_string(row, "prdy_ctrt")),
+            row.get("prdy_vrss_sign"),
+        )
+        name_value = row.get("iem_nm")
+        name = name_value.strip() if isinstance(name_value, str) else None
+        as_of = datetime.now(UTC).replace(microsecond=0).isoformat()
+        return Quote(
+            broker="NH",
+            market=normalized_market,
+            symbol=response_symbol,
+            name=name or None,
+            currency="KRW",
+            price=format(price, "f"),
+            previous_close=format(price - change, "f"),
+            change_amount=format(change, "f"),
+            change_rate=format(change_rate, "f"),
+            as_of=as_of,
+            source="NH_PLUG_MOCK",
+        )
 
     async def prepare_read(self, db: AsyncSession) -> VerifiedNHClient:
         return await self._prepare_client(db, require_prior_verification=True)
@@ -263,6 +313,18 @@ def _required_string(row: dict[str, Any], field_name: str) -> str:
             "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
         )
     return value.strip()
+
+
+def _signed_change(value: Decimal, sign_code: Any) -> Decimal:
+    code = str(sign_code).strip()
+    magnitude = abs(value)
+    if code in {"1", "2", "6", "7"}:
+        return magnitude
+    if code in {"4", "5", "8", "9"}:
+        return -magnitude
+    if code in {"0", "3"}:
+        return Decimal("0")
+    return value
 
 
 nh_adapter = NHAndroidAdapter()
