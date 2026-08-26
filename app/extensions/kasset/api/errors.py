@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MobileApiError(Exception):
     status_code: int
     code: str
