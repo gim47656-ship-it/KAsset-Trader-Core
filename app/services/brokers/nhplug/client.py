@@ -7,9 +7,9 @@ read-only path allowlist checked before token resolution, and no mutation API.
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Awaitable, Callable
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import httpx
 
@@ -40,7 +40,16 @@ _SUCCESS_RESPONSE_CODES: Final[frozenset[str]] = frozenset(
 )
 _KR_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(r"^\d{6}$")
 _ALLOWED_MARKETS: Final[frozenset[str]] = frozenset({"KRX"})
-TokenProvider = Callable[[], Awaitable[str]]
+
+
+class TokenProvider(Protocol):
+    async def __call__(
+        self,
+        *,
+        force_refresh: bool = False,
+        failed_token: str | None = None,
+    ) -> str:
+        ...
 
 
 def _assert_mock_base_url(base_url: str) -> str:
@@ -77,6 +86,14 @@ def _assert_resolved_mock_request(request: httpx.Request) -> None:
             "NHPLUG data request resolved outside the pinned mock HTTPS endpoint"
         )
     _assert_readonly_path(request.url.path)
+
+
+def _is_invalid_token_response(response: httpx.Response) -> bool:
+    if response.status_code == 401:
+        return True
+    if response.status_code == 429 or b"IGW42902" in response.content:
+        return False
+    return b"IGW40043" in response.content
 
 
 class NHPlugMockClient:
@@ -175,7 +192,7 @@ class NHPlugMockClient:
         input_0: dict[str, Any],
         act_no: str | None = None,
     ) -> dict[str, Any]:
-        """Guard before token I/O, then guard resolved request before send."""
+        """Guard before token I/O and before each of at most two pinned sends."""
 
         _assert_mock_enabled()
         _assert_readonly_path(path)
@@ -204,17 +221,21 @@ class NHPlugMockClient:
                 )
             account_allowlist.assert_allowed(verified_act_no)
 
-        token = await self._token_provider()
+        pinned_body = json.dumps(
+            {"Input_0": input_0},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        token = await self._token_provider(
+            force_refresh=False,
+            failed_token=None,
+        )
         if not isinstance(token, str) or not token.strip():
             raise NHPlugMockResponseError(
                 "NHPLUG OAuth provider returned no access token"
             )
-        headers = {
-            "x-client-id": self._app_key,
-            "x-client-secret": self._app_secret,
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=UTF-8",
-        }
+        token = token.strip()
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(
             base_url=self._base_url,
             transport=self._transport,
@@ -224,14 +245,43 @@ class NHPlugMockClient:
             # host-boundary control.
             follow_redirects=False,
         ) as client:
-            request = client.build_request(
-                "POST", path, headers=headers, json={"Input_0": input_0}
+            for attempt in range(2):
+                request = client.build_request(
+                    "POST",
+                    path,
+                    headers={
+                        "x-client-id": self._app_key,
+                        "x-client-secret": self._app_secret,
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json; charset=UTF-8",
+                    },
+                    content=pinned_body,
+                )
+                # Every actual send repeats the master, host/path, and account
+                # checks. The retry therefore cannot bypass any Stage 1 guard.
+                _assert_mock_enabled()
+                _assert_resolved_mock_request(request)
+                if account_allowlist is not None and verified_act_no is not None:
+                    account_allowlist.assert_allowed(verified_act_no)
+                response = await client.send(request)
+
+                if attempt == 0 and _is_invalid_token_response(response):
+                    token = await self._token_provider(
+                        force_refresh=True,
+                        failed_token=token,
+                    )
+                    if not isinstance(token, str) or not token.strip():
+                        raise NHPlugMockResponseError(
+                            "NHPLUG OAuth provider returned no access token"
+                        )
+                    token = token.strip()
+                    continue
+                break
+
+        if response is None:
+            raise NHPlugMockResponseError(
+                "NHPLUG mock request completed without a response"
             )
-            _assert_resolved_mock_request(request)
-            # Second independent account check immediately before the send site.
-            if account_allowlist is not None and verified_act_no is not None:
-                account_allowlist.assert_allowed(verified_act_no)
-            response = await client.send(request)
         response.raise_for_status()
         try:
             payload = response.json()

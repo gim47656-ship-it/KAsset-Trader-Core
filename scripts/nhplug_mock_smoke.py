@@ -14,7 +14,9 @@ Examples (only after an operator has created the dedicated three-key file):
       --mode quote --symbol 005930 --confirm-read
 
 Credential values, tokens, account numbers, and broker response bodies are
-never printed.  A rejected mock quote exits non-zero rather than faking success.
+never printed. Access tokens reuse the secure process-independent cache, and
+only a token-invalid response may trigger one refresh retry. A rejected mock
+quote exits non-zero rather than faking success.
 """
 
 from __future__ import annotations
