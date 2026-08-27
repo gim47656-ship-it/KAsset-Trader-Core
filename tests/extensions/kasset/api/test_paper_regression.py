@@ -92,14 +92,19 @@ async def test_paper_market_order_reaches_fill_path(
         paper_account_adapter, "quote", AsyncMock(return_value=_quote())
     )
 
-    async def fill(_db: object, order: object, price: Decimal) -> None:
+    async def fill(
+        _db: object, owner_user_id: int, order: object, price: Decimal
+    ) -> None:
+        assert owner_user_id == 101
         order.status = "FILLED"
         order.average_fill_price = price
 
     monkeypatch.setattr(paper_orders, "_fill", fill)
     monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="filled"))
 
-    envelope, replay = await paper_orders.submit(db, _request())  # type: ignore[arg-type]
+    envelope, replay = await paper_orders.submit(  # type: ignore[arg-type]
+        db, 101, _request()
+    )
 
     assert envelope == "filled"
     assert replay is False
@@ -130,6 +135,7 @@ async def test_paper_non_crossing_limit_order_stays_open(
 
     envelope, replay = await paper_orders.submit(
         db,
+        101,
         _request(order_type="LIMIT"),  # type: ignore[arg-type]
     )
 
@@ -151,7 +157,9 @@ async def test_paper_client_order_id_replays_without_second_write(
     monkeypatch.setattr(runtime_state, "assert_order_allowed", allowed)
     monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="same-order"))
 
-    envelope, replay = await paper_orders.submit(db, _request())  # type: ignore[arg-type]
+    envelope, replay = await paper_orders.submit(  # type: ignore[arg-type]
+        db, 101, _request()
+    )
 
     assert envelope == "same-order"
     assert replay is True
@@ -168,7 +176,9 @@ async def test_paper_cancel_and_kill_switch_guards(
     monkeypatch.setattr(paper_orders, "get", AsyncMock(return_value=open_order))
     monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="cancelled"))
 
-    cancelled = await paper_orders.cancel(cancel_db, "order-1")  # type: ignore[arg-type]
+    cancelled = await paper_orders.cancel(  # type: ignore[arg-type]
+        cancel_db, 101, "order-1"
+    )
 
     assert cancelled == "cancelled"
     assert open_order.status == "CANCELLED"
@@ -185,7 +195,9 @@ async def test_paper_cancel_and_kill_switch_guards(
     )
 
     with pytest.raises(MobileApiError) as exc_info:
-        await paper_orders.submit(submit_db, _request())  # type: ignore[arg-type]
+        await paper_orders.submit(  # type: ignore[arg-type]
+            submit_db, 101, _request()
+        )
 
     assert exc_info.value.code == "KILL_SWITCH_ON"
     assert submit_db.added == []
@@ -230,6 +242,7 @@ async def test_paper_crossing_amend_keeps_total_quantity_when_fill_fails(
     with pytest.raises(MobileApiError):
         await paper_orders.amend(
             db,  # type: ignore[arg-type]
+            101,
             "order-1",
             AmendRequest(quantity="6", limitPrice="80000"),
         )
@@ -239,6 +252,7 @@ async def test_paper_crossing_amend_keeps_total_quantity_when_fill_fails(
     assert db.commit_count == 1
     fill.assert_awaited_once_with(
         db,
+        101,
         order,
         Decimal("70000"),
         fill_quantity=Decimal("4"),

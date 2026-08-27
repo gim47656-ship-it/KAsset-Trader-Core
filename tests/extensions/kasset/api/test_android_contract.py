@@ -30,11 +30,29 @@ ORDER = {
 
 
 async def _session_override() -> object:
-    return object()
+    return SimpleNamespace(user=SimpleNamespace(id=101, role="trader", is_active=True))
+
+
+class _EmptyResult:
+    """Minimal async-session result: every query sees an empty store."""
+
+    def scalars(self) -> "_EmptyResult":
+        return self
+
+    def all(self) -> list[object]:
+        return []
+
+    def first(self) -> None:
+        return None
+
+
+class _EmptyStoreDb:
+    async def execute(self, *args: object, **kwargs: object) -> _EmptyResult:
+        return _EmptyResult()
 
 
 async def _db_override() -> AsyncIterator[object]:
-    yield object()
+    yield _EmptyStoreDb()
 
 
 def _client() -> TestClient:
@@ -60,7 +78,9 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
 
     required = {
         "/health": {"get"},
-        "/api/v1/auth/pair": {"post"},
+        "/api/v1/auth/register": {"post"},
+        "/api/v1/auth/login": {"post"},
+        "/api/v1/auth/me": {"get"},
         "/api/v1/auth/refresh": {"post"},
         "/api/v1/auth/revoke": {"post"},
         "/api/v1/system/status": {"get"},
@@ -80,6 +100,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/ai/status": {"get"},
         "/api/v1/ai/briefing": {"get"},
     }
+    assert "/api/v1/auth/pair" not in paths
     for path, methods in required.items():
         assert path in paths
         assert methods <= set(paths[path])
@@ -98,9 +119,11 @@ def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
         response = client.get("/api/v1/ai/briefing?market=kr&symbol=005930&limit=10")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    # `asOf` is the server-side evaluation time even for an empty payload.
+    assert body.pop("asOf").endswith("Z")
+    assert body == {
         "status": "empty",
-        "asOf": None,
         "news": {
             "status": "empty",
             "refreshedAt": None,
@@ -183,7 +206,9 @@ def test_broker_catalog_builds_nh_entry_with_required_display_name(
         AsyncMock(return_value=None),
     )
 
-    brokers = asyncio.run(broker_registry.list_brokers(object()))  # type: ignore[arg-type]
+    brokers = asyncio.run(
+        broker_registry.list_brokers(object(), 101)  # type: ignore[arg-type]
+    )
 
     nh = next(broker for broker in brokers if broker.provider == "NH")
     assert nh.display_name == "NH투자증권 PLUG"
@@ -238,7 +263,9 @@ def test_nh_quote_normalizes_official_current_price_fields(
     )
 
     quote = asyncio.run(
-        nh_adapter.quote(object(), market="krx", symbol="005930")  # type: ignore[arg-type]
+        nh_adapter.quote(  # type: ignore[arg-type]
+            object(), 101, market="krx", symbol="005930"
+        )
     )
 
     assert quote.model_dump(by_alias=True) == {

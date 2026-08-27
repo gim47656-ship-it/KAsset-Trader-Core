@@ -700,13 +700,14 @@ class Settings(BaseSettings):
     DAILY_SCAN_FNG_HIGH: int = 80
     DAILY_SCAN_TOP_COINS_COUNT: int = 30
 
-    # KAsset Android pairing facade. The pairing secret is never persisted or logged.
-    PAIRING_SECRET: SecretStr | None = None
-    KASSET_MOBILE_USERNAME: str = "kasset-mobile"
+    # KAsset Android product surface.
     KASSET_SERVER_VERSION: str = "2.3-R1"
     CREDENTIAL_MASTER_KEY: SecretStr | None = None
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False
+    # PAPER-only automated execution of owner-approved AI recommendations.
+    # Deliberately independent of TRADING_ENABLED so operators must opt in.
+    AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
 
     # JWT Authentication settings
     SECRET_KEY: str

@@ -298,9 +298,10 @@ async def test_file_cache_is_reused_by_a_different_client_instance(
     assert cache_payload["base"] == AUTH_BASE_URL
     assert cache_payload["token"] == "process-shared-token"
     assert cache_payload["exp"] > time.time() + 60
-    assert cache_payload["owner_fingerprint"] == hashlib.sha256(
-        f"owner-key-sentinel|{AUTH_BASE_URL}".encode()
-    ).hexdigest()
+    assert (
+        cache_payload["owner_fingerprint"]
+        == hashlib.sha256(f"owner-key-sentinel|{AUTH_BASE_URL}".encode()).hexdigest()
+    )
     assert "owner-key-sentinel" not in cache_text
     assert "owner-secret-sentinel" not in cache_text
 
@@ -341,9 +342,7 @@ async def test_invalid_file_cache_is_never_reused(
         payload["exp"] = time.time() + 60
 
     cache_path.write_text(
-        "{corrupt-json"
-        if invalid_cache == "corruption"
-        else json.dumps(payload),
+        "{corrupt-json" if invalid_cache == "corruption" else json.dumps(payload),
         encoding="utf-8",
     )
     transport, seen = _transport(

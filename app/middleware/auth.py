@@ -141,7 +141,7 @@ class AuthMiddleware:
         )
         async with session_manager as db:
             try:
-                user = await get_current_user(token, db)
+                user = await get_current_user(token, db, request=request)
             except HTTPException:
                 return None
         return user if user.is_active else None
@@ -294,7 +294,7 @@ class AuthMiddleware:
                 )
             return None
 
-        # KAsset Android endpoints own explicit Bearer/pairing authentication.
+        # KAsset Android endpoints own explicit account/device Bearer authentication.
         # Bypass only their exact route boundary; unrelated /api/v1 routes keep
         # the existing session-cookie policy below.
         if is_android_compat_path(path):

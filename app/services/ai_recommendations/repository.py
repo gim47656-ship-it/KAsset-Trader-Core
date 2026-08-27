@@ -1,4 +1,4 @@
-"""Persistence operations for review-only AI recommendations."""
+"""Owner-scoped persistence operations for AI recommendation review."""
 
 from __future__ import annotations
 
@@ -16,19 +16,29 @@ from app.models.ai_recommendations import (
 
 
 class AIRecommendationRepository:
-    """Own the recommendation query and decision compare-and-set operations."""
+    """Own recommendation queries, review CAS, and PAPER execution claims."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get(self, recommendation_id: str) -> AIRecommendation | None:
+    async def get(
+        self,
+        owner_user_id: int,
+        recommendation_id: str,
+        *,
+        for_update: bool = False,
+    ) -> AIRecommendation | None:
         statement = select(AIRecommendation).where(
-            AIRecommendation.id == recommendation_id
+            AIRecommendation.owner_user_id == owner_user_id,
+            AIRecommendation.id == recommendation_id,
         )
+        if for_update:
+            statement = statement.with_for_update()
         return (await self._session.scalars(statement)).one_or_none()
 
     async def list_by_status(
         self,
+        owner_user_id: int,
         *,
         status: RecommendationStatusGroup,
         limit: int,
@@ -46,7 +56,10 @@ class AIRecommendationRepository:
             )
         statement = (
             select(AIRecommendation)
-            .where(decision_filter)
+            .where(
+                AIRecommendation.owner_user_id == owner_user_id,
+                decision_filter,
+            )
             .order_by(AIRecommendation.created_at.desc(), AIRecommendation.id.desc())
             .limit(limit)
         )
@@ -54,16 +67,18 @@ class AIRecommendationRepository:
 
     async def resolve_pending(
         self,
+        owner_user_id: int,
         *,
         recommendation_id: str,
         decision: TerminalRecommendationDecision,
         decided_at: datetime,
     ) -> AIRecommendation | None:
-        """Resolve only a still-pending row and return it when this call won."""
+        """Resolve only this owner's still-pending row."""
 
         statement = (
             update(AIRecommendation)
             .where(
+                AIRecommendation.owner_user_id == owner_user_id,
                 AIRecommendation.id == recommendation_id,
                 AIRecommendation.decision == RecommendationDecision.PENDING,
             )
@@ -79,6 +94,29 @@ class AIRecommendationRepository:
             execution_options={"populate_existing": True},
         )
         return result.one_or_none()
+
+    async def claim_for_paper_execution(
+        self,
+        owner_user_id: int,
+        now: datetime,
+    ) -> AIRecommendation | None:
+        statement = (
+            select(AIRecommendation)
+            .where(
+                AIRecommendation.owner_user_id == owner_user_id,
+                AIRecommendation.decision == RecommendationDecision.APPROVED,
+                AIRecommendation.valid_until > now,
+                AIRecommendation.paper_execution_status.is_(None),
+            )
+            .order_by(
+                AIRecommendation.decided_at,
+                AIRecommendation.created_at,
+                AIRecommendation.id,
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        return (await self._session.scalars(statement)).one_or_none()
 
 
 __all__ = ["AIRecommendationRepository", "RecommendationStatusGroup"]

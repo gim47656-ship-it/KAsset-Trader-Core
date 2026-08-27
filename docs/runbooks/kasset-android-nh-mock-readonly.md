@@ -1,8 +1,8 @@
 # KAsset Android + NH PLUG Mock Read-Only 런북
 
-이 런북은 `kasset-integration` 브랜치의 Android 호환 API를 로컬에서 실행하고
-KAsset Trader Android 앱을 `PAPER`와 NH PLUG Mock Read-Only 경로에 연결하는 절차다.
-NH 실전 주문과 NH 운영 데이터 host는 이 범위에 없다.
+이 런북은 `main` 브랜치의 Android API를 로컬에서 실행하고 KAsset Trader
+Android 앱을 공개 계정 인증, `PAPER`, NH PLUG Mock Read-Only 경로에 연결하는
+절차다. NH 실전 주문과 NH 운영 데이터 host는 이 범위에 없다.
 
 ## 1. 런타임 설정
 
@@ -11,10 +11,9 @@ NH 실전 주문과 NH 운영 데이터 host는 이 범위에 없다.
 | 목적 | 이 저장소의 변수 | 비고 |
 |---|---|---|
 | 실행 환경 | `ENVIRONMENT` | 외부 배포 문서의 `APP_ENV`에 해당 |
-| 공개 주소 | 없음 | `PUBLIC_BASE_URL` 대신 TLS reverse proxy와 Android 페어링 화면에 주소를 설정 |
+| 공개 주소 | 없음 | `PUBLIC_BASE_URL` 대신 TLS reverse proxy와 Android 계정 화면에 주소를 설정 |
 | PostgreSQL | `DATABASE_URL` | Alembic과 서버가 같은 DB를 사용 |
-| JWT 서명 | `SECRET_KEY` | 외부 배포 문서의 `SERVER_AUTH_SECRET`에 해당 |
-| Android 페어링 | `PAIRING_SECRET` | 앱에 입력할 값, 저장·로그 금지 |
+| JWT 서명 | `SECRET_KEY` | 계정/device access·refresh token 서명 키 |
 | Credential Vault | `CREDENTIAL_MASTER_KEY` | base64로 인코딩한 정확히 32바이트 키 |
 | PAPER 주문 gate | `TRADING_ENABLED` | 기본 `false` |
 | LIVE 주문 gate | `LIVE_TRADING_ENABLED` | Phase 1에서는 `false` 유지 |
@@ -27,7 +26,7 @@ python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)
 ```
 
 키를 바꾸면 기존 Vault ciphertext를 복호화할 수 없다. DB 백업과 함께 별도 secret
-store에 보관한다. `.env`, pairing code, NH App Key, NH App Secret, 전체 계좌번호는
+store에 보관한다. `.env`, 사용자 비밀번호, NH App Key, NH App Secret, 전체 계좌번호는
 Git에 넣지 않는다.
 
 ## 2. DB와 서버 시작
@@ -45,7 +44,7 @@ curl -sS http://127.0.0.1:8000/health
 ```
 
 정상 응답은 `{"status":"ok"}`다. 운영에서는 Android가 입력할 공개 주소 앞에 TLS
-reverse proxy를 둔다. Pairing, credential, token 요청을 평문 인터넷에 노출하지 않는다.
+reverse proxy를 둔다. 계정 등록·로그인, credential, token 요청을 평문 인터넷에 노출하지 않는다.
 
 ## 3. Android 연결
 
@@ -56,14 +55,15 @@ cd KAsset-Trader/android
 gradlew.bat :app:assembleDebug
 ```
 
-페어링 화면의 서버 주소:
+계정 화면의 서버 주소:
 
 - Android Emulator: `http://10.0.2.2:8000`
 - `adb reverse tcp:8000 tcp:8000`을 쓴 실기기: `http://127.0.0.1:8000`
 - 운영/원격 기기: TLS가 적용된 `https://...` 주소
 
-`연결 확인` 후 `PAIRING_SECRET`을 페어링 코드로 입력한다. 앱은 access/refresh token만
-Android Keystore에 저장하며 pairing code는 저장하지 않는다.
+`연결 확인` 후 `계정 만들기` 또는 `로그인`을 사용한다. 앱은 비밀번호를 저장하지
+않고 access/refresh token만 Android Keystore에 저장한다. 로그아웃해도 서버 주소와
+설치별 device ID는 유지된다.
 
 ## 4. PAPER 확인
 

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.models.trading import User, UserRole
 from app.routers.dependencies import get_authenticated_user
 from app.schemas.ai_recommendations import (
     RecommendationDecisionRequest,
@@ -129,6 +130,7 @@ async def _parse_decision_body(
 )
 async def list_recommendations(
     request: Request,
+    current_user: Annotated[User, Depends(get_authenticated_user)],
     service: Annotated[AIRecommendationService, Depends(_service)],
 ) -> RecommendationListResponse | JSONResponse:
     parsed = _parse_list_query(request)
@@ -136,6 +138,7 @@ async def list_recommendations(
         return parsed
     status_group, limit = parsed
     recommendations = await service.list_recommendations(
+        current_user.id,
         status=cast(RecommendationStatusGroup, status_group),
         limit=limit,
     )
@@ -177,14 +180,22 @@ async def list_recommendations(
 async def decide_recommendation(
     recommendation_id: str,
     request: Request,
+    current_user: Annotated[User, Depends(get_authenticated_user)],
     service: Annotated[AIRecommendationService, Depends(_service)],
 ) -> RecommendationResponse | JSONResponse:
+    if current_user.role not in {UserRole.trader, UserRole.admin}:
+        return _error_response(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="FORBIDDEN",
+            message="이 작업을 수행할 권한이 없습니다.",
+        )
     parsed = await _parse_decision_body(request)
     if isinstance(parsed, JSONResponse):
         return parsed
 
     try:
         row = await service.decide(
+            current_user.id,
             recommendation_id=recommendation_id,
             decision=parsed.decision,
         )

@@ -36,13 +36,21 @@ class PaperOrderFacade:
     def __init__(self) -> None:
         self._transition_lock = asyncio.Lock()
 
-    async def preview(self, db: AsyncSession, request: OrderRequest) -> RiskAssessment:
+    async def preview(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        request: OrderRequest,
+    ) -> RiskAssessment:
         self._assert_paper(request)
-        account = await paper_account_adapter.resolve_account(db, request.account_id)
+        account = await paper_account_adapter.resolve_account(
+            db, owner_user_id, request.account_id
+        )
         quote = await paper_account_adapter.quote(
             db, market=request.market, symbol=request.symbol
         )
-        state = await runtime_state.get(db)
+        state = await runtime_state.get(db, owner_user_id)
+        global_state = await runtime_state.get_global(db)
         price = Decimal(quote.price)
         estimated_amount = request.quantity * (
             request.limit_price if request.order_type == "LIMIT" else price
@@ -59,7 +67,7 @@ class PaperOrderFacade:
                     code="TRADING_DISABLED", message="서버에서 거래가 꺼져 있습니다."
                 )
             )
-        if state.kill_switch_enabled:
+        if global_state.kill_switch_enabled or state.kill_switch_enabled:
             reasons.append(
                 RiskReason(code="KILL_SWITCH_ON", message="거래 중지 상태입니다.")
             )
@@ -93,18 +101,26 @@ class PaperOrderFacade:
         )
 
     async def submit(
-        self, db: AsyncSession, request: OrderRequest
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        request: OrderRequest,
     ) -> tuple[OrderEnvelope, bool]:
         self._assert_paper(request)
         if not request.client_order_id:
             raise MobileApiError(422, "VALIDATION_ERROR", "clientOrderId가 필요합니다.")
         async with self._transition_lock:
-            existing = await self._by_client_id(db, request.client_order_id)
+            existing = await self._by_client_id(
+                db, owner_user_id, request.client_order_id
+            )
             if existing is not None:
-                return await self.envelope(db, existing, replay=True), True
+                return (
+                    await self.envelope(db, owner_user_id, existing, replay=True),
+                    True,
+                )
 
-            await runtime_state.assert_order_allowed(db)
-            risk = await self.preview(db, request)
+            await runtime_state.assert_order_allowed(db, owner_user_id)
+            risk = await self.preview(db, owner_user_id, request)
             if risk.decision != "APPROVED":
                 raise MobileApiError(
                     409,
@@ -117,13 +133,14 @@ class PaperOrderFacade:
                     },
                 )
             account = await paper_account_adapter.resolve_account(
-                db, request.account_id
+                db, owner_user_id, request.account_id
             )
             quote = await paper_account_adapter.quote(
                 db, market=request.market, symbol=request.symbol
             )
             order = AndroidPaperOrder(
                 id=str(uuid4()),
+                owner_user_id=owner_user_id,
                 client_order_id=request.client_order_id,
                 paper_account_id=account.id,
                 broker_order_id=f"PAPER-{uuid4().hex[:16].upper()}",
@@ -143,10 +160,15 @@ class PaperOrderFacade:
                 await db.commit()
             except IntegrityError:
                 await db.rollback()
-                existing = await self._by_client_id(db, request.client_order_id)
+                existing = await self._by_client_id(
+                    db, owner_user_id, request.client_order_id
+                )
                 if existing is None:
                     raise
-                return await self.envelope(db, existing, replay=True), True
+                return (
+                    await self.envelope(db, owner_user_id, existing, replay=True),
+                    True,
+                )
             await db.refresh(order)
 
             market_price = Decimal(quote.price)
@@ -157,14 +179,22 @@ class PaperOrderFacade:
                 order.status = "OPEN"
                 await db.commit()
                 await db.refresh(order)
-                return await self.envelope(db, order, risk=risk), False
+                return (
+                    await self.envelope(db, owner_user_id, order, risk=risk),
+                    False,
+                )
 
-            await self._fill(db, order, market_price)
-            return await self.envelope(db, order, risk=risk), False
+            await self._fill(db, owner_user_id, order, market_price)
+            return await self.envelope(db, owner_user_id, order, risk=risk), False
 
-    async def cancel(self, db: AsyncSession, order_id: str) -> OrderEnvelope:
+    async def cancel(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order_id: str,
+    ) -> OrderEnvelope:
         async with self._transition_lock:
-            order = await self.get(db, order_id, for_update=True)
+            order = await self.get(db, owner_user_id, order_id, for_update=True)
             if order.status not in {"OPEN", "PARTIALLY_FILLED"}:
                 raise MobileApiError(
                     409,
@@ -174,13 +204,17 @@ class PaperOrderFacade:
             order.status = "CANCELLED"
             await db.commit()
             await db.refresh(order)
-            return await self.envelope(db, order)
+            return await self.envelope(db, owner_user_id, order)
 
     async def amend(
-        self, db: AsyncSession, order_id: str, amendment: AmendRequest
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order_id: str,
+        amendment: AmendRequest,
     ) -> OrderEnvelope:
         async with self._transition_lock:
-            order = await self.get(db, order_id, for_update=True)
+            order = await self.get(db, owner_user_id, order_id, for_update=True)
             if order.order_type != "LIMIT" or order.status not in {
                 "OPEN",
                 "PARTIALLY_FILLED",
@@ -206,7 +240,7 @@ class PaperOrderFacade:
                 clientOrderId=order.client_order_id,
                 broker="PAPER",
                 accountId=paper_account_adapter.account_id(
-                    await paper_account_adapter.resolve_account(db, None)
+                    await paper_account_adapter.resolve_account(db, owner_user_id, None)
                 ),
                 market=order.market,
                 symbol=order.symbol,
@@ -215,8 +249,8 @@ class PaperOrderFacade:
                 quantity=quantity,
                 limitPrice=limit_price,
             )
-            await runtime_state.assert_order_allowed(db)
-            risk = await self.preview(db, request)
+            await runtime_state.assert_order_allowed(db, owner_user_id)
+            risk = await self.preview(db, owner_user_id, request)
             if risk.decision != "APPROVED":
                 raise MobileApiError(
                     409,
@@ -243,6 +277,7 @@ class PaperOrderFacade:
                     await db.commit()
                     await self._fill(
                         db,
+                        owner_user_id,
                         order,
                         Decimal(quote.price),
                         fill_quantity=remaining,
@@ -250,12 +285,20 @@ class PaperOrderFacade:
             else:
                 await db.commit()
                 await db.refresh(order)
-            return await self.envelope(db, order, risk=risk)
+            return await self.envelope(db, owner_user_id, order, risk=risk)
 
     async def get(
-        self, db: AsyncSession, order_id: str, *, for_update: bool = False
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order_id: str,
+        *,
+        for_update: bool = False,
     ) -> AndroidPaperOrder:
-        stmt = select(AndroidPaperOrder).where(AndroidPaperOrder.id == order_id)
+        stmt = select(AndroidPaperOrder).where(
+            AndroidPaperOrder.owner_user_id == owner_user_id,
+            AndroidPaperOrder.id == order_id,
+        )
         if for_update:
             stmt = stmt.with_for_update()
         result = await db.execute(stmt)
@@ -267,11 +310,14 @@ class PaperOrderFacade:
     async def list_orders(
         self,
         db: AsyncSession,
+        owner_user_id: int,
         *,
         statuses: set[str] | None,
         limit: int,
     ) -> OrdersResponse:
-        stmt = select(AndroidPaperOrder)
+        stmt = select(AndroidPaperOrder).where(
+            AndroidPaperOrder.owner_user_id == owner_user_id
+        )
         if statuses:
             stmt = stmt.where(AndroidPaperOrder.status.in_(statuses))
         result = await db.execute(
@@ -281,23 +327,37 @@ class PaperOrderFacade:
             orders=[self.serialize_order(order) for order in result.scalars().all()]
         )
 
-    async def list_fills(self, db: AsyncSession, *, limit: int) -> FillsResponse:
+    async def list_fills(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        *,
+        limit: int,
+    ) -> FillsResponse:
         result = await db.execute(
             select(AndroidPaperOrder)
-            .where(AndroidPaperOrder.paper_trade_id.is_not(None))
+            .where(
+                AndroidPaperOrder.owner_user_id == owner_user_id,
+                AndroidPaperOrder.paper_trade_id.is_not(None),
+            )
             .order_by(AndroidPaperOrder.updated_at.desc())
             .limit(limit)
         )
         fills: list[Fill] = []
         for order in result.scalars().all():
-            fill = await self._fill_for_order(db, order)
+            fill = await self._fill_for_order(db, owner_user_id, order)
             if fill is not None:
                 fills.append(fill)
         return FillsResponse(fills=fills)
 
-    async def detail(self, db: AsyncSession, order_id: str) -> OrderDetail:
-        order = await self.get(db, order_id)
-        fill = await self._fill_for_order(db, order)
+    async def detail(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order_id: str,
+    ) -> OrderDetail:
+        order = await self.get(db, owner_user_id, order_id)
+        fill = await self._fill_for_order(db, owner_user_id, order)
         return OrderDetail(
             order=self.serialize_order(order), fills=[fill] if fill is not None else []
         )
@@ -305,12 +365,14 @@ class PaperOrderFacade:
     async def envelope(
         self,
         db: AsyncSession,
+        owner_user_id: int,
         order: AndroidPaperOrder,
         *,
         risk: RiskAssessment | None = None,
         replay: bool = False,
     ) -> OrderEnvelope:
-        fill = await self._fill_for_order(db, order)
+        self._assert_owned(order, owner_user_id)
+        fill = await self._fill_for_order(db, owner_user_id, order)
         return OrderEnvelope(
             order=self.serialize_order(order),
             risk=risk,
@@ -321,11 +383,13 @@ class PaperOrderFacade:
     async def _fill(
         self,
         db: AsyncSession,
+        owner_user_id: int,
         order: AndroidPaperOrder,
         market_price: Decimal,
         *,
         fill_quantity: Decimal | None = None,
     ) -> None:
+        self._assert_owned(order, owner_user_id)
         prior_filled = Decimal(order.filled_quantity)
         execution_quantity = (
             fill_quantity
@@ -352,7 +416,10 @@ class PaperOrderFacade:
                 409, "BROKER_ERROR", "PAPER 주문을 실행하지 못했습니다."
             ) from err
         result = await db.execute(
-            select(PaperTrade).where(PaperTrade.correlation_id == order.id)
+            select(PaperTrade).where(
+                PaperTrade.account_id == order.paper_account_id,
+                PaperTrade.correlation_id == order.id,
+            )
         )
         trade = result.scalar_one_or_none()
         if trade is None:
@@ -382,12 +449,19 @@ class PaperOrderFacade:
         await db.refresh(order)
 
     async def _fill_for_order(
-        self, db: AsyncSession, order: AndroidPaperOrder
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order: AndroidPaperOrder,
     ) -> Fill | None:
+        self._assert_owned(order, owner_user_id)
         if order.paper_trade_id is None:
             return None
         result = await db.execute(
-            select(PaperTrade).where(PaperTrade.id == order.paper_trade_id)
+            select(PaperTrade).where(
+                PaperTrade.account_id == order.paper_account_id,
+                PaperTrade.id == order.paper_trade_id,
+            )
         )
         trade = result.scalar_one_or_none()
         if trade is None:
@@ -406,11 +480,15 @@ class PaperOrderFacade:
         )
 
     async def _by_client_id(
-        self, db: AsyncSession, client_order_id: str
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        client_order_id: str,
     ) -> AndroidPaperOrder | None:
         result = await db.execute(
             select(AndroidPaperOrder).where(
-                AndroidPaperOrder.client_order_id == client_order_id
+                AndroidPaperOrder.owner_user_id == owner_user_id,
+                AndroidPaperOrder.client_order_id == client_order_id,
             )
         )
         return result.scalar_one_or_none()
@@ -447,6 +525,11 @@ class PaperOrderFacade:
             created_at=iso_z(created),
             updated_at=iso_z(updated),
         )
+
+    @staticmethod
+    def _assert_owned(order: AndroidPaperOrder, owner_user_id: int) -> None:
+        if order.owner_user_id != owner_user_id:
+            raise MobileApiError(404, "NOT_FOUND", "주문을 찾을 수 없습니다.")
 
     @staticmethod
     def _crosses(side: str, limit_price: Decimal | None, market_price: Decimal) -> bool:

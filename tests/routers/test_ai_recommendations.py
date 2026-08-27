@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal, get_db
 from app.middleware.auth import AuthMiddleware
 from app.models.ai_recommendations import AIRecommendation
+from app.models.trading import User, UserRole
 from app.routers.ai_recommendations import _service, router
 from app.routers.dependencies import get_authenticated_user
 from app.services.ai_recommendations import (
@@ -27,11 +28,18 @@ from app.services.ai_recommendations import (
 )
 
 _NOW = datetime(2026, 8, 27, 1, 0, 0, tzinfo=UTC)
+_TEST_OWNER_ID: int | None = None
+
+
+def _test_owner_id() -> int:
+    assert _TEST_OWNER_ID is not None
+    return _TEST_OWNER_ID
 
 
 def _recommendation(
     recommendation_id: str,
     *,
+    owner_user_id: int | None = None,
     action: str = "BUY",
     decision: str = "PENDING",
     created_at: datetime = _NOW,
@@ -43,6 +51,7 @@ def _recommendation(
     suggested_quantity: str | None = "10.000",
 ) -> AIRecommendation:
     return AIRecommendation(
+        owner_user_id=owner_user_id or _test_owner_id(),
         id=recommendation_id,
         action=action,
         decision=decision,
@@ -90,8 +99,9 @@ def _app(session: AsyncSession, *, authenticated: bool = True) -> FastAPI:
     )
     if authenticated:
         app.dependency_overrides[get_authenticated_user] = lambda: SimpleNamespace(
-            id=1,
+            id=_test_owner_id(),
             is_active=True,
+            role=UserRole.trader,
         )
     return app
 
@@ -105,12 +115,17 @@ async def _request(app: FastAPI, method: str, url: str, **kwargs):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _clean_recommendations(db_session: AsyncSession):
+async def _clean_recommendations(db_session: AsyncSession, user: User):
+    global _TEST_OWNER_ID
+    _TEST_OWNER_ID = user.id
     await db_session.execute(delete(AIRecommendation))
     await db_session.commit()
-    yield
-    await db_session.execute(delete(AIRecommendation))
-    await db_session.commit()
+    try:
+        yield
+    finally:
+        await db_session.execute(delete(AIRecommendation))
+        await db_session.commit()
+        _TEST_OWNER_ID = None
 
 
 @pytest.mark.asyncio
@@ -458,11 +473,16 @@ async def test_decision_persists_across_new_database_sessions(
         decided = await AIRecommendationService(
             deciding_session,
             clock=lambda: _NOW,
-        ).decide(recommendation_id="reconnect", decision="APPROVED")
+        ).decide(
+            _test_owner_id(),
+            recommendation_id="reconnect",
+            decision="APPROVED",
+        )
         assert decided.decision == "APPROVED"
 
     async with AsyncSessionLocal() as reconnect_session:
         rows = await AIRecommendationService(reconnect_session).list_recommendations(
+            _test_owner_id(),
             status="RESOLVED",
             limit=50,
         )
@@ -484,6 +504,7 @@ async def test_concurrent_different_decisions_have_one_winner(
         async with AsyncSessionLocal() as session:
             service = AIRecommendationService(session, clock=lambda: _NOW)
             return await service.decide(
+                _test_owner_id(),
                 recommendation_id="concurrent",
                 decision=decision,
             )

@@ -12,18 +12,27 @@ from app.services.brokers.nhplug.gating import mock_enabled
 class AndroidBrokerRegistry:
     """Expose stable provider names without changing Core broker enums."""
 
-    async def list_brokers(self, db: AsyncSession) -> list[Broker]:
+    async def list_brokers(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+    ) -> list[Broker]:
         return [
             self._paper(),
-            await self._nh(db),
+            await self._nh(db, owner_user_id),
             self._preparing("KIS", "한국투자증권"),
             self._preparing("TOSS", "토스증권"),
             self._preparing("KB", "KB증권"),
         ]
 
-    async def get_broker(self, db: AsyncSession, provider: str) -> Broker:
+    async def get_broker(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        provider: str,
+    ) -> Broker:
         normalized = provider.strip().upper()
-        for broker in await self.list_brokers(db):
+        for broker in await self.list_brokers(db, owner_user_id):
             if broker.provider == normalized:
                 return broker
         raise MobileApiError(404, "BROKER_NOT_FOUND", "지원하지 않는 브로커입니다.")
@@ -51,8 +60,8 @@ class AndroidBrokerRegistry:
         )
 
     @staticmethod
-    async def _nh(db: AsyncSession) -> Broker:
-        record = await credential_vault.record(db, "NH")
+    async def _nh(db: AsyncSession, owner_user_id: int) -> Broker:
+        record = await credential_vault.record(db, owner_user_id, "NH")
         credential_id: str | None = None
         credential_readable = False
         app_key_masked: str | None = None
@@ -66,7 +75,7 @@ class AndroidBrokerRegistry:
                 else None
             )
             try:
-                revealed = await credential_vault.reveal_nh(db)
+                revealed = await credential_vault.reveal_nh(db, owner_user_id)
             except MobileApiError:
                 revealed = None
             if revealed is not None:

@@ -19,11 +19,12 @@ from app.extensions.kasset.api.paper_schemas import (
     SymbolItem,
     SymbolsResponse,
 )
+from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.paper_trading import PaperAccount, PaperTrade
 from app.models.trading import Instrument, InstrumentType
 from app.services.paper_trading_service import PaperTradingService
 
-_DEFAULT_ACCOUNT_NAME = "KAsset Android PAPER"
+_DEFAULT_ACCOUNT_NAME_PREFIX = "KAsset Android PAPER"
 
 
 def decimal_text(value: Decimal | int | str) -> str:
@@ -43,24 +44,57 @@ def iso_z(value: datetime | None = None) -> str:
 
 
 class PaperAccountAdapter:
-    async def default_account(self, db: AsyncSession) -> PaperAccount:
+    async def default_account(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+    ) -> PaperAccount:
         result = await db.execute(
-            select(PaperAccount).where(PaperAccount.name == _DEFAULT_ACCOUNT_NAME)
+            select(PaperAccount)
+            .join(
+                AndroidPaperAccount,
+                AndroidPaperAccount.paper_account_id == PaperAccount.id,
+            )
+            .where(AndroidPaperAccount.owner_user_id == owner_user_id)
+            .order_by(AndroidPaperAccount.created_at, PaperAccount.id)
+            .limit(1)
         )
         account = result.scalar_one_or_none()
         if account is not None:
             return account
-        service = PaperTradingService(db)
+
+        account = PaperAccount(
+            name=f"{_DEFAULT_ACCOUNT_NAME_PREFIX} {owner_user_id}",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("10000000"),
+            cash_usd=Decimal("0"),
+            description="KAsset Android user PAPER account",
+            strategy_name=None,
+            is_active=True,
+        )
         try:
-            return await service.create_account(
-                name=_DEFAULT_ACCOUNT_NAME,
-                initial_capital_krw=Decimal("10000000"),
-                description="KAsset Android compatibility account",
+            db.add(account)
+            await db.flush()
+            db.add(
+                AndroidPaperAccount(
+                    owner_user_id=owner_user_id,
+                    paper_account_id=account.id,
+                )
             )
+            await db.commit()
+            await db.refresh(account)
+            return account
         except IntegrityError:
             await db.rollback()
             result = await db.execute(
-                select(PaperAccount).where(PaperAccount.name == _DEFAULT_ACCOUNT_NAME)
+                select(PaperAccount)
+                .join(
+                    AndroidPaperAccount,
+                    AndroidPaperAccount.paper_account_id == PaperAccount.id,
+                )
+                .where(AndroidPaperAccount.owner_user_id == owner_user_id)
+                .order_by(AndroidPaperAccount.created_at, PaperAccount.id)
+                .limit(1)
             )
             account = result.scalar_one_or_none()
             if account is None:
@@ -68,16 +102,35 @@ class PaperAccountAdapter:
             return account
 
     async def resolve_account(
-        self, db: AsyncSession, account_id: str | None
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        account_id: str | None,
     ) -> PaperAccount:
-        account = await self.default_account(db)
-        expected = self.account_id(account)
-        if account_id not in {None, "", expected}:
+        if account_id in {None, ""}:
+            return await self.default_account(db, owner_user_id)
+        prefix = "PAPER-"
+        raw_id = account_id.removeprefix(prefix)
+        if not account_id.startswith(prefix) or not raw_id.isdecimal():
+            raise MobileApiError(404, "NOT_FOUND", "PAPER 계좌를 찾을 수 없습니다.")
+        result = await db.execute(
+            select(PaperAccount)
+            .join(
+                AndroidPaperAccount,
+                AndroidPaperAccount.paper_account_id == PaperAccount.id,
+            )
+            .where(
+                AndroidPaperAccount.owner_user_id == owner_user_id,
+                PaperAccount.id == int(raw_id),
+            )
+        )
+        account = result.scalar_one_or_none()
+        if account is None:
             raise MobileApiError(404, "NOT_FOUND", "PAPER 계좌를 찾을 수 없습니다.")
         return account
 
-    async def balance(self, db: AsyncSession) -> Balance:
-        account = await self.default_account(db)
+    async def balance(self, db: AsyncSession, owner_user_id: int) -> Balance:
+        account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
         positions = await service.get_positions(account.id)
         evaluation = sum(
@@ -131,8 +184,10 @@ class PaperAccountAdapter:
             updated_at=iso_z(),
         )
 
-    async def positions(self, db: AsyncSession) -> PositionsResponse:
-        account = await self.default_account(db)
+    async def positions(
+        self, db: AsyncSession, owner_user_id: int
+    ) -> PositionsResponse:
+        account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
         raw_positions = await service.get_positions(account.id)
         names = await self._instrument_names(

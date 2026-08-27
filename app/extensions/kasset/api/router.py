@@ -3,9 +3,10 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.web_router import limiter
 from app.core.config import settings
 from app.core.db import get_db
 from app.extensions.kasset.api.ai_briefing import (
@@ -51,14 +52,17 @@ from app.extensions.kasset.api.schemas import (
     BrokersResponse,
     BrokerVerifyResponse,
     CredentialRequest,
+    CurrentUserResponse,
     DatabaseStatus,
     HealthResponse,
-    PairRequest,
+    LoginRequest,
     RefreshRequest,
+    RegisterRequest,
     SessionTokens,
     SystemBrokerStatus,
     SystemStatus,
 )
+from app.models.trading import UserRole
 
 public_router = APIRouter(tags=["kasset-android"])
 router = APIRouter(prefix="/api/v1", tags=["kasset-android"])
@@ -69,17 +73,35 @@ async def health() -> HealthResponse:
     return HealthResponse()
 
 
-@router.post("/auth/pair", response_model=SessionTokens)
-async def pair(
-    request: PairRequest,
+@router.post(
+    "/auth/register",
+    response_model=SessionTokens,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit("5/minute")
+async def register(
+    request: Request,
+    payload: RegisterRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionTokens:
-    return await mobile_auth.pair(
-        db,
-        pairing_code=request.pairing_code,
-        device_id=request.device_id,
-        device_name=request.device_name,
-    )
+    return await mobile_auth.register(db, payload)
+
+
+@router.post("/auth/login", response_model=SessionTokens)
+@limiter.limit("5/minute")
+async def login(
+    request: Request,
+    payload: LoginRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionTokens:
+    return await mobile_auth.login(db, payload)
+
+
+@router.get("/auth/me", response_model=CurrentUserResponse)
+async def me(
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+) -> CurrentUserResponse:
+    return mobile_auth.current_user(session)
 
 
 @router.post("/auth/refresh", response_model=SessionTokens)
@@ -101,10 +123,12 @@ async def revoke(
 
 @router.get("/brokers", response_model=BrokersResponse)
 async def brokers(
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BrokersResponse:
-    return BrokersResponse(brokers=await broker_registry.list_brokers(db))
+    return BrokersResponse(
+        brokers=await broker_registry.list_brokers(db, session.user.id)
+    )
 
 
 @router.post("/brokers/{provider}/credential", response_model=Broker)
@@ -112,18 +136,20 @@ async def brokers(
 async def register_broker_credential(
     provider: str,
     request: CredentialRequest,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Broker:
+    _require_trader(session)
     _require_nh(provider)
     credential = await credential_vault.store_nh(
         db,
+        session.user.id,
         app_key=request.app_key,
         app_secret=request.app_secret,
         account_no=request.account_no,
     )
     await nh_adapter.invalidate_auth_cache(credential.id)
-    return await broker_registry.get_broker(db, "NH")
+    return await broker_registry.get_broker(db, session.user.id, "NH")
 
 
 @router.delete("/brokers/{provider}/credential", status_code=status.HTTP_204_NO_CONTENT)
@@ -132,11 +158,12 @@ async def register_broker_credential(
 )
 async def delete_broker_credential(
     provider: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
+    _require_trader(session)
     _require_nh(provider)
-    credential_id = await credential_vault.delete_nh(db)
+    credential_id = await credential_vault.delete_nh(db, session.user.id)
     await nh_adapter.invalidate_auth_cache(credential_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -144,11 +171,12 @@ async def delete_broker_credential(
 @router.post("/brokers/{provider}/verify", response_model=BrokerVerifyResponse)
 async def verify_broker(
     provider: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BrokerVerifyResponse:
+    _require_trader(session)
     _require_nh(provider)
-    checked_at = await nh_adapter.verify(db)
+    checked_at = await nh_adapter.verify(db, session.user.id)
     return BrokerVerifyResponse(
         connected=True,
         checked_at=checked_at.isoformat().replace("+00:00", "Z"),
@@ -158,15 +186,19 @@ async def verify_broker(
 
 @router.get("/system/status", response_model=SystemStatus)
 async def system_status(
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SystemStatus:
-    return await _build_system_status(db)
+    return await _build_system_status(db, session.user.id)
 
 
-async def _build_system_status(db: AsyncSession) -> SystemStatus:
-    registered = await broker_registry.list_brokers(db)
-    state = await runtime_state.get(db)
+async def _build_system_status(
+    db: AsyncSession,
+    owner_user_id: int,
+) -> SystemStatus:
+    registered = await broker_registry.list_brokers(db, owner_user_id)
+    state = await runtime_state.get(db, owner_user_id)
+    global_state = await runtime_state.get_global(db)
     return SystemStatus(
         server_version=settings.KASSET_SERVER_VERSION,
         server_time=(
@@ -176,7 +208,9 @@ async def _build_system_status(db: AsyncSession) -> SystemStatus:
         trading_mode=state.trading_mode,
         trading_enabled=settings.TRADING_ENABLED,
         live_trading_enabled=settings.LIVE_TRADING_ENABLED,
-        kill_switch_enabled=state.kill_switch_enabled,
+        kill_switch_enabled=(
+            global_state.kill_switch_enabled or state.kill_switch_enabled
+        ),
         brokers=[
             SystemBrokerStatus(
                 provider=broker.provider,
@@ -196,45 +230,60 @@ async def _build_system_status(db: AsyncSession) -> SystemStatus:
 @router.post("/system/kill-switch", response_model=SystemStatus)
 async def set_kill_switch(
     request: KillSwitchRequest,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SystemStatus:
-    await runtime_state.set_kill_switch(db, enabled=request.enabled)
-    return await _build_system_status(db)
+    _require_trader(session)
+    await runtime_state.set_user_kill_switch(
+        db, session.user.id, enabled=request.enabled
+    )
+    return await _build_system_status(db, session.user.id)
+
+
+@router.post("/admin/system/kill-switch", response_model=SystemStatus)
+async def set_global_kill_switch(
+    request: KillSwitchRequest,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SystemStatus:
+    _require_admin(session)
+    await runtime_state.set_global_kill_switch(db, enabled=request.enabled)
+    return await _build_system_status(db, session.user.id)
 
 
 @router.post("/system/trading-mode", response_model=SystemStatus)
 async def set_trading_mode(
     request: TradingModeRequest,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SystemStatus:
-    await runtime_state.set_trading_mode(db, mode=request.mode)
-    return await _build_system_status(db)
+    _require_trader(session)
+    await runtime_state.set_trading_mode(db, session.user.id, mode=request.mode)
+    return await _build_system_status(db, session.user.id)
 
 
 @router.get("/account/balance", response_model=Balance)
 async def account_balance(
     broker: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Balance:
     if broker.strip().upper() == "NH":
-        return await nh_adapter.balance(db)
+        return await nh_adapter.balance(db, session.user.id)
     _require_paper(broker)
-    return await paper_account_adapter.balance(db)
+    return await paper_account_adapter.balance(db, session.user.id)
 
 
 @router.get("/positions", response_model=PositionsResponse)
 async def positions(
     broker: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PositionsResponse:
     if broker.strip().upper() == "NH":
-        return await nh_adapter.positions(db)
+        return await nh_adapter.positions(db, session.user.id)
     _require_paper(broker)
-    return await paper_account_adapter.positions(db)
+    return await paper_account_adapter.positions(db, session.user.id)
 
 
 @router.get("/market/quote", response_model=Quote)
@@ -242,11 +291,11 @@ async def market_quote(
     broker: str,
     market: str,
     symbol: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Quote:
     if broker.strip().upper() == "NH":
-        return await nh_adapter.quote(db, market=market, symbol=symbol)
+        return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
 
@@ -264,22 +313,24 @@ async def market_symbols(
 @router.post("/orders/preview", response_model=RiskAssessment)
 async def preview_order(
     request: OrderRequest,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RiskAssessment:
+    _require_trader(session)
     _require_order_capable(request.broker)
-    return await paper_orders.preview(db, request)
+    return await paper_orders.preview(db, session.user.id, request)
 
 
 @router.post("/orders", response_model=OrderEnvelope)
 async def submit_order(
     request: OrderRequest,
     response: Response,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrderEnvelope:
+    _require_trader(session)
     _require_order_capable(request.broker)
-    envelope, replay = await paper_orders.submit(db, request)
+    envelope, replay = await paper_orders.submit(db, session.user.id, request)
     response.status_code = status.HTTP_200_OK if replay else status.HTTP_201_CREATED
     return envelope
 
@@ -287,7 +338,7 @@ async def submit_order(
 @router.get("/orders", response_model=OrdersResponse)
 async def list_orders(
     broker: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -300,62 +351,66 @@ async def list_orders(
         if status_filter
         else None
     )
-    return await paper_orders.list_orders(db, statuses=statuses, limit=limit)
+    return await paper_orders.list_orders(
+        db, session.user.id, statuses=statuses, limit=limit
+    )
 
 
 @router.get("/orders/{order_id}", response_model=OrderDetail)
 async def order_detail(
     order_id: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrderDetail:
-    return await paper_orders.detail(db, order_id)
+    return await paper_orders.detail(db, session.user.id, order_id)
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderEnvelope)
 async def cancel_order(
     order_id: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     broker: Annotated[str | None, Query()] = None,
 ) -> OrderEnvelope:
+    _require_trader(session)
     if broker is not None:
         _require_order_capable(broker)
-    return await paper_orders.cancel(db, order_id)
+    return await paper_orders.cancel(db, session.user.id, order_id)
 
 
 @router.post("/orders/{order_id}/amend", response_model=OrderEnvelope)
 async def amend_order(
     order_id: str,
     request: AmendRequest,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     broker: Annotated[str | None, Query()] = None,
 ) -> OrderEnvelope:
+    _require_trader(session)
     if broker is not None:
         _require_order_capable(broker)
-    return await paper_orders.amend(db, order_id, request)
+    return await paper_orders.amend(db, session.user.id, order_id, request)
 
 
 @router.get("/fills", response_model=FillsResponse)
 async def fills(
     broker: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> FillsResponse:
     if broker.strip().upper() == "NH":
         return FillsResponse(fills=[])
     _require_paper(broker)
-    return await paper_orders.list_fills(db, limit=limit)
+    return await paper_orders.list_fills(db, session.user.id, limit=limit)
 
 
 @router.get("/risk/policy", response_model=RiskPolicy)
 async def risk_policy(
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RiskPolicy:
-    state = await runtime_state.get(db)
+    state = await runtime_state.get(db, session.user.id)
     return RiskPolicy(
         max_order_ratio=format(state.max_order_ratio, "f"),
         max_symbol_ratio=format(state.max_symbol_ratio, "f"),
@@ -367,15 +422,17 @@ async def risk_policy(
 @router.put("/risk/policy", response_model=RiskPolicy)
 async def update_risk_policy(
     request: RiskPolicyUpdate,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RiskPolicy:
+    _require_trader(session)
     await runtime_state.update_policy(
         db,
+        session.user.id,
         max_order_ratio=request.max_order_ratio,
         max_symbol_ratio=request.max_symbol_ratio,
     )
-    return await risk_policy(_session, db)
+    return await risk_policy(session, db)
 
 
 @router.get("/ai/status", response_model=AiStatus)
@@ -398,6 +455,16 @@ async def ai_briefing(
     limit: Annotated[int, Query(ge=MIN_LIMIT, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> AiBriefingResponse:
     return await build_mobile_ai_briefing(db, market=market, symbol=symbol, limit=limit)
+
+
+def _require_trader(session: MobileSession) -> None:
+    if session.user.role not in {UserRole.trader, UserRole.admin}:
+        raise MobileApiError(403, "FORBIDDEN", "이 작업을 수행할 권한이 없습니다.")
+
+
+def _require_admin(session: MobileSession) -> None:
+    if session.user.role != UserRole.admin:
+        raise MobileApiError(403, "FORBIDDEN", "관리자 권한이 필요합니다.")
 
 
 def _require_paper(provider: str) -> None:

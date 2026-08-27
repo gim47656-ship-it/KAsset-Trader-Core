@@ -58,14 +58,14 @@ class NHAndroidAdapter:
             ):
                 self._cached_auth = None
 
-    async def verify(self, db: AsyncSession) -> datetime:
-        await self._prepare_client(db, require_prior_verification=False)
+    async def verify(self, db: AsyncSession, owner_user_id: int) -> datetime:
+        await self._prepare_client(db, owner_user_id, require_prior_verification=False)
         checked_at = datetime.now(UTC).replace(microsecond=0)
-        await credential_vault.mark_verified(db, checked_at=checked_at)
+        await credential_vault.mark_verified(db, owner_user_id, checked_at=checked_at)
         return checked_at
 
-    async def balance(self, db: AsyncSession) -> Balance:
-        context = await self.prepare_read(db)
+    async def balance(self, db: AsyncSession, owner_user_id: int) -> Balance:
+        context = await self.prepare_read(db, owner_user_id)
         try:
             payload = await context.client.fetch_balance(
                 act_no=context.credential.account_no
@@ -95,8 +95,10 @@ class NHAndroidAdapter:
             updated_at=updated_at,
         )
 
-    async def positions(self, db: AsyncSession) -> PositionsResponse:
-        context = await self.prepare_read(db)
+    async def positions(
+        self, db: AsyncSession, owner_user_id: int
+    ) -> PositionsResponse:
+        context = await self.prepare_read(db, owner_user_id)
         try:
             payload = await context.client.fetch_balance(
                 act_no=context.credential.account_no
@@ -134,7 +136,14 @@ class NHAndroidAdapter:
             )
         return PositionsResponse(positions=positions)
 
-    async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
+    async def quote(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        *,
+        market: str,
+        symbol: str,
+    ) -> Quote:
         normalized_market = market.strip().upper()
         normalized_symbol = symbol.strip()
         if (
@@ -146,7 +155,7 @@ class NHAndroidAdapter:
                 "VALIDATION_ERROR",
                 "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
             )
-        context = await self.prepare_read(db)
+        context = await self.prepare_read(db, owner_user_id)
         try:
             payload = await context.client.fetch_quote(
                 market=normalized_market,
@@ -192,12 +201,17 @@ class NHAndroidAdapter:
             source="NH_PLUG_MOCK",
         )
 
-    async def prepare_read(self, db: AsyncSession) -> VerifiedNHClient:
-        return await self._prepare_client(db, require_prior_verification=True)
+    async def prepare_read(
+        self, db: AsyncSession, owner_user_id: int
+    ) -> VerifiedNHClient:
+        return await self._prepare_client(
+            db, owner_user_id, require_prior_verification=True
+        )
 
     async def _prepare_client(
         self,
         db: AsyncSession,
+        owner_user_id: int,
         *,
         require_prior_verification: bool,
     ) -> VerifiedNHClient:
@@ -207,7 +221,7 @@ class NHAndroidAdapter:
                 "BROKER_NOT_CONNECTED",
                 "NH PLUG 모의투자 조회 기능이 서버에서 비활성화되어 있습니다.",
             )
-        credential = await credential_vault.reveal_nh(db)
+        credential = await credential_vault.reveal_nh(db, owner_user_id)
         if require_prior_verification and credential.last_verified_at is None:
             raise MobileApiError(
                 409,

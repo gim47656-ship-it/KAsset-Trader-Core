@@ -222,9 +222,7 @@ class NHPlugAuthClient:
             not isinstance(base, str)
             or base != self._base_url
             or not isinstance(owner_fingerprint, str)
-            or not hmac.compare_digest(
-                owner_fingerprint, self._owner_fingerprint
-            )
+            or not hmac.compare_digest(owner_fingerprint, self._owner_fingerprint)
         ):
             return None
 

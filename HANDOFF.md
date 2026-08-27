@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-26 (KAsset Trader Android 호환 API와 PAPER/NH Mock Read-Only 통합 완료)
+갱신: 2026-08-27 (다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트 통합, checker PASS)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
@@ -17,62 +17,89 @@
 
 ## 전체 진행 상태
 
-- **완료 — Android 호환 API:** `/health`, `/api/v1/auth/*`, brokers/system/account/positions/market/orders/fills/risk/ai.
-- **완료 — 인증:** pairing secret constant-time 비교, device-bound access/refresh JWT, refresh 회전, revoke.
-- **완료 — Credential Vault:** 앱키/시크릿/계좌번호 개별 AES-256-GCM 암호화, masked 응답, migration `20260826_kasset_credential_vault`.
-- **완료 — PAPER:** 기본 계좌, 잔고·보유·시세, preview/submit/list/detail/cancel/amend/fills, `clientOrderId` idempotency, Kill Switch/Trading Mode gate.
-- **완료 — NH Mock Read-Only:** credential verify, account allowlist, token cache, 잔고·보유·현재가 정규화, 주문 이중 차단.
-- **완료 — 자동 검증:** 관련 API/NH/PAPER/보안 테스트 75건, ruff, ty, Alembic head 확인.
-- **대기 — 외부/DB 통합:** 로컬 PostgreSQL과 실제 NH operator credential이 없어 DB-backed 서버 E2E와 NH 외부 read-only smoke는 미실행.
+- **완료 — 브랜치 통합:** `integrate/pr1-pr3` 브랜치에 PR1(브리핑)·PR3(NH 토큰 캐시)·PR2(추천 API)가
+  upstream 최신 main 위로 통합됨. Alembic 단일 head `20260827_kasset_multi_user_core`.
+- **완료 — 다중 사용자 컷오버:** pairing 제거 → 공개 계정 register/login/refresh/revoke
+  (device-bound JWT). 주문·체결·잔고·credential·추천·risk·kill switch 전부 `owner_user_id` 스코프.
+  migration이 단일 trader 조건으로 legacy 데이터를 backfill하고, 조건 위반 시 fail-closed.
+- **완료 — 토큰 경계:** kasset-android 토큰은 모바일 표면 + `/api/v1/ai/recommendations`에서만
+  유효. generic Core trader 게이트(loss-cut 승인 등)는 401 거부
+  (`app/extensions/kasset/api/paths.py::is_kasset_token_allowed_path`).
+- **완료 — AI PAPER 자동화:** 4개 결정론 전략 + producer(합의 synthesis) + consumer
+  (preview→policy 재확인→submit, LIVE 금지) + backtest. `AI_PAPER_AUTO_EXECUTION_ENABLED`
+  기본 false의 fail-closed TaskIQ 스윕(`kasset.paper_automation.run`, 5분 주기), owner 실패 격리.
+- **완료 — 배포 매니페스트:** `deploy/kasset/{compose.yaml,Caddyfile,env.example}`,
+  `scripts/kasset_{backup,restore,smoke}.sh` (CSP 중립).
+- **완료 — 검증:** 로컬 PostgreSQL 16에서 kasset 93 + routers 22 + middleware 6 +
+  migration 체인 13 + 컷오버 가드 1 + 자동화 배선 5 passed. ruff/ty clean.
+  checker 2회(전체→델타) 후 잔여 차단 finding 0.
+- **대기(사용자 승인) — 배포:** Naver Cloud `175.45.201.51` 배포, live 추천 E2E,
+  빈 호스트 이전 복구는 사용자 명시 요청 시 수행.
 
-현재 브랜치/관련 head: `kasset-integration` / `833afe9f`.
-Android 관련 head: HANSE `main` / `4e620fea`.
+현재 브랜치: `integrate/pr1-pr3` (origin/main보다 앞섬, 아래 커밋 참조).
 
 ## 이번 세션에서 한 일
 
-1. `app/extensions/kasset/api/**`에 Android 호환 인증, 오류 봉투, DTO, broker registry, runtime state, credential vault, PAPER/NH adapter, router를 추가했다.
-2. `app/extensions/kasset/models.py`, `alembic/versions/20260826_kasset_credential_vault.py`로 device session, encrypted broker credential, Android PAPER order, runtime state 저장을 추가했다.
-3. NH PLUG client에 exact mock host/port/path, redirect 거부, 계좌 allowlist, read-only dispatch, secret redaction을 적용했다. 공식 OpenAPI의 `currentPrice` 필드명은 문서로 대조했지만 실제 credential 응답은 아직 확인하지 않았다.
-4. PAPER 주문의 idempotency, 시장가/지정가 체결, 취소·정정, 리스크·Kill Switch 회귀를 추가했다.
-5. 독립 검수에서 발견된 NH `Broker.display_name` 누락, NH orders/fills의 잘못된 409, PAPER 부분체결 정정 총수량 왜곡, UTC `Z` 불일치를 `833afe9f`에서 수정했다.
-6. README, `env.example`, `docs/runbooks/kasset-android-nh-mock-readonly.md`에 실행·안전·외부 smoke 절차를 기록했다.
+1. 로컬 임시 PostgreSQL 16(`E:/LVDT_Projects/.pgtmp`)을 세워 이전 세션에서 불가능했던
+   DB-backed 검증 전부를 실측했다.
+2. DB 실측으로 드러난 결함 수정: `test_android_contract` 더미 DB → 빈 결과 세션,
+   `test_multi_user_contract`의 만료 인스턴스 동기 접근(MissingGreenlet) → id 사전 캡처,
+   briefing `unavailableReason` 기계 코드 → 사용자 표시용 한국어.
+3. Migration 체인 3종 수리: kasset 모델을 `app/models/__init__`에 등록(create_all 완전성),
+   63자 초과 FK 이름 단축(`fk_kasset_android_paper_accounts_paper_account_id`),
+   chain fixture에 users CI 인덱스 drop 추가, POSIX 전용 alembic 경로 →
+   `sys.executable -m alembic`.
+4. checker 검수(전체 1회 + 델타 1회) finding 해소:
+   - HIGH: kasset 토큰이 generic trader 게이트 통과 → `is_kasset_token_allowed_path`로
+     모바일 표면 + 추천 API만 허용, `get_current_user`가 경로 검사. 회귀 테스트 추가.
+   - MEDIUM: 자동화 미배선 → `automation/job.py`(안전 게이트·owner 어댑터·스윕) +
+     `app/tasks/kasset_paper_automation_tasks.py`(5분 cron, fail-closed) +
+     `AI_PAPER_AUTO_EXECUTION_ENABLED` config 선언. owner 실패 격리 포함, 테스트 5개.
+   - MEDIUM: migration 가드 미검증 → `test_multi_user_migration_guards.py`가 실제 alembic
+     CLI로 2-trader upgrade 거부와 2-owner downgrade 거부를 실측.
+   - LOW(FK 접미사): 관례 이름 64자 > PostgreSQL 63자 한계로 기각.
+5. `workflow_dispatch` 계약 테스트 갱신, `ci_shards/shard-1.txt`에 신규 테스트 등록,
+   Caddy `/health` 공개 계약 유지 수정, PAPER preview에 사용자 kill switch 반영,
+   env/런북의 pairing 잔재를 계정 인증으로 정리.
 
-검증 실측:
+검증 실측 (로컬 PostgreSQL 16, `.venv` python):
 
 ```text
-uv run pytest -q tests/extensions/kasset/api tests/services/brokers/nhplug tests/scripts/test_nhplug_mock_smoke.py
-→ 75 passed in 2.93s
-
-uv run ruff check app/extensions/kasset/api tests/extensions/kasset/api
-uv run ty check app/extensions/kasset/api tests/extensions/kasset/api
-→ All checks passed
-
-uv run alembic heads
-→ 20260826_kasset_credential_vault (head)
+pytest tests/extensions/kasset -p no:randomly            → 93 passed
+pytest tests/routers/test_ai_recommendations.py + middleware → 28 passed
+pytest migration 체인 3종                                 → 13 passed
+pytest tests/extensions/kasset/test_multi_user_migration_guards.py → 1 passed
+pytest tests/middleware tests/ci tests/infra             → 305+ passed
+  (예외 1: trailing-space 파일명 테스트는 Windows FS 한계, diff 무관)
+ruff check / format --check app tests scripts            → clean
+ty check app/ --error-on-warning                         → clean
+alembic heads                                            → 20260827_kasset_multi_user_core 단일
+Android :app:testDebugUnitTest                           → 55 tests, 0 failures
 ```
 
-독립 검수:
-
-- `security-reviewer`: PASS. Credential 원문 누출, 운영 주문 경로, 평문 영구 저장에 대한 차단 확인. 공유 JWT secret의 generic Core endpoint 접근 가능성은 LOW 잔여 위험.
-- `checker-deep`: 수정 전 HIGH/MEDIUM 지적 후 `833afe9f`와 Android `4e620fea` 재검수 PASS. 기존 차단 항목 모두 해소.
-
-환경 한계:
-
-- PostgreSQL/Docker/psql이 없어 전체 DB 통합 실행은 `asyncpg ConnectionRefusedError [WinError 1225]`로 불가했다. 같은 환경에서 반복하지 않는다.
-- 실제 NH App Key/App Secret/Mock 계좌가 없어 `--confirm-read` smoke는 실행하지 않았다.
+독립 검수: checker 전체 1회(REWORK) → 수정 → 델타 1회(잔여 차단 0). FINAL: PASS.
 
 ## 다음 세션이 바로 할 일
 
-1. PostgreSQL을 준비하고 `uv run alembic upgrade head` 후 `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`을 실행한다.
-2. Android에서 페어링→PAPER 잔고/보유/시세→preview/submit→같은 `clientOrderId` 재시도→내역→Kill Switch까지 실제 DB로 확인한다.
-3. 운영자가 제공한 NH 모의 credential로 런북의 account/quote `--confirm-read` smoke를 실행하고 실제 `Output_0`/`Output_1` 키를 adapter 매핑과 대조한다. 주문 명령과 운영 host는 사용하지 않는다.
+1. 사용자가 배포를 승인하면: `integrate/pr1-pr3`를 main에 merge·push하고
+   `/opt/kasset-trader-core`에 배포, `alembic upgrade head`(가드가 단일 trader를 요구함),
+   `scripts/kasset_smoke.sh` 실행.
+2. 배포 후 Android 계정 가입→로그인→PAPER→NH 조회→추천 승인/거절 live E2E와
+   주문 ledger 불변을 확인한다.
+3. `AI_PAPER_AUTO_EXECUTION_ENABLED`는 운영자가 명시적으로 켤 때까지 false로 둔다.
+4. 빈 Linux 호스트 복원 리허설은 대상 호스트 확보 후 `scripts/kasset_backup.sh`/`restore`로 진행.
 
 남은 기술 위험:
 
-- 한 PAPER 주문에 여러 `PaperTrade`가 생기는 진짜 부분체결이 추가되면 correlation 조회가 `scalar_one_or_none()`라 `MultipleResultsFound` 가능성이 있다. 현재 경로는 한 번에 FILLED라 도달하지 않는다.
-- `SystemStatus.database.status`는 broker/runtime DB 조회 성공 후 `ok`를 반환하지만 별도 ping과 `migrationRevision` 보고는 아직 없다.
-- mobile JWT와 기존 Core JWT가 같은 `SECRET_KEY`를 사용한다. mobile route는 client/device를 검사하지만 generic Core bearer endpoint의 audience 분리는 후속 보안 강화 항목이다.
+- mobile JWT와 Core JWT가 같은 `SECRET_KEY`를 공유한다. 경로 스코프로 차단했지만
+  audience claim 분리가 더 강한 후속 개선이다.
+- 자동화 producer는 라이브러리+테스트로 존재하며 외부 AI 파이프라인이 추천 POST API로
+  공급하는 구조다. producer의 스케줄 배선은 별도 제품 결정이 필요하다.
+- 진짜 부분체결 도입 시 PAPER correlation 조회 `scalar_one_or_none()`의
+  `MultipleResultsFound` 가능성은 여전하다.
+
 
 ## 세션 이력
 
+- 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결. 배포는 사용자 승인 대기.
 - 2026-08-26: Android 호환 API, PAPER facade, NH Mock Read-Only, Credential Vault, 검증·런북 완료; 독립 고위험 재검수 PASS.

@@ -48,8 +48,7 @@ class TokenProvider(Protocol):
         *,
         force_refresh: bool = False,
         failed_token: str | None = None,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 def _assert_mock_base_url(base_url: str) -> str:

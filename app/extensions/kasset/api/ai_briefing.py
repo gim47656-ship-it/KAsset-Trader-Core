@@ -70,7 +70,9 @@ _REPORTABLE_DATA_STATUSES: frozenset[str] = frozenset(
     {"fresh", "soft_stale", "partial"}
 )
 _STALE_DATA_STATUSES: frozenset[str] = frozenset({"soft_stale", "partial"})
-_NO_ELIGIBLE_BRIEFING = "NO_ELIGIBLE_BRIEFING"
+# Android renders this string verbatim in the AI hub, so it must stay
+# human-readable Korean rather than a machine code.
+_NO_ELIGIBLE_BRIEFING = "저장된 AI 브리핑 제공자가 아직 연결되지 않았습니다."
 
 
 def normalize_market(value: str) -> MobileAiMarket:

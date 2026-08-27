@@ -436,10 +436,7 @@ async def test_invalid_token_response_refreshes_once_and_retries_same_request(
     assert seen[0].url == seen[1].url
     assert seen[0].content == seen[1].content
     assert seen[0].headers["authorization"] == "Bearer unit-test-token"
-    assert (
-        seen[1].headers["authorization"]
-        == "Bearer unit-test-refreshed-token"
-    )
+    assert seen[1].headers["authorization"] == "Bearer unit-test-refreshed-token"
 
 
 @pytest.mark.asyncio
@@ -553,9 +550,7 @@ async def test_retry_rechecks_resolved_host_and_path_before_second_send(
     provider = _TokenProvider()
     client, _ = _client(httpx.MockTransport(handler), provider)
 
-    with pytest.raises(
-        (NHPlugMockEndpointError, NHPlugMockReadOnlyEndpointError)
-    ):
+    with pytest.raises((NHPlugMockEndpointError, NHPlugMockReadOnlyEndpointError)):
         await client.list_accounts()
 
     assert build_count == 2
@@ -592,9 +587,7 @@ async def test_retry_rechecks_account_allowlist_before_second_send(
         assert act_no == "mock-account"
         allowlist_calls += 1
         if allowlist_calls == 3:
-            raise NHPlugMockAccountRejected(
-                "account changed before retry dispatch"
-            )
+            raise NHPlugMockAccountRejected("account changed before retry dispatch")
 
     monkeypatch.setattr(
         MockAccountAllowlist,

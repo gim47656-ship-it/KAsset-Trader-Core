@@ -2,13 +2,16 @@
 
 _EXACT_PATHS = frozenset(
     {
-        "/api/v1/auth/pair",
+        "/api/v1/auth/register",
+        "/api/v1/auth/login",
+        "/api/v1/auth/me",
         "/api/v1/auth/refresh",
         "/api/v1/auth/revoke",
         "/api/v1/system/status",
         "/api/v1/system/kill-switch",
         "/api/v1/system/trading-mode",
         "/api/v1/system/audit",
+        "/api/v1/admin/system/kill-switch",
         "/api/v1/brokers",
         "/api/v1/account/balance",
         "/api/v1/positions",
@@ -27,3 +30,19 @@ _DYNAMIC_PREFIXES = ("/api/v1/brokers/", "/api/v1/orders/")
 
 def is_android_compat_path(path: str) -> bool:
     return path in _EXACT_PATHS or path.startswith(_DYNAMIC_PREFIXES)
+
+
+# Generic Core API paths a KAsset Android token may also call. The mobile
+# client consumes the recommendation review API, which lives outside the
+# compatibility facade; every other generic Core surface (trader-gated web
+# APIs included) must reject KAsset-issued tokens.
+_KASSET_GENERIC_API_ROOTS = ("/api/v1/ai/recommendations",)
+
+
+def is_kasset_token_allowed_path(path: str) -> bool:
+    if is_android_compat_path(path):
+        return True
+    return any(
+        path == root or path.startswith(root + "/")
+        for root in _KASSET_GENERIC_API_ROOTS
+    )

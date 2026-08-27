@@ -1,6 +1,8 @@
 """Wire schemas matching Android TraderApi JSON names."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+from app.models.trading import UserRole
 
 
 def _to_camel(name: str) -> str:
@@ -16,12 +18,26 @@ class AndroidWireModel(BaseModel):
     )
 
 
-class PairRequest(AndroidWireModel):
-    pairing_code: str = Field(
-        alias="pairingCode", min_length=1, max_length=256, repr=False
-    )
+class RegisterRequest(AndroidWireModel):
+    username: str = Field(min_length=1, max_length=50)
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128, repr=False)
     device_id: str = Field(alias="deviceId", min_length=1, max_length=200)
     device_name: str = Field(alias="deviceName", min_length=1, max_length=200)
+
+
+class LoginRequest(AndroidWireModel):
+    username: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=128, repr=False)
+    device_id: str = Field(alias="deviceId", min_length=1, max_length=200)
+    device_name: str = Field(alias="deviceName", min_length=1, max_length=200)
+
+
+class CurrentUserResponse(AndroidWireModel):
+    id: int
+    username: str
+    email: str
+    role: UserRole
 
 
 class RefreshRequest(AndroidWireModel):

@@ -253,7 +253,10 @@ def test_empty_stores_return_http_200_with_truthful_empty_state() -> None:
     assert body["news"] == {"status": "empty", "refreshedAt": None, "items": []}
     assert body["research"] == {"status": "empty", "refreshedAt": None, "items": []}
     assert body["briefing"]["status"] == "unavailable"
-    assert body["briefing"]["unavailableReason"] == "NO_ELIGIBLE_BRIEFING"
+    assert (
+        body["briefing"]["unavailableReason"]
+        == "저장된 AI 브리핑 제공자가 아직 연결되지 않았습니다."
+    )
     assert body["briefing"]["id"] is None
     assert body["briefing"]["dataStatus"] == "unknown"
 

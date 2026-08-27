@@ -7,7 +7,14 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, Index, Text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func, text
@@ -26,6 +33,12 @@ class RecommendationDecision(StrEnum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+
+
+class RecommendationExecutionStatus(StrEnum):
+    CLAIMED = "CLAIMED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
 
 
 class RecommendationMarket(StrEnum):
@@ -81,8 +94,42 @@ class AIRecommendation(Base):
             "(decision IN ('APPROVED', 'REJECTED') AND decided_at IS NOT NULL)",
             name="decision_timestamp",
         ),
+        CheckConstraint(
+            "paper_execution_status IS NULL OR "
+            "paper_execution_status IN ('CLAIMED', 'SUCCEEDED', 'FAILED')",
+            name="paper_execution_status",
+        ),
+        CheckConstraint(
+            "(paper_execution_status IS NULL "
+            "AND paper_execution_claimed_at IS NULL "
+            "AND paper_execution_completed_at IS NULL "
+            "AND paper_order_id IS NULL "
+            "AND paper_execution_error IS NULL) OR "
+            "(paper_execution_status = 'CLAIMED' "
+            "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_completed_at IS NULL "
+            "AND paper_order_id IS NULL "
+            "AND paper_execution_error IS NULL) OR "
+            "(paper_execution_status = 'SUCCEEDED' "
+            "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_completed_at IS NOT NULL "
+            "AND paper_order_id IS NOT NULL "
+            "AND paper_execution_error IS NULL) OR "
+            "(paper_execution_status = 'FAILED' "
+            "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_completed_at IS NOT NULL "
+            "AND paper_order_id IS NULL "
+            "AND length(btrim(paper_execution_error)) > 0)",
+            name="paper_execution_coherent",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "id",
+            name="uq_ai_recommendations_owner_id",
+        ),
         Index(
-            "ix_ai_recommendations_decision_created_at",
+            "ix_ai_recommendations_owner_decision_created_at",
+            "owner_user_id",
             "decision",
             "created_at",
             "id",
@@ -91,6 +138,11 @@ class AIRecommendation(Base):
         {"schema": "review"},
     )
 
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     id: Mapped[str] = mapped_column(
         Text,
         primary_key=True,
@@ -143,6 +195,17 @@ class AIRecommendation(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    paper_execution_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    paper_execution_claimed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    paper_execution_completed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    paper_order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    paper_execution_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -154,6 +217,7 @@ __all__ = [
     "AIRecommendation",
     "RecommendationAction",
     "RecommendationDecision",
+    "RecommendationExecutionStatus",
     "RecommendationMarket",
     "RecommendationStatusGroup",
     "TerminalRecommendationDecision",

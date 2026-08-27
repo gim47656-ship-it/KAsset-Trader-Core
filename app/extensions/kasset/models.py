@@ -1,29 +1,100 @@
-"""Persistence owned by the KAsset Android compatibility facade."""
+"""User-owned persistence for the KAsset Android product surface."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import TIMESTAMP, BigInteger, Boolean, ForeignKey, Numeric, Text
+from sqlalchemy import (
+    TIMESTAMP,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Numeric,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.models.base import Base
 
 
+class AndroidPaperAccount(Base):
+    __tablename__ = "kasset_android_paper_accounts"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", name="uq_kasset_android_paper_account_owner"),
+        UniqueConstraint(
+            "paper_account_id", name="uq_kasset_android_paper_account_link"
+        ),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    paper_account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("paper.paper_accounts.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AndroidPaperOrder(Base):
     __tablename__ = "kasset_android_paper_orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "id",
+            name="uq_kasset_android_paper_order_owner_id",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "client_order_id",
+            name="uq_kasset_android_paper_order_owner_client",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "broker_order_id",
+            name="uq_kasset_android_paper_order_owner_broker",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "paper_account_id"],
+            [
+                "kasset_android_paper_accounts.owner_user_id",
+                "kasset_android_paper_accounts.paper_account_id",
+            ],
+            name="fk_kasset_android_order_owner_paper_account",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_kasset_android_paper_order_owner_created",
+            "owner_user_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    client_order_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    client_order_id: Mapped[str] = mapped_column(Text, nullable=False)
     paper_account_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("paper.paper_accounts.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
-    broker_order_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    broker_order_id: Mapped[str] = mapped_column(Text, nullable=False)
     market: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str | None] = mapped_column(Text)
@@ -56,7 +127,11 @@ class AndroidPaperOrder(Base):
 class AndroidRuntimeState(Base):
     __tablename__ = "kasset_android_runtime_state"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     kill_switch_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
@@ -83,11 +158,87 @@ class AndroidRuntimeState(Base):
     )
 
 
-class BrokerCredential(Base):
-    __tablename__ = "kasset_broker_credentials"
+class GlobalRuntimeState(Base):
+    __tablename__ = "kasset_global_runtime_state"
+    __table_args__ = (CheckConstraint("id = 1", name="singleton"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    kill_switch_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class KAssetDeviceSession(Base):
+    __tablename__ = "kasset_device_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "device_id",
+            name="uq_kasset_device_session_owner_device",
+        ),
+        UniqueConstraint(
+            "refresh_token_hash",
+            name="uq_kasset_device_session_refresh_hash",
+        ),
+        Index(
+            "ix_kasset_device_session_owner_active",
+            "owner_user_id",
+            "revoked_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    provider: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    device_name: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class BrokerCredential(Base):
+    __tablename__ = "kasset_broker_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "id",
+            name="uq_kasset_broker_credential_owner_id",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "provider",
+            name="uq_kasset_broker_credential_owner_provider",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_app_key: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_app_secret: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_account_no: Mapped[str] = mapped_column(Text, nullable=False)

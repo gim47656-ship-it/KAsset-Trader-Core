@@ -62,7 +62,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _REPO = pathlib.Path(__file__).resolve().parents[4]
 PARENT_REVISION = "20260820_rob1290_reconcile"
-HEAD_REVISION = "20260824_s257_rung_reason"
+HEAD_REVISION = "20260827_kasset_multi_user_core"
 
 _SCRATCH_PREFIX = "w5_alembic_chain_"
 
@@ -96,6 +96,13 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "review.telegram_callback_recovery_cursor",
     "review.telegram_callback_inbox",
     "review.screener_pick_log",
+    "review.ai_recommendations",
+    "kasset_android_paper_orders",
+    "kasset_android_paper_accounts",
+    "kasset_android_runtime_state",
+    "kasset_global_runtime_state",
+    "kasset_device_sessions",
+    "kasset_broker_credentials",
 )
 
 
@@ -128,6 +135,11 @@ async def scratch_database() -> AsyncIterator[str]:
                 await connection.run_sync(Base.metadata.create_all)
                 for table in _POST_PARENT_TABLES:
                     await connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                # The KAsset multi-user migration adds these case-insensitive
+                # unique indexes; current metadata already materializes them,
+                # so drop both and let the migration add them back.
+                for index in ("uq_users_username_ci", "uq_users_email_ci"):
+                    await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
                 # ROB-s257 E-2 is later than this reconstructed boundary.
                 # Current metadata already contains its nullable observation
                 # column, so drop it and let the migration add it back.

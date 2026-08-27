@@ -11,8 +11,9 @@ from app.extensions.kasset.api.schemas import (
     Broker,
     BrokerCapabilities,
     CredentialRequest,
-    PairRequest,
+    LoginRequest,
     RefreshRequest,
+    RegisterRequest,
     SessionTokens,
 )
 
@@ -60,7 +61,19 @@ def test_vault_ciphertext_round_trip_and_aad_binding(
 def test_secret_models_hide_sensitive_values_from_repr() -> None:
     now = datetime.now(UTC)
     models = [
-        PairRequest(pairingCode="pairing-code", deviceId="device", deviceName="phone"),
+        RegisterRequest(
+            username="trader",
+            email="trader@example.com",
+            password="Register-secret-1!",
+            deviceId="device",
+            deviceName="phone",
+        ),
+        LoginRequest(
+            username="trader",
+            password="Login-secret-1!",
+            deviceId="device",
+            deviceName="phone",
+        ),
         RefreshRequest(refreshToken="refresh-only-token"),
         CredentialRequest(
             appKey="nh-app-key",
@@ -76,6 +89,7 @@ def test_secret_models_hide_sensitive_values_from_repr() -> None:
         ),
         RevealedBrokerCredential(
             credential_id="credential-1",
+            owner_user_id=101,
             provider="NH",
             app_key="revealed-key",
             app_secret="revealed-secret",
@@ -88,7 +102,8 @@ def test_secret_models_hide_sensitive_values_from_repr() -> None:
     rendered = "\n".join(repr(model) for model in models)
 
     for secret in (
-        "pairing-code",
+        "Register-secret-1!",
+        "Login-secret-1!",
         "refresh-only-token",
         "nh-app-key",
         "nh-app-secret",
