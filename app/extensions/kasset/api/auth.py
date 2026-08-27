@@ -26,7 +26,9 @@ _MOBILE_CLIENT = "kasset-android"
 
 
 def _iso_z(value: datetime) -> str:
-    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -64,7 +66,9 @@ class MobileAuthService:
             )
 
         user = await self._get_or_create_mobile_user(db)
-        tokens = await self._issue(db, user, device_id=device_id, device_name=device_name)
+        tokens = await self._issue(
+            db, user, device_id=device_id, device_name=device_name
+        )
         await db.commit()
         return tokens
 
@@ -114,7 +118,9 @@ class MobileAuthService:
             )
         )
         token_record = result.scalar_one_or_none()
-        if token_record is None or _as_utc(token_record.expires_at) <= datetime.now(UTC):
+        if token_record is None or _as_utc(token_record.expires_at) <= datetime.now(
+            UTC
+        ):
             raise unauthorized()
         return MobileSession(user, token_record, device_id)
 
@@ -194,7 +200,10 @@ class MobileAuthService:
             )
         except jwt.PyJWTError as err:
             raise unauthorized() from err
-        if payload.get("type") != expected_type or payload.get("client") != _MOBILE_CLIENT:
+        if (
+            payload.get("type") != expected_type
+            or payload.get("client") != _MOBILE_CLIENT
+        ):
             raise unauthorized()
         return payload
 

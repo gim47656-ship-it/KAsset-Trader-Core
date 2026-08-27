@@ -11,7 +11,9 @@ from app.extensions.kasset.models import AndroidRuntimeState
 
 
 class AndroidRuntimeStateService:
-    async def get(self, db: AsyncSession, *, for_update: bool = False) -> AndroidRuntimeState:
+    async def get(
+        self, db: AsyncSession, *, for_update: bool = False
+    ) -> AndroidRuntimeState:
         stmt = select(AndroidRuntimeState).where(AndroidRuntimeState.id == 1)
         if for_update:
             stmt = stmt.with_for_update()

@@ -51,10 +51,7 @@ def _serialize_timestamp(value: datetime | None) -> str | None:
     if value is None:
         return None
     return (
-        value.astimezone(UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
+        value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
 
 
@@ -65,9 +62,7 @@ class RecommendationEvidence(BaseModel):
     source: str | None = None
     published_at: datetime | None = Field(default=None, alias="publishedAt")
 
-    _published_at_timezone = field_validator("published_at")(
-        _validate_aware_timestamp
-    )
+    _published_at_timezone = field_validator("published_at")(_validate_aware_timestamp)
 
     @field_serializer("published_at", when_used="json")
     def serialize_published_at(self, value: datetime | None) -> str | None:

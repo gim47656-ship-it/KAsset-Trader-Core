@@ -552,9 +552,10 @@ def test_main_registers_exact_recommendation_paths() -> None:
         if hasattr(route, "path")
     }
     assert "GET" in methods_by_path["/api/v1/ai/recommendations"]
-    assert "POST" in methods_by_path[
-        "/api/v1/ai/recommendations/{recommendation_id}/decision"
-    ]
+    assert (
+        "POST"
+        in methods_by_path["/api/v1/ai/recommendations/{recommendation_id}/decision"]
+    )
 
 
 def test_recommendation_runtime_has_no_order_surface_imports_or_calls() -> None:
@@ -602,7 +603,6 @@ def test_recommendation_runtime_has_no_order_surface_imports_or_calls() -> None:
                 elif isinstance(function, ast.Attribute):
                     call_names.append(function.attr)
         assert not any(
-            module.startswith(forbidden_import_prefixes)
-            for module in imported_modules
+            module.startswith(forbidden_import_prefixes) for module in imported_modules
         ), path
         assert forbidden_call_roots.isdisjoint(call_names), path

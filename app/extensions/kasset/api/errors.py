@@ -18,5 +18,7 @@ class MobileApiError(Exception):
         return {"error": error}
 
 
-def unauthorized(message: str = "세션이 만료되었거나 폐기되었습니다.") -> MobileApiError:
+def unauthorized(
+    message: str = "세션이 만료되었거나 폐기되었습니다.",
+) -> MobileApiError:
     return MobileApiError(401, "UNAUTHORIZED", message)

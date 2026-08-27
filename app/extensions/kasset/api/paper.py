@@ -34,8 +34,11 @@ def iso_z(value: datetime | None = None) -> str:
     current = value or datetime.now(UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
+    return (
+        current.astimezone(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
 
 
@@ -132,7 +135,9 @@ class PaperAccountAdapter:
         account = await self.default_account(db)
         service = PaperTradingService(db)
         raw_positions = await service.get_positions(account.id)
-        names = await self._instrument_names(db, [item["symbol"] for item in raw_positions])
+        names = await self._instrument_names(
+            db, [item["symbol"] for item in raw_positions]
+        )
         now = iso_z()
         return PositionsResponse(
             positions=[
@@ -171,9 +176,7 @@ class PaperAccountAdapter:
             ]
         )
 
-    async def quote(
-        self, db: AsyncSession, *, market: str, symbol: str
-    ) -> Quote:
+    async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
         normalized_market = market.strip().upper()
         normalized_symbol = symbol.strip().upper()
         try:
@@ -200,7 +203,9 @@ class PaperAccountAdapter:
         except MobileApiError:
             raise
         except ValueError as err:
-            raise MobileApiError(404, "NOT_FOUND", "종목 시세를 찾을 수 없습니다.") from err
+            raise MobileApiError(
+                404, "NOT_FOUND", "종목 시세를 찾을 수 없습니다."
+            ) from err
         except Exception as err:
             raise MobileApiError(
                 502, "BROKER_ERROR", "PAPER 시세를 가져오지 못했습니다."
@@ -278,9 +283,7 @@ class PaperAccountAdapter:
         return "USD" if instrument_type == "equity_us" else "KRW"
 
     @staticmethod
-    async def _instrument_names(
-        db: AsyncSession, symbols: list[str]
-    ) -> dict[str, str]:
+    async def _instrument_names(db: AsyncSession, symbols: list[str]) -> dict[str, str]:
         if not symbols:
             return {}
         result = await db.execute(

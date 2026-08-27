@@ -276,6 +276,15 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 "external_cash_declarations",
             ):
                 await connection.execute(text(f"DROP TABLE review.{table}"))
+            # KAsset Android and AI review tables are later than this
+            # reconstructed boundary and already present in current metadata.
+            for table in (
+                "ai_recommendations",
+                "kasset_broker_credentials",
+                "kasset_android_runtime_state",
+                "kasset_android_paper_orders",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
 
         env = {**os.environ, "DATABASE_URL": target_url_text}
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.extensions.kasset.ai.base import AiProvider, AiProviderUnavailable
+from app.extensions.kasset.ai.base import AiProviderUnavailable, ExternalSkillRunner
 from app.extensions.kasset.ai.models import AiProviderMode, SkillRequest, SkillResult
 
 
@@ -11,8 +11,8 @@ class AiProviderRouter:
         self,
         *,
         mode: AiProviderMode | str,
-        subscription: AiProvider | None = None,
-        api: AiProvider | None = None,
+        subscription: ExternalSkillRunner | None = None,
+        api: ExternalSkillRunner | None = None,
     ) -> None:
         self._mode = AiProviderMode(mode)
         self._subscription = subscription
@@ -24,7 +24,9 @@ class AiProviderRouter:
 
     async def run_skill(self, request: SkillRequest) -> SkillResult:
         if self._mode is AiProviderMode.SUBSCRIPTION:
-            return await self._require(self._subscription, "subscription").run_skill(request)
+            return await self._require(self._subscription, "subscription").run_skill(
+                request
+            )
 
         if self._mode is AiProviderMode.API:
             return await self._require(self._api, "api").run_skill(request)
@@ -39,7 +41,9 @@ class AiProviderRouter:
             return await self._require(self._api, "api").run_skill(request)
 
     @staticmethod
-    def _require(provider: AiProvider | None, name: str) -> AiProvider:
+    def _require(
+        provider: ExternalSkillRunner | None, name: str
+    ) -> ExternalSkillRunner:
         if provider is None:
             raise AiProviderUnavailable(f"{name} provider is not configured")
         return provider

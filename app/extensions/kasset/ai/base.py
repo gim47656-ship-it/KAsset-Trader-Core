@@ -11,7 +11,7 @@ class AiProviderUnavailable(RuntimeError):
     """Provider could not be reached or is not configured for this run."""
 
 
-class AiProvider(Protocol):
+class ExternalSkillRunner(Protocol):
     """Minimal provider interface used by read-only KAsset skills."""
 
     @property

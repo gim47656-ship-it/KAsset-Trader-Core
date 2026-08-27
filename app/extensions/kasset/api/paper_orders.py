@@ -36,9 +36,7 @@ class PaperOrderFacade:
     def __init__(self) -> None:
         self._transition_lock = asyncio.Lock()
 
-    async def preview(
-        self, db: AsyncSession, request: OrderRequest
-    ) -> RiskAssessment:
+    async def preview(self, db: AsyncSession, request: OrderRequest) -> RiskAssessment:
         self._assert_paper(request)
         account = await paper_account_adapter.resolve_account(db, request.account_id)
         quote = await paper_account_adapter.quote(
@@ -63,9 +61,7 @@ class PaperOrderFacade:
             )
         if state.kill_switch_enabled:
             reasons.append(
-                RiskReason(
-                    code="KILL_SWITCH_ON", message="거래 중지 상태입니다."
-                )
+                RiskReason(code="KILL_SWITCH_ON", message="거래 중지 상태입니다.")
             )
         available = (
             Decimal(account.cash_usd)
@@ -74,9 +70,13 @@ class PaperOrderFacade:
         )
         if request.side == "BUY" and estimated_amount + fee > available:
             reasons.append(
-                RiskReason(code="INSUFFICIENT_CASH", message="주문 가능 금액이 부족합니다.")
+                RiskReason(
+                    code="INSUFFICIENT_CASH", message="주문 가능 금액이 부족합니다."
+                )
             )
-        if available > 0 and estimated_amount > available * Decimal(state.max_order_ratio):
+        if available > 0 and estimated_amount > available * Decimal(
+            state.max_order_ratio
+        ):
             reasons.append(
                 RiskReason(
                     code="MAX_ORDER_RATIO",
@@ -97,9 +97,7 @@ class PaperOrderFacade:
     ) -> tuple[OrderEnvelope, bool]:
         self._assert_paper(request)
         if not request.client_order_id:
-            raise MobileApiError(
-                422, "VALIDATION_ERROR", "clientOrderId가 필요합니다."
-            )
+            raise MobileApiError(422, "VALIDATION_ERROR", "clientOrderId가 필요합니다.")
         async with self._transition_lock:
             existing = await self._by_client_id(db, request.client_order_id)
             if existing is not None:
@@ -112,9 +110,15 @@ class PaperOrderFacade:
                     409,
                     "RISK_REJECTED",
                     "위험 관리 정책에 따라 주문이 거절되었습니다.",
-                    {"reasons": [reason.model_dump(by_alias=True) for reason in risk.reasons]},
+                    {
+                        "reasons": [
+                            reason.model_dump(by_alias=True) for reason in risk.reasons
+                        ]
+                    },
                 )
-            account = await paper_account_adapter.resolve_account(db, request.account_id)
+            account = await paper_account_adapter.resolve_account(
+                db, request.account_id
+            )
             quote = await paper_account_adapter.quote(
                 db, market=request.market, symbol=request.symbol
             )
@@ -218,7 +222,11 @@ class PaperOrderFacade:
                     409,
                     "RISK_REJECTED",
                     "위험 관리 정책에 따라 주문이 거절되었습니다.",
-                    {"reasons": [reason.model_dump(by_alias=True) for reason in risk.reasons]},
+                    {
+                        "reasons": [
+                            reason.model_dump(by_alias=True) for reason in risk.reasons
+                        ]
+                    },
                 )
             order.quantity = quantity
             order.limit_price = limit_price
@@ -444,7 +452,11 @@ class PaperOrderFacade:
     def _crosses(side: str, limit_price: Decimal | None, market_price: Decimal) -> bool:
         if limit_price is None:
             return False
-        return limit_price >= market_price if side == "BUY" else limit_price <= market_price
+        return (
+            limit_price >= market_price
+            if side == "BUY"
+            else limit_price <= market_price
+        )
 
     @staticmethod
     def _assert_paper(request: OrderRequest) -> None:

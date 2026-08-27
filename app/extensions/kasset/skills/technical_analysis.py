@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.extensions.kasset.ai.base import AiProvider
+from app.extensions.kasset.ai.base import ExternalSkillRunner
 from app.extensions.kasset.ai.models import SkillRequest, SkillResult
 
 
@@ -34,7 +34,7 @@ class TechnicalAnalysisSkill:
         self,
         data: TechnicalAnalysisInput,
         *,
-        provider: AiProvider,
+        provider: ExternalSkillRunner,
     ) -> SkillResult:
         request = SkillRequest(
             skill=self.name,

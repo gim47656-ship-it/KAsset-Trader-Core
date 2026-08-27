@@ -8,7 +8,9 @@ from typing import Any
 from app.extensions.kasset.ai.base import AiProviderUnavailable
 from app.extensions.kasset.ai.models import SkillRequest, SkillResult
 
-SubscriptionInvoker = Callable[[SkillRequest], Awaitable[SkillResult | Mapping[str, Any]]]
+SubscriptionInvoker = Callable[
+    [SkillRequest], Awaitable[SkillResult | Mapping[str, Any]]
+]
 
 
 class SubscriptionAgentProvider:

@@ -76,15 +76,21 @@ def _quote() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_paper_market_order_reaches_fill_path(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_paper_market_order_reaches_fill_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     db = FakeSession()
     monkeypatch.setattr(paper_orders, "_by_client_id", AsyncMock(return_value=None))
-    monkeypatch.setattr(runtime_state, "assert_order_allowed", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runtime_state, "assert_order_allowed", AsyncMock(return_value=None)
+    )
     monkeypatch.setattr(paper_orders, "preview", AsyncMock(return_value=_approved()))
     monkeypatch.setattr(
         paper_account_adapter, "resolve_account", AsyncMock(return_value=_account())
     )
-    monkeypatch.setattr(paper_account_adapter, "quote", AsyncMock(return_value=_quote()))
+    monkeypatch.setattr(
+        paper_account_adapter, "quote", AsyncMock(return_value=_quote())
+    )
 
     async def fill(_db: object, order: object, price: Decimal) -> None:
         order.status = "FILLED"
@@ -108,18 +114,23 @@ async def test_paper_non_crossing_limit_order_stays_open(
 ) -> None:
     db = FakeSession()
     monkeypatch.setattr(paper_orders, "_by_client_id", AsyncMock(return_value=None))
-    monkeypatch.setattr(runtime_state, "assert_order_allowed", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runtime_state, "assert_order_allowed", AsyncMock(return_value=None)
+    )
     monkeypatch.setattr(paper_orders, "preview", AsyncMock(return_value=_approved()))
     monkeypatch.setattr(
         paper_account_adapter, "resolve_account", AsyncMock(return_value=_account())
     )
-    monkeypatch.setattr(paper_account_adapter, "quote", AsyncMock(return_value=_quote()))
+    monkeypatch.setattr(
+        paper_account_adapter, "quote", AsyncMock(return_value=_quote())
+    )
     fill = AsyncMock()
     monkeypatch.setattr(paper_orders, "_fill", fill)
     monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="open"))
 
     envelope, replay = await paper_orders.submit(
-        db, _request(order_type="LIMIT")  # type: ignore[arg-type]
+        db,
+        _request(order_type="LIMIT"),  # type: ignore[arg-type]
     )
 
     assert envelope == "open"
@@ -135,9 +146,7 @@ async def test_paper_client_order_id_replays_without_second_write(
 ) -> None:
     db = FakeSession()
     existing = SimpleNamespace(client_order_id="client-order-1", status="FILLED")
-    monkeypatch.setattr(
-        paper_orders, "_by_client_id", AsyncMock(return_value=existing)
-    )
+    monkeypatch.setattr(paper_orders, "_by_client_id", AsyncMock(return_value=existing))
     allowed = AsyncMock()
     monkeypatch.setattr(runtime_state, "assert_order_allowed", allowed)
     monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="same-order"))
@@ -171,9 +180,7 @@ async def test_paper_cancel_and_kill_switch_guards(
         runtime_state,
         "assert_order_allowed",
         AsyncMock(
-            side_effect=MobileApiError(
-                409, "KILL_SWITCH_ON", "거래 중지 상태입니다."
-            )
+            side_effect=MobileApiError(409, "KILL_SWITCH_ON", "거래 중지 상태입니다.")
         ),
     )
 
@@ -208,7 +215,9 @@ async def test_paper_crossing_amend_keeps_total_quantity_when_fill_fails(
     )
     monkeypatch.setattr(runtime_state, "assert_order_allowed", AsyncMock())
     monkeypatch.setattr(paper_orders, "preview", AsyncMock(return_value=_approved()))
-    monkeypatch.setattr(paper_account_adapter, "quote", AsyncMock(return_value=_quote()))
+    monkeypatch.setattr(
+        paper_account_adapter, "quote", AsyncMock(return_value=_quote())
+    )
     fill = AsyncMock(
         side_effect=MobileApiError(
             409,

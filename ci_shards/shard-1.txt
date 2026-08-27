@@ -16,6 +16,10 @@ tests/brokers/kis/test_vts_distributed_gate.py
 tests/ci/test_ci_required_workflow_contract.py
 tests/ci/test_file_shard_plan_workflow_entrypoint.py
 tests/core/test_exceptions.py
+tests/extensions/kasset/api/test_ai_briefing.py
+tests/extensions/kasset/api/test_android_contract.py
+tests/extensions/kasset/api/test_paper_regression.py
+tests/extensions/kasset/api/test_secret_security.py
 tests/infra/test_database_guard_completeness.py
 tests/infra/test_run_owned_database.py
 tests/integration/services/daily_candles/test_full_cycle.py
@@ -25,6 +29,8 @@ tests/integration/test_rob301_symbol_reports_run_scoped.py
 tests/jobs/test_analyst_consensus_snapshots_job.py
 tests/jobs/test_kis_market_adapters.py
 tests/jobs/test_news_relevance_judgment.py
+tests/kasset/test_ai_provider_router.py
+tests/kasset/test_technical_analysis_skill.py
 tests/mcp/test_trade_journal_enrich.py
 tests/mcp_server/test_alpaca_paper_lab_automated_boundary.py
 tests/mcp_server/test_analyze_halted_suspect.py
@@ -61,6 +67,7 @@ tests/research/test_kr_backfill_kiwoom_payload.py
 tests/research/test_kr_backfill_no_public_dml.py
 tests/research/test_krb1_c_stress_reducer.py
 tests/research/us_stage_b/test_registry_and_contracts.py
+tests/routers/test_ai_recommendations.py
 tests/routers/test_invest_artifacts_router.py
 tests/routers/test_investment_reports_snapshot_backed.py
 tests/routers/test_investment_reports_snapshot_evidence_router.py

@@ -85,11 +85,7 @@ def _parse_list_query(request: Request) -> tuple[str, int] | JSONResponse:
 
     limit_text = limit_values[0] if limit_values else "50"
 
-    if (
-        len(limit_text) > 3
-        or not limit_text.isascii()
-        or not limit_text.isdecimal()
-    ):
+    if len(limit_text) > 3 or not limit_text.isascii() or not limit_text.isdecimal():
         return _error_response(
             status_code=status.HTTP_400_BAD_REQUEST,
             code="VALIDATION_ERROR",

@@ -89,7 +89,9 @@ class AIRecommendationService:
 
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
-            raise RuntimeError("recommendation clock must return a timezone-aware datetime")
+            raise RuntimeError(
+                "recommendation clock must return a timezone-aware datetime"
+            )
         now = now.astimezone(UTC).replace(microsecond=0)
 
         if decision == RecommendationDecision.APPROVED:

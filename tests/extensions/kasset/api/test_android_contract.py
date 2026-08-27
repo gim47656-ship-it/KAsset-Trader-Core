@@ -95,9 +95,7 @@ def test_health_contract_is_unauthenticated() -> None:
 
 def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
     with _client() as client:
-        response = client.get(
-            "/api/v1/ai/briefing?market=kr&symbol=005930&limit=10"
-        )
+        response = client.get("/api/v1/ai/briefing?market=kr&symbol=005930&limit=10")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -206,9 +204,7 @@ def test_nh_history_reads_return_empty_contracts() -> None:
 
 def test_nh_quote_rejects_invalid_input_before_credential_access() -> None:
     with _client() as client:
-        response = client.get(
-            "/api/v1/market/quote?broker=NH&market=NYSE&symbol=AAPL"
-        )
+        response = client.get("/api/v1/market/quote?broker=NH&market=NYSE&symbol=AAPL")
 
     assert response.status_code == 422
     assert response.json() == {
@@ -217,7 +213,6 @@ def test_nh_quote_rejects_invalid_input_before_credential_access() -> None:
             "message": "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
         }
     }
-
 
 
 def test_nh_quote_normalizes_official_current_price_fields(

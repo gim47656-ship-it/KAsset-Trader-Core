@@ -17,7 +17,9 @@ class AndroidWireModel(BaseModel):
 
 
 class PairRequest(AndroidWireModel):
-    pairing_code: str = Field(alias="pairingCode", min_length=1, max_length=256, repr=False)
+    pairing_code: str = Field(
+        alias="pairingCode", min_length=1, max_length=256, repr=False
+    )
     device_id: str = Field(alias="deviceId", min_length=1, max_length=200)
     device_name: str = Field(alias="deviceName", min_length=1, max_length=200)
 

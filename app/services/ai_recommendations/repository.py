@@ -34,7 +34,9 @@ class AIRecommendationRepository:
         limit: int,
     ) -> list[AIRecommendation]:
         if status == "PENDING":
-            decision_filter = AIRecommendation.decision == RecommendationDecision.PENDING
+            decision_filter = (
+                AIRecommendation.decision == RecommendationDecision.PENDING
+            )
         else:
             decision_filter = AIRecommendation.decision.in_(
                 (

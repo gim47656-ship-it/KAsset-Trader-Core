@@ -17,7 +17,9 @@ from app.extensions.kasset.api.schemas import (
 )
 
 
-def test_vault_ciphertext_round_trip_and_aad_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vault_ciphertext_round_trip_and_aad_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         CredentialVault,
         "_master_key",
@@ -35,13 +37,18 @@ def test_vault_ciphertext_round_trip_and_aad_binding(monkeypatch: pytest.MonkeyP
 
     assert encrypted.startswith("v1.")
     assert plaintext not in encrypted
-    assert vault._decrypt(
-        encrypted,
-        credential_id="credential-1",
-        provider="NH",
-        field_name="app_secret",
-    ) == plaintext
-    with pytest.raises(MobileApiError, match="저장된 브로커 연결 정보를 읽지 못했습니다"):
+    assert (
+        vault._decrypt(
+            encrypted,
+            credential_id="credential-1",
+            provider="NH",
+            field_name="app_secret",
+        )
+        == plaintext
+    )
+    with pytest.raises(
+        MobileApiError, match="저장된 브로커 연결 정보를 읽지 못했습니다"
+    ):
         vault._decrypt(
             encrypted,
             credential_id="credential-1",
@@ -53,9 +60,7 @@ def test_vault_ciphertext_round_trip_and_aad_binding(monkeypatch: pytest.MonkeyP
 def test_secret_models_hide_sensitive_values_from_repr() -> None:
     now = datetime.now(UTC)
     models = [
-        PairRequest(
-            pairingCode="pairing-code", deviceId="device", deviceName="phone"
-        ),
+        PairRequest(pairingCode="pairing-code", deviceId="device", deviceName="phone"),
         RefreshRequest(refreshToken="refresh-only-token"),
         CredentialRequest(
             appKey="nh-app-key",
