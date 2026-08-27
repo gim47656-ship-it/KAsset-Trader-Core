@@ -16,6 +16,7 @@ tests/brokers/kis/test_vts_distributed_gate.py
 tests/ci/test_ci_required_workflow_contract.py
 tests/ci/test_file_shard_plan_workflow_entrypoint.py
 tests/core/test_exceptions.py
+tests/extensions/kasset/ai/test_api_provider.py
 tests/extensions/kasset/api/test_ai_briefing.py
 tests/extensions/kasset/api/test_android_contract.py
 tests/extensions/kasset/api/test_multi_user_contract.py

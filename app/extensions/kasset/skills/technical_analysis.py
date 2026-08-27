@@ -45,7 +45,7 @@ class TechnicalAnalysisSkill:
                 "Analyze the supplied technical evidence only. Identify trend, "
                 "momentum, volatility, support/resistance, and contradictory "
                 "signals. Return BUY/SELL/HOLD/WATCH only as advisory evidence. "
-                "Do not propose order quantity, broker, account, leverage, or "
+                "Do not propose order sizing, brokers, accounts, leverage, or "
                 "execution instructions. Explicitly note stale or insufficient "
                 "evidence."
             ),

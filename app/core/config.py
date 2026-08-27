@@ -708,6 +708,16 @@ class Settings(BaseSettings):
     # PAPER-only automated execution of owner-approved AI recommendations.
     # Deliberately independent of TRADING_ENABLED so operators must opt in.
     AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
+    # KAsset AI provider stack: subscription bridge first (hybrid), then the
+    # primary OpenAI-format endpoint, then OpenRouter. Endpoints stay inactive
+    # until both their key and model are configured.
+    KASSET_AI_PROVIDER_MODE: Literal["subscription", "api", "hybrid"] = "hybrid"
+    KASSET_AI_API_BASE_URL: str = "https://api.openai.com/v1"
+    KASSET_AI_API_KEY: SecretStr | None = None
+    KASSET_AI_API_MODEL: str = ""
+    KASSET_AI_OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
+    KASSET_AI_OPENROUTER_MODEL: str = ""
 
     # JWT Authentication settings
     SECRET_KEY: str
