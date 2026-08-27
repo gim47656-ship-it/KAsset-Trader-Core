@@ -123,7 +123,7 @@ class ResearchReportsQueryService:
         query: str | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
-        market_filter: Literal["kr", "us"] | None = None,
+        market_filter: Literal["kr", "us", "crypto"] | None = None,
         symbol_in: list[str] | None = None,
     ) -> tuple[list[ResearchReport], dict | None]:
         """Paginated feed query for /invest/api/feed/research (ROB-179).
