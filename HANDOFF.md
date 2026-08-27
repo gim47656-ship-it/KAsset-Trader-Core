@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-27 (다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트 통합, checker PASS)
+갱신: 2026-08-27 (Naver Cloud main 배포·복구·live E2E 완료)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
@@ -33,10 +33,21 @@
 - **완료 — 검증:** 로컬 PostgreSQL 16에서 kasset 93 + routers 22 + middleware 6 +
   migration 체인 13 + 컷오버 가드 1 + 자동화 배선 5 passed. ruff/ty clean.
   checker 2회(전체→델타) 후 잔여 차단 finding 0.
-- **대기(사용자 승인) — 배포:** Naver Cloud `175.45.201.51` 배포, live 추천 E2E,
-  빈 호스트 이전 복구는 사용자 명시 요청 시 수행.
+- **완료 — Naver Cloud 배포:** `main` `76923cfe`가 `/opt/kasset-trader-core`에 배포됨.
+  migration head `20260827_kasset_multi_user_core`, 기존 운영자(`kasset-mobile`, id=1)가
+  runtime_state 소유자로 backfill. api/db/redis healthy, caddy running.
+- **완료 — live E2E:** 서버에서 계정 register→login→system/status, generic trader 게이트
+  401 거부, 추천 PENDING 조회→APPROVED 결정→DB 영속, 주문 ledger 불변(0→0) 실측.
+  smoke 계정·fixture는 정리함.
+- **사고·복구 기록:** 배포 중 db 컨테이너 재생성으로 데이터가 초기화됐다. 원인은
+  `docker-compose.kasset.yml`의 볼륨 매핑 결함 — `timescale/timescaledb-ha:pg17`의
+  PGDATA는 `/home/postgres/pgdata`인데 볼륨이 `/var/lib/postgresql/data`에 걸려 있어
+  실데이터가 컨테이너 레이어에 있었다. 재생성 직전에 받은 pg_dump
+  (`/root/backups/kasset_pre_multiuser_20260827_2353.dump`)로 전량 복원했고, 볼륨 매핑을
+  `postgres_data:/home/postgres/pgdata`(uid 1000 chown)로 수정해 재발을 차단했다.
+- **대기(사용자 승인) — 이전 리허설:** 빈 호스트 복원은 대상 호스트 확보 후 수행.
 
-현재 브랜치: `integrate/pr1-pr3` (origin/main보다 앞섬, 아래 커밋 참조).
+현재 브랜치: `main` `76923cfe` (origin/main 동일). 서버도 동일 커밋.
 
 ## 이번 세션에서 한 일
 
@@ -101,5 +112,6 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
-- 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결. 배포는 사용자 승인 대기.
+- 2026-08-27: Naver Cloud에 main 76923cfe 배포, 볼륨 결함 사고를 pg_dump로 복구, live 계정·추천 E2E 실측.
+- 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결.
 - 2026-08-26: Android 호환 API, PAPER facade, NH Mock Read-Only, Credential Vault, 검증·런북 완료; 독립 고위험 재검수 PASS.
