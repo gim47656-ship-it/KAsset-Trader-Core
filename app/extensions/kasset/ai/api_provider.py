@@ -65,7 +65,6 @@ class OpenAiCompatibleProvider:
         profile = self._profile
         body = {
             "model": profile.model,
-            "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": _SYSTEM_CONTRACT},
