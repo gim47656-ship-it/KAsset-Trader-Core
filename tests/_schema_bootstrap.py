@@ -88,7 +88,11 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # trigger. Production applies alembic/versions/20260823_screener_pick_log.py
 # separately; tests never auto-run that migration.
 # v41 (ROB-s257 E-2): nullable rung void-reason group + closed CHECK.
-SCHEMA_BOOTSTRAP_VERSION = 41
+# v42: review.ai_recommendations (new ORM table via create_all).
+#
+# Production applies alembic/versions/20260827_ai_recommendations.py; the
+# version bump makes persistent local test databases rebuild the ORM table.
+SCHEMA_BOOTSTRAP_VERSION = 42
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"
