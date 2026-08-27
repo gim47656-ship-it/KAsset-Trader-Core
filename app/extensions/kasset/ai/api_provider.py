@@ -1,42 +1,54 @@
-"""OpenAI-wire-format API providers and the ordered availability chain.
-
-OpenAI, DeepSeek, and OpenRouter all speak the same chat-completions wire
-format, so one adapter plus per-provider profiles covers the whole API tier.
-Swapping the production model is a configuration change, never a code change.
-
-Fallback policy mirrors ``AiProviderRouter``: only availability failures
-(connect/timeout, auth, rate limit, quota, 5xx) move to the next provider.
-A reachable provider returning malformed analysis surfaces as an error —
-silently retrying validation failures on another model would hide systematic
-prompt or contract bugs.
-"""
+"""Responses API providers and the ordered legacy availability chain."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 import httpx
 
 from app.extensions.kasset.ai.base import AiProviderUnavailable, ExternalSkillRunner
 from app.extensions.kasset.ai.models import SkillRequest, SkillResult
 
-_UNAVAILABLE_STATUS = frozenset({401, 402, 403, 408, 429})
+_SYSTEM_CONTRACT = (
+    "You are KAsset Core's read-only market-analysis layer. Use only the JSON "
+    "input supplied by the application. Return one JSON object matching the "
+    "provided schema and no explanatory text. Never call tools or request more "
+    "data. Never provide broker, account, leverage, quantity, or order-execution "
+    "instructions."
+)
+
+_SKILL_RESULT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "minLength": 1, "maxLength": 20_000},
+        "signal": {
+            "anyOf": [
+                {"type": "string", "enum": ["BUY", "SELL", "HOLD", "WATCH"]},
+                {"type": "null"},
+            ]
+        },
+        "confidence": {
+            "anyOf": [
+                {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                {"type": "null"},
+            ]
+        },
+        "rationale": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "signal", "confidence", "rationale"],
+    "additionalProperties": False,
+}
+
 _ALLOWED_SIGNALS = frozenset({"BUY", "SELL", "HOLD", "WATCH"})
 
-_SYSTEM_CONTRACT = (
-    "You are a read-only market analysis assistant. Respond with a single "
-    "JSON object and nothing else, using exactly these keys: "
-    '"summary" (non-empty string), "signal" (one of "BUY", "SELL", "HOLD", '
-    '"WATCH", or null), "confidence" (number between 0 and 1, or null), '
-    '"rationale" (array of strings). Never propose order quantity, broker, '
-    "account, leverage, or execution instructions."
-)
+ReasoningEffort = Literal["low", "medium", "high"]
 
 
 @dataclass(frozen=True, slots=True)
 class ApiProviderProfile:
-    """One OpenAI-compatible endpoint. ``api_key`` is never logged."""
+    """One Responses API endpoint. ``api_key`` is never logged."""
 
     name: str
     base_url: str
@@ -51,81 +63,176 @@ class ApiProviderProfile:
                 raise ValueError(f"profile {attribute} is required")
 
 
+class OpenAiResponsesClient:
+    """Small Responses API client shared by skills and tiered routing."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 60.0,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        if not name.strip():
+            raise ValueError("client name is required")
+        if not base_url.strip():
+            raise ValueError("client base_url is required")
+        if not api_key.strip():
+            raise ValueError("client api_key is required")
+        self._name = name
+        self._base_url = base_url.rstrip("/") + "/"
+        self._api_key = api_key
+        self._timeout_seconds = timeout_seconds
+        self._extra_headers = dict(extra_headers or {})
+
+    async def request_json(
+        self,
+        *,
+        model: str,
+        input_payload: dict[str, object],
+        reasoning_effort: ReasoningEffort | None,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> dict[str, object]:
+        """Request one strict structured response without exposing any tools."""
+
+        body: dict[str, object] = {
+            "model": model,
+            "instructions": _SYSTEM_CONTRACT,
+            "input": json.dumps(
+                input_payload,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "strict": True,
+                    "name": schema_name,
+                    "schema": schema,
+                }
+            },
+        }
+        if reasoning_effort is not None:
+            body["reasoning"] = {"effort": reasoning_effort}
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            **self._extra_headers,
+        }
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=self._timeout_seconds,
+            ) as client:
+                response = await client.post("responses", json=body, headers=headers)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            raise AiProviderUnavailable(
+                f"{self._name} unreachable: {type(exc).__name__}"
+            ) from exc
+
+        if response.status_code == 429 or response.status_code >= 500:
+            raise AiProviderUnavailable(
+                f"{self._name} unavailable: HTTP {response.status_code}"
+            )
+        if not response.is_success:
+            excerpt = response.text.replace(self._api_key, "[REDACTED]")[:200]
+            if not excerpt:
+                excerpt = "<empty response body>"
+            raise ValueError(
+                f"{self._name} rejected the analysis request: "
+                f"HTTP {response.status_code}: {excerpt}"
+            )
+
+        output_text = self._extract_output_text(response)
+        try:
+            analysis = json.loads(output_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{self._name} returned malformed structured output"
+            ) from exc
+        if not isinstance(analysis, dict):
+            raise ValueError(f"{self._name} did not return a JSON object")
+        return analysis
+
+    def _extract_output_text(self, response: httpx.Response) -> str:
+        try:
+            output = response.json()["output"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{self._name} returned a malformed Responses payload"
+            ) from exc
+        if not isinstance(output, list):
+            raise ValueError(f"{self._name} returned a malformed Responses payload")
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "refusal":
+                raise ValueError(f"{self._name} refused the analysis request")
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "refusal":
+                    raise ValueError(f"{self._name} refused the analysis request")
+                if part.get("type") != "output_text":
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+        raise ValueError(f"{self._name} returned empty structured output")
+
+
 class OpenAiCompatibleProvider:
-    """Chat-completions adapter for one configured endpoint profile."""
+    """Preserve ``run_skill`` over the shared Responses API client."""
 
     def __init__(self, profile: ApiProviderProfile) -> None:
         self._profile = profile
+        self._client = OpenAiResponsesClient(
+            name=profile.name,
+            base_url=profile.base_url,
+            api_key=profile.api_key,
+            timeout_seconds=profile.timeout_seconds,
+            extra_headers=profile.extra_headers,
+        )
 
     @property
     def name(self) -> str:
         return self._profile.name
 
     async def run_skill(self, request: SkillRequest) -> SkillResult:
-        profile = self._profile
-        body = {
-            "model": profile.model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": _SYSTEM_CONTRACT},
-                {"role": "user", "content": self._user_message(request)},
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {profile.api_key}",
-            **profile.extra_headers,
-        }
-        try:
-            async with httpx.AsyncClient(
-                base_url=profile.base_url.rstrip("/"),
-                timeout=profile.timeout_seconds,
-            ) as client:
-                response = await client.post(
-                    "/chat/completions", json=body, headers=headers
-                )
-        except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise AiProviderUnavailable(
-                f"{profile.name} unreachable: {type(exc).__name__}"
-            ) from exc
-
-        if response.status_code in _UNAVAILABLE_STATUS or response.status_code >= 500:
-            raise AiProviderUnavailable(
-                f"{profile.name} unavailable: HTTP {response.status_code}"
-            )
-        if response.status_code != 200:
-            raise ValueError(
-                f"{profile.name} rejected the analysis request: "
-                f"HTTP {response.status_code}"
-            )
-        return self._parse_result(request, response)
+        analysis = await self._client.request_json(
+            model=self._profile.model,
+            input_payload=self._input_payload(request),
+            reasoning_effort="medium",
+            schema_name="kasset_skill_result",
+            schema=_SKILL_RESULT_SCHEMA,
+        )
+        return self._parse_result(request, analysis)
 
     @staticmethod
-    def _user_message(request: SkillRequest) -> str:
-        payload = {
+    def _input_payload(request: SkillRequest) -> dict[str, object]:
+        return {
             "skill": request.skill,
             "symbol": request.symbol,
             "market": request.market,
             "instruction": request.instruction,
             "context": request.context,
         }
-        return json.dumps(payload, ensure_ascii=False, default=str)
 
     def _parse_result(
         self,
         request: SkillRequest,
-        response: httpx.Response,
+        analysis: dict[str, object],
     ) -> SkillResult:
         profile = self._profile
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-            analysis = json.loads(content)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{profile.name} returned a malformed completion payload"
-            ) from exc
-        if not isinstance(analysis, dict):
-            raise ValueError(f"{profile.name} did not return a JSON object")
-
         summary = analysis.get("summary")
         if not isinstance(summary, str) or not summary.strip():
             raise ValueError(f"{profile.name} analysis is missing a summary")
@@ -153,12 +260,7 @@ class OpenAiCompatibleProvider:
 
 
 class ChainedApiProvider:
-    """Ordered availability chain over OpenAI-compatible providers.
-
-    Realizes the operator's fallback intent (primary API -> OpenRouter):
-    a provider is skipped only when it is unavailable; every other failure
-    surfaces immediately.
-    """
+    """Fallback only when a configured Responses endpoint is unavailable."""
 
     def __init__(self, providers: list[ExternalSkillRunner]) -> None:
         if not providers:
@@ -185,4 +287,5 @@ __all__ = [
     "ApiProviderProfile",
     "ChainedApiProvider",
     "OpenAiCompatibleProvider",
+    "OpenAiResponsesClient",
 ]

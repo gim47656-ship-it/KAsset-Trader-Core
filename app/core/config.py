@@ -710,15 +710,24 @@ class Settings(BaseSettings):
     # PAPER-only automated execution of owner-approved AI recommendations.
     # Deliberately independent of TRADING_ENABLED so operators must opt in.
     AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
-    # KAsset AI provider stack: subscription bridge first (hybrid), then the
-    # primary OpenAI-format endpoint, then OpenRouter. Endpoints stay inactive
-    # until both their key and model are configured.
+    # Event-driven market analysis is opt-in and remains fail-closed by default.
+    KASSET_MARKET_EVENTS_ENABLED: bool = False
+    # Event-driven OpenAI analysis uses a fixed Luna -> Terra -> Sol model stack.
+    # The legacy run_skill provider chain remains for existing MCP consumers;
+    # every API-backed path stays inactive until an API key is configured.
     KASSET_AI_PROVIDER_MODE: Literal["subscription", "api", "hybrid"] = "hybrid"
     KASSET_AI_API_BASE_URL: str = "https://api.openai.com/v1"
     KASSET_AI_API_KEY: SecretStr | None = None
     KASSET_AI_API_MODEL: str = ""
+    KASSET_AI_MODEL_LUNA: str = "gpt-5.6-luna"
+    KASSET_AI_MODEL_TERRA: str = "gpt-5.6-terra"
+    KASSET_AI_MODEL_SOL: str = "gpt-5.6-sol"
     KASSET_AI_OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
+    KASSET_AI_OPENROUTER_MODEL_FLASH: str = (
+        "deepseek/deepseek-v4-flash-0731@preset/kasset-cheap"
+    )
+    KASSET_AI_OPENROUTER_MODEL_PRO: str = "deepseek/deepseek-v4-pro-0813"
     KASSET_AI_OPENROUTER_MODEL: str = ""
 
     # JWT Authentication settings

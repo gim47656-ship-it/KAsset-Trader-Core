@@ -17,6 +17,7 @@ tests/ci/test_ci_required_workflow_contract.py
 tests/ci/test_file_shard_plan_workflow_entrypoint.py
 tests/core/test_exceptions.py
 tests/extensions/kasset/ai/test_api_provider.py
+tests/extensions/kasset/ai/test_model_router.py
 tests/extensions/kasset/api/test_ai_briefing.py
 tests/extensions/kasset/api/test_android_contract.py
 tests/extensions/kasset/api/test_google_auth.py
@@ -25,7 +26,10 @@ tests/extensions/kasset/api/test_paper_regression.py
 tests/extensions/kasset/api/test_secret_security.py
 tests/extensions/kasset/automation/test_backtest.py
 tests/extensions/kasset/automation/test_consumer.py
+tests/extensions/kasset/automation/test_event_detector.py
+tests/extensions/kasset/automation/test_feature_engine.py
 tests/extensions/kasset/automation/test_job.py
+tests/extensions/kasset/automation/test_market_pipeline.py
 tests/extensions/kasset/automation/test_producer.py
 tests/extensions/kasset/automation/test_strategies.py
 tests/extensions/kasset/test_multi_user_migration_guards.py

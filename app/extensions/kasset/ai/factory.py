@@ -1,9 +1,7 @@
-"""Configuration-driven assembly of the KAsset AI provider stack.
+"""Configuration-driven assembly of the KAsset AI provider stacks.
 
-Realized operator intent: try the subscription bridge first, then the
-primary OpenAI-format API endpoint, then OpenRouter — availability failures
-only. Every tier is optional; an unconfigured tier is simply skipped by the
-availability chain, and a fully unconfigured stack fails closed.
+The event pipeline uses the OpenAI-only Luna/Terra/Sol router. The legacy
+``run_skill`` provider router remains available for existing MCP consumers.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from app.extensions.kasset.ai.api_provider import (
     OpenAiCompatibleProvider,
 )
 from app.extensions.kasset.ai.base import ExternalSkillRunner
+from app.extensions.kasset.ai.model_router import OpenAiModelRouter
 from app.extensions.kasset.ai.provider_router import AiProviderRouter
 from app.extensions.kasset.ai.subscription_provider import (
     SubscriptionAgentProvider,
@@ -23,17 +22,20 @@ from app.extensions.kasset.ai.subscription_provider import (
 
 
 def build_api_provider_chain() -> ChainedApiProvider | None:
-    """Primary OpenAI-format endpoint first, OpenRouter as the last resort."""
+    """Build the compatibility ``run_skill`` API provider chain."""
 
     providers: list[ExternalSkillRunner] = []
-    if settings.KASSET_AI_API_KEY is not None and settings.KASSET_AI_API_MODEL.strip():
+    primary_model = (
+        settings.KASSET_AI_MODEL_TERRA.strip() or settings.KASSET_AI_API_MODEL.strip()
+    )
+    if settings.KASSET_AI_API_KEY is not None and primary_model:
         providers.append(
             OpenAiCompatibleProvider(
                 ApiProviderProfile(
                     name="primary-api",
                     base_url=settings.KASSET_AI_API_BASE_URL,
                     api_key=settings.KASSET_AI_API_KEY.get_secret_value(),
-                    model=settings.KASSET_AI_API_MODEL,
+                    model=primary_model,
                 )
             )
         )
@@ -56,6 +58,32 @@ def build_api_provider_chain() -> ChainedApiProvider | None:
     return ChainedApiProvider(providers)
 
 
+def build_model_router() -> OpenAiModelRouter:
+    """Build the event-driven router; missing providers stay fail-closed."""
+
+    api_key = (
+        settings.KASSET_AI_API_KEY.get_secret_value()
+        if settings.KASSET_AI_API_KEY is not None
+        else None
+    )
+    openrouter_api_key = (
+        settings.KASSET_AI_OPENROUTER_API_KEY.get_secret_value()
+        if settings.KASSET_AI_OPENROUTER_API_KEY is not None
+        else None
+    )
+    return OpenAiModelRouter(
+        base_url=settings.KASSET_AI_API_BASE_URL,
+        api_key=api_key,
+        luna_model=settings.KASSET_AI_MODEL_LUNA,
+        terra_model=settings.KASSET_AI_MODEL_TERRA,
+        sol_model=settings.KASSET_AI_MODEL_SOL,
+        openrouter_base_url=settings.KASSET_AI_OPENROUTER_BASE_URL,
+        openrouter_api_key=openrouter_api_key,
+        openrouter_flash_model=settings.KASSET_AI_OPENROUTER_MODEL_FLASH,
+        openrouter_pro_model=settings.KASSET_AI_OPENROUTER_MODEL_PRO,
+    )
+
+
 def build_ai_provider_router(
     *,
     subscription_invoker: SubscriptionInvoker | None = None,
@@ -76,4 +104,8 @@ def build_ai_provider_router(
     )
 
 
-__all__ = ["build_ai_provider_router", "build_api_provider_chain"]
+__all__ = [
+    "build_ai_provider_router",
+    "build_api_provider_chain",
+    "build_model_router",
+]

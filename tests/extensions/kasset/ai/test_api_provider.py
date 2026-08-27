@@ -1,4 +1,4 @@
-"""Contract tests for the OpenAI-format API tier and its fallback chain."""
+"""Contract tests for the Responses API tier and its fallback chain."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from app.core.config import settings
 from app.extensions.kasset.ai.api_provider import (
@@ -36,8 +37,15 @@ def _profile(name: str = "primary-api") -> ApiProviderProfile:
     )
 
 
-def _completion(payload: dict[str, object]) -> dict[str, object]:
-    return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+def _response(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": json.dumps(payload)}],
+            }
+        ]
+    }
 
 
 class _Transport(httpx.AsyncBaseTransport):
@@ -73,14 +81,14 @@ def _patch_transport(
 
 
 @pytest.mark.asyncio
-async def test_provider_parses_a_wire_format_completion(
+async def test_provider_preserves_run_skill_contract_over_responses_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     transport = _Transport(
         [
             httpx.Response(
                 200,
-                json=_completion(
+                json=_response(
                     {
                         "summary": "Momentum is improving.",
                         "signal": "buy",
@@ -103,15 +111,31 @@ async def test_provider_parses_a_wire_format_completion(
     assert result.metadata == {"provider_profile": "primary-api", "model": "test-model"}
     assert result.correlation_id == "corr-1"
 
-    sent = json.loads(transport.requests[0].content)
+    request = transport.requests[0]
+    sent = json.loads(request.content)
+    assert str(request.url) == "https://example.test/v1/responses"
+    assert set(sent) == {"model", "instructions", "input", "reasoning", "text"}
     assert sent["model"] == "test-model"
-    assert sent["response_format"] == {"type": "json_object"}
-    assert transport.requests[0].headers["Authorization"] == "Bearer test-key"
+    assert sent["reasoning"] == {"effort": "medium"}
+    assert json.loads(sent["input"]) == {
+        "skill": "technical_analysis",
+        "symbol": "005930",
+        "market": "kr",
+        "instruction": "Analyze the supplied evidence.",
+        "context": {"timeframe": "1d"},
+    }
+    assert "Analyze the supplied evidence." not in sent["instructions"]
+    response_format = sent["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["strict"] is True
+    assert response_format["name"] == "kasset_skill_result"
+    assert response_format["schema"]["additionalProperties"] is False
+    assert request.headers["Authorization"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("status", [401, 402, 403, 408, 429, 500, 503])
+@pytest.mark.parametrize("status", [429, 500, 503])
 @pytest.mark.asyncio
-async def test_availability_failures_raise_unavailable(
+async def test_retryable_statuses_raise_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
 ) -> None:
@@ -120,6 +144,25 @@ async def test_availability_failures_raise_unavailable(
 
     with pytest.raises(AiProviderUnavailable):
         await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_4xx_includes_redacted_response_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = "invalid request; echoed credential=test-key; " + ("x" * 250)
+    transport = _Transport([httpx.Response(400, text=body)])
+    _patch_transport(monkeypatch, {"https://example.test": transport})
+
+    with pytest.raises(ValueError) as excinfo:
+        await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
+
+    message = str(excinfo.value)
+    assert "HTTP 400" in message
+    assert "invalid request" in message
+    assert "[REDACTED]" in message
+    assert "test-key" not in message
+    assert len(message.rsplit(": ", maxsplit=1)[-1]) == 200
 
 
 @pytest.mark.asyncio
@@ -137,11 +180,10 @@ async def test_connection_errors_raise_unavailable(
 async def test_malformed_analysis_surfaces_instead_of_falling_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reachable provider with broken output must fail loudly, not fall back."""
     transport = _Transport(
         [
-            httpx.Response(200, json=_completion({"signal": "BUY"})),
-            httpx.Response(200, json=_completion({"summary": "unused fallback"})),
+            httpx.Response(200, json=_response({"signal": "BUY"})),
+            httpx.Response(200, json=_response({"summary": "unused fallback"})),
         ]
     )
     _patch_transport(monkeypatch, {"https://example.test": transport})
@@ -157,13 +199,43 @@ async def test_malformed_analysis_surfaces_instead_of_falling_back(
     assert len(transport.requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("response_payload", "message"),
+    [
+        (
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "no"}],
+                    }
+                ]
+            },
+            "refused",
+        ),
+        ({"output": []}, "empty structured output"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_refusal_and_empty_output_raise_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    response_payload: dict[str, object],
+    message: str,
+) -> None:
+    transport = _Transport([httpx.Response(200, json=response_payload)])
+    _patch_transport(monkeypatch, {"https://example.test": transport})
+
+    with pytest.raises(ValueError, match=message):
+        await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
+
+
 @pytest.mark.asyncio
 async def test_chain_falls_back_only_on_unavailability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     primary = _Transport([httpx.Response(429, json={"error": "quota"})])
     fallback = _Transport(
-        [httpx.Response(200, json=_completion({"summary": "from openrouter"}))]
+        [httpx.Response(200, json=_response({"summary": "from openrouter"}))]
     )
     _patch_transport(
         monkeypatch,
@@ -238,24 +310,40 @@ def test_factory_skips_unconfigured_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "KASSET_AI_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "")
     monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "")
     monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
     monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL", "")
     assert build_api_provider_chain() is None
 
 
-def test_factory_orders_primary_before_openrouter(
+def test_factory_prefers_terra_and_orders_primary_before_openrouter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pydantic import SecretStr
-
     monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("k1"))
-    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "deepseek-chat")
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "gpt-terra")
+    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "legacy-model")
     monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", SecretStr("k2"))
-    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL", "google/gemini-flash")
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL", "fallback-model")
 
     chain = build_api_provider_chain()
 
     assert chain is not None
     names = [provider.name for provider in chain._providers]
+    models = [provider._profile.model for provider in chain._providers]
     assert names == ["primary-api", "openrouter"]
+    assert models == ["gpt-terra", "fallback-model"]
+
+
+def test_factory_uses_legacy_model_only_when_terra_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("k1"))
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "")
+    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "legacy-model")
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
+
+    chain = build_api_provider_chain()
+
+    assert chain is not None
+    assert chain._providers[0]._profile.model == "legacy-model"
