@@ -1,4 +1,18 @@
 # app/models/__init__.py
+# KAsset Android product tables live in the extension package but are part of
+# the canonical schema; importing them here keeps Base.metadata complete for
+# create_all-based test bootstraps regardless of which module imports models.
+from app.extensions.kasset import models as _kasset_models  # noqa: E402,F401
+
+from .ai_recommendations import (
+    AIRecommendation,
+    RecommendationAction,
+    RecommendationDecision,
+    RecommendationExecutionStatus,
+    RecommendationMarket,
+    RecommendationStatusGroup,
+    TerminalRecommendationDecision,
+)
 from .analysis import StockAnalysisResult, StockInfo
 from .analysis_artifact import AnalysisArtifact
 from .analyst_consensus_snapshot import AnalystConsensusSnapshot
@@ -178,6 +192,13 @@ __all__ = [
     "WatchEventRepricingClaim",
     "Base",
     "AnalysisArtifact",
+    "AIRecommendation",
+    "RecommendationAction",
+    "RecommendationDecision",
+    "RecommendationExecutionStatus",
+    "RecommendationMarket",
+    "RecommendationStatusGroup",
+    "TerminalRecommendationDecision",
     "AnalystConsensusSnapshot",
     "BinanceDemoOrderLedger",
     "ScalpTradeAnalytics",

@@ -20,6 +20,7 @@ from app.services.brokers.nhplug.client import (
 )
 from app.services.brokers.nhplug.errors import (
     NHPlugMockAccountRejected,
+    NHPlugMockBrokerRejected,
     NHPlugMockConfigurationError,
     NHPlugMockDisabled,
     NHPlugMockEndpointError,
@@ -32,9 +33,18 @@ pytestmark = pytest.mark.unit
 class _TokenProvider:
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[tuple[bool, str | None]] = []
 
-    async def __call__(self) -> str:
+    async def __call__(
+        self,
+        *,
+        force_refresh: bool = False,
+        failed_token: str | None = None,
+    ) -> str:
         self.calls += 1
+        self.requests.append((force_refresh, failed_token))
+        if force_refresh:
+            return "unit-test-refreshed-token"
         return "unit-test-token"
 
 
@@ -86,7 +96,12 @@ def test_readonly_allowlist_is_exactly_the_three_stage_one_paths() -> None:
 
 
 def test_live_or_wrong_host_is_rejected_at_construction() -> None:
-    async def token() -> str:
+    async def token(
+        *,
+        force_refresh: bool = False,
+        failed_token: str | None = None,
+    ) -> str:
+        del force_refresh, failed_token
         return "unit-test-token"
 
     with pytest.raises(NHPlugMockEndpointError):
@@ -383,3 +398,209 @@ async def test_quote_requires_the_same_verified_account_and_exact_symbol(
     assert json.loads(seen[0].content) == {
         "Input_0": {"iem_cd": "005930", "market_cd": "KRX"}
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_response",
+    (
+        httpx.Response(401, json={"rsp_cd": "unauthorized"}),
+        httpx.Response(200, json={"rsp_cd": "IGW40043"}),
+    ),
+)
+async def test_invalid_token_response_refreshes_once_and_retries_same_request(
+    armed: None,
+    first_response: httpx.Response,
+) -> None:
+    seen: list[httpx.Request] = []
+    responses = iter(
+        (
+            first_response,
+            httpx.Response(200, json=_account_payload()),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return next(responses)
+
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+
+    assert (await client.list_accounts())["rsp_cd"] == "00000"
+    assert provider.requests == [
+        (False, None),
+        (True, "unit-test-token"),
+    ]
+    assert len(seen) == 2
+    assert seen[0].url == seen[1].url
+    assert seen[0].content == seen[1].content
+    assert seen[0].headers["authorization"] == "Bearer unit-test-token"
+    assert seen[1].headers["authorization"] == "Bearer unit-test-refreshed-token"
+
+
+@pytest.mark.asyncio
+async def test_http_429_never_refreshes_the_access_token(armed: None) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(429, json={"rsp_cd": "IGW42902"})
+
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        await client.list_accounts()
+
+    assert error.value.response.status_code == 429
+    assert provider.requests == [(False, None)]
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_body_igw42902_never_refreshes_the_access_token(
+    armed: None,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"rsp_cd": "IGW42902"})
+
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+
+    with pytest.raises(NHPlugMockBrokerRejected) as error:
+        await client.list_accounts()
+
+    assert error.value.response_code == "IGW42902"
+    assert provider.requests == [(False, None)]
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_second_401_stops_without_a_third_send_or_refresh(
+    armed: None,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(401, json={"rsp_cd": "unauthorized"})
+
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        await client.list_accounts()
+
+    assert error.value.response.status_code == 401
+    assert provider.requests == [
+        (False, None),
+        (True, "unit-test-token"),
+    ]
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tampered_retry_url",
+    (
+        "https://unexpected.example.invalid:8443/n2/acctinfo",
+        "https://moapi.nhplug.com:8443/outside/read-only-allowlist",
+    ),
+)
+async def test_retry_rechecks_resolved_host_and_path_before_second_send(
+    armed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tampered_retry_url: str,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(401, json={"rsp_cd": "unauthorized"})
+
+    original_build_request = httpx.AsyncClient.build_request
+    build_count = 0
+
+    def tamper_second_request(
+        self: httpx.AsyncClient,
+        *args: Any,
+        **kwargs: Any,
+    ) -> httpx.Request:
+        nonlocal build_count
+        request = original_build_request(self, *args, **kwargs)
+        build_count += 1
+        if build_count == 1:
+            return request
+        return httpx.Request(
+            request.method,
+            tampered_retry_url,
+            headers=request.headers,
+            content=request.content,
+        )
+
+    monkeypatch.setattr(
+        httpx.AsyncClient,
+        "build_request",
+        tamper_second_request,
+    )
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+
+    with pytest.raises((NHPlugMockEndpointError, NHPlugMockReadOnlyEndpointError)):
+        await client.list_accounts()
+
+    assert build_count == 2
+    assert provider.requests == [
+        (False, None),
+        (True, "unit-test-token"),
+    ]
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_rechecks_account_allowlist_before_second_send(
+    armed: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(401, json={"rsp_cd": "unauthorized"})
+
+    provider = _TokenProvider()
+    client, _ = _client(httpx.MockTransport(handler), provider)
+    allowlist = _allowlist()
+    client.bind_account_allowlist(allowlist)
+    allowlist_calls = 0
+
+    def reject_before_retry_send(
+        self: MockAccountAllowlist,
+        act_no: str,
+    ) -> None:
+        nonlocal allowlist_calls
+        assert self is allowlist
+        assert act_no == "mock-account"
+        allowlist_calls += 1
+        if allowlist_calls == 3:
+            raise NHPlugMockAccountRejected("account changed before retry dispatch")
+
+    monkeypatch.setattr(
+        MockAccountAllowlist,
+        "assert_allowed",
+        reject_before_retry_send,
+    )
+
+    with pytest.raises(NHPlugMockAccountRejected):
+        await client.fetch_balance(act_no="mock-account")
+
+    assert allowlist_calls == 3
+    assert provider.requests == [
+        (False, None),
+        (True, "unit-test-token"),
+    ]
+    assert len(seen) == 1

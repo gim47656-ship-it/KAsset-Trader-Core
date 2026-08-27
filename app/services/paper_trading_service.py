@@ -291,6 +291,7 @@ class PaperTradingService:
         price: Decimal | float | int | None = None,
         amount: Decimal | float | int | None = None,
         reason: str = "",
+        correlation_id: str | None = None,
     ) -> dict[str, Any]:
         # 1. Preview order to get finalized quantity/price/costs
         preview = await self.preview_order(
@@ -398,6 +399,7 @@ class PaperTradingService:
             fee=fee,
             currency=currency,
             reason=reason,
+            correlation_id=correlation_id,
             realized_pnl=realized_pnl,
         )
         self.db.add(trade)

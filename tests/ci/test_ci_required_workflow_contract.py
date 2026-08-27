@@ -235,6 +235,7 @@ def test_workflow_triggers_are_unchanged(workflow: dict[str, Any]) -> None:
     assert triggers == {
         "push": {"branches": ["main", "develop"]},
         "pull_request": {"branches": ["main", "develop"]},
+        "workflow_dispatch": None,
     }
 
 

@@ -19,6 +19,7 @@ from app.auth.web_router import router as web_auth_router
 from app.core.config import settings
 from app.core.logging_config import configure_dependency_log_levels
 from app.core.taskiq_broker import broker
+from app.extensions.kasset.api.installation import install_android_compat_api
 from app.middleware.auth import AuthMiddleware
 from app.middleware.csrf import TemplateFormCSRFMiddleware
 from app.monitoring.sentry import capture_exception, init_sentry
@@ -28,6 +29,7 @@ from app.monitoring.trade_notifier.runtime import (
 )
 from app.routers import (
     agent_callback,
+    ai_recommendations,
     alpaca_paper_ledger,
     candidate_discovery,
     deprecated_pages,
@@ -186,12 +188,14 @@ def create_app() -> FastAPI:
         )
 
     # Include routers
+    install_android_compat_api(app)
     app.include_router(auth_router)
     app.include_router(web_auth_router)
     app.include_router(admin_router)
     app.include_router(screener.router)
     app.include_router(health.router)
     app.include_router(news_analysis.router)
+    app.include_router(ai_recommendations.router)
     app.include_router(agent_callback.router)
     app.include_router(user_defaults.router)
     app.include_router(order_estimation.router)

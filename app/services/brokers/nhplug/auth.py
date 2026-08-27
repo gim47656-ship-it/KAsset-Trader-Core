@@ -8,7 +8,15 @@ revocation.  No data client imports this module.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
+import json
+import math
+import os
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
@@ -33,6 +41,9 @@ AUTH_ALLOWED_PATHS: Final[frozenset[str]] = frozenset(
 
 _DEFAULT_TOKEN_TTL_SECONDS: Final[float] = 86_400.0
 _TOKEN_REFRESH_LEEWAY_SECONDS: Final[float] = 60.0
+DEFAULT_TOKEN_CACHE_PATH: Final[Path] = Path.home() / ".nhplug" / "token_cache.json"
+_CACHE_PARENT_MODE: Final[int] = 0o700
+_CACHE_FILE_MODE: Final[int] = 0o600
 
 
 def _assert_auth_base_url(base_url: str) -> str:
@@ -72,12 +83,7 @@ def _assert_resolved_auth_request(request: httpx.Request) -> None:
 
 
 class NHPlugAuthClient:
-    """OAuth-only client with in-process 24-hour token reuse.
-
-    The cache is deliberately process-local for this initial read-only stage:
-    it prevents duplicate issuance during one smoke run without creating an
-    additional persisted credential surface.
-    """
+    """OAuth-only client with memory and process-independent file token reuse."""
 
     def __init__(
         self,
@@ -85,28 +91,235 @@ class NHPlugAuthClient:
         app_key: str,
         app_secret: str,
         base_url: str = AUTH_BASE_URL,
+        cache_path: str | Path | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 10.0,
     ) -> None:
+        if not isinstance(app_key, str) or not app_key.strip():
+            raise NHPlugMockConfigurationError("NHPLUG_APP_KEY is required")
+        if not isinstance(app_secret, str) or not app_secret.strip():
+            raise NHPlugMockConfigurationError("NHPLUG_APP_SECRET is required")
         self._base_url = _assert_auth_base_url(base_url)
         self._app_key = app_key
         self._app_secret = app_secret
+        self._cache_path = (
+            DEFAULT_TOKEN_CACHE_PATH
+            if cache_path is None
+            else Path(cache_path).expanduser()
+        )
+        self._owner_fingerprint = hashlib.sha256(
+            f"{self._app_key}|{self._base_url}".encode()
+        ).hexdigest()
         self._transport = transport
         self._timeout = timeout
         self._cached_token: str | None = None
         self._token_expires_at = 0.0
+        self._refresh_lock = asyncio.Lock()
 
-    async def get_access_token(self, *, force_refresh: bool = False) -> str:
-        """Return a cached token or issue one through the sole allowed path."""
+    async def get_access_token(
+        self,
+        *,
+        force_refresh: bool = False,
+        failed_token: str | None = None,
+    ) -> str:
+        """Resolve memory, then file, issuing only when no usable token remains."""
+
+        if failed_token is not None and (
+            not isinstance(failed_token, str) or not failed_token.strip()
+        ):
+            raise NHPlugMockConfigurationError(
+                "failed_token must be a non-empty access token"
+            )
+        if failed_token is not None:
+            failed_token = failed_token.strip()
 
         now = time.time()
-        if (
-            not force_refresh
-            and self._cached_token is not None
-            and now < self._token_expires_at - _TOKEN_REFRESH_LEEWAY_SECONDS
-        ):
-            return self._cached_token
+        if not force_refresh:
+            memory_token = self._valid_memory_token(now)
+            if memory_token is not None:
+                return memory_token[0]
 
+        async with self._refresh_lock:
+            now = time.time()
+            if not force_refresh:
+                memory_token = self._valid_memory_token(now)
+                if memory_token is not None:
+                    return memory_token[0]
+                file_token = self._read_file_cache(now=now)
+                if file_token is not None:
+                    self._remember_token(*file_token)
+                    return file_token[0]
+            elif failed_token is not None:
+                replacement_token = self._different_token_after_failure(
+                    now,
+                    failed_token,
+                )
+                if replacement_token is not None:
+                    self._remember_token(*replacement_token)
+                    return replacement_token[0]
+                self._invalidate_cached_token(expected_token=failed_token)
+            else:
+                self._invalidate_cached_token()
+
+            return await self._issue_access_token()
+
+    async def revoke_access_token(self, *, access_token: str) -> dict[str, Any]:
+        """Revoke through the allowlisted path, then invalidate only that token."""
+
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise NHPlugMockConfigurationError(
+                "an access token is required for OAuth revocation"
+            )
+        normalized_token = access_token.strip()
+        payload = await self._post_form(
+            path=AUTH_REVOKE_PATH,
+            form={"access_token": normalized_token},
+        )
+        self._invalidate_cached_token(expected_token=normalized_token)
+        return payload
+
+    def _valid_memory_token(self, now: float) -> tuple[str, float] | None:
+        token = self._cached_token
+        if (
+            token is None
+            or self._token_expires_at <= now + _TOKEN_REFRESH_LEEWAY_SECONDS
+        ):
+            return None
+        return token, self._token_expires_at
+
+    def _different_token_after_failure(
+        self,
+        now: float,
+        failed_token: str,
+    ) -> tuple[str, float] | None:
+        file_token = self._read_file_cache(now=now)
+        if file_token is not None and not hmac.compare_digest(
+            file_token[0], failed_token
+        ):
+            return file_token
+        memory_token = self._valid_memory_token(now)
+        if memory_token is not None and not hmac.compare_digest(
+            memory_token[0], failed_token
+        ):
+            return memory_token
+        return None
+
+    def _read_file_cache(self, *, now: float | None) -> tuple[str, float] | None:
+        try:
+            if self._cache_path.is_symlink() or not self._cache_path.is_file():
+                return None
+            os.chmod(self._cache_path.parent, _CACHE_PARENT_MODE)
+            os.chmod(self._cache_path, _CACHE_FILE_MODE)
+            payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        base = payload.get("base")
+        owner_fingerprint = payload.get("owner_fingerprint")
+        if (
+            not isinstance(base, str)
+            or base != self._base_url
+            or not isinstance(owner_fingerprint, str)
+            or not hmac.compare_digest(owner_fingerprint, self._owner_fingerprint)
+        ):
+            return None
+
+        token = payload.get("token")
+        raw_expires_at = payload.get("exp")
+        if (
+            not isinstance(token, str)
+            or not token
+            or token.strip() != token
+            or isinstance(raw_expires_at, bool)
+            or not isinstance(raw_expires_at, int | float)
+        ):
+            return None
+        try:
+            expires_at = float(raw_expires_at)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(expires_at):
+            return None
+        if now is not None and expires_at <= now + _TOKEN_REFRESH_LEEWAY_SECONDS:
+            return None
+        return token, expires_at
+
+    def _write_file_cache(self, *, token: str, expires_at: float) -> None:
+        parent = self._cache_path.parent
+        temporary_path: Path | None = None
+        file_descriptor = -1
+        try:
+            if parent.is_symlink():
+                return
+            parent.mkdir(mode=_CACHE_PARENT_MODE, parents=True, exist_ok=True)
+            os.chmod(parent, _CACHE_PARENT_MODE)
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                dir=parent,
+                prefix=f".{self._cache_path.name}.",
+                suffix=".tmp",
+            )
+            temporary_path = Path(temporary_name)
+            os.chmod(temporary_path, _CACHE_FILE_MODE)
+            cache_file = os.fdopen(file_descriptor, "w", encoding="utf-8")
+            file_descriptor = -1
+            with cache_file:
+                json.dump(
+                    {
+                        "base": self._base_url,
+                        "exp": expires_at,
+                        "owner_fingerprint": self._owner_fingerprint,
+                        "token": token,
+                    },
+                    cache_file,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                cache_file.flush()
+                os.fsync(cache_file.fileno())
+            os.replace(temporary_path, self._cache_path)
+            temporary_path = None
+        except (OSError, TypeError, ValueError):
+            return
+        finally:
+            if file_descriptor >= 0:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _invalidate_cached_token(self, *, expected_token: str | None = None) -> None:
+        memory_token = self._cached_token
+        if expected_token is None or (
+            memory_token is not None
+            and hmac.compare_digest(memory_token, expected_token)
+        ):
+            self._cached_token = None
+            self._token_expires_at = 0.0
+
+        file_token = self._read_file_cache(now=None)
+        if file_token is None:
+            return
+        if expected_token is not None and not hmac.compare_digest(
+            file_token[0], expected_token
+        ):
+            return
+        try:
+            self._cache_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _remember_token(self, token: str, expires_at: float) -> None:
+        self._cached_token = token
+        self._token_expires_at = expires_at
+
+    async def _issue_access_token(self) -> str:
         payload = await self._post_form(
             path=AUTH_TOKEN_PATH,
             form={
@@ -124,29 +337,19 @@ class NHPlugAuthClient:
         expires_in = payload.get("expires_in", _DEFAULT_TOKEN_TTL_SECONDS)
         try:
             ttl = float(expires_in)
-        except (TypeError, ValueError) as exc:
+        except (OverflowError, TypeError, ValueError):
             raise NHPlugMockResponseError(
                 "NHPLUG OAuth response has an invalid expiry"
-            ) from exc
-        if ttl <= 0:
+            ) from None
+        if not math.isfinite(ttl) or ttl <= 0:
             raise NHPlugMockResponseError(
                 "NHPLUG OAuth response has a non-positive expiry"
             )
-        self._cached_token = token.strip()
-        self._token_expires_at = now + ttl
-        return self._cached_token
-
-    async def revoke_access_token(self, *, access_token: str) -> dict[str, Any]:
-        """Revoke only through the second explicit OAuth allowlisted path."""
-
-        if not isinstance(access_token, str) or not access_token.strip():
-            raise NHPlugMockConfigurationError(
-                "an access token is required for OAuth revocation"
-            )
-        return await self._post_form(
-            path=AUTH_REVOKE_PATH,
-            form={"access_token": access_token},
-        )
+        normalized_token = token.strip()
+        expires_at = time.time() + ttl
+        self._remember_token(normalized_token, expires_at)
+        self._write_file_cache(token=normalized_token, expires_at=expires_at)
+        return normalized_token
 
     async def _post_form(self, *, path: str, form: dict[str, str]) -> dict[str, Any]:
         """Check the path before client creation, then recheck just before send."""

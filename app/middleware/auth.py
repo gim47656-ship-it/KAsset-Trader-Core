@@ -4,14 +4,16 @@ import hmac
 from contextlib import AbstractAsyncContextManager
 from typing import ClassVar, cast
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.auth.dependencies import get_current_user
 from app.auth.web_router import get_current_user_from_session
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.extensions.kasset.api.paths import is_android_compat_path
 from app.routers.deprecated_pages import LEGACY_PREFIXES
 
 
@@ -119,6 +121,30 @@ class AuthMiddleware:
         )
         async with session_manager as db:
             return await get_current_user_from_session(request, db)
+
+    @staticmethod
+    async def _load_api_user(request: Request):
+        """Authenticate an API bearer token, otherwise use the web session."""
+        authorization = request.headers.get("Authorization")
+        if authorization is None:
+            return await AuthMiddleware._load_user(request)
+
+        scheme, separator, token = authorization.partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not token.strip():
+            return None
+        if token != token.strip() or " " in token:
+            return None
+
+        session_manager = cast(
+            AbstractAsyncContextManager[AsyncSession],
+            cast(object, AsyncSessionLocal()),
+        )
+        async with session_manager as db:
+            try:
+                user = await get_current_user(token, db, request=request)
+            except HTTPException:
+                return None
+        return user if user.is_active else None
 
     @staticmethod
     def _is_api_request_path(path: str) -> bool:
@@ -268,6 +294,12 @@ class AuthMiddleware:
                 )
             return None
 
+        # KAsset Android endpoints own explicit account/device Bearer authentication.
+        # Bypass only their exact route boundary; unrelated /api/v1 routes keep
+        # the existing session-cookie policy below.
+        if is_android_compat_path(path):
+            return None
+
         # Allow public paths
         if self._is_public_path(path):
             return None
@@ -276,9 +308,9 @@ class AuthMiddleware:
         if is_api_request and self._is_public_api_path(path):
             return None
 
-        # Handle API endpoints with explicit public allowlist
+        # Protected APIs accept either a validated bearer token or web session.
         if is_api_request:
-            user = await self._load_user(request)
+            user = await self._load_api_user(request)
 
             if not user:
                 return JSONResponse(

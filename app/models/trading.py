@@ -7,9 +7,11 @@ from sqlalchemy import (
     Boolean,
     Enum,
     ForeignKey,
+    Index,
     Interval,
     Numeric,
     Text,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -82,6 +84,20 @@ class User(Base):
     created_at: Mapped[str] = mapped_column(
         TIMESTAMP(timezone=True), server_default="now()"
     )
+
+
+Index(
+    "uq_users_username_ci",
+    func.lower(User.username),
+    unique=True,
+    postgresql_where=User.username.is_not(None),
+)
+Index(
+    "uq_users_email_ci",
+    func.lower(User.email),
+    unique=True,
+    postgresql_where=User.email.is_not(None),
+)
 
 
 class RefreshToken(Base):

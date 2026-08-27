@@ -700,6 +700,15 @@ class Settings(BaseSettings):
     DAILY_SCAN_FNG_HIGH: int = 80
     DAILY_SCAN_TOP_COINS_COUNT: int = 30
 
+    # KAsset Android product surface.
+    KASSET_SERVER_VERSION: str = "2.3-R1"
+    CREDENTIAL_MASTER_KEY: SecretStr | None = None
+    TRADING_ENABLED: bool = False
+    LIVE_TRADING_ENABLED: bool = False
+    # PAPER-only automated execution of owner-approved AI recommendations.
+    # Deliberately independent of TRADING_ENABLED so operators must opt in.
+    AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
+
     # JWT Authentication settings
     SECRET_KEY: str
     ALGORITHM: Literal["HS256", "HS384", "HS512"] = "HS256"

@@ -1,0 +1,297 @@
+name: ${KASSET_PROJECT_NAME:-kasset}
+
+x-app-service: &app-service
+  image: ${KASSET_IMAGE:?KASSET_IMAGE must be an immutable tag or digest}
+  pull_policy: always
+  user: "10001:10001"
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+    - /app/tmp:size=128m,mode=1777
+  secrets:
+    - kasset_runtime_env
+  environment:
+    ENV_FILE: /run/secrets/kasset_runtime_env
+    ENVIRONMENT: production
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: ${POSTGRES_USER:-kasset}
+    POSTGRES_DB: ${POSTGRES_DB:-kasset}
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_DB: ${REDIS_DB:-0}
+    TRADING_ENABLED: ${TRADING_ENABLED:-false}
+    LIVE_TRADING_ENABLED: ${LIVE_TRADING_ENABLED:-false}
+    AI_PAPER_AUTO_EXECUTION_ENABLED: ${AI_PAPER_AUTO_EXECUTION_ENABLED:-false}
+    PAPER_EXECUTION_ENABLED: ${PAPER_EXECUTION_ENABLED:-false}
+    ALPACA_PAPER_CRYPTO_ENABLED: ${ALPACA_PAPER_CRYPTO_ENABLED:-false}
+    PAPER_COHORT_ENABLED: ${PAPER_COHORT_ENABLED:-false}
+    CRYPTO_PENDING_ORDER_ALERT_ENABLED: ${CRYPTO_PENDING_ORDER_ALERT_ENABLED:-false}
+    TOSS_API_ENABLED: ${TOSS_API_ENABLED:-false}
+    TOSS_LIVE_ORDER_MUTATIONS_ENABLED: ${TOSS_LIVE_ORDER_MUTATIONS_ENABLED:-false}
+    KIWOOM_LIVE_MARKETDATA_ENABLED: ${KIWOOM_LIVE_MARKETDATA_ENABLED:-false}
+    NHPLUG_MOCK_ENABLED: ${NHPLUG_MOCK_ENABLED:-false}
+  networks:
+    - backend
+  restart: unless-stopped
+  stop_grace_period: 30s
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: ${LOG_MAX_SIZE:-20m}
+      max-file: ${LOG_MAX_FILES:-5}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be an immutable tag or digest}
+    pull_policy: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kasset}
+      POSTGRES_DB: ${POSTGRES_DB:-kasset}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: ${POSTGRES_SHM_SIZE:-256m}
+    deploy:
+      resources:
+        limits:
+          cpus: ${POSTGRES_CPU_LIMIT:-1.50}
+          memory: ${POSTGRES_MEMORY_LIMIT:-2g}
+        reservations:
+          cpus: ${POSTGRES_CPU_RESERVATION:-0.25}
+          memory: ${POSTGRES_MEMORY_RESERVATION:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-20m}
+        max-file: ${LOG_MAX_FILES:-5}
+
+  redis:
+    image: ${REDIS_IMAGE:?REDIS_IMAGE must be an immutable tag or digest}
+    pull_policy: always
+    command:
+      - /bin/sh
+      - -ec
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$$(cat /run/secrets/redis_password)"
+    secrets:
+      - redis_password
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(cat /run/secrets/redis_password)\" ping | grep -q '^PONG$$'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: ${REDIS_CPU_LIMIT:-0.75}
+          memory: ${REDIS_MEMORY_LIMIT:-768m}
+        reservations:
+          cpus: ${REDIS_CPU_RESERVATION:-0.10}
+          memory: ${REDIS_MEMORY_RESERVATION:-128m}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-20m}
+        max-file: ${LOG_MAX_FILES:-5}
+
+  migration:
+    <<: *app-service
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: ${MIGRATION_CPU_LIMIT:-1.00}
+          memory: ${MIGRATION_MEMORY_LIMIT:-1g}
+
+  api:
+    <<: *app-service
+    command: ["python", "-m", "uvicorn", "app.main:api", "--host", "0.0.0.0", "--port", "8000", "--workers", "${API_WORKERS:-2}"]
+    networks:
+      - edge
+      - backend
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 6s
+      retries: 8
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: ${API_CPU_LIMIT:-2.00}
+          memory: ${API_MEMORY_LIMIT:-2g}
+        reservations:
+          cpus: ${API_CPU_RESERVATION:-0.50}
+          memory: ${API_MEMORY_RESERVATION:-512m}
+
+  worker:
+    <<: *app-service
+    command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks", "--workers", "${TASKIQ_WORKERS:-1}"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_CPU_LIMIT:-1.00}
+          memory: ${WORKER_MEMORY_LIMIT:-1g}
+        reservations:
+          cpus: ${WORKER_CPU_RESERVATION:-0.25}
+          memory: ${WORKER_MEMORY_RESERVATION:-256m}
+
+  scheduler:
+    <<: *app-service
+    command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: ${SCHEDULER_CPU_LIMIT:-0.50}
+          memory: ${SCHEDULER_MEMORY_LIMIT:-512m}
+        reservations:
+          cpus: ${SCHEDULER_CPU_RESERVATION:-0.10}
+          memory: ${SCHEDULER_MEMORY_RESERVATION:-128m}
+
+  caddy:
+    image: ${CADDY_IMAGE:?CADDY_IMAGE must be an immutable tag or digest}
+    pull_policy: always
+    init: true
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    environment:
+      KASSET_DOMAIN: ${KASSET_DOMAIN:?KASSET_DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      KASSET_WEB_TERMINAL_PATH: ${KASSET_WEB_TERMINAL_PATH:-/__kasset_terminal_not_configured__}
+      KASSET_WEB_TERMINAL_UPSTREAM: ${KASSET_WEB_TERMINAL_UPSTREAM:-127.0.0.1:65535}
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    ports:
+      - target: 80
+        published: "80"
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: "443"
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: "443"
+        protocol: udp
+        mode: host
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: ${CADDY_CPU_LIMIT:-0.50}
+          memory: ${CADDY_MEMORY_LIMIT:-256m}
+        reservations:
+          cpus: ${CADDY_CPU_RESERVATION:-0.10}
+          memory: ${CADDY_MEMORY_RESERVATION:-64m}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-20m}
+        max-file: ${LOG_MAX_FILES:-5}
+
+networks:
+  edge:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+
+configs:
+  caddyfile:
+    file: ./Caddyfile
+
+secrets:
+  kasset_runtime_env:
+    file: ${KASSET_RUNTIME_ENV_FILE:?KASSET_RUNTIME_ENV_FILE is required}
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE is required}
+  redis_password:
+    file: ${REDIS_PASSWORD_FILE:?REDIS_PASSWORD_FILE is required}

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -263,12 +264,29 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 "external_cash_declarations",
             ):
                 await connection.execute(text(f"DROP TABLE review.{table}"))
+            # KAsset Android and AI review tables are later than this
+            # reconstructed boundary and already present in current metadata.
+            await connection.execute(text("DROP TABLE review.ai_recommendations"))
+            for table in (
+                "kasset_android_paper_orders",
+                "kasset_android_paper_accounts",
+                "kasset_android_runtime_state",
+                "kasset_global_runtime_state",
+                "kasset_device_sessions",
+                "kasset_broker_credentials",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
+            # The KAsset multi-user migration adds these case-insensitive
+            # unique indexes; current metadata already materializes them, so
+            # drop both and let the migration add them back.
+            for index in ("uq_users_username_ci", "uq_users_email_ci"):
+                await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
 
         env = {**os.environ, "DATABASE_URL": target_url_text}
 
         def alembic(*args: str) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
-                [str(REPO / ".venv/bin/alembic"), *args],
+                [sys.executable, "-m", "alembic", *args],
                 cwd=REPO,
                 env=env,
                 text=True,

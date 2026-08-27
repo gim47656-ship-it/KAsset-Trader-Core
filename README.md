@@ -68,7 +68,7 @@ flowchart LR
 
 | 시장 | 데이터 | 실주문 | 모의 |
 |---|---|---|---|
-| 국내주식 (KRX/NXT) | KIS · Toss · Naver · KRX | KIS · Toss | KIS 모의 · Kiwoom 모의 |
+| 국내주식 (KRX/NXT) | KIS · Toss · Naver · KRX · NH PLUG Mock | KIS · Toss | KIS 모의 · Kiwoom 모의 · KAsset PAPER · NH PLUG Mock(Read-Only) |
 | 미국주식 | KIS · Toss · Yahoo · Finnhub · TradingView | KIS · Toss | Alpaca Paper |
 | 암호화폐 | Upbit (REST + WebSocket) | Upbit | Upbit shadow-sim · Binance Spot/Futures Demo |
 
@@ -122,6 +122,16 @@ docker compose up -d          # PostgreSQL / Redis / Adminer
 - `DATABASE_URL`, `REDIS_URL` — 필수 인프라
 - `KIS_APP_KEY/SECRET`, `UPBIT_ACCESS_KEY/SECRET_KEY` — 브로커 자격증명
 - 실주문·모의주문 게이트(`TOSS_LIVE_ORDER_MUTATIONS_ENABLED`, `KIWOOM_MOCK_ENABLED`, `BINANCE_SPOT_DEMO_ENABLED` 등)는 **모두 기본 off**
+
+## KAsset Android 호환 API
+
+`app/extensions/kasset/api/`가 KAsset Trader Android 앱의 pairing, broker, account,
+market, PAPER order 계약을 제공한다. `PAPER`는 주문 가능하고, `NH`는
+`NHPLUG_MOCK_ENABLED=true`에서 계좌 확인·잔고·보유·국내주식 현재가만 제공한다.
+NH 주문·정정·취소는 서버에서 `409 BROKER_READ_ONLY`로 다시 차단한다.
+
+설치, 환경 변수, Android 연결, Credential Vault와 NH read-only smoke 절차:
+[`docs/runbooks/kasset-android-nh-mock-readonly.md`](docs/runbooks/kasset-android-nh-mock-readonly.md)
 
 ## 테스트
 

@@ -13,6 +13,12 @@ def _mock_enabled() -> bool:
     return os.getenv("NHPLUG_MOCK_ENABLED", "").strip().lower() == "true"
 
 
+def mock_enabled() -> bool:
+    """Expose the explicit mock-read gate without weakening it."""
+
+    return _mock_enabled()
+
+
 def _assert_mock_enabled() -> None:
     """Fail closed unless the operator explicitly armed mock reads."""
 
