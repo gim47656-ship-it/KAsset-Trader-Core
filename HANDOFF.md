@@ -1,6 +1,31 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-27 (Naver Cloud main 배포·복구·live E2E 완료)
+갱신: 2026-08-28 (Google 로그인 + Luna/Terra/Sol 3단 AI 라우터 배포·실검증)
+
+## 이번 세션에서 한 일 (2026-08-28)
+
+- **Google 간편로그인**: `POST /api/v1/auth/google` — RS256+JWKS 검증(aud/iss/exp/
+  email_verified), `users.google_sub` 식별·자동가입, 미설정 시 503 fail-closed.
+  migration `20260828_kasset_google_sub`. checker PASS. 서버 배포 완료(가짜 토큰 → 401).
+- **3단 AI 모델 라우터** (`app/extensions/kasset/ai/model_router.py`): Responses API +
+  strict json_schema, tool use 금지, 고정 instructions(캐싱). Luna(→저신뢰/actionable
+  →Terra)(→저신뢰/HIGH/escalate→Sol=critical_review). 티어별 OpenRouter 폴백:
+  Luna→`deepseek/deepseek-v4-flash-0731@preset/kasset-cheap`, Terra/Sol→v4-pro.
+  폴백 트리거는 429/5xx/transport만. 운영 실검증: 사다리 관통(REVIEW/0.82→sol),
+  가짜 OAI 키 강제 시 OR 폴백 응답 확인.
+- **이벤트 파이프라인**: FeatureEngine(RSI14 Wilder/SMA20/volume_ratio/20일 돌파,
+  순수함수) + EventDetector(±2%/거래량 2x/RSI 30·70/돌파/중요뉴스) →
+  트리거 없으면 LLM 미호출. `kasset_market_events.run`(평일 15분 cron,
+  `KASSET_MARKET_EVENTS_ENABLED` 기본 False) → BUY/SELL·conf≥0.60만
+  AIRecommendation PENDING 저장. KR 대체거래소 partition은 "NTX"(NXT 표기 수용).
+- **AI env(서버 .env.kasset)**: `KASSET_AI_API_MODEL=gpt-5.6-terra`, OAI 키,
+  OpenRouter 키(프리셋 kasset-cheap = relace/deepinfra/coreweave allowlist).
+  키 파일 개행 누락으로 env 라인이 붙는 사고 1회 — 분리 복구 완료(키 추가는 반드시
+  개행 보장 후 append).
+- checker 2회(1차 REWORK: NTX venue·shard 누락 → 수정, 2차 PASS). 커밋 `da2e403a` 배포됨.
+- 알려진 로컬 한계: Windows에서 research/스크립트 계열 301 failed·77 errors는 fcntl·CRLF
+  SHA·trailing-space 등 플랫폼 잡음(Linux CI 기준 무관). diff 영향 영역 격리 스위트는
+  2965 passed(실패 2건은 stash 후에도 재현되는 기존 한계).
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
