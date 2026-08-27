@@ -54,6 +54,7 @@ from app.extensions.kasset.api.schemas import (
     CredentialRequest,
     CurrentUserResponse,
     DatabaseStatus,
+    GoogleLoginRequest,
     HealthResponse,
     LoginRequest,
     RefreshRequest,
@@ -95,6 +96,16 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionTokens:
     return await mobile_auth.login(db, payload)
+
+
+@router.post("/auth/google", response_model=SessionTokens)
+@limiter.limit("5/minute")
+async def google_login(
+    request: Request,
+    payload: GoogleLoginRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionTokens:
+    return await mobile_auth.google_login(db, payload)
 
 
 @router.get("/auth/me", response_model=CurrentUserResponse)

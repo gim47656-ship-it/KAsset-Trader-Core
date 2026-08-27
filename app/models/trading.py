@@ -73,6 +73,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     email: Mapped[str | None] = mapped_column(Text, unique=True)
     username: Mapped[str | None] = mapped_column(Text, unique=True)
+    google_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashed_password: Mapped[str | None] = mapped_column(Text)
     nickname: Mapped[str | None] = mapped_column(Text)
     role: Mapped[UserRole] = mapped_column(
@@ -97,6 +98,12 @@ Index(
     func.lower(User.email),
     unique=True,
     postgresql_where=User.email.is_not(None),
+)
+Index(
+    "uq_users_google_sub",
+    User.google_sub,
+    unique=True,
+    postgresql_where=User.google_sub.is_not(None),
 )
 
 

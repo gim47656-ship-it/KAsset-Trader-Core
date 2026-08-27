@@ -100,6 +100,11 @@ async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
                 await connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
             for index in ("uq_users_username_ci", "uq_users_email_ci"):
                 await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
+            # The Google sign-in migration is later than this boundary and its
+            # column/index are already materialized by create_all.
+            await connection.execute(
+                text("ALTER TABLE users DROP COLUMN IF EXISTS google_sub")
+            )
 
         stamped = _alembic(env, "stamp", PARENT_REVISION)
         assert stamped.returncode == 0, stamped.stderr

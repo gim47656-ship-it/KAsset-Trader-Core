@@ -281,6 +281,9 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # drop both and let the migration add them back.
             for index in ("uq_users_username_ci", "uq_users_email_ci"):
                 await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
+            # Google login is added after this boundary. Dropping its column
+            # also removes the partial unique index materialized by metadata.
+            await connection.execute(text("ALTER TABLE users DROP COLUMN google_sub"))
 
         env = {**os.environ, "DATABASE_URL": target_url_text}
 

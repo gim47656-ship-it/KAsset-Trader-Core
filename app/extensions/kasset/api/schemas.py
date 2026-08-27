@@ -33,6 +33,12 @@ class LoginRequest(AndroidWireModel):
     device_name: str = Field(alias="deviceName", min_length=1, max_length=200)
 
 
+class GoogleLoginRequest(AndroidWireModel):
+    id_token: str = Field(alias="idToken", min_length=1, repr=False)
+    device_id: str = Field(alias="deviceId", min_length=1, max_length=200)
+    device_name: str = Field(alias="deviceName", min_length=1, max_length=200)
+
+
 class CurrentUserResponse(AndroidWireModel):
     id: int
     username: str

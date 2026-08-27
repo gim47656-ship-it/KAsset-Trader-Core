@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import string
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Annotated
 from uuid import uuid4
 
@@ -27,6 +29,7 @@ from app.core.db import get_db
 from app.extensions.kasset.api.errors import MobileApiError, unauthorized
 from app.extensions.kasset.api.schemas import (
     CurrentUserResponse,
+    GoogleLoginRequest,
     LoginRequest,
     RegisterRequest,
     SessionTokens,
@@ -35,6 +38,9 @@ from app.extensions.kasset.models import KAssetDeviceSession
 from app.models.trading import User, UserRole
 
 _MOBILE_CLIENT = "kasset-android"
+_GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+_GOOGLE_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
+_GOOGLE_JWKS_CLIENT = jwt.PyJWKClient(_GOOGLE_JWKS_URL)
 
 
 def _iso_z(value: datetime) -> str:
@@ -118,6 +124,66 @@ class MobileAuthService:
                 "INVALID_CREDENTIALS",
                 "사용자 이름 또는 비밀번호가 올바르지 않습니다.",
             )
+
+        try:
+            tokens = await self._issue(
+                db,
+                user,
+                device_id=request.device_id,
+                device_name=request.device_name,
+            )
+            await db.commit()
+            return tokens
+        except IntegrityError as err:
+            await db.rollback()
+            raise unauthorized() from err
+
+    async def google_login(
+        self,
+        db: AsyncSession,
+        request: GoogleLoginRequest,
+    ) -> SessionTokens:
+        client_id = settings.KASSET_GOOGLE_OAUTH_CLIENT_ID.strip()
+        if not client_id:
+            raise MobileApiError(
+                503,
+                "GOOGLE_LOGIN_UNAVAILABLE",
+                "Google 로그인을 사용할 수 없습니다.",
+            )
+
+        payload = await self._decode_google_id_token(request.id_token, client_id)
+        if payload.get("email_verified") is not True:
+            raise self._invalid_google_token()
+        google_sub = self._claim(payload, "sub")
+
+        user = await db.scalar(select(User).where(User.google_sub == google_sub))
+        if user is None:
+            email = await self._available_google_email(db, payload.get("email"))
+            user = User(
+                username=await self._available_google_username(db, google_sub),
+                email=email,
+                google_sub=google_sub,
+                hashed_password=None,
+                role=UserRole.trader,
+                is_active=True,
+            )
+            try:
+                db.add(user)
+                await db.flush()
+            except IntegrityError as err:
+                await db.rollback()
+                user = await db.scalar(
+                    select(User).where(User.google_sub == google_sub)
+                )
+                if user is None:
+                    raise MobileApiError(
+                        409,
+                        "GOOGLE_ACCOUNT_CONFLICT",
+                        "Google 계정을 만들 수 없습니다.",
+                    ) from err
+
+        if not user.is_active:
+            raise unauthorized("사용할 수 없는 계정입니다.")
 
         try:
             tokens = await self._issue(
@@ -331,6 +397,66 @@ class MobileAuthService:
         )
         email_matches = list(email_result.scalars().all())
         return email_matches[0] if len(email_matches) == 1 else None
+
+    @staticmethod
+    async def _available_google_email(
+        db: AsyncSession, email_claim: object
+    ) -> str | None:
+        if not isinstance(email_claim, str):
+            return None
+        email = email_claim.strip().lower()
+        if not email:
+            return None
+        email_exists = await db.scalar(
+            select(User.id).where(func.lower(User.email) == email).limit(1)
+        )
+        return None if email_exists is not None else email
+
+    @staticmethod
+    async def _available_google_username(db: AsyncSession, google_sub: str) -> str:
+        base = f"google-{google_sub}"[:32]
+        candidate = base
+        digest = sha256(google_sub.encode()).hexdigest()[:12]
+        attempt = 0
+        while (
+            await db.scalar(
+                select(User.id)
+                .where(func.lower(User.username) == candidate.lower())
+                .limit(1)
+            )
+            is not None
+        ):
+            suffix = f"-{digest}" if attempt == 0 else f"-{digest}-{attempt}"
+            candidate = f"{base[: 50 - len(suffix)]}{suffix}"
+            attempt += 1
+        return candidate
+
+    @staticmethod
+    async def _decode_google_id_token(
+        id_token: str, client_id: str
+    ) -> dict[str, object]:
+        try:
+            signing_key = await asyncio.to_thread(
+                _GOOGLE_JWKS_CLIENT.get_signing_key_from_jwt, id_token
+            )
+            return jwt.decode(
+                id_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=client_id,
+                issuer=_GOOGLE_ISSUERS,
+                options={"require": ["aud", "exp", "iss", "sub"]},
+            )
+        except jwt.PyJWTError as err:
+            raise MobileAuthService._invalid_google_token() from err
+
+    @staticmethod
+    def _invalid_google_token() -> MobileApiError:
+        return MobileApiError(
+            401,
+            "INVALID_GOOGLE_TOKEN",
+            "Google 인증 토큰이 올바르지 않습니다.",
+        )
 
     @staticmethod
     async def _assert_identity_available(

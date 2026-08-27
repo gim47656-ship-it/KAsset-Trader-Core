@@ -702,6 +702,8 @@ class Settings(BaseSettings):
 
     # KAsset Android product surface.
     KASSET_SERVER_VERSION: str = "2.3-R1"
+    # Google ID tokens must target this web client ID; empty disables Google login.
+    KASSET_GOOGLE_OAUTH_CLIENT_ID: str = ""
     CREDENTIAL_MASTER_KEY: SecretStr | None = None
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False

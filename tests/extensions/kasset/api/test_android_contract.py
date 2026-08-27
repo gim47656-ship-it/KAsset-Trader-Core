@@ -80,6 +80,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/health": {"get"},
         "/api/v1/auth/register": {"post"},
         "/api/v1/auth/login": {"post"},
+        "/api/v1/auth/google": {"post"},
         "/api/v1/auth/me": {"get"},
         "/api/v1/auth/refresh": {"post"},
         "/api/v1/auth/revoke": {"post"},

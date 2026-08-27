@@ -62,7 +62,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _REPO = pathlib.Path(__file__).resolve().parents[4]
 PARENT_REVISION = "20260820_rob1290_reconcile"
-HEAD_REVISION = "20260827_kasset_multi_user_core"
+HEAD_REVISION = "20260828_kasset_google_sub"
 
 _SCRATCH_PREFIX = "w5_alembic_chain_"
 
@@ -140,6 +140,11 @@ async def scratch_database() -> AsyncIterator[str]:
                 # so drop both and let the migration add them back.
                 for index in ("uq_users_username_ci", "uq_users_email_ci"):
                     await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
+                # Google login is later than this reconstructed boundary.
+                # Dropping its column also removes the partial unique index.
+                await connection.execute(
+                    text("ALTER TABLE users DROP COLUMN google_sub")
+                )
                 # ROB-s257 E-2 is later than this reconstructed boundary.
                 # Current metadata already contains its nullable observation
                 # column, so drop it and let the migration add it back.

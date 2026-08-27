@@ -19,6 +19,7 @@ tests/core/test_exceptions.py
 tests/extensions/kasset/ai/test_api_provider.py
 tests/extensions/kasset/api/test_ai_briefing.py
 tests/extensions/kasset/api/test_android_contract.py
+tests/extensions/kasset/api/test_google_auth.py
 tests/extensions/kasset/api/test_multi_user_contract.py
 tests/extensions/kasset/api/test_paper_regression.py
 tests/extensions/kasset/api/test_secret_security.py
