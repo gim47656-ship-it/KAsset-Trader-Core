@@ -115,3 +115,30 @@ class SystemStatus(AndroidWireModel):
 
 class HealthResponse(AndroidWireModel):
     status: str = "ok"
+
+
+class AiBriefingSection(AndroidWireModel):
+    status: str
+    refreshed_at: str | None
+    items: list[dict[str, object]]
+
+
+class AiBriefingSummary(AndroidWireModel):
+    status: str
+    id: str | None
+    title: str | None
+    summary: str | None
+    provider: str | None
+    market: str | None
+    as_of: str | None
+    valid_until: str | None
+    data_status: str | None
+    unavailable_reason: str | None
+
+
+class AiBriefingResponse(AndroidWireModel):
+    status: str
+    as_of: str | None
+    news: AiBriefingSection
+    research: AiBriefingSection
+    briefing: AiBriefingSummary

@@ -19,6 +19,7 @@ _EXACT_PATHS = frozenset(
         "/api/v1/fills",
         "/api/v1/risk/policy",
         "/api/v1/ai/status",
+        "/api/v1/ai/briefing",
     }
 )
 _DYNAMIC_PREFIXES = ("/api/v1/brokers/", "/api/v1/orders/")

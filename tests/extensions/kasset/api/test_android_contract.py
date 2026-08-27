@@ -9,11 +9,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.db import get_db
-from app.extensions.kasset.api.auth import get_mobile_session
+from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.nh_adapter import nh_adapter
+from app.middleware.auth import AuthMiddleware
 
 ORDER = {
     "clientOrderId": "client-order-1",
@@ -44,6 +45,14 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def _full_middleware_client() -> TestClient:
+    app = FastAPI()
+    install_android_compat_api(app)
+    app.add_middleware(AuthMiddleware)
+    app.dependency_overrides[get_db] = _db_override
+    return TestClient(app)
+
+
 def test_android_compatibility_surface_exposes_required_routes() -> None:
     with _client() as client:
         document = client.app.openapi()
@@ -69,6 +78,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/fills": {"get"},
         "/api/v1/risk/policy": {"get", "put"},
         "/api/v1/ai/status": {"get"},
+        "/api/v1/ai/briefing": {"get"},
     }
     for path, methods in required.items():
         assert path in paths
@@ -81,6 +91,67 @@ def test_health_contract_is_unauthenticated() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/ai/briefing?market=kr&symbol=005930&limit=10"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "empty",
+        "asOf": None,
+        "news": {
+            "status": "empty",
+            "refreshedAt": None,
+            "items": [],
+        },
+        "research": {
+            "status": "empty",
+            "refreshedAt": None,
+            "items": [],
+        },
+        "briefing": {
+            "status": "unavailable",
+            "id": None,
+            "title": None,
+            "summary": None,
+            "provider": None,
+            "market": None,
+            "asOf": None,
+            "validUntil": None,
+            "dataStatus": "unknown",
+            "unavailableReason": "저장된 AI 브리핑 제공자가 아직 연결되지 않았습니다.",
+        },
+    }
+
+
+def test_ai_briefing_mobile_auth_survives_upstream_middleware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authenticate = AsyncMock(return_value=object())
+    monkeypatch.setattr(mobile_auth, "authenticate", authenticate)
+
+    with _full_middleware_client() as client:
+        authorized = client.get(
+            "/api/v1/ai/briefing?market=kr&limit=3",
+            headers={"Authorization": "Bearer valid-mobile-token"},
+        )
+        anonymous = client.get("/api/v1/ai/briefing?market=kr&limit=3")
+
+    assert authorized.status_code == 200
+    assert authorized.json()["briefing"]["status"] == "unavailable"
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {
+        "error": {
+            "code": "UNAUTHORIZED",
+            "message": "인증 토큰이 필요합니다.",
+        }
+    }
+    authenticate.assert_awaited_once()
+    assert authenticate.await_args.args[1] == "valid-mobile-token"
 
 
 def test_nh_order_preview_submit_cancel_and_amend_are_read_only() -> None:

@@ -39,6 +39,9 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.api.schemas import (
+    AiBriefingResponse,
+    AiBriefingSection,
+    AiBriefingSummary,
     AiRelayStatus,
     Broker,
     BrokersResponse,
@@ -369,6 +372,49 @@ async def update_risk_policy(
         max_symbol_ratio=request.max_symbol_ratio,
     )
     return await risk_policy(_session, db)
+
+
+@router.get("/ai/briefing", response_model=AiBriefingResponse)
+async def ai_briefing(
+    _market: Annotated[
+        str,
+        Query(
+            alias="market",
+            min_length=1,
+            max_length=16,
+            pattern=r"^(kr|us|crypto)$",
+        ),
+    ],
+    _limit: Annotated[int, Query(alias="limit", ge=1, le=100)],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    _symbol: Annotated[
+        str | None,
+        Query(
+            alias="symbol",
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$",
+        ),
+    ] = None,
+) -> AiBriefingResponse:
+    return AiBriefingResponse(
+        status="empty",
+        as_of=None,
+        news=AiBriefingSection(status="empty", refreshed_at=None, items=[]),
+        research=AiBriefingSection(status="empty", refreshed_at=None, items=[]),
+        briefing=AiBriefingSummary(
+            status="unavailable",
+            id=None,
+            title=None,
+            summary=None,
+            provider=None,
+            market=None,
+            as_of=None,
+            valid_until=None,
+            data_status="unknown",
+            unavailable_reason="저장된 AI 브리핑 제공자가 아직 연결되지 않았습니다.",
+        ),
+    )
 
 
 @router.get("/ai/status", response_model=AiStatus)
