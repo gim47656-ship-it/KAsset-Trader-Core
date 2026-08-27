@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-27 (NH PLUG 공식 토큰 영속 캐시 구현·집중 검증)
+갱신: 2026-08-27 (NH PLUG 토큰 영속 캐시 PR #3·실 credential 진단)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
@@ -16,7 +16,8 @@
 - 완료: 기존 OAuth 두 path, mock read-only 세 path, redirect 차단, `NHPLUG_MOCK_ENABLED`, `acct_type=03` allowlist와 주문 금지를 유지.
 - 완료: NH 관련 집중 테스트 77개와 변경 파일 Ruff·ty 검사 통과.
 - 완료: 전체 Ruff·ty와 독립 Checker `PASS`. 전체 pytest는 기존 Windows 전용 collection 오류 23건으로 중단됐으며 NH 집중 테스트는 통과.
-- 대기: 사용자가 제공한 App Key로 `/n2/acctinfo`를 안전하게 조회해 `acct_type=03` 모의계좌 존재 여부 확인. 노출된 Secret 원문은 저장하지 않음.
+- 완료: commit `88a20afa`, branch `fix/nhplug-persistent-token-cache`, PR #3 생성.
+- 차단: 이미지에서 판독한 App Secret 두 후보로 OAuth를 호출했으나 모두 `403 유효하지 않은 AppSecret입니다.`였다. 토큰은 발급되지 않았고 계좌 API도 호출되지 않았다. 더 이상 문자를 추측하지 않는다.
 - 대기: Core 추천 PR #2 merge·Naver Cloud 배포와 Android live E2E. 배포 요청 전에는 실행하지 않음.
 
 ## 이번 세션에서 한 일
@@ -52,13 +53,13 @@ uv run pytest -q
 
 ## 다음 세션이 바로 할 일
 
-1. branch를 push하고 PR을 생성한다. 기존 추천 PR #2와 독립 변경이므로 배포 전 두 PR의 merge 순서를 확인한다.
-2. 실제 App Key/Secret은 코드·Git·문서에 넣지 않는다. 운영자가 root 전용 입력 경로로 제공한 경우에만 캐시를 포함한 실제 OAuth를 한 번 실행한다.
+1. NH 개발자센터에서 App Secret 원문을 복사하거나 Whale의 로그인된 앱 상세 화면을 Relay로 연다. 이미지 OCR 후보 재시도는 금지한다.
+2. 정확한 App Key/Secret은 코드·Git·문서에 넣지 않고 root 전용 입력으로 OAuth 한 번만 실행한다.
 3. `/n2/acctinfo` 결과에서는 전체 계좌번호를 출력하지 않고 account type별 개수와 마스킹된 끝 네 자리만 확인한다.
 4. `acct_type=03`이 있으면 기존 mock Read-Only 경로를 그대로 사용한다. `01/02`만 있으면 실계좌 Read-Only 추가 여부를 사용자와 확정하며 주문 경로는 만들지 않는다.
-5. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
+5. PR #3과 기존 추천 PR #2를 검토·merge한다. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
 
 ## 세션 이력
 
-- 2026-08-27: NH 공식 토큰 파일 캐시와 401 1회 재발급·429 재발급 금지 구현, 집중 테스트 77개 통과.
+- 2026-08-27: NH 공식 토큰 파일 캐시와 401 단일 재발급·429 재발급 금지 PR #3 생성, OAuth는 이미지 판독 오류로 403 차단.
 - 2026-08-27: Android 추천 검토 API PR #2 구현·로컬 PostgreSQL 검증 완료.
