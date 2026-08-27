@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-27 (NH PLUG 토큰 영속 캐시 PR #3·계좌 유형 discovery)
+갱신: 2026-08-27 (NH PLUG 종합매매 모의계좌 연결·Read-Only smoke)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
@@ -17,7 +17,7 @@
 - 완료: NH 관련 집중 테스트 77개와 변경 파일 Ruff·ty 검사 통과.
 - 완료: 전체 Ruff·ty와 독립 Checker `PASS`. 전체 pytest는 기존 Windows 전용 collection 오류 23건으로 중단됐으며 NH 집중 테스트는 통과.
 - 완료: commit `88a20afa`, branch `fix/nhplug-persistent-token-cache`, PR #3 생성.
-- 차단: ACL 제한 로컬 파일의 정확한 credential로 OAuth와 `/n2/acctinfo`는 성공했다. 서로 다른 `acct_type=03` 모의계좌가 3개이고 모두 끝 네 자리가 `2097`이라 자동 선택하지 않았다. 사용할 전체 모의계좌번호 입력이 필요하다.
+- 완료: 사용자가 지정한 상품코드 `01` 종합매매 모의계좌만 Secret에 연결했다. `51` 선물옵션·`71` 해외파생일반은 제외했다. 계좌목록·잔고·삼성전자 현재가 Read-Only smoke는 모두 `rsp_cd=00000`이다.
 - 대기: Core 추천 PR #2 merge·Naver Cloud 배포와 Android live E2E. 배포 요청 전에는 실행하지 않음.
 
 ## 이번 세션에서 한 일
@@ -30,6 +30,9 @@
 - SDK 전체 의존성은 추가하지 않았다. 기존 static guard의 vendor SDK import 금지와 주문 endpoint 금지를 유지했다.
 - Checker의 parent symlink와 raw response code 파싱 관찰은 모두 비차단이다. 전자는 동일 OS 사용자 전용 경로에서 권한을 `700`으로 강화하는 동작이고, 후자는 공식 샘플과 같은 비 JSON `IGW40043` 탐지를 보존하므로 변경하지 않았다.
 - 최초 안전 조회에서 `acct_type=01` 실계좌 1개와 `03` 모의계좌 3개를 확인했다. 전체 계좌번호·토큰·Secret은 출력하거나 저장하지 않았다.
+- 로컬 Secret과 토큰 캐시 ACL을 현재 사용자 전용으로 제한하고 서버에 root 전용 env `600`, 캐시 디렉터리 `700`, 캐시 파일 `600`으로 원자 저장했다.
+- 서버 Compose의 API 서비스에 NH env 파일과 `/root/.nhplug` 영속 마운트를 추가했다. 실행 중 컨테이너는 재시작하거나 배포하지 않았다.
+- 상품코드 `01` 계좌로 계좌목록·잔고·삼성전자 현재가를 실제 모의 API에서 조회했다. 주문 endpoint는 호출하지 않았다.
 
 검증:
 
@@ -49,21 +52,22 @@ uv run ruff check . && uv run ty check
 uv run pytest -q
 → 기존 Windows 비호환 `fcntl`, `SIGHUP`과 frozen source SHA 등 23 collection errors로 중단
 
-NH OAuth와 `/n2/acctinfo` 안전 discovery
-→ 성공, acct_type 01: 1개 / acct_type 03: 3개
-→ 03 세 계좌의 끝 네 자리가 모두 2097이라 자동 선택 중단
+NH OAuth·상품코드 01 모의계좌·Read-Only smoke
+→ 계좌목록 `rsp_cd=00000`, acct_type 01: 1개 / acct_type 03: 3개
+→ 상품코드 01 종합매매만 선택, 51 선물옵션·71 해외파생일반 제외
+→ 잔고 `rsp_cd=00000`, 삼성전자 현재가 `rsp_cd=00000`
+→ 서버 Secret/캐시 권한 600/600, 캐시 디렉터리 700
+→ docker compose config --quiet exit 0
 ```
 
 최초 테스트 실행은 test dependency group이 설치되지 않아 `ModuleNotFoundError: pytest_asyncio`로 중단됐고, `uv sync --group test --group dev` 후 같은 집중 테스트가 통과했다. 이는 코드 실패가 아니라 새 clone의 의존성 준비 문제였다.
 
 ## 다음 세션이 바로 할 일
 
-1. 사용할 전체 `acct_type=03` 모의계좌번호를 로컬
-   `C:/Users/hanse/.secrets/kasset-nhplug.env`의 `NHPLUG_MOCK_ACCOUNT_NO`에 추가한다.
-2. 정확한 세 값으로 서버 root 전용 env와 token cache를 저장하고 account/quote smoke를 실행한다.
-3. PR #3과 기존 추천 PR #2를 검토·merge한다. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
+1. PR #3과 기존 추천 PR #2를 검토·merge한다. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
+2. 배포 후 API 컨테이너에서 `/root/.nhplug/token_cache.json` 재사용을 확인한다. 서버 Compose에는 env 파일과 영속 마운트가 준비돼 있다.
 
 ## 세션 이력
 
-- 2026-08-27: NH 토큰 캐시 PR #3 생성, OAuth·계좌목록 성공 후 동일 끝자리의 모의계좌 3개 중 사용자 선택 대기.
+- 2026-08-27: 상품코드 01 종합매매 모의계좌 연결, 서버 Secret·캐시 영속 마운트 준비, 계좌·잔고·현재가 Read-Only smoke 성공.
 - 2026-08-27: Android 추천 검토 API PR #2 구현·로컬 PostgreSQL 검증 완료.
