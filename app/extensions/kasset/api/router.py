@@ -8,6 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db
+from app.extensions.kasset.api.ai_briefing import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MIN_LIMIT,
+    build_mobile_ai_briefing,
+)
+from app.extensions.kasset.api.ai_schemas import AiBriefingResponse
 from app.extensions.kasset.api.auth import (
     MobileSession,
     get_mobile_session,
@@ -426,6 +433,17 @@ async def ai_status(
         reachable=False,
         message="AI 기능은 이번 통합 단계에서 확장하지 않습니다.",
     )
+
+
+@router.get("/ai/briefing", response_model=AiBriefingResponse)
+async def ai_briefing(
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    market: str,
+    symbol: Annotated[str | None, Query(max_length=40)] = None,
+    limit: Annotated[int, Query(ge=MIN_LIMIT, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+) -> AiBriefingResponse:
+    return await build_mobile_ai_briefing(db, market=market, symbol=symbol, limit=limit)
 
 
 def _require_paper(provider: str) -> None:
