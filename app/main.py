@@ -29,6 +29,7 @@ from app.monitoring.trade_notifier.runtime import (
 )
 from app.routers import (
     agent_callback,
+    ai_recommendations,
     alpaca_paper_ledger,
     candidate_discovery,
     deprecated_pages,
@@ -194,6 +195,7 @@ def create_app() -> FastAPI:
     app.include_router(screener.router)
     app.include_router(health.router)
     app.include_router(news_analysis.router)
+    app.include_router(ai_recommendations.router)
     app.include_router(agent_callback.router)
     app.include_router(user_defaults.router)
     app.include_router(order_estimation.router)

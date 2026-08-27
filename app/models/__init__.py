@@ -1,4 +1,12 @@
 # app/models/__init__.py
+from .ai_recommendations import (
+    AIRecommendation,
+    RecommendationAction,
+    RecommendationDecision,
+    RecommendationMarket,
+    RecommendationStatusGroup,
+    TerminalRecommendationDecision,
+)
 from .analysis import StockAnalysisResult, StockInfo
 from .analysis_artifact import AnalysisArtifact
 from .analyst_consensus_snapshot import AnalystConsensusSnapshot
@@ -178,6 +186,12 @@ __all__ = [
     "WatchEventRepricingClaim",
     "Base",
     "AnalysisArtifact",
+    "AIRecommendation",
+    "RecommendationAction",
+    "RecommendationDecision",
+    "RecommendationMarket",
+    "RecommendationStatusGroup",
+    "TerminalRecommendationDecision",
     "AnalystConsensusSnapshot",
     "BinanceDemoOrderLedger",
     "ScalpTradeAnalytics",
