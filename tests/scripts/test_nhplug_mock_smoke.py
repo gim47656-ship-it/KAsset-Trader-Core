@@ -124,7 +124,13 @@ def test_account_mode_verifies_type_then_reads_balance_without_leaking_values(
         def __init__(self, **_: Any) -> None:
             calls.append("auth")
 
-        async def get_access_token(self) -> str:
+        async def get_access_token(
+            self,
+            *,
+            force_refresh: bool = False,
+            failed_token: str | None = None,
+        ) -> str:
+            del force_refresh, failed_token
             return "unused-fake-token"
 
     class _FakeClient:
@@ -180,7 +186,13 @@ def test_quote_rejection_is_a_clear_nonzero_result_not_fake_success(
         def __init__(self, **_: Any) -> None:
             pass
 
-        async def get_access_token(self) -> str:
+        async def get_access_token(
+            self,
+            *,
+            force_refresh: bool = False,
+            failed_token: str | None = None,
+        ) -> str:
+            del force_refresh, failed_token
             return "unused-fake-token"
 
     class _FakeClient:
