@@ -45,7 +45,9 @@
   실데이터가 컨테이너 레이어에 있었다. 재생성 직전에 받은 pg_dump
   (`/root/backups/kasset_pre_multiuser_20260827_2353.dump`)로 전량 복원했고, 볼륨 매핑을
   `postgres_data:/home/postgres/pgdata`(uid 1000 chown)로 수정해 재발을 차단했다.
-- **대기(사용자 승인) — 이전 리허설:** 빈 호스트 복원은 대상 호스트 확보 후 수행.
+- **연기(사용자 결정 2026-08-27) — 이전 리허설:** VPS 이전과 빈 호스트 복원 검증은
+  약 3개월 후(지원 자원 종료 전)에 진행한다. 그때까지 현 Naver Cloud 서버를 유지하고,
+  `scripts/kasset_backup.sh` 기반 주기 백업과 `/root/backups`의 pg_dump 보관을 전제로 한다.
 
 현재 브랜치: `main` `76923cfe` (origin/main 동일). 서버도 동일 커밋.
 
