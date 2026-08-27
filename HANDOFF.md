@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-27 (NH PLUG 토큰 영속 캐시 PR #3·실 credential 진단)
+갱신: 2026-08-27 (NH PLUG 토큰 영속 캐시 PR #3·계좌 유형 discovery)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 
@@ -17,7 +17,7 @@
 - 완료: NH 관련 집중 테스트 77개와 변경 파일 Ruff·ty 검사 통과.
 - 완료: 전체 Ruff·ty와 독립 Checker `PASS`. 전체 pytest는 기존 Windows 전용 collection 오류 23건으로 중단됐으며 NH 집중 테스트는 통과.
 - 완료: commit `88a20afa`, branch `fix/nhplug-persistent-token-cache`, PR #3 생성.
-- 차단: 이미지에서 판독한 App Secret 두 후보로 OAuth를 호출했으나 모두 `403 유효하지 않은 AppSecret입니다.`였다. 토큰은 발급되지 않았고 계좌 API도 호출되지 않았다. 더 이상 문자를 추측하지 않는다.
+- 차단: ACL 제한 로컬 파일의 정확한 credential로 OAuth와 `/n2/acctinfo`는 성공했다. 서로 다른 `acct_type=03` 모의계좌가 3개이고 모두 끝 네 자리가 `2097`이라 자동 선택하지 않았다. 사용할 전체 모의계좌번호 입력이 필요하다.
 - 대기: Core 추천 PR #2 merge·Naver Cloud 배포와 Android live E2E. 배포 요청 전에는 실행하지 않음.
 
 ## 이번 세션에서 한 일
@@ -29,6 +29,7 @@
 - 데이터 요청 본문을 한 번만 직렬화해 최대 두 번 같은 bytes로 보내며, 각 send 직전에 gate·host·path·account allowlist를 다시 검사한다.
 - SDK 전체 의존성은 추가하지 않았다. 기존 static guard의 vendor SDK import 금지와 주문 endpoint 금지를 유지했다.
 - Checker의 parent symlink와 raw response code 파싱 관찰은 모두 비차단이다. 전자는 동일 OS 사용자 전용 경로에서 권한을 `700`으로 강화하는 동작이고, 후자는 공식 샘플과 같은 비 JSON `IGW40043` 탐지를 보존하므로 변경하지 않았다.
+- 최초 안전 조회에서 `acct_type=01` 실계좌 1개와 `03` 모의계좌 3개를 확인했다. 전체 계좌번호·토큰·Secret은 출력하거나 저장하지 않았다.
 
 검증:
 
@@ -47,19 +48,22 @@ uv run ruff check . && uv run ty check
 
 uv run pytest -q
 → 기존 Windows 비호환 `fcntl`, `SIGHUP`과 frozen source SHA 등 23 collection errors로 중단
+
+NH OAuth와 `/n2/acctinfo` 안전 discovery
+→ 성공, acct_type 01: 1개 / acct_type 03: 3개
+→ 03 세 계좌의 끝 네 자리가 모두 2097이라 자동 선택 중단
 ```
 
 최초 테스트 실행은 test dependency group이 설치되지 않아 `ModuleNotFoundError: pytest_asyncio`로 중단됐고, `uv sync --group test --group dev` 후 같은 집중 테스트가 통과했다. 이는 코드 실패가 아니라 새 clone의 의존성 준비 문제였다.
 
 ## 다음 세션이 바로 할 일
 
-1. NH 개발자센터에서 App Secret 원문을 복사하거나 Whale의 로그인된 앱 상세 화면을 Relay로 연다. 이미지 OCR 후보 재시도는 금지한다.
-2. 정확한 App Key/Secret은 코드·Git·문서에 넣지 않고 root 전용 입력으로 OAuth 한 번만 실행한다.
-3. `/n2/acctinfo` 결과에서는 전체 계좌번호를 출력하지 않고 account type별 개수와 마스킹된 끝 네 자리만 확인한다.
-4. `acct_type=03`이 있으면 기존 mock Read-Only 경로를 그대로 사용한다. `01/02`만 있으면 실계좌 Read-Only 추가 여부를 사용자와 확정하며 주문 경로는 만들지 않는다.
-5. PR #3과 기존 추천 PR #2를 검토·merge한다. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
+1. 사용할 전체 `acct_type=03` 모의계좌번호를 로컬
+   `C:/Users/hanse/.secrets/kasset-nhplug.env`의 `NHPLUG_MOCK_ACCOUNT_NO`에 추가한다.
+2. 정확한 세 값으로 서버 root 전용 env와 token cache를 저장하고 account/quote smoke를 실행한다.
+3. PR #3과 기존 추천 PR #2를 검토·merge한다. 실제 배포는 사용자가 명시적으로 요청한 경우에만 merge된 `main`으로 수행한다.
 
 ## 세션 이력
 
-- 2026-08-27: NH 공식 토큰 파일 캐시와 401 단일 재발급·429 재발급 금지 PR #3 생성, OAuth는 이미지 판독 오류로 403 차단.
+- 2026-08-27: NH 토큰 캐시 PR #3 생성, OAuth·계좌목록 성공 후 동일 끝자리의 모의계좌 3개 중 사용자 선택 대기.
 - 2026-08-27: Android 추천 검토 API PR #2 구현·로컬 PostgreSQL 검증 완료.
