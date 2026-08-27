@@ -102,12 +102,17 @@ class MarketEventPipeline:
             currency="KRW" if recommendation_market == "KRX" else "USD",
             rationale=list(verdict.rationale_tags),
             risks=[str(verdict.risk)],
+            # Must satisfy RecommendationEvidence (title required, extras
+            # forbidden) or GET /api/v1/ai/recommendations fails validation.
             evidence=[
                 {
-                    "features": features,
-                    "triggers": triggers,
-                    "tier_used": verdict.tier_used,
-                }
+                    "title": "탐지 신호: " + ", ".join(triggers),
+                    "source": "event_detector",
+                },
+                {
+                    "title": f"AI 판정 모델: {verdict.tier_used}",
+                    "source": "model_router",
+                },
             ],
             confidence=str(confidence),
             source="kasset_market_events",

@@ -187,32 +187,37 @@ async def test_high_confidence_buy_persists_owner_scoped_pending_recommendation(
     assert recommendation.valid_until == _NOW + timedelta(hours=1)
     assert recommendation.evidence == [
         {
-            "features": {
-                "insufficient": False,
-                "change_pct": 3.0,
-                "volume_ratio": 1.0,
-                "rsi14": 100.0,
-                "sma20": 100.15,
-                "sma20_distance_pct": pytest.approx(
-                    ((103.0 - 100.15) / 100.15) * 100.0
-                ),
-                "high20_break": True,
-                "low20_break": False,
-            },
-            "triggers": ["price_spike", "rsi_extreme", "breakout"],
-            "tier_used": "gpt-5.6-terra",
-        }
+            "title": "탐지 신호: price_spike, rsi_extreme, breakout",
+            "source": "event_detector",
+        },
+        {
+            "title": "AI 판정 모델: gpt-5.6-terra",
+            "source": "model_router",
+        },
     ]
+    # The stored row must round-trip through the mobile API response schema;
+    # a shape drift here breaks GET /api/v1/ai/recommendations for real rows.
+    from app.schemas.ai_recommendations import RecommendationResponse
+
+    RecommendationResponse.model_validate(recommendation)
     assert len(router.calls) == 1
     kind, payload, correlation_id = router.calls[0]
     assert kind == AnalysisKind.CANDIDATE_SCAN
-    assert payload == {
-        "symbol": "005930",
-        "market": "KRX",
-        "features": recommendation.evidence[0]["features"],
-        "triggers": ["price_spike", "rsi_extreme", "breakout"],
-        "news": [],
-    }
+    assert payload["symbol"] == "005930"
+    assert payload["market"] == "KRX"
+    assert payload["triggers"] == ["price_spike", "rsi_extreme", "breakout"]
+    assert payload["news"] == []
+    features = payload["features"]
+    assert features["insufficient"] is False
+    assert features["change_pct"] == 3.0
+    assert features["rsi14"] == 100.0
+    assert features["high20_break"] is True
+    assert features["low20_break"] is False
+    assert features["sma20"] == 100.15
+    assert features["sma20_distance_pct"] == pytest.approx(
+        ((103.0 - 100.15) / 100.15) * 100.0
+    )
+    assert features["volume_ratio"] == 1.0
     assert correlation_id is not None and correlation_id.startswith(
         f"market-scan:{owner}:KRX:005930:"
     )
