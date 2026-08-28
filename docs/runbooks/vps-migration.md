@@ -9,7 +9,6 @@ Naver 전용 서비스 종속은 없다.
 
 ```text
 인터넷 ──> Cloudflare Tunnel(api.hsps-portal.xyz) ──> cloudflared ──> api:8000
-     └─(구, 폐기 예정) 175-45-201-51.sslip.io ──> caddy:443 ──> api:8000
 
 docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ db          timescale/timescaledb-ha:pg17  (volume postgres_data)
@@ -19,8 +18,9 @@ docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ scheduler   taskiq scheduler (캔들 수집 매시 :05, 스캔 매시 :10, KST 평일 9-16시)
 ├─ mcp         analysis_readonly MCP :8768 (127.0.0.1, 토큰 인증)
 ├─ cloudflared Cloudflare Tunnel kasset-trader (http2 강제 — UDP 7844 차단 환경)
-├─ caddy       (구) sslip.io HTTPS — Android가 터널 도메인으로 전환되면 제거
 └─ migration   alembic upgrade head (profile: migration, 수동 1회성)
+
+환경변수 항목은 `.env.kasset.example`이 기준이다(키 이름 전수 + 주석).
 ```
 
 - Risk Manager/주문 검증: `POST /api/v1/orders/preview`와 주문 제출 경로의 Risk Engine은
@@ -87,7 +87,6 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml build api
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d db redis
 /usr/local/sbin/kasset-db-restore.sh /root/kasset-<최신>.dump.gz
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp cloudflared
-# caddy는 Android가 터널 도메인으로 전환된 뒤에는 불필요 — 기동하지 않는다.
 
 # 5) 검증
 curl -sS https://api.hsps-portal.xyz/health          # 터널 경유 200
@@ -105,3 +104,43 @@ docker logs kasset-trader-cloudflared-1 | grep Registered
 /usr/local/sbin/kasset-db-restore.sh /root/backups/kasset-daily/kasset-<STAMP>.dump.gz
 # RESTORE 입력으로 확인. api/worker/scheduler/mcp 자동 재기동.
 ```
+
+## 6. Cloudflare Tunnel 최초 설정 (새 계정·존에서 다시 만들 때)
+
+1. Cloudflare One > Networks > Tunnels > **Create tunnel** (Remote-managed, 이름 `kasset-trader`).
+2. 발급된 커넥터 토큰을 `.env.kasset`의 `TUNNEL_TOKEN`에 넣는다(커밋 금지).
+3. Public hostname 추가: `api.hsps-portal.xyz` → Service `http://api:8000`
+   (cloudflared가 compose 내부 네트워크에서 서비스명 `api`로 접근).
+4. `docker compose ... up -d cloudflared` → 존에 CNAME `api → <tunnel-id>.cfargotunnel.com` 자동 생성.
+5. FastAPI 포트는 호스트에 `127.0.0.1` 바인딩뿐이므로 인터넷 직접 노출이 없다.
+
+## 7. 롤백 (이전 실패 시)
+
+구 서버를 지우기 전에는 언제든 5분 안에 되돌릴 수 있다:
+
+```bash
+new$ docker compose --env-file .env.kasset -f docker-compose.kasset.yml stop cloudflared
+old$ docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d   # 전 서비스 재기동
+curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 200
+```
+
+- 같은 `TUNNEL_TOKEN`을 쓰는 커넥터가 살아 있는 쪽으로 Cloudflare가 라우팅한다.
+  이전 검증이 끝날 때까지 구 서버 compose를 지우지 않는 것이 롤백의 전부다.
+- 이전 후 새 서버에서 문제가 발견되면: 새 서버 cloudflared 정지 → 구 서버 up → 원인 수정.
+- DB는 이전 시점 덤프가 남아 있으므로(`/root/backups/kasset-daily/` + 이전용 최종 덤프)
+  잘못 복원했어도 `kasset-db-restore.sh <덤프>`로 재복원한다.
+
+## 8. 정상 동작 검증 체크리스트
+
+| # | 확인 | 명령/방법 | 기대 |
+|---|---|---|---|
+| 1 | 터널 경유 API | `curl -sS https://api.hsps-portal.xyz/health` | 200 |
+| 2 | 컨테이너 상태 | `docker compose ... ps` | api/db/redis/mcp healthy, worker/scheduler Up |
+| 3 | 커넥터 등록 | `docker logs kasset-trader-cloudflared-1 \| grep Registered` | 커넥션 4개 |
+| 4 | DB 복원 무결성 | `psql -tAc "SELECT count(*) FROM users; SELECT max(time) FROM kr_candles_1d"` | 이전 전과 동일 |
+| 5 | 스케줄 동작 | 다음 정시 +10분에 worker 로그 `market-scan` 실행 | 에러 없음 |
+| 6 | 캔들 수집 | Toss 허용 IP 갱신 후 장중 :05 로그 | rows_upserted > 0 |
+| 7 | 폰 스모크 | 앱 로그인 → 홈 시세 → 추천 목록 | 정상 표시 |
+| 8 | 안전 스위치 | `TRADING_ENABLED=false`, `LIVE_TRADING_ENABLED=false` 유지 | PAPER 전용 |
+| 9 | 포트 비노출 | 외부에서 `nc -zv <새IP> 8000 5432 6379` | 전부 실패 |
+| 10 | 백업 cron | 다음날 `/root/backups/kasset-daily/` 신규 덤프 | 생성됨 |

@@ -531,7 +531,14 @@ async def sync_kr_candles(
 
     session = cast(AsyncSession, cast(object, AsyncSessionLocal()))
     try:
-        kis_holdings = await kis.fetch_my_stocks()
+        # KIS 자격이 없거나 무효인 서버(PAPER 전용 운영)에서 태스크 전체가
+        # 죽지 않도록 보유 조회 실패는 빈 목록으로 강등한다. 대상 심볼은
+        # 수동 보유·관심종목 유니버스가 계속 공급한다.
+        try:
+            kis_holdings = await kis.fetch_my_stocks()
+        except Exception as exc:  # noqa: BLE001 - 브로커 응답 형상 다양
+            logger.warning("KIS holdings scan skipped: %s", exc)
+            kis_holdings = []
         manual_service = ManualHoldingsService(session)
         manual_holdings = await manual_service.get_holdings_by_user(
             user_id=user_id,

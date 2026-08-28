@@ -302,3 +302,5 @@ frontend/**/.vite/
 
 # ROB-371 US earnings coverage probe artifacts (counts-only, never committed).
 research/event_coverage/results/
+
+!.env.kasset.example

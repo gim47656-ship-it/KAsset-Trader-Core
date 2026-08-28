@@ -1,4 +1,11 @@
 name: kasset-trader
+# 어떤 Ubuntu VPS에서도 그대로 실행되는 구성 — 클라우드 전용 서비스 없음.
+# 이전 절차는 docs/runbooks/vps-migration.md 참고.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
 services:
   db:
     image: timescale/timescaledb-ha:pg17
@@ -13,6 +20,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
@@ -25,6 +33,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    logging: *default-logging
     restart: unless-stopped
 
   api:
@@ -51,6 +60,7 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    logging: *default-logging
     restart: unless-stopped
 
   mcp:
@@ -65,6 +75,13 @@ services:
       MCP_AUTH_TOKEN: ${MCP_ANALYSIS_AUTH_TOKEN}
     ports:
       - "127.0.0.1:8768:8768"
+    # 이미지 HEALTHCHECK(api :8000)를 MCP 포트로 교정
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8768/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
     command: ["python", "-m", "app.mcp_server.main"]
     volumes:
       - ./research_contracts:/app/research_contracts:ro
@@ -99,6 +116,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # 이미지에서 상속되는 api용 HEALTHCHECK 무효화(taskiq는 HTTP 미제공)
+    healthcheck:
+      disable: true
+    logging: *default-logging
     restart: unless-stopped
 
   scheduler:
@@ -110,6 +131,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      disable: true
+    logging: *default-logging
     restart: unless-stopped
 
   cloudflared:
@@ -117,6 +141,7 @@ services:
     command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", "${TUNNEL_TOKEN}"]
     depends_on:
       - api
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:
