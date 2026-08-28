@@ -1,7 +1,8 @@
 """Android TraderApi-compatible routes."""
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -95,9 +96,21 @@ public_router = APIRouter(tags=["kasset-android"])
 
 @asynccontextmanager
 async def _kasset_api_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # The first market read in a fresh process pays a one-time ~6s provider
+    # client warmup (measured on the deployed API), which the app sees as a
+    # stalled home screen right after a deploy. Pay it in the background at
+    # startup so the first real request hits the warm 60-second cache. The test
+    # environment stays offline by contract, so it never warms.
+    warmup: asyncio.Task[None] | None = None
+    if settings.ENVIRONMENT != "test":
+        warmup = asyncio.create_task(market_overview_service.warm_market_sources())
     try:
         yield
     finally:
+        if warmup is not None:
+            warmup.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup
         await nh_orderbook_store.close()
 
 

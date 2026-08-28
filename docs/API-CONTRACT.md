@@ -191,10 +191,11 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 `GET /api/v1/market/indices/{symbol}?range=1W|1M|3M|6M`
 
 - 인증된 KAsset 모바일 세션이 필요하다. `{symbol}`은 `KOSPI`, `KOSDAQ`, `SPX`, `NASDAQ` 중 하나이며 대소문자는 구분하지 않는다. 지원하지 않는 심볼은 `404 UNKNOWN_INDEX`, 허용하지 않는 `range`는 `422`다.
-- 응답은 `summary`와 `candles`로 구성한다. `summary`의 가격·등락 값과 모든 candle OHLCV는 JSON number가 아닌 십진수 문자열이다. 공급자 이름, 내부 상태 필드, 원본 예외 문자열은 노출하지 않는다.
+- 응답은 `summary`와 `candles`로 구성한다. `summary`의 가격·등락 값과 모든 candle 값은 JSON number가 아닌 십진수 문자열이다. 공급자 이름, 내부 상태 필드, 원본 예외 문자열은 노출하지 않는다.
 - 범위는 `1W = day/5`, `1M = day/20`, `3M = day/60`, `6M = week/26`으로 기존 실제 지수 history 조회에 전달한다.
-- `candles`는 기존 일봉 계약과 같은 `{time, open, high, low, close, volume}` 형태다. 거래일만 제공되는 history의 `time`은 실제 체결시각으로 만들지 않고 해당 거래일의 `T00:00:00Z` bucket으로 표현한다.
-- candle은 날짜 오름차순이고 같은 bucket은 마지막 실제 행 하나만 유지한다. 날짜 또는 OHLCV 중 하나라도 유효한 실제 값이 없으면 그 행을 제외하며 값을 합성하지 않는다.
+- `candles`는 `{time, open, high, low, close, volume}` 형태다. 거래일만 제공되는 history의 `time`은 실제 체결시각으로 만들지 않고 해당 거래일의 `T00:00:00Z` bucket으로 표현한다.
+- `volume`은 `null`일 수 있다. 국내 지수 시세 원천은 지수 봉의 거래량을 제공하지 않으며, 이때 `0`을 만들어 넣지 않고 `null`로 둔다. 클라이언트는 가격만 표시한다.
+- candle은 날짜 오름차순이고 같은 bucket은 마지막 실제 행 하나만 유지한다. 날짜 또는 OHLC 중 하나라도 유효한 실제 값이 없으면 그 행을 제외하며 값을 합성하지 않는다.
 - `summary.status`, `summary.sessionState`, `summary.asOf`는 홈 시장 개요와 같은 서버 규칙을 사용한다. 현재 지수 값이 없거나 조회가 실패하면 숫자와 `asOf`를 `null`, `status`를 `unavailable`로 반환하되 HTTP 상태는 `200`이다.
 - 응답은 정규화된 `symbol + range`별로 프로세스 내 60초 단일비행 캐시한다. 다른 심볼 또는 다른 범위는 별도 키다.
 
@@ -220,7 +221,7 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
       "high": "6510",
       "low": "6475",
       "close": "6500.5",
-      "volume": "1000"
+      "volume": null
     }
   ]
 }

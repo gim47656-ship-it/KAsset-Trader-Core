@@ -12,7 +12,7 @@ from typing import Any, Literal
 from app.core.config import settings
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.schemas import (
-    DailyCandle,
+    MarketIndexCandle,
     MarketIndexDetailResponse,
     MarketIndexRange,
     MarketIndexSummary,
@@ -316,14 +316,14 @@ def _history_date_bucket(value: object) -> str | None:
     return f"{trading_date.isoformat()}T00:00:00Z"
 
 
-def _index_candles(result: object) -> list[DailyCandle]:
+def _index_candles(result: object) -> list[MarketIndexCandle]:
     if not isinstance(result, dict):
         return []
     history = result.get("history")
     if not isinstance(history, list):
         return []
 
-    by_time: dict[str, DailyCandle] = {}
+    by_time: dict[str, MarketIndexCandle] = {}
     for row in history:
         if not isinstance(row, dict):
             continue
@@ -332,23 +332,22 @@ def _index_candles(result: object) -> list[DailyCandle]:
         high = _decimal_text(row.get("high"))
         low = _decimal_text(row.get("low"))
         close = _decimal_text(row.get("close"))
-        volume = _decimal_text(row.get("volume"))
         if (
             bucket is None
             or open_ is None
             or high is None
             or low is None
             or close is None
-            or volume is None
         ):
             continue
-        by_time[bucket] = DailyCandle(
+        by_time[bucket] = MarketIndexCandle(
             time=bucket,
             open=open_,
             high=high,
             low=low,
             close=close,
-            volume=volume,
+            # The KR index price source publishes no volume for an index bar.
+            volume=_decimal_text(row.get("volume")),
         )
     return [by_time[bucket] for bucket in sorted(by_time)]
 
@@ -608,6 +607,20 @@ async def get_market_overview() -> MarketOverviewResponse:
         response = await _build_market_overview()
         _set_cached(response, time.monotonic())
         return response
+
+
+async def warm_market_sources() -> None:
+    """Pre-build the overview snapshot so the first client request is warm.
+
+    Failures are irrelevant here: the snapshot is rebuilt on demand and every
+    source already degrades to an ``unavailable`` item. A warmup must never
+    take the API process down.
+    """
+
+    try:
+        await get_market_overview()
+    except Exception:
+        return
 
 
 async def _build_market_index_detail(

@@ -218,6 +218,52 @@ def test_index_detail_normalizes_kr_quote_timestamp_to_utc(
     assert response.json()["summary"]["asOf"] == "2026-08-28T05:01:00Z"
 
 
+def test_index_detail_keeps_kr_bars_that_carry_no_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The live Naver index price rows carry no traded volume, so dropping
+    # volume-less bars would leave the KR chart permanently empty.
+    result = {
+        "indices": [
+            {
+                "symbol": "KOSPI",
+                "current": 6788.88,
+                "change": -123.49,
+                "change_pct": -1.79,
+                "data_state": DATA_STATE_FRESH,
+            }
+        ],
+        "history": [
+            {
+                "date": "2026-08-28",
+                "open": 6846.54,
+                "high": 6901.78,
+                "low": 6780.13,
+                "close": 6788.88,
+                "volume": None,
+            }
+        ],
+    }
+    monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
+    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
+
+    with _client() as client:
+        response = client.get("/api/v1/market/indices/KOSPI?range=1M")
+
+    assert response.status_code == 200
+    assert response.json()["candles"] == [
+        {
+            "time": "2026-08-28T00:00:00Z",
+            "open": "6846.54",
+            "high": "6901.78",
+            "low": "6780.13",
+            "close": "6788.88",
+            "volume": None,
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_index_detail_returns_sanitized_unavailable_contract(
     monkeypatch: pytest.MonkeyPatch,

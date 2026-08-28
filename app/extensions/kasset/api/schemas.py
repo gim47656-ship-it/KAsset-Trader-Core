@@ -88,9 +88,25 @@ class MarketIndexSummary(MarketOverviewItem):
     range: MarketIndexRange
 
 
+class MarketIndexCandle(AndroidWireModel):
+    """Index OHLC bar.
+
+    Volume is optional because the KR index price source publishes no traded
+    volume for an index bar. Emitting ``0`` there would invent a value, so the
+    field stays null and the client renders price only.
+    """
+
+    time: str
+    open: str
+    high: str
+    low: str
+    close: str
+    volume: str | None = None
+
+
 class MarketIndexDetailResponse(AndroidWireModel):
     summary: MarketIndexSummary
-    candles: list[DailyCandle]
+    candles: list[MarketIndexCandle]
 
 
 class MarketOverviewSession(AndroidWireModel):
