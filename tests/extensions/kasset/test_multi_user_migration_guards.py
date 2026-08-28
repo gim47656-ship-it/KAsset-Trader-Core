@@ -17,11 +17,11 @@ from uuid import uuid4
 import asyncpg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import settings
 from app.models.base import Base
+from tests._run_owned_database import validate_run_owned_database_url
 
 REPO = Path(__file__).resolve().parents[3]
 PARENT_REVISION = "20260824_s257_rung_reason"
@@ -71,7 +71,7 @@ async def _insert_user(engine, username: str, role: str) -> int:
 
 @pytest.mark.asyncio
 async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
-    base_url = make_url(settings.DATABASE_URL)
+    base_url = validate_run_owned_database_url(settings.DATABASE_URL)
     if base_url.get_backend_name() != "postgresql":
         pytest.skip("the cutover guard acceptance requires PostgreSQL")
 
