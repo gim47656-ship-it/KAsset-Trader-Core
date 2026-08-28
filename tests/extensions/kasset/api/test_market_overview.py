@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -281,10 +282,10 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "USD",
         "KRW",
     ]
-    # ^TNX와 국고채는 % 값을 가격 취급하지 않고 그대로 싣는다.
+    # ^TNX와 국고채는 % 단위를 유지하되 값은 소수 2자리로 제한한다.
     assert body["indicators"][1]["value"] == "4.68"
     assert body["indicators"][5]["key"] == "KR_BOND_10Y"
-    assert body["indicators"][5]["value"] == "4.245"
+    assert body["indicators"][5]["value"] == "4.25"
     assert body["indicators"][5]["previousClose"] is None
     assert body["indicators"][5]["changeAmount"] is None
     assert body["indicators"][5]["changeRate"] is None
@@ -296,13 +297,13 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "JPYKRW",
         "EURKRW",
     ]
-    assert body["indices"][0]["changeRate"] == "0.70"
-    assert body["indices"][0]["changeAmount"] == "18.90"
+    assert body["indices"][0]["changeRate"] == "0.7"
+    assert body["indices"][0]["changeAmount"] == "18.9"
     assert "change_rate" not in body["indices"][0]
     assert body["indices"][2]["asOf"] is None
     assert [item["price"] for item in body["fx"]] == [
-        "1500.00",
-        "10.00",
+        "1500",
+        "10",
         "2000",
     ]
     assert all(item["changeAmount"] is None for item in body["fx"])
@@ -313,6 +314,121 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         {"market": "US", "state": "OPEN"},
     ]
     assert body["errors"] == []
+
+
+def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:
+    index_result = {
+        "indices": [
+            {"symbol": "KOSPI", "current": "6788.88", "source": "naver"},
+            {"symbol": "KOSDAQ", "current": "838.41", "source": "naver"},
+            {
+                "symbol": "SPX",
+                "current": 7767.33984375,
+                "change": 36.349998474121094,
+                "change_pct": 0.4699999988079071,
+                "source": "yfinance",
+            },
+            {"symbol": "NASDAQ", "current": 26667.576171875, "source": "yfinance"},
+            {"symbol": "DJI", "current": 53794.37109375, "source": "yfinance"},
+            {"symbol": "RUT", "current": 2997.286865234375, "source": "yfinance"},
+            {"symbol": "SOX", "current": 11689.716796875, "source": "yfinance"},
+        ]
+    }
+    indices, index_errors = mod._index_items(
+        index_result,
+        sessions={"KRX": "OPEN", "US": "OPEN"},
+    )
+
+    assert index_errors == []
+    assert {item.symbol: item.price for item in indices} == {
+        "KOSPI": "6788.88",
+        "KOSDAQ": "838.41",
+        "SPX": "7767.34",
+        "NASDAQ": "26667.58",
+        "DJI": "53794.37",
+        "RUT": "2997.29",
+        "SOX": "11689.72",
+    }
+    spx = next(item for item in indices if item.symbol == "SPX")
+    assert spx.change_amount == "36.35"
+    assert spx.change_rate == "0.47"
+    assert (
+        mod._quantized_decimal_text(
+            Decimal("1E+8"),
+            decimal_places=mod.INDEX_DECIMAL_PLACES,
+        )
+        == "100000000"
+    )
+
+    indicator_result = {
+        "indices": [
+            {"symbol": "VIX", "current": 14.220000267028809},
+            {"symbol": "US10Y", "current": 4.696000099182129},
+            {"symbol": "WTI", "current": 83.1500015258789},
+            {"symbol": "GOLD", "current": 4607.7001953125},
+        ]
+    }
+    indicators, _indicator_errors = mod._indicator_items(
+        indicator_result,
+        {
+            "trade_price": 109975000.0,
+            "prev_closing_price": 111000000.0,
+            "signed_change_price": -1025000.0,
+            "signed_change_rate": -0.0092699362,
+        },
+        {
+            "KR_BOND_10Y": TossIndicatorPoint(
+                symbol="KR_BOND_10Y",
+                last_price=Decimal("4.245"),
+                as_of=datetime(2026, 8, 28, 6, 30, tzinfo=UTC),
+            )
+        },
+        sessions={"KRX": "OPEN", "US": "OPEN"},
+    )
+    indicators_by_key = {item.key: item for item in indicators}
+
+    assert {
+        key: indicators_by_key[key].value for key in ("VIX", "US10Y", "WTI", "GOLD")
+    } == {
+        "VIX": "14.22",
+        "US10Y": "4.7",
+        "WTI": "83.15",
+        "GOLD": "4607.7",
+    }
+    assert indicators_by_key["KR_BOND_10Y"].value == "4.25"
+    assert indicators_by_key["BTC"].value == "109975000"
+    assert indicators_by_key["BTC"].change_rate == "-0.93"
+
+    fx, fx_errors = mod._fx_items(
+        SimpleNamespace(
+            usd_krw=Decimal("1381.39"),
+            jpy_krw=Decimal("8.671256687620105017577911603"),
+            eur_krw=Decimal("1609.719278172501299131038629"),
+            as_of=datetime(2026, 8, 28, 6, 0, tzinfo=UTC),
+        ),
+        None,
+    )
+
+    assert fx_errors == []
+    assert {item.symbol: item.price for item in fx} == {
+        "USDKRW": "1381.39",
+        "JPYKRW": "8.67",
+        "EURKRW": "1609.72",
+    }
+
+    wire_numbers = [
+        *(item.price for item in indices),
+        *(item.value for item in indicators),
+        *(item.previous_close for item in indicators),
+        *(item.change_amount for item in indicators),
+        *(item.change_rate for item in indicators),
+        *(item.price for item in fx),
+    ]
+    assert all(
+        value is None or re.fullmatch(r"-?\d+(?:\.\d+)?", value)
+        for value in wire_numbers
+    )
+
 
 @pytest.mark.asyncio
 async def test_overview_prefers_configured_toss_for_usd_krw(
@@ -337,7 +453,7 @@ async def test_overview_prefers_configured_toss_for_usd_krw(
 
     assert response.fx[0].price == "1512.25"
     assert response.fx[0].as_of == "2026-08-28T06:05:00Z"
-    assert response.fx[1].price == "10.00"
+    assert response.fx[1].price == "10"
     assert response.fx[2].price == "2000"
 
 
@@ -349,9 +465,7 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
     for row in payload["indices"]:
         if row["symbol"] in {"KOSPI", "KOSDAQ"}:
             row["data_state"] = DATA_STATE_MARKET_CLOSED
-    monkeypatch.setattr(
-        mod, "kr_market_data_state", lambda: DATA_STATE_MARKET_CLOSED
-    )
+    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_MARKET_CLOSED)
     monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_AFTERHOURS)
     monkeypatch.setattr(
         mod,
@@ -557,9 +671,7 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     )
     monkeypatch.setattr(mod.time, "monotonic", lambda: monotonic_now)
 
-    first_batch = await asyncio.gather(
-        *(mod.get_market_overview() for _ in range(5))
-    )
+    first_batch = await asyncio.gather(*(mod.get_market_overview() for _ in range(5)))
     assert calls == 1
     assert all(item is first_batch[0] for item in first_batch)
 

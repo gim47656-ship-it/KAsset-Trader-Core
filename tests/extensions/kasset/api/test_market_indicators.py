@@ -87,9 +87,9 @@ def test_units_follow_the_catalogue_and_percent_values_are_not_priced() -> None:
     assert by_key["KR_BOND_10Y"].unit == "PERCENT"
     assert by_key["GOLD"].unit == "USD"
     assert by_key["BTC"].unit == "KRW"
-    # % 지표는 통화 환산 없이 원값 그대로 나간다.
+    # % 지표는 통화 환산하지 않고 소수 2자리로 제한한다.
     assert by_key["US10Y"].value == "4.68"
-    assert by_key["KR_BOND_10Y"].value == "4.245"
+    assert by_key["KR_BOND_10Y"].value == "4.25"
     assert {item.group for item in items if item.key.startswith("KR_BOND")} == {"RATE"}
 
 
@@ -154,7 +154,7 @@ def test_toss_indicator_without_timestamp_is_stale_not_available() -> None:
     )
     bond = _by_key(undated)["KR_BOND_10Y"]
     # 기준 시각을 증명할 수 없으면 값은 싣되 available이라고 말하지 않는다.
-    assert bond.value == "4.245"
+    assert bond.value == "4.25"
     assert bond.as_of is None
     assert bond.status == "stale"
 
@@ -180,7 +180,7 @@ def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
         "KR_BOND_20Y",
         "KR_BOND_30Y",
     }
-    assert by_key["VIX"].value == "10.0"
+    assert by_key["VIX"].value == "10"
     assert by_key["BTC"].value == "109807000"
     assert [error.scope for error in errors] == ["indicators"] * 6
     assert {error.code for error in errors} == {"TIMEOUT"}
@@ -196,8 +196,8 @@ def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
     by_key = _by_key(items)
     assert by_key["BTC"].status == "unavailable"
     assert by_key["BTC"].value is None
-    assert by_key["KR_BOND_10Y"].value == "4.245"
-    assert by_key["GOLD"].value == "10.0"
+    assert by_key["KR_BOND_10Y"].value == "4.25"
+    assert by_key["GOLD"].value == "10"
     assert [error.symbol for error in errors] == [
         "KR_BOND_2Y",
         "KR_BOND_3Y",

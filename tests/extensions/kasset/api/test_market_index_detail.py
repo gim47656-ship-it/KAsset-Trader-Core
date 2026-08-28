@@ -125,7 +125,7 @@ async def test_new_us_indices_are_whitelisted_for_every_public_range(
     assert response.summary.market == "US"
     assert response.summary.currency == "USD"
     assert response.summary.range == range_
-    assert response.summary.price == "6500.50"
+    assert response.summary.price == "6500.5"
     assert response.summary.status == "available"
     assert len(response.candles) == 1
     source.assert_awaited_once_with(symbol=symbol, period=period, count=count)

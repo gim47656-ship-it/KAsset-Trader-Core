@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable
 from datetime import UTC, date, datetime
-from decimal import Decimal, DecimalException, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal
 
 from app.core.config import settings
@@ -60,6 +60,15 @@ from app.services.exchange_rate_service import (
 # 때는 앱 폴링 주기와 겹쳐 최악 약 2분까지 오래된 값이 보였다.
 OVERVIEW_CACHE_TTL_SECONDS = 15.0
 SOURCE_TIMEOUT_SECONDS = 6.0
+INDEX_DECIMAL_PLACES = 2
+FX_DECIMAL_PLACES = 2
+CHANGE_RATE_DECIMAL_PLACES = 2
+INDICATOR_DECIMAL_PLACES: dict[MarketIndicatorUnit, int] = {
+    "POINT": 2,
+    "PERCENT": 2,
+    "USD": 2,
+    "KRW": 0,
+}
 
 _IndexMarket = Literal["KRX", "US"]
 _IndexCurrency = Literal["KRW", "USD"]
@@ -230,6 +239,34 @@ def _decimal_text(value: object) -> str | None:
     return format(parsed, "f")
 
 
+def _quantized_decimal_text(
+    value: object,
+    *,
+    decimal_places: int,
+) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, float):
+            # 지원 Python에서 str(float)와 repr(float)는 같은 최단 왕복 문자열을
+            # 만든다. 표시용 변환이 아니라 이진 float를 재구성하는 리터럴을
+            # Decimal에 넘긴다는 의도를 명확히 하려고 repr을 사용한다.
+            parsed = Decimal(repr(value))
+        else:
+            parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not parsed.is_finite():
+            return None
+        quantum = Decimal(1).scaleb(-decimal_places)
+        rounded = parsed.quantize(quantum, rounding=ROUND_HALF_UP)
+    except (DecimalException, ValueError):
+        return None
+
+    # normalize()는 큰 정수를 1E+8처럼 바꿀 수 있어 와이어 정규식을 깨뜨린다.
+    # 고정소수점으로 만든 뒤 문자열에서만 0을 걷어 지수 표기를 막는다.
+    text = format(rounded, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def _datetime_text(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -346,9 +383,15 @@ def _index_rows_by_symbol(result: object) -> dict[str, dict[str, Any]]:
 def _usable_index_row(
     rows_by_symbol: dict[str, dict[str, Any]],
     symbol: str,
+    *,
+    decimal_places: int,
 ) -> tuple[dict[str, Any], str] | None:
     row = rows_by_symbol.get(symbol)
-    price = _decimal_text(row.get("current")) if row is not None else None
+    price = (
+        _quantized_decimal_text(row.get("current"), decimal_places=decimal_places)
+        if row is not None
+        else None
+    )
     if (
         row is None
         or row.get("error") is not None
@@ -419,7 +462,11 @@ def _index_summary(
 ) -> MarketIndexSummary:
     name, market, currency = _INDEX_DEFINITIONS_BY_SYMBOL[symbol]
     session_state = sessions[market]
-    usable = _usable_index_row(_index_rows_by_symbol(result), symbol)
+    usable = _usable_index_row(
+        _index_rows_by_symbol(result),
+        symbol,
+        decimal_places=INDEX_DECIMAL_PLACES,
+    )
     if usable is None:
         return MarketIndexSummary(
             symbol=symbol,
@@ -442,8 +489,14 @@ def _index_summary(
         market=market,
         currency=currency,
         price=price,
-        change_amount=_decimal_text(row.get("change")),
-        change_rate=_decimal_text(row.get("change_pct")),
+        change_amount=_quantized_decimal_text(
+            row.get("change"),
+            decimal_places=INDEX_DECIMAL_PLACES,
+        ),
+        change_rate=_quantized_decimal_text(
+            row.get("change_pct"),
+            decimal_places=CHANGE_RATE_DECIMAL_PLACES,
+        ),
         as_of=_source_as_of(row),
         status=_index_status(row, session_state=session_state),
         session_state=session_state,
@@ -463,7 +516,11 @@ def _index_items(
     errors: list[MarketOverviewError] = []
     for symbol, name, market, currency in _INDEX_DEFINITIONS:
         session_state = sessions[market]
-        usable = _usable_index_row(rows_by_symbol, symbol)
+        usable = _usable_index_row(
+            rows_by_symbol,
+            symbol,
+            decimal_places=INDEX_DECIMAL_PLACES,
+        )
         if usable is None:
             items.append(
                 _unavailable_item(
@@ -492,9 +549,15 @@ def _index_items(
                 market=market,
                 currency=currency,
                 price=price,
-                change_amount=_decimal_text(row.get("change")),
+                change_amount=_quantized_decimal_text(
+                    row.get("change"),
+                    decimal_places=INDEX_DECIMAL_PLACES,
+                ),
                 # The source already expresses change_pct in percentage points.
-                change_rate=_decimal_text(row.get("change_pct")),
+                change_rate=_quantized_decimal_text(
+                    row.get("change_pct"),
+                    decimal_places=CHANGE_RATE_DECIMAL_PLACES,
+                ),
                 as_of=_source_as_of(row),
                 status=_index_status(row, session_state=session_state),
                 session_state=session_state,
@@ -614,7 +677,12 @@ def _indicator_items(
     items: list[MarketIndicatorItem] = []
     errors: list[MarketOverviewError] = []
     for key, name, group, unit, provider in _INDICATOR_DEFINITIONS:
-        usable = _usable_index_row(rows_by_symbol, key)
+        decimal_places = INDICATOR_DECIMAL_PLACES[unit]
+        usable = _usable_index_row(
+            rows_by_symbol,
+            key,
+            decimal_places=decimal_places,
+        )
         if usable is None:
             items.append(
                 MarketIndicatorItem(
@@ -646,10 +714,19 @@ def _indicator_items(
                 name=name,
                 group=group,
                 value=value,
-                previous_close=_decimal_text(row.get("previous_close")),
-                change_amount=_decimal_text(row.get("change")),
-                # 공급자가 이미 퍼센트포인트로 준 등락률을 그대로 싣는다.
-                change_rate=_decimal_text(row.get("change_pct")),
+                previous_close=_quantized_decimal_text(
+                    row.get("previous_close"),
+                    decimal_places=decimal_places,
+                ),
+                change_amount=_quantized_decimal_text(
+                    row.get("change"),
+                    decimal_places=decimal_places,
+                ),
+                # 공급자가 이미 퍼센트포인트로 준 등락률을 소수 2자리로 제한한다.
+                change_rate=_quantized_decimal_text(
+                    row.get("change_pct"),
+                    decimal_places=CHANGE_RATE_DECIMAL_PLACES,
+                ),
                 unit=unit,
                 as_of=_source_as_of(row),
                 status=_indicator_status(row, provider=provider, sessions=sessions),
@@ -697,7 +774,10 @@ def _fx_items(
         values,
         strict=True,
     ):
-        price = _decimal_text(raw_price)
+        price = _quantized_decimal_text(
+            raw_price,
+            decimal_places=FX_DECIMAL_PLACES,
+        )
         if price is None:
             items.append(
                 _unavailable_item(
