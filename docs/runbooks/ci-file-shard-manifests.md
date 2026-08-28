@@ -186,6 +186,75 @@ only resolves when the repo root is on `sys.path` (same class of failure as
 ROB-1308's `scripts/call_durations.py`; see
 `tests/ci/test_file_shard_plan_workflow_entrypoint.py`).
 
+### 4.3 Windows workstation: `check` cannot be reproduced locally
+
+CI collects on `ubuntu-latest`; part of this repo's development happens on
+Windows. A plain local `check` there always fails, for a reason unrelated to
+the manifests: some tests only import on POSIX (`fcntl`, `signal.SIGHUP`
+and similar), so `pytest --collect-only` aborts on them and their files never
+reach the collected list. `check` then reports every one of them as a stale
+manifest entry.
+
+Measured on Windows at the time this section was written: `23` collection
+errors, `39` manifest entries reported "not in current collection", while the
+same tree's CI run reported only the genuine defect (test files present in the
+collection but in no manifest). The `39` are a Windows artifact; the files
+exist on disk and collect on Linux.
+
+So on Windows do **not** read `check`'s exit code as a verdict, and do not
+"fix" the reported stale entries — deleting them would break the Linux run.
+Verify the one direction that is still sound locally: every file Windows *did*
+collect appears in exactly one manifest. Nothing collected may be missing, and
+no manifest line may be duplicated.
+
+```bash
+# 1. collected file list. Two Windows gotchas: passing `-m "not live"` through
+#    `cmd.exe /c "..."` splits the argument (pytest then errors with
+#    `file or directory not found: live"`), and a collection that dies early
+#    prints no node ids at all, which downstream looks identical to a pass.
+#    Drive pytest from a helper so the argument list stays intact and the
+#    node count is printed.
+cat > /tmp/collect.py <<'PY'
+import subprocess, sys
+r = subprocess.run(
+    [sys.executable, "-m", "pytest", "tests/", "--collect-only", "-q",
+     "--no-cov", "-m", "not live", "--import-mode=importlib"],
+    capture_output=True, text=True,
+)
+files = sorted({
+    line.strip().replace("\\", "/").split("::", 1)[0]
+    for line in r.stdout.splitlines()
+    if "::" in line and line.startswith("tests")
+})
+# newline="\n" is required: Windows Python's text mode would otherwise write
+# CRLF, and every later path comparison against an LF file finds no overlap.
+with open("/tmp/collected-files.txt", "w", newline="\n") as fh:
+    fh.write("\n".join(files) + "\n")
+print("files", len(files), "rc", r.returncode)
+PY
+cmd.exe /c ".venv\Scripts\python.exe /tmp/collect.py"
+#   rc 2 with a non-zero file count is the expected Windows state
+#   (POSIX-only collection errors); rc 0 means everything collected.
+
+# 2. manifest union. `tr -d '\r'` is required: with core.autocrlf the working
+#    copy has CRLF, and a trailing \r makes every path compare unequal.
+cat ci_shards/shard-*.txt | tr -d '\r' | grep . \
+  | LC_ALL=C sort > /tmp/manifest-all.txt
+LC_ALL=C sort -u /tmp/manifest-all.txt > /tmp/manifest-uniq.txt
+
+# 3. the two sound assertions. Plain temp files, not `<(...)` process
+#    substitution — that fails on this toolchain with
+#    `/dev/fd/63: No such file or directory`.
+comm -13 /tmp/manifest-uniq.txt /tmp/collected-files.txt
+#   -> must print nothing: collected but in no manifest
+cmp -s /tmp/manifest-all.txt /tmp/manifest-uniq.txt \
+  && echo "no duplicate entry" || echo "DUPLICATE manifest entry"
+```
+
+If step 3 prints paths, add each one at its `LC_ALL=C` sorted position in the
+shard with the fewest entries (§4), then re-run. `taskiq-smoke` on the PR
+remains the authoritative verdict.
+
 ## 5. Where the exact-cover check runs
 
 Exact cover — every file the authoritative

@@ -336,9 +336,10 @@ def test_candles_fall_back_to_toss_when_store_is_empty(
     _install(monkeypatch, client)
 
     with _client(_FakeDb()) as http:
-        response = http.get("/api/v1/market/candles?market=KRX&symbol=005380&count=5")
+        response = http.get("/api/v1/market/candles?market=KRX&symbol=005380&range=1W")
 
     assert response.status_code == 200
+    assert response.json()["interval"] == "1d"
     candles = response.json()["candles"]
     assert [candle["close"] for candle in candles] == ["401000", "398500"]
     assert candles[0]["time"] < candles[1]["time"]

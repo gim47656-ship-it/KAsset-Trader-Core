@@ -53,6 +53,8 @@ from typing import TypedDict
 
 import pytest
 import pytest_asyncio
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 
 from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS
@@ -62,7 +64,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _REPO = pathlib.Path(__file__).resolve().parents[4]
 PARENT_REVISION = "20260820_rob1290_reconcile"
-HEAD_REVISION = "20260828_kasset_google_sub"
 
 _SCRATCH_PREFIX = "w5_alembic_chain_"
 
@@ -103,6 +104,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "kasset_global_runtime_state",
     "kasset_device_sessions",
     "kasset_broker_credentials",
+    "symbol_master",
 )
 
 
@@ -144,6 +146,11 @@ async def scratch_database() -> AsyncIterator[str]:
                 # Dropping its column also removes the partial unique index.
                 await connection.execute(
                     text("ALTER TABLE users DROP COLUMN google_sub")
+                )
+                # KAsset nickname aliases are later than this boundary and are
+                # already materialized by current-head metadata.
+                await connection.execute(
+                    text("ALTER TABLE instruments DROP COLUMN aliases")
                 )
                 # ROB-s257 E-2 is later than this reconstructed boundary.
                 # Current metadata already contains its nullable observation
@@ -204,6 +211,14 @@ def _alembic(*args: str, database_url: str) -> str:
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
     return completed.stdout
+
+
+def _expected_head() -> str:
+    config = Config(str(_REPO / "alembic.ini"))
+    config.set_main_option("script_location", str(_REPO / "alembic"))
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1, heads
+    return heads[0]
 
 
 async def _stamped_revision(database_url: str) -> str | None:
@@ -762,8 +777,7 @@ def test_alembic_reports_exactly_one_head() -> None:
         _alembic("heads", database_url=os.environ["DATABASE_URL"]).strip().splitlines()
     )
     heads = [line for line in output if line.strip()]
-    assert len(heads) == 1, output
-    assert heads[0].startswith(HEAD_REVISION), output
+    assert heads == [f"{_expected_head()} (head)"], output
 
 
 @pytest.mark.asyncio
@@ -771,6 +785,7 @@ async def test_the_real_chain_upgrades_downgrades_and_upgrades_again(
     scratch_database: str,
 ) -> None:
     """R9 B19 — real parent schema -> head -> parent -> head, all via the CLI."""
+    expected_head = _expected_head()
     # R23: the EXACT live set, not a subset. The previous `<=` check was
     # missing `handler_marker_order` entirely, so a constraint could vanish
     # from the migration without anything failing.
@@ -827,7 +842,7 @@ async def test_the_real_chain_upgrades_downgrades_and_upgrades_again(
         await _assert_outcome_constraint_matrix(scratch_database)
         await _assert_attempt_budget_matrix(scratch_database)
         await _assert_error_class_constraint_matrix(scratch_database)
-        assert await _stamped_revision(scratch_database) == HEAD_REVISION
+        assert await _stamped_revision(scratch_database) == expected_head
         objects = await _live_objects(scratch_database)
         live = {
             name

@@ -23,6 +23,10 @@ tests/core/test_cli.py
 tests/core/test_invest_deep_links.py
 tests/core/test_logging_config.py
 tests/core/test_normalizers.py
+tests/extensions/kasset/api/test_candles.py
+tests/extensions/kasset/api/test_market_indicators.py
+tests/extensions/kasset/api/test_market_quotes.py
+tests/extensions/kasset/api/test_orderbook.py
 tests/integration/test_paper_positions_market_filter.py
 tests/integration/test_rob279_staged_pipeline_e2e.py
 tests/jobs/test_kis_mock_reconciliation_job.py
@@ -40,6 +44,7 @@ tests/mcp_server/test_watch_events_list_recent_tool.py
 tests/mcp_server/tooling/test_crypto_live_routing.py
 tests/mcp_server/tooling/test_get_holdings_n1_residuals.py
 tests/mcp_server/tooling/test_live_order_evidence_us.py
+tests/mcp_server/tooling/test_market_index_default_batch.py
 tests/mcp_server/tooling/test_order_execution_live_routing.py
 tests/mcp_server/tooling/test_paper_execution_registration.py
 tests/mcp_server/tooling/test_toss_batch_evidence_source.py
@@ -232,6 +237,7 @@ tests/services/us_dual_paper/test_smoke_cli_preview.py
 tests/services/watch_trigger_repricing/test_gate.py
 tests/services/watch_trigger_repricing/test_invariants.py
 tests/tasks/test_kis_live_reconcile_tasks.py
+tests/tasks/test_nhplug_symbol_master_tasks.py
 tests/tasks/test_toss_live_reconcile_tasks.py
 tests/test_admin_router.py
 tests/test_alpaca_paper_fill_reconcile_smoke.py

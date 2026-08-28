@@ -19,10 +19,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+from app.services.brokers.toss.candles import TossCandleClient, fetch_toss_candles
 from app.services.brokers.toss.client import TossReadClient
+from app.services.brokers.toss.dto import TossCandlesPage
 from app.services.invest_price_fallback import TossPriceClient
 
 logger = logging.getLogger(__name__)
@@ -421,6 +424,37 @@ class TossSharedMarketData:
             future = self._daily_close_inflight.pop((symbol, boundary), None)
             if future is not None and not future.done():
                 future.set_result(close)
+
+    async def intraday_bars(self, symbol: str, *, count: int) -> list[TossDailyBar]:
+        """토스 1분봉을 오래된 순으로 돌려준다. 실패하거나 비면 빈 목록이다."""
+        if not bool(getattr(settings, "toss_api_enabled", False)):
+            return []
+        normalized = symbol.strip().upper()
+        if not normalized or count <= 0:
+            return []
+        self._reset_if_loop_changed()
+
+        try:
+            async with self._daily_close_gate:
+                client = await self._ensure_client()
+                candles = getattr(client, "candles", None)
+                if candles is None:
+                    return []
+                rows = await fetch_toss_candles(
+                    client=cast(TossCandleClient, client),
+                    symbol=normalized,
+                    interval="1m",
+                    count=count,
+                    adjusted=True,
+                    max_pages=2,
+                )
+                return _daily_bars(TossCandlesPage(candles=rows, next_before=None))
+        except Exception as exc:  # noqa: BLE001 — 분봉은 없으면 빈 목록이다
+            logger.warning(
+                "kasset toss intraday bars unavailable (%s): chart omitted",
+                type(exc).__name__,
+            )
+            return []
 
     async def daily_bars(self, symbol: str, *, count: int) -> list[TossDailyBar]:
         """토스 일봉을 오래된 순으로 돌려준다. 실패하면 빈 목록이다.

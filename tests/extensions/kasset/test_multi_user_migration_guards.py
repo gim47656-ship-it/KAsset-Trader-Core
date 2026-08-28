@@ -26,7 +26,6 @@ from app.models.base import Base
 REPO = Path(__file__).resolve().parents[3]
 PARENT_REVISION = "20260824_s257_rung_reason"
 PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
-HEAD_REVISION = "20260827_kasset_multi_user_core"
 
 _BOUNDARY_TABLES = (
     "review.ai_recommendations",
@@ -36,6 +35,7 @@ _BOUNDARY_TABLES = (
     "kasset_global_runtime_state",
     "kasset_device_sessions",
     "kasset_broker_credentials",
+    "symbol_master",
 )
 
 
@@ -104,6 +104,10 @@ async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
             # column/index are already materialized by create_all.
             await connection.execute(
                 text("ALTER TABLE users DROP COLUMN IF EXISTS google_sub")
+            )
+            # The nickname aliases migration is also later than this boundary.
+            await connection.execute(
+                text("ALTER TABLE instruments DROP COLUMN aliases")
             )
 
         stamped = _alembic(env, "stamp", PARENT_REVISION)

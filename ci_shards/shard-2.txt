@@ -10,6 +10,9 @@ tests/brokers/kis/mock_scalping_exec/test_reservation.py
 tests/brokers/kis/mock_scalping_ws/test_import_guard.py
 tests/brokers/kis/mock_scalping_ws/test_smoke_cli.py
 tests/ci/test_file_shard_plan.py
+tests/extensions/kasset/api/test_market_quote_coverage.py
+tests/extensions/kasset/api/test_market_warmup.py
+tests/extensions/kasset/api/test_token_path_allowlist.py
 tests/integration/services/test_forecast_read_window_candles.py
 tests/mcp_server/test_alpaca_paper_automated_orders.py
 tests/mcp_server/test_alpaca_paper_default_profile_gate.py
@@ -222,6 +225,7 @@ tests/services/test_market_events_user_context.py
 tests/services/test_mirror_counterfactual_execution.py
 tests/services/test_n8n_response_builder.py
 tests/services/test_news_text.py
+tests/services/test_nhplug_symbol_master_service.py
 tests/services/test_nxt_preflight.py
 tests/services/test_order_preview_session_service.py
 tests/services/test_paper_retrospective_pending.py

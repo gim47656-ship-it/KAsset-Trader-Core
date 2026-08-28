@@ -12,6 +12,10 @@ tests/brokers/kis/test_vts_order_pacer.py
 tests/core/test_config_order_proposals.py
 tests/core/test_money.py
 tests/core/test_research_pipeline_flags.py
+tests/extensions/kasset/api/test_market_index_detail.py
+tests/extensions/kasset/api/test_market_overview.py
+tests/extensions/kasset/api/test_market_stream.py
+tests/extensions/kasset/api/test_session_token_lifecycle.py
 tests/infra/test_schema_barrier.py
 tests/integration/test_screener_e2e.py
 tests/integration/test_strategy_event_db_roundtrip.py
@@ -28,6 +32,7 @@ tests/mcp_server/tooling/test_fx_pnl.py
 tests/mcp_server/tooling/test_get_holdings_news.py
 tests/mcp_server/tooling/test_live_order_evidence_upbit.py
 tests/mcp_server/tooling/test_loss_cut_place_order.py
+tests/mcp_server/tooling/test_market_index_session_lifetime.py
 tests/mcp_server/tooling/test_order_proposal_create_post_commit.py
 tests/mcp_server/tooling/test_paper_validation_registration.py
 tests/mcp_server/tooling/test_screen_stocks_snapshot_docs.py

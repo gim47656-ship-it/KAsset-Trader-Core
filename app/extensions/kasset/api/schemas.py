@@ -27,6 +27,8 @@ MarketOverviewItemStatus = Literal["available", "stale", "unavailable"]
 MarketSessionState = Literal["OPEN", "PREOPEN", "AFTER_HOURS", "CLOSED"]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
 MarketIndexRange = Literal["1W", "1M", "3M", "6M"]
+CandleRange = Literal["1D", "1W", "1M", "3M", "6M"]
+CandleInterval = Literal["1m", "1d"]
 MarketIndicatorKey = Literal[
     "VIX",
     "US10Y",
@@ -83,6 +85,7 @@ class DailyCandle(AndroidWireModel):
 
 
 class DailyCandlesResponse(AndroidWireModel):
+    interval: CandleInterval
     candles: list[DailyCandle]
 
 

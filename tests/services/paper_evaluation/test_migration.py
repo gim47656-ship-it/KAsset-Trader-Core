@@ -284,6 +284,12 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # Google login is added after this boundary. Dropping its column
             # also removes the partial unique index materialized by metadata.
             await connection.execute(text("ALTER TABLE users DROP COLUMN google_sub"))
+            # KAsset nickname aliases and the NHPLUG symbol master are also
+            # later than this boundary and already present in current metadata.
+            await connection.execute(
+                text("ALTER TABLE instruments DROP COLUMN aliases")
+            )
+            await connection.execute(text("DROP TABLE symbol_master"))
 
         env = {**os.environ, "DATABASE_URL": target_url_text}
 
