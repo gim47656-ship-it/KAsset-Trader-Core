@@ -136,6 +136,26 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # 오리진 직접 TLS 엣지. Cloudflare 프록시를 벗어나면 오리진이 스스로
+  # 인증서를 제시해야 한다. Caddyfile은 deploy/kasset/Caddyfile 공용본을 쓴다.
+  # KASSET_DOMAIN 은 쉼표로 여러 호스트를 넣을 수 있다(전환 중 병행 운용).
+  caddy:
+    image: caddy:2.11.4-alpine
+    volumes:
+      - ./deploy/kasset/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      KASSET_DOMAIN: ${KASSET_DOMAIN:?KASSET_DOMAIN must be set}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL must be set}
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    logging: *default-logging
+    restart: unless-stopped
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", "${TUNNEL_TOKEN}"]
@@ -147,3 +167,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  caddy_data:
+  caddy_config:
