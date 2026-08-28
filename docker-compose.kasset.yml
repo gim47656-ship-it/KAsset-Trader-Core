@@ -1,0 +1,141 @@
+name: kasset-trader
+services:
+  db:
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: kasset
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: kasset
+    volumes:
+      - postgres_data:/home/postgres/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kasset -d kasset"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    image: kasset-trader-core:76923cf
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file:
+      - .env.kasset
+      - .env.nhplug-mock.native
+    volumes:
+      - /root/.nhplug:/root/.nhplug
+      - /usr/local/bin/codex:/usr/local/bin/codex:ro
+      - /usr/local/bin/codex-code-mode-host:/usr/local/bin/codex-code-mode-host:ro
+      - /opt/kasset-codex:/var/lib/kasset-codex
+      - ./research_contracts:/app/research_contracts:ro
+      - ./research:/app/research:ro
+    environment:
+      CODEX_HOME: /var/lib/kasset-codex
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  mcp:
+    image: kasset-trader-core:76923cf
+    env_file:
+      - .env.kasset
+    environment:
+      MCP_TYPE: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8768"
+      MCP_PROFILE: analysis_readonly
+      MCP_AUTH_TOKEN: ${MCP_ANALYSIS_AUTH_TOKEN}
+    ports:
+      - "127.0.0.1:8768:8768"
+    command: ["python", "-m", "app.mcp_server.main"]
+    volumes:
+      - ./research_contracts:/app/research_contracts:ro
+      - ./research:/app/research:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migration:
+    image: kasset-trader-core:76923cf
+    env_file:
+      - .env.kasset
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["migration"]
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.kasset:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  worker:
+    image: kasset-trader-core:76923cf
+    env_file:
+      - .env.kasset
+      - .env.nhplug-mock.native
+    command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", "--workers", "1"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  scheduler:
+    image: kasset-trader-core:76923cf
+    env_file:
+      - .env.kasset
+      - .env.nhplug-mock.native
+    command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", "${TUNNEL_TOKEN}"]
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
