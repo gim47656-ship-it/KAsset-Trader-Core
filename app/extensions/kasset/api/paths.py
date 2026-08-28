@@ -18,15 +18,21 @@ _EXACT_PATHS = frozenset(
         "/api/v1/positions",
         "/api/v1/market/quote",
         "/api/v1/market/symbols",
+        "/api/v1/instruments/search",
         "/api/v1/orders",
         "/api/v1/orders/preview",
         "/api/v1/fills",
         "/api/v1/risk/policy",
         "/api/v1/ai/status",
         "/api/v1/ai/briefing",
+        "/api/v1/watchlist",
     }
 )
-_DYNAMIC_PREFIXES = ("/api/v1/brokers/", "/api/v1/orders/")
+_DYNAMIC_PREFIXES = (
+    "/api/v1/brokers/",
+    "/api/v1/orders/",
+    "/api/v1/watchlist/",
+)
 
 
 def is_android_compat_path(path: str) -> bool:

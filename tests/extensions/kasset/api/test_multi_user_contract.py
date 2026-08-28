@@ -525,6 +525,9 @@ async def test_kasset_token_is_scoped_to_mobile_and_recommendation_paths(
             "/api/v1/ai/recommendations/rec-1/decision",
             "/api/v1/orders",
             "/api/v1/system/status",
+            "/api/v1/watchlist",
+            "/api/v1/watchlist/005930",
+            "/api/v1/instruments/search",
         ):
             user = await get_current_user(
                 tokens.access_token, db_session, request=_http_request(allowed)

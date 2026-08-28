@@ -56,13 +56,19 @@ from app.extensions.kasset.api.schemas import (
     DatabaseStatus,
     GoogleLoginRequest,
     HealthResponse,
+    InstrumentSearchResponse,
     LoginRequest,
     RefreshRequest,
     RegisterRequest,
     SessionTokens,
     SystemBrokerStatus,
     SystemStatus,
+    WatchlistCreateRequest,
+    WatchlistItem,
+    WatchlistMarket,
+    WatchlistResponse,
 )
+from app.extensions.kasset.api.watchlist import watchlist_service
 from app.models.trading import UserRole
 
 public_router = APIRouter(tags=["kasset-android"])
@@ -271,6 +277,64 @@ async def set_trading_mode(
     _require_trader(session)
     await runtime_state.set_trading_mode(db, session.user.id, mode=request.mode)
     return await _build_system_status(db, session.user.id)
+
+
+@router.get("/watchlist", response_model=WatchlistResponse)
+async def list_watchlist(
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WatchlistResponse:
+    return await watchlist_service.list_items(db, session.user.id)
+
+
+@router.post(
+    "/watchlist",
+    response_model=WatchlistItem,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_watchlist_item(
+    request: WatchlistCreateRequest,
+    response: Response,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WatchlistItem:
+    _require_trader(session)
+    item, created = await watchlist_service.add_item(
+        db,
+        session.user.id,
+        symbol=request.symbol,
+        market=request.market,
+    )
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return item
+
+
+@router.delete("/watchlist/{symbol}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_watchlist_item(
+    symbol: str,
+    market: WatchlistMarket,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    _require_trader(session)
+    await watchlist_service.remove_item(
+        db,
+        session.user.id,
+        symbol=symbol,
+        market=market,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/instruments/search", response_model=InstrumentSearchResponse)
+async def search_instruments(
+    q: Annotated[str, Query(min_length=1, max_length=100)],
+    market: WatchlistMarket,
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InstrumentSearchResponse:
+    return await watchlist_service.search_instruments(db, query=q, market=market)
 
 
 @router.get("/account/balance", response_model=Balance)

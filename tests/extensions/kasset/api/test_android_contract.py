@@ -92,6 +92,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/positions": {"get"},
         "/api/v1/market/quote": {"get"},
         "/api/v1/market/symbols": {"get"},
+        "/api/v1/instruments/search": {"get"},
         "/api/v1/orders": {"get", "post"},
         "/api/v1/orders/preview": {"post"},
         "/api/v1/orders/{order_id}/cancel": {"post"},
@@ -100,6 +101,8 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/risk/policy": {"get", "put"},
         "/api/v1/ai/status": {"get"},
         "/api/v1/ai/briefing": {"get"},
+        "/api/v1/watchlist": {"get", "post"},
+        "/api/v1/watchlist/{symbol}": {"delete"},
     }
     assert "/api/v1/auth/pair" not in paths
     for path, methods in required.items():

@@ -39,67 +39,109 @@ async def kasset_market_events_run() -> dict[str, object]:
         }
 
     async with _session() as session:
-        owner_ids = list(
-            (
+        owner_ids = [
+            int(owner_id)
+            for owner_id in (
                 await session.scalars(
                     select(User.id)
                     .where(User.role == UserRole.trader, User.is_active.is_(True))
                     .order_by(User.id)
-                    .limit(2)
                 )
             ).all()
-        )
-        if len(owner_ids) != 1:
-            reason = "trader_not_found" if not owner_ids else "multiple_traders"
-            return {
-                "enabled": True,
-                "owner_user_id": None,
-                "scanned": 0,
-                "results": [],
-                "skipped": reason,
-            }
+        ]
+    if not owner_ids:
+        return {
+            "enabled": True,
+            "owners": [],
+            "scanned": 0,
+            "skipped": "trader_not_found",
+        }
 
-        owner_user_id = int(owner_ids[0])
-        watch_items = await _active_watch_items(session, owner_user_id)
+    from app.extensions.kasset.ai.factory import build_model_router
 
-        from app.extensions.kasset.ai.factory import build_model_router
+    try:
+        router = build_model_router()
+    except AiProviderUnavailable:
+        return {
+            "enabled": True,
+            "owners": [
+                {
+                    "ownerUserId": owner_user_id,
+                    "scanned": 0,
+                    "results": [],
+                    "skipped": "ai_unavailable",
+                }
+                for owner_user_id in owner_ids
+            ],
+            "scanned": 0,
+            "skipped": "ai_unavailable",
+        }
 
-        try:
-            router = build_model_router()
-        except AiProviderUnavailable:
-            return {
-                "enabled": True,
-                "owner_user_id": owner_user_id,
-                "scanned": 0,
-                "results": [],
-                "skipped": "ai_unavailable",
-            }
-
-        pipeline = MarketEventPipeline(session, router, _utc_now)
+    owners: list[dict[str, object]] = []
+    total_scanned = 0
+    for owner_user_id in owner_ids:
         results: list[dict[str, object]] = []
-        for symbol, instrument_type, exchange_code in watch_items:
-            market = _scan_market(instrument_type, exchange_code)
-            if market is None:
-                continue
-            try:
-                outcome = await pipeline.run_symbol_scan(owner_user_id, market, symbol)
-            except ValueError:
-                # One unsupported venue must not abort the remaining scans.
-                results.append(
-                    {
-                        "symbol": symbol,
-                        "market": market,
-                        "skipped": "unsupported_market",
-                    }
-                )
-                continue
-            results.append({"symbol": symbol, "market": market, **outcome})
+        try:
+            async with _session() as session:
+                watch_items = await _active_watch_items(session, owner_user_id)
+                pipeline = MarketEventPipeline(session, router, _utc_now)
+                for symbol, instrument_type, exchange_code in watch_items:
+                    market = _scan_market(instrument_type, exchange_code)
+                    if market is None:
+                        continue
+                    try:
+                        outcome = await pipeline.run_symbol_scan(
+                            owner_user_id,
+                            market,
+                            symbol,
+                        )
+                    except ValueError:
+                        # One unsupported venue must not abort the remaining scans.
+                        results.append(
+                            {
+                                "symbol": symbol,
+                                "market": market,
+                                "skipped": "unsupported_market",
+                            }
+                        )
+                    except Exception as exc:
+                        # Provider or data failures stay isolated to this scan.
+                        results.append(
+                            {
+                                "symbol": symbol,
+                                "market": market,
+                                "skipped": "scan_failed",
+                                "errorClass": type(exc).__name__,
+                            }
+                        )
+                    else:
+                        results.append({"symbol": symbol, "market": market, **outcome})
+        except Exception as exc:
+            owners.append(
+                {
+                    "ownerUserId": owner_user_id,
+                    "scanned": 0,
+                    "results": [],
+                    "skipped": "owner_scan_failed",
+                    "errorClass": type(exc).__name__,
+                }
+            )
+            continue
+
+        scanned = len(results)
+        total_scanned += scanned
+        owners.append(
+            {
+                "ownerUserId": owner_user_id,
+                "scanned": scanned,
+                "results": results,
+            }
+        )
 
     return {
         "enabled": True,
-        "owner_user_id": owner_user_id,
-        "scanned": len(results),
-        "results": results,
+        "owners": owners,
+        "scanned": total_scanned,
     }
 
 

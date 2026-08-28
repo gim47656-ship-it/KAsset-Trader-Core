@@ -25,6 +25,7 @@ tests/extensions/kasset/api/test_google_auth.py
 tests/extensions/kasset/api/test_multi_user_contract.py
 tests/extensions/kasset/api/test_paper_regression.py
 tests/extensions/kasset/api/test_secret_security.py
+tests/extensions/kasset/api/test_watchlist.py
 tests/extensions/kasset/automation/test_backtest.py
 tests/extensions/kasset/automation/test_consumer.py
 tests/extensions/kasset/automation/test_event_detector.py

@@ -1,5 +1,7 @@
 """Wire schemas matching Android TraderApi JSON names."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.models.trading import UserRole
@@ -16,6 +18,34 @@ class AndroidWireModel(BaseModel):
         populate_by_name=True,
         extra="forbid",
     )
+
+WatchlistMarket = Literal["KRX", "US", "CRYPTO"]
+
+
+class WatchlistCreateRequest(AndroidWireModel):
+    symbol: str = Field(min_length=1, max_length=64)
+    market: WatchlistMarket
+
+
+class WatchlistItem(AndroidWireModel):
+    symbol: str
+    name: str
+    market: WatchlistMarket
+    instrument_id: int
+
+
+class WatchlistResponse(AndroidWireModel):
+    items: list[WatchlistItem]
+
+
+class InstrumentSearchItem(AndroidWireModel):
+    symbol: str
+    name: str
+    market: WatchlistMarket
+
+
+class InstrumentSearchResponse(AndroidWireModel):
+    items: list[InstrumentSearchItem]
 
 
 class RegisterRequest(AndroidWireModel):
