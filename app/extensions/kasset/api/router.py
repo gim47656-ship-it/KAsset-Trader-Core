@@ -24,7 +24,7 @@ from app.extensions.kasset.api.auth import (
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.nh_adapter import nh_adapter
+from app.extensions.kasset.api.nh_adapter import nh_adapter, nh_market_data
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
@@ -389,6 +389,14 @@ async def market_quote(
     if broker.strip().upper() == "NH":
         return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
+    if market.strip().upper() in {"KRX", "KR"}:
+        # 시세는 계좌 연동과 무관한 공용 데이터다. 서버 공용 NH PLUG 채널을
+        # 우선 쓰고, 불가하면 저장 캔들 기반 PAPER 시세로 강등한다.
+        try:
+            shared = await nh_market_data.quote(market=market, symbol=symbol)
+            return shared.model_copy(update={"broker": "PAPER"})
+        except MobileApiError:
+            pass
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
 
 

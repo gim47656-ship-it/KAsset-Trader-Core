@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -167,38 +168,8 @@ class NHAndroidAdapter:
                 "NH_QUOTE_FAILED",
                 "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
             ) from err
-        row = _object_block(payload, "Output_0")
-        response_symbol = _required_string(row, "iem_cd")
-        if response_symbol != normalized_symbol:
-            raise MobileApiError(
-                502,
-                "NH_RESPONSE_INVALID",
-                "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
-            )
-        price = Decimal(_decimal_string(row, "stck_prpr"))
-        change = _signed_change(
-            Decimal(_decimal_string(row, "prdy_vrss")),
-            row.get("prdy_vrss_sign"),
-        )
-        change_rate = _signed_change(
-            Decimal(_decimal_string(row, "prdy_ctrt")),
-            row.get("prdy_vrss_sign"),
-        )
-        name_value = row.get("iem_nm")
-        name = name_value.strip() if isinstance(name_value, str) else None
-        as_of = iso_z()
-        return Quote(
-            broker="NH",
-            market=normalized_market,
-            symbol=response_symbol,
-            name=name or None,
-            currency="KRW",
-            price=format(price, "f"),
-            previous_close=format(price - change, "f"),
-            change_amount=format(change, "f"),
-            change_rate=format(change_rate, "f"),
-            as_of=as_of,
-            source="NH_PLUG_MOCK",
+        return _quote_from_payload(
+            payload, market=normalized_market, symbol=normalized_symbol
         )
 
     async def prepare_read(
@@ -282,6 +253,130 @@ class NHAndroidAdapter:
                 auth_client,
             )
             return auth_client
+
+
+class NHSharedMarketData:
+    """계좌 연동과 무관한 서버 공용 KRX 시세 채널.
+
+    사용자별 볼트 자격은 계좌·주문에만 쓰고, 시세는 서버 env 자격
+    (NHPLUG_APP_KEY/SECRET + NHPLUG_MOCK_ACCOUNT_NO)으로 모두에게 제공한다.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._cached: NHPlugMockClient | None = None
+
+    async def _client(self) -> NHPlugMockClient:
+        if not mock_enabled():
+            raise MobileApiError(
+                409,
+                "BROKER_NOT_CONNECTED",
+                "NH PLUG 모의투자 조회 기능이 서버에서 비활성화되어 있습니다.",
+            )
+        app_key = os.environ.get("NHPLUG_APP_KEY", "").strip()
+        app_secret = os.environ.get("NHPLUG_APP_SECRET", "").strip()
+        account_no = os.environ.get("NHPLUG_MOCK_ACCOUNT_NO", "").strip()
+        if not (app_key and app_secret and account_no):
+            raise MobileApiError(
+                409,
+                "BROKER_NOT_CONNECTED",
+                "서버 공용 NH PLUG 시세 자격이 설정되지 않았습니다.",
+            )
+        async with self._lock:
+            if self._cached is not None:
+                return self._cached
+            try:
+                auth_client = NHPlugAuthClient(
+                    app_key=app_key, app_secret=app_secret
+                )
+                client = NHPlugMockClient(
+                    app_key=app_key,
+                    app_secret=app_secret,
+                    token_provider=auth_client.get_access_token,
+                )
+                payload = await client.list_accounts()
+                allowlist = MockAccountAllowlist.from_acctinfo_response(
+                    payload=payload,
+                    configured_account_no=account_no,
+                )
+                client.bind_account_allowlist(allowlist)
+            except (NHPlugMockError, httpx.HTTPError) as err:
+                raise MobileApiError(
+                    502,
+                    "NH_CONNECTION_FAILED",
+                    "NH PLUG 모의투자 서버 연결을 확인하지 못했습니다.",
+                ) from err
+            self._cached = client
+            return client
+
+    async def quote(self, *, market: str, symbol: str) -> Quote:
+        normalized_market = market.strip().upper()
+        normalized_symbol = symbol.strip()
+        if (
+            normalized_market != "KRX"
+            or _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is None
+        ):
+            raise MobileApiError(
+                422,
+                "VALIDATION_ERROR",
+                "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
+            )
+        client = await self._client()
+        try:
+            payload = await client.fetch_quote(
+                market=normalized_market,
+                symbol=normalized_symbol,
+            )
+        except (NHPlugMockError, httpx.HTTPError) as err:
+            self._cached = None
+            raise MobileApiError(
+                502,
+                "NH_QUOTE_FAILED",
+                "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
+            ) from err
+        return _quote_from_payload(
+            payload, market=normalized_market, symbol=normalized_symbol
+        )
+
+
+def _quote_from_payload(
+    payload: dict[str, Any], *, market: str, symbol: str
+) -> Quote:
+    row = _object_block(payload, "Output_0")
+    response_symbol = _required_string(row, "iem_cd")
+    if response_symbol != symbol:
+        raise MobileApiError(
+            502,
+            "NH_RESPONSE_INVALID",
+            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
+        )
+    price = Decimal(_decimal_string(row, "stck_prpr"))
+    change = _signed_change(
+        Decimal(_decimal_string(row, "prdy_vrss")),
+        row.get("prdy_vrss_sign"),
+    )
+    change_rate = _signed_change(
+        Decimal(_decimal_string(row, "prdy_ctrt")),
+        row.get("prdy_vrss_sign"),
+    )
+    name_value = row.get("iem_nm")
+    name = name_value.strip() if isinstance(name_value, str) else None
+    return Quote(
+        broker="NH",
+        market=market,
+        symbol=response_symbol,
+        name=name or None,
+        currency="KRW",
+        price=format(price, "f"),
+        previous_close=format(price - change, "f"),
+        change_amount=format(change, "f"),
+        change_rate=format(change_rate, "f"),
+        as_of=iso_z(),
+        source="NH_PLUG_MOCK",
+    )
+
+
+nh_market_data = NHSharedMarketData()
 
 
 def _object_block(payload: dict[str, Any], name: str) -> dict[str, Any]:
