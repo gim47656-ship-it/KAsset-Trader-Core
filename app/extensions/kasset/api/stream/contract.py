@@ -20,6 +20,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
 
+from pydantic import Field
+
 from app.extensions.kasset.api.krx_quotes import build_quote
 from app.extensions.kasset.api.paper import decimal_text, iso_z
 from app.extensions.kasset.api.paper_schemas import Quote
@@ -72,10 +74,10 @@ STATUS_MAILBOX_KEY: Final[str] = "\x00status"
 
 
 class StreamOrderbookLevel(AndroidWireModel):
-    """호가 한 단. REST `OrderbookLevel`과 같은 필드 이름·표기다."""
+    """호가 한 단. REST `OrderbookLevel`과 같은 필드 이름·decimal 표기다."""
 
-    price: str
-    volume: str
+    price: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+    volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
 
 
 class StreamOrderbook(AndroidWireModel):

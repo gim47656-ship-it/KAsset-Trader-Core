@@ -155,38 +155,63 @@ async def _serve(
     session: StreamSession,
     sender: asyncio.Task[None],
 ) -> None:
-    while True:
-        if sender.done():
-            # 송신 루프가 죽었다. 느린 클라이언트가 유일한 정상 원인이다.
-            await _close_for_sender(websocket, sender)
-            return
-        try:
-            raw = await websocket.receive_text()
-        except WebSocketDisconnect:
-            return
-        except RuntimeError:
-            # 이미 닫힌 소켓에서 읽었다. 정상 종료로 취급한다.
-            return
+    receive_task = asyncio.create_task(
+        websocket.receive_text(), name="kasset-stream-receive"
+    )
+    try:
+        while True:
+            done, _pending = await asyncio.wait(
+                {receive_task, sender}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if sender in done:
+                # 수신 전용 클라이언트도 sender 타임아웃을 즉시 감지한다.
+                # receive_text()가 끝날 때까지 기다리면 좀비 세션과 구독 수요가
+                # 무기한 남으므로, 수신 태스크부터 취소하고 소켓을 닫는다.
+                receive_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await receive_task
+                await _close_for_sender(websocket, sender)
+                return
 
-        frame = contract.parse_client_frame(raw)
-        if isinstance(frame, contract.SubscribeRequest):
-            accepted, rejected = await runtime.declare(session, frame.topics)
-            session.push_control(
-                contract.subscribed_message(accepted=accepted, rejected=rejected)
+            try:
+                raw = receive_task.result()
+            except WebSocketDisconnect:
+                return
+            except RuntimeError:
+                # 이미 닫힌 소켓에서 읽었다. 정상 종료로 취급한다.
+                return
+
+            # 다음 수신은 지금 등록한다. 클라이언트가 연달아 보낸 프레임은
+            # ASGI 서버가 버퍼링하고, 종료 시 finally가 이 태스크를 회수한다.
+            receive_task = asyncio.create_task(
+                websocket.receive_text(), name="kasset-stream-receive"
             )
-            continue
-        if isinstance(frame, contract.PingRequest):
-            session.push_control(contract.pong_message())
-            continue
-        if isinstance(frame, contract.AuthRequest):
-            # 이미 인증된 연결이다. 재인증 경로를 만들지 않는다.
-            session.push_control(
-                contract.error_message(
-                    contract.ERROR_UNKNOWN_TYPE, "이미 인증된 연결입니다."
+            frame = contract.parse_client_frame(raw)
+            if isinstance(frame, contract.SubscribeRequest):
+                accepted, rejected = await runtime.declare(session, frame.topics)
+                session.push_control(
+                    contract.subscribed_message(accepted=accepted, rejected=rejected)
                 )
-            )
-            continue
-        session.push_control(contract.error_message(frame.code, frame.message))
+                continue
+            if isinstance(frame, contract.PingRequest):
+                session.push_control(contract.pong_message())
+                continue
+            if isinstance(frame, contract.AuthRequest):
+                # 이미 인증된 연결이다. 재인증 경로를 만들지 않는다.
+                session.push_control(
+                    contract.error_message(
+                        contract.ERROR_UNKNOWN_TYPE, "이미 인증된 연결입니다."
+                    )
+                )
+                continue
+            session.push_control(contract.error_message(frame.code, frame.message))
+    finally:
+        # 연결 종료·파싱 오류·런타임 오류 어느 경로에서도 receive task를 남기지
+        # 않는다. 바깥 finally는 세션 등록을 해제해 상향 수요까지 회수한다.
+        if not receive_task.done():
+            receive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await receive_task
 
 
 async def _close_for_sender(websocket: WebSocket, sender: asyncio.Task[None]) -> None:

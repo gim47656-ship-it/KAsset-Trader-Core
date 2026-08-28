@@ -77,6 +77,9 @@ DECLARE_ACK_TIMEOUT_SECONDS: Final[float] = 5.0
 # 공급자가 거부한 토픽을 다시 시도해 볼 때까지의 시간. 종목 마스터가 갱신되면
 # 풀릴 수 있으므로 영구 차단하지 않는다.
 REJECT_COOLDOWN_SECONDS: Final[float] = 1800.0
+# 평문 `PING` 뒤 아무 상향 프레임도 받지 못한 연속 주기 상한. 첫 PING 뒤
+# 약 120초(60초 × 2) 동안 무응답이면 half-open 연결로 판정한다.
+MAX_MISSED_KEEPALIVES: Final[int] = 2
 
 # 강등 사유(하향 `status.reason` 으로 그대로 나간다).
 REASON_UNAVAILABLE: Final[str] = "UPSTREAM_UNAVAILABLE"
@@ -115,6 +118,10 @@ class _Blocked(RuntimeError):
     """엣지 차단·허용 IP·동시 연결 한도. 긴 냉각이 유일한 대응이다."""
 
 
+class _StaleConnection(RuntimeError):
+    """PING에 응답하지 않는 half-open 연결. 즉시 강등 후 재연결한다."""
+
+
 class TossUpstreamOwner:
     """리스를 잡은 프로세스에서만 토스 WS 연결을 열고 틱을 팬아웃한다."""
 
@@ -132,6 +139,7 @@ class TossUpstreamOwner:
         reconcile_interval_seconds: float = RECONCILE_INTERVAL_SECONDS,
         recv_poll_seconds: float = RECV_POLL_SECONDS,
         keepalive_interval_seconds: float = protocol.KEEPALIVE_INTERVAL_SECONDS,
+        max_missed_keepalives: int = MAX_MISSED_KEEPALIVES,
         renew_interval_seconds: float = bus_module.OWNER_RENEW_SECONDS,
         capacity: int = MAX_UPSTREAM_TOPICS,
         backoff_base_seconds: float = BACKOFF_BASE_SECONDS,
@@ -149,6 +157,7 @@ class TossUpstreamOwner:
         self._reconcile_interval_seconds = reconcile_interval_seconds
         self._recv_poll_seconds = recv_poll_seconds
         self._keepalive_interval_seconds = keepalive_interval_seconds
+        self._max_missed_keepalives = max(1, max_missed_keepalives)
         self._renew_interval_seconds = renew_interval_seconds
         self._capacity = max(1, min(capacity, MAX_UPSTREAM_TOPICS))
         self._backoff_base_seconds = max(backoff_base_seconds, 0.0)
@@ -213,6 +222,13 @@ class TossUpstreamOwner:
             except _Blocked as exc:
                 logger.warning("toss stream upstream blocked (%s)", exc)
                 blocked = True
+            except _StaleConnection:
+                # 표준 WS ping을 끈 대신 평문 PING 왕복 하나로 dead-peer를
+                # 판정한다. 앱이 즉시 REST 폴링으로 강등되도록 상태도 바로 내린다.
+                logger.warning(
+                    "toss stream keepalive unanswered: reconnecting upstream"
+                )
+                await self._publish_state(live=False, reason=REASON_UNAVAILABLE)
             except UpstreamHandshakeError as exc:
                 blocked = self._on_handshake_failure(exc)
             except Exception as exc:  # noqa: BLE001 — 전송 실패는 재연결로 수습한다
@@ -279,6 +295,8 @@ class TossUpstreamOwner:
         now = self._clock()
         next_renew = now + self._renew_interval_seconds
         next_ping = now + self._keepalive_interval_seconds
+        keepalive_pending = False
+        missed_keepalives = 0
         declare_blocked_until = 0.0
 
         async with self._connector(token) as connection:
@@ -294,9 +312,17 @@ class TossUpstreamOwner:
                         return produced
                     next_renew = now + self._renew_interval_seconds
                 if now >= next_ping:
+                    # 이전 PING 이후 pong 또는 데이터가 한 건도 없었다. 새 PING을
+                    # 보내기 전에 실패 횟수를 올려, 약 interval × threshold 동안
+                    # 무응답인 연결만 half-open으로 판정한다.
+                    if keepalive_pending:
+                        missed_keepalives += 1
+                        if missed_keepalives >= self._max_missed_keepalives:
+                            raise _StaleConnection
                     # 명세: 클라이언트로부터의 수신이 180초 없으면 서버가 끊는다.
                     # 서버가 보내는 데이터는 그 타이머를 리셋하지 않는다.
                     await connection.send(protocol.PING_TEXT)
+                    keepalive_pending = True
                     next_ping = now + self._keepalive_interval_seconds
 
                 try:
@@ -305,6 +331,10 @@ class TossUpstreamOwner:
                     )
                 except TimeoutError:
                     continue
+                # pong뿐 아니라 임의의 상향 프레임도 peer가 살아 있다는 증거다.
+                # 파싱할 수 없는 프레임이라도 TCP 왕복은 확인되었으므로 reset한다.
+                keepalive_pending = False
+                missed_keepalives = 0
 
                 frame = protocol.parse_inbound(raw)
                 if frame is None or isinstance(frame, protocol.PongFrame):
@@ -319,7 +349,13 @@ class TossUpstreamOwner:
                         # 배포 신호이므로 실패로 세지 않고 즉시 재연결한다.
                         return True
                     if outcome == "redeclare":
-                        next_reconcile = 0.0
+                        # `too-many-topics`가 연속으로 와도 선언 빈도 5회/초를
+                        # 태우지 않는다. 기존 재조정 주기 또는 명세상 안전한 최소
+                        # 간격(0.5초) 중 긴 쪽을 반드시 기다린다.
+                        next_reconcile = self._clock() + max(
+                            self._reconcile_interval_seconds,
+                            protocol.DECLARE_MIN_INTERVAL_SECONDS,
+                        )
                     elif outcome == "throttle":
                         declare_blocked_until = (
                             self._clock() + protocol.RATE_LIMIT_BACKOFF_SECONDS

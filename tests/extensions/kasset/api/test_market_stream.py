@@ -31,6 +31,7 @@ import fakeredis.aioredis
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from app.extensions.kasset.api import krx_quotes
@@ -43,7 +44,7 @@ from app.extensions.kasset.api.paths import (
 )
 from app.extensions.kasset.api.stream import contract, route
 from app.extensions.kasset.api.stream import toss_protocol as protocol
-from app.extensions.kasset.api.stream.bus import StreamBus
+from app.extensions.kasset.api.stream.bus import OWNER_KEY, StreamBus
 from app.extensions.kasset.api.stream.runtime import (
     MarketStreamRuntime,
     get_stream_runtime,
@@ -511,6 +512,10 @@ async def test_too_many_topics_shrinks_capacity_and_redeclares() -> None:
             }
         )
         await _await_until(lambda: owner.capacity == 2)
+        # 용량을 줄였더라도 즉시 연속 선언하지 않는다. full-replace 선언이 계속
+        # 거부되는 조건에서 공급자 한도(5회/초)를 태우는 회귀를 막는다.
+        await asyncio.sleep(protocol.DECLARE_MIN_INTERVAL_SECONDS / 2)
+        assert len(connection.declares()) == 1
         await _await_until(lambda: len(connection.declares()) >= 2)
         # 구독자가 가장 적은 종목이 빠진다.
         assert connection.declared_codes(-1) == {"trade:us:AAA", "trade:us:BBB"}
@@ -671,9 +676,129 @@ async def test_owner_sends_plain_text_ping_for_keepalive() -> None:
     assert "PING" in connection.sent
 
 
+@pytest.mark.asyncio
+async def test_unanswered_keepalives_degrade_and_reconnect_the_upstream() -> None:
+    """half-open 연결이 리스를 쥔 채 시세를 무기한 멈추면 안 된다."""
+
+    bus = _FakeBus()
+    bus.aggregate = {"quote:US:TQQQ": 1}
+    connection = _ScriptedConnection()
+    owner = _owner(
+        bus,
+        connection,
+        keepalive_interval_seconds=0.01,
+        max_missed_keepalives=2,
+        backoff_base_seconds=0.001,
+        backoff_max_seconds=0.001,
+    )
+
+    async with _running(owner):
+        # 첫 연결은 PING 2회에 아무 상향 프레임도 받지 못해 죽은 것으로
+        # 판정된다. 리스를 놓고 백오프한 뒤 두 번째 연결을 연다.
+        await _await_until(lambda: owner.connect_attempts >= 2)
+        assert connection.sent.count(protocol.PING_TEXT) >= 2
+        assert bus.state is not None
+        assert bus.state["live"] is False
+        assert bus.state["reason"] == "UPSTREAM_UNAVAILABLE"
+        assert bus.released >= 1
+
+
+@pytest.mark.asyncio
+async def test_pong_resets_the_missed_keepalive_counter() -> None:
+    """매 PING에 pong이 오면 같은 연결과 리스를 계속 유지한다."""
+
+    bus = _FakeBus()
+    bus.aggregate = {"quote:US:TQQQ": 1}
+    connection = _ScriptedConnection()
+    owner = _owner(
+        bus,
+        connection,
+        keepalive_interval_seconds=0.01,
+        max_missed_keepalives=2,
+    )
+
+    async with _running(owner):
+        for expected in range(1, 6):
+            await _await_until(
+                lambda expected=expected: (
+                    connection.sent.count(protocol.PING_TEXT) >= expected
+                )
+            )
+            connection.push({"type": "pong"})
+        await asyncio.sleep(0.005)
+        assert owner.connect_attempts == 1
+
+
 # --------------------------------------------------------------------------- #
 # Redis 조정 계층
 # --------------------------------------------------------------------------- #
+
+
+class _PauseBeforeExecutePipeline:
+    """WATCH 뒤 경쟁자가 키를 바꿀 때까지 EXEC를 멈추는 실제 pipeline 래퍼."""
+
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        execute_started: asyncio.Event,
+        allow_execute: asyncio.Event,
+    ) -> None:
+        self._inner = inner
+        self._execute_started = execute_started
+        self._allow_execute = allow_execute
+
+    async def __aenter__(self):
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: object):
+        return await self._inner.__aexit__(*args)
+
+    async def watch(self, key: str) -> None:
+        await self._inner.watch(key)
+
+    async def get(self, key: str):
+        return await self._inner.get(key)
+
+    async def unwatch(self) -> None:
+        await self._inner.unwatch()
+
+    def multi(self) -> None:
+        self._inner.multi()
+
+    def pexpire(self, key: str, milliseconds: int) -> None:
+        self._inner.pexpire(key, milliseconds)
+
+    def delete(self, key: str) -> None:
+        self._inner.delete(key)
+
+    async def execute(self):
+        self._execute_started.set()
+        await self._allow_execute.wait()
+        return await self._inner.execute()
+
+
+class _PausedPipelineRedis:
+    """Redis 명령은 실제 fakeredis, pipeline EXEC 시점만 테스트가 제어한다."""
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        execute_started: asyncio.Event,
+        allow_execute: asyncio.Event,
+    ) -> None:
+        self._client = client
+        self._execute_started = execute_started
+        self._allow_execute = allow_execute
+
+    def pipeline(self):
+        return _PauseBeforeExecutePipeline(
+            self._client.pipeline(),
+            execute_started=self._execute_started,
+            allow_execute=self._allow_execute,
+        )
 
 
 @pytest.mark.asyncio
@@ -691,6 +816,35 @@ async def test_only_one_process_can_hold_the_upstream_lease() -> None:
 
     await first.release_owner_lease()
     assert await second.acquire_owner_lease() is True
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_loses_a_real_watch_multi_race() -> None:
+    """WATCH와 EXEC 사이 소유권이 바뀌면 WatchError를 False로 닫아야 한다."""
+
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    await client.set(OWNER_KEY, "proc-a", px=15_000)
+    execute_started = asyncio.Event()
+    allow_execute = asyncio.Event()
+    paused_client = _PausedPipelineRedis(
+        client,
+        execute_started=execute_started,
+        allow_execute=allow_execute,
+    )
+    owner = StreamBus(  # type: ignore[arg-type]
+        redis_client=paused_client, instance_id="proc-a"
+    )
+
+    renewal = asyncio.create_task(owner.renew_owner_lease())
+    await asyncio.wait_for(execute_started.wait(), timeout=0.5)
+
+    # WATCH가 잡힌 뒤 다른 프로세스가 소유권을 가져간다. 실제 fakeredis
+    # transaction은 EXEC에서 WatchError를 내고, StreamBus가 그 분기를 닫는다.
+    await client.set(OWNER_KEY, "proc-b", px=15_000)
+    allow_execute.set()
+
+    assert await asyncio.wait_for(renewal, timeout=0.5) is False
+    assert await client.get(OWNER_KEY) == "proc-b"
 
 
 @pytest.mark.asyncio
@@ -961,6 +1115,29 @@ def test_stream_orderbook_payload_matches_the_rest_orderbook_field_names() -> No
     assert payload["ready"] is True
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("price", "-1"),
+        ("price", "NaN"),
+        ("price", "1e3"),
+        ("volume", "-1"),
+        ("volume", "NaN"),
+        ("volume", "1e3"),
+    ],
+)
+def test_stream_orderbook_level_rejects_non_rest_decimal_notation(
+    field: str, value: str
+) -> None:
+    """REST와 스트림 호가는 같은 decimal 문자열 표기만 허용한다."""
+
+    payload = {"price": "72100.50", "volume": "8500"}
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        contract.StreamOrderbookLevel.model_validate(payload)
+
+
 def _collect(sink: list[str]):
     async def send(message: str) -> None:
         sink.append(message)
@@ -971,6 +1148,56 @@ def _collect(sink: list[str]):
 # --------------------------------------------------------------------------- #
 # WebSocket 엔드포인트
 # --------------------------------------------------------------------------- #
+
+
+class _ReceiveOnlyWebSocket:
+    """클라이언트 입력은 없지만 서버 close는 관찰하는 WebSocket 대역."""
+
+    def __init__(self) -> None:
+        self.receive_started = asyncio.Event()
+        self.receive_cancelled = asyncio.Event()
+        self.closed: list[tuple[int, str]] = []
+        self._never = asyncio.Event()
+
+    async def receive_text(self) -> str:
+        self.receive_started.set()
+        try:
+            await self._never.wait()
+        except asyncio.CancelledError:
+            self.receive_cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    async def close(self, *, code: int, reason: str) -> None:
+        self.closed.append((code, reason))
+
+
+@pytest.mark.asyncio
+async def test_receive_only_client_closes_immediately_when_sender_times_out() -> None:
+    """클라이언트가 다음 프레임을 보내지 않아도 4409와 수요 회수가 진행된다."""
+
+    websocket = _ReceiveOnlyWebSocket()
+
+    async def stalled_sender() -> None:
+        await websocket.receive_started.wait()
+        raise SlowConsumer("stream client send timed out")
+
+    sender = asyncio.create_task(stalled_sender())
+    await asyncio.wait_for(
+        route._serve(  # noqa: SLF001 — 비동기 경쟁 조건의 직접 회귀 테스트
+            websocket,  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            sender,
+        ),
+        timeout=0.5,
+    )
+
+    assert websocket.closed == [
+        (contract.CLOSE_SLOW_CONSUMER, "전송이 지연되어 연결을 닫습니다.")
+    ]
+    # FIRST_COMPLETED 뒤 남은 receive task도 반드시 회수해야 한다.
+    assert websocket.receive_cancelled.is_set()
 
 
 def _app(runtime: MarketStreamRuntime) -> FastAPI:
