@@ -200,39 +200,59 @@ class NHOrderbookSnapshotStore:
         websocket_auth_retries = 0
 
         while True:
+            # try 범위를 예외 발생 지점과 일치시킨다. 각 핸들러가 쓰는
+            # credentials/token 이 항상 바인딩된 상태임을 정적으로 보장한다.
             try:
                 credentials = self._require_configuration()
+            except MobileApiError:
+                return
+
+            try:
                 token = await self._access_token(
                     credentials=credentials,
                     force_refresh=force_refresh,
                     failed_token=failed_token,
                 )
-                await self._clear_auth_failure()
-                received_data = await self._connection_session(token)
-                force_refresh = False
-                failed_token = None
-                if received_data:
-                    reconnect_delay = 1.0
-                    websocket_auth_retries = 0
             except asyncio.CancelledError:
                 raise
             except MobileApiError:
                 return
-            except _WebSocketAuthenticationError:
-                websocket_auth_retries += 1
-                await self._mark_auth_failure(credentials)
-                if websocket_auth_retries > 1:
-                    return
-                force_refresh = True
-                failed_token = token
             except _PermanentAuthenticationError:
                 await self._mark_auth_failure(credentials)
                 return
-            except Exception as exc:  # transient connect/read failures reconnect
+            except Exception as exc:  # transient token failures reconnect
                 logger.warning(
-                    "NH PLUG orderbook WebSocket disconnected (%s)",
+                    "NH PLUG orderbook token acquisition failed (%s)",
                     type(exc).__name__,
                 )
+            else:
+                try:
+                    await self._clear_auth_failure()
+                    received_data = await self._connection_session(token)
+                    force_refresh = False
+                    failed_token = None
+                    if received_data:
+                        reconnect_delay = 1.0
+                        websocket_auth_retries = 0
+                except asyncio.CancelledError:
+                    raise
+                except MobileApiError:
+                    return
+                except _WebSocketAuthenticationError:
+                    websocket_auth_retries += 1
+                    await self._mark_auth_failure(credentials)
+                    if websocket_auth_retries > 1:
+                        return
+                    force_refresh = True
+                    failed_token = token
+                except _PermanentAuthenticationError:
+                    await self._mark_auth_failure(credentials)
+                    return
+                except Exception as exc:  # transient connect/read failures reconnect
+                    logger.warning(
+                        "NH PLUG orderbook WebSocket disconnected (%s)",
+                        type(exc).__name__,
+                    )
 
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(
