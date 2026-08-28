@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.ai.base import AiProviderUnavailable
@@ -53,12 +54,18 @@ class MarketEventPipeline:
         if features["insufficient"] is True:
             return {"skipped": "insufficient_data"}
 
+        now = _normalized_now(self._clock())
+        if await self._has_open_recommendation(owner_user_id, symbol, now):
+            # A still-valid PENDING recommendation for this symbol already
+            # awaits the owner's review; re-analyzing every scan tick would
+            # only burn model calls and stack duplicates.
+            return {"skipped": "cooldown_active"}
+
         news_summaries: list[dict[str, object]] = []
         triggers = self._detector.detect(features, news_summaries)
         if not triggers:
             return {"skipped": "no_triggers"}
 
-        now = _normalized_now(self._clock())
         correlation_id = (
             f"market-scan:{owner_user_id}:{market}:{symbol}:{int(now.timestamp())}"
         )
@@ -124,6 +131,24 @@ class MarketEventPipeline:
         await self._session.commit()
         await self._session.refresh(recommendation)
         return {**result, "recommendation_id": recommendation.id}
+
+    async def _has_open_recommendation(
+        self,
+        owner_user_id: int,
+        symbol: str,
+        now: datetime,
+    ) -> bool:
+        count = await self._session.scalar(
+            select(func.count())
+            .select_from(AIRecommendation)
+            .where(
+                AIRecommendation.owner_user_id == owner_user_id,
+                AIRecommendation.symbol == symbol,
+                AIRecommendation.decision == RecommendationDecision.PENDING,
+                AIRecommendation.valid_until > now,
+            )
+        )
+        return bool(count)
 
 
 def _market_route(market: str) -> tuple[MarketKey, str, str | None]:

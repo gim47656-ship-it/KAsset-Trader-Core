@@ -201,6 +201,80 @@ async def test_high_confidence_buy_persists_owner_scoped_pending_recommendation(
 
     RecommendationResponse.model_validate(recommendation)
     assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_pending_recommendation_cools_down_rescan(
+    db_session: AsyncSession,
+    owner: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A still-valid PENDING recommendation must suppress re-analysis."""
+    _stub_candles(monkeypatch, _candles(latest_close=103.0))
+    router = FakeRouter(
+        SimpleNamespace(
+            action="BUY",
+            confidence=0.91,
+            risk="LOW",
+            bullish_score=88,
+            bearish_score=12,
+            escalate=False,
+            rationale_tags=["price_break"],
+            tier_used="gpt-5.6-terra",
+            kind=AnalysisKind.CANDIDATE_SCAN,
+            correlation_id=None,
+        )
+    )
+    pipeline = MarketEventPipeline(db_session, router, lambda: _NOW)
+
+    first = await pipeline.run_symbol_scan(owner, "KRX", "005930")
+    assert "recommendation_id" in first
+
+    second = await pipeline.run_symbol_scan(owner, "KRX", "005930")
+
+    stored = (
+        await db_session.scalars(
+            select(AIRecommendation).where(AIRecommendation.owner_user_id == owner)
+        )
+    ).all()
+    assert second == {"skipped": "cooldown_active"}
+    assert len(stored) == 1
+    assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_recommendation_does_not_cool_down(
+    db_session: AsyncSession,
+    owner: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_candles(monkeypatch, _candles(latest_close=103.0))
+    router = FakeRouter(
+        SimpleNamespace(
+            action="BUY",
+            confidence=0.91,
+            risk="LOW",
+            bullish_score=88,
+            bearish_score=12,
+            escalate=False,
+            rationale_tags=["price_break"],
+            tier_used="gpt-5.6-terra",
+            kind=AnalysisKind.CANDIDATE_SCAN,
+            correlation_id=None,
+        )
+    )
+    pipeline = MarketEventPipeline(db_session, router, lambda: _NOW)
+    first = await pipeline.run_symbol_scan(owner, "KRX", "005930")
+    assert "recommendation_id" in first
+
+    later = _NOW + timedelta(hours=2)
+    result = await MarketEventPipeline(
+        db_session, router, lambda: later
+    ).run_symbol_scan(owner, "KRX", "005930")
+
+    assert "recommendation_id" in result
+    assert len(router.calls) == 2
+
     kind, payload, correlation_id = router.calls[0]
     assert kind == AnalysisKind.CANDIDATE_SCAN
     assert payload["symbol"] == "005930"

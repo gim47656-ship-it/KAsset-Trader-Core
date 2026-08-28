@@ -27,7 +27,10 @@ from app.models.trading import (
 
 @broker.task(
     task_name="kasset_market_events.run",
-    schedule=[{"cron": "*/15 * * * 1-5"}],
+    # Hourly at :10 during KST sessions, right after the :05 candle sync.
+    # Features come from daily candles, so scanning faster than the data
+    # refreshes only burns model calls (and the old UTC */15 ran overnight).
+    schedule=[{"cron": "10 9-16 * * 1-5", "cron_offset": "Asia/Seoul"}],
 )
 async def kasset_market_events_run() -> dict[str, object]:
     if not settings.KASSET_MARKET_EVENTS_ENABLED:
