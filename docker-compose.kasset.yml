@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: kasset-trader-core:76923cf
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -64,7 +64,7 @@ services:
     restart: unless-stopped
 
   mcp:
-    image: kasset-trader-core:76923cf
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - .env.kasset
     environment:
@@ -94,7 +94,7 @@ services:
     restart: unless-stopped
 
   migration:
-    image: kasset-trader-core:76923cf
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - .env.kasset
     depends_on:
@@ -106,7 +106,7 @@ services:
     profiles: ["migration"]
 
   worker:
-    image: kasset-trader-core:76923cf
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - .env.kasset
       - .env.nhplug-mock.native
@@ -123,7 +123,7 @@ services:
     restart: unless-stopped
 
   scheduler:
-    image: kasset-trader-core:76923cf
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - .env.kasset
       - .env.nhplug-mock.native
