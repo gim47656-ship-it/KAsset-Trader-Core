@@ -70,6 +70,8 @@ from app.extensions.kasset.api.schemas import (
     InstrumentSearchMarket,
     InstrumentSearchResponse,
     LoginRequest,
+    MarketIndexDetailResponse,
+    MarketIndexRange,
     MarketOverviewResponse,
     NicknameUpdateRequest,
     OrderbookResponse,
@@ -415,6 +417,18 @@ async def market_overview(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
 ) -> MarketOverviewResponse:
     return await market_overview_service.get_market_overview()
+
+
+@router.get(
+    "/market/indices/{symbol}",
+    response_model=MarketIndexDetailResponse,
+)
+async def market_index_detail(
+    symbol: str,
+    range_: Annotated[MarketIndexRange, Query(alias="range")],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+) -> MarketIndexDetailResponse:
+    return await market_overview_service.get_market_index_detail(symbol, range_)
 
 
 @router.get("/market/quote", response_model=Quote)

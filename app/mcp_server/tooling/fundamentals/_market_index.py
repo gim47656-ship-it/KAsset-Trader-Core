@@ -15,6 +15,7 @@ from app.mcp_server.tooling.fundamentals_sources_indices import (
     _fetch_index_kr_history,
     _fetch_index_us_current,
     _fetch_index_us_history,
+    _fetch_indices_us_current_batch,
 )
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
@@ -155,34 +156,61 @@ async def handle_get_market_index(
         except Exception as exc:
             return _error_payload(source=meta["source"], message=str(exc), symbol=sym)
 
-    # _DEFAULT_INDICES is equity-only (naver/yfinance) — coingecko symbols
-    # (CRYPTO/BTC.D) are fetched explicitly via the single-symbol path above and
-    # must never appear here (guarded by test_crypto_not_in_default_indices), so
-    # the naver/else(yfinance) split below is exhaustive for the default batch.
-    tasks = []
-    for idx_sym in _DEFAULT_INDICES:
-        meta = _INDEX_META[idx_sym]
-        if meta["source"] == "naver":
-            tasks.append(_fetch_index_kr_current(meta["naver_code"], meta["name"]))
-        else:
-            tasks.append(
-                _fetch_index_us_current(meta["yf_ticker"], meta["name"], idx_sym)
+    # _DEFAULT_INDICES is equity-only (naver/yfinance). Fetch the two KRX
+    # currents independently while the default US pair shares one yfinance
+    # daily download. The single-symbol path above remains unchanged.
+    kr_symbols = [
+        symbol
+        for symbol in _DEFAULT_INDICES
+        if _INDEX_META[symbol]["source"] == "naver"
+    ]
+    us_symbols = [
+        symbol
+        for symbol in _DEFAULT_INDICES
+        if _INDEX_META[symbol]["source"] == "yfinance"
+    ]
+    results = await asyncio.gather(
+        *(
+            _fetch_index_kr_current(
+                _INDEX_META[symbol]["naver_code"],
+                _INDEX_META[symbol]["name"],
             )
+            for symbol in kr_symbols
+        ),
+        _fetch_indices_us_current_batch(us_symbols),
+        return_exceptions=True,
+    )
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    indices: list[dict[str, Any]] = []
-    for i, r in enumerate(results):
-        if isinstance(r, BaseException):
-            indices.append({"symbol": _DEFAULT_INDICES[i], "error": str(r)})
-        elif isinstance(r, dict):
-            if _INDEX_META[_DEFAULT_INDICES[i]]["source"] == "naver":
-                _tag_kr_index_data_state(r)
-            indices.append(r)
+    rows_by_symbol: dict[str, dict[str, Any]] = {}
+    for symbol, result in zip(kr_symbols, results[:-1], strict=True):
+        if isinstance(result, BaseException):
+            rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
+        elif isinstance(result, dict):
+            rows_by_symbol[symbol] = _tag_kr_index_data_state(result)
         else:
-            indices.append({"symbol": _DEFAULT_INDICES[i], "error": str(r)})
+            rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
 
-    return {"indices": indices}
+    us_result = results[-1]
+    if isinstance(us_result, BaseException):
+        for symbol in us_symbols:
+            rows_by_symbol[symbol] = {"symbol": symbol, "error": str(us_result)}
+    elif isinstance(us_result, list):
+        for row in us_result:
+            if not isinstance(row, dict):
+                continue
+            row_symbol = row.get("symbol")
+            if isinstance(row_symbol, str) and row_symbol in us_symbols:
+                rows_by_symbol[row_symbol] = row
+        for symbol in us_symbols:
+            rows_by_symbol.setdefault(
+                symbol,
+                {"symbol": symbol, "error": "batch result unavailable"},
+            )
+    else:
+        for symbol in us_symbols:
+            rows_by_symbol[symbol] = {"symbol": symbol, "error": str(us_result)}
+
+    return {"indices": [rows_by_symbol[symbol] for symbol in _DEFAULT_INDICES]}
 
 
 async def handle_get_market_index_current_only(symbol: str) -> dict[str, Any]:

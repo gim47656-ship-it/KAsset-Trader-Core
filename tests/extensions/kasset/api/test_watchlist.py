@@ -229,7 +229,10 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
         "instrumentId": primary.id,
     }
 
-    assert (await client.get("/api/v1/watchlist")).json() == {"items": []}
+    assert (await client.get("/api/v1/watchlist")).json() == {
+        "items": [],
+        "maxItems": 20,
+    }
 
     created = await client.post("/api/v1/watchlist", json=payload)
     assert created.status_code == 201
@@ -255,7 +258,10 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
     )
     assert removed.status_code == 204
     assert removed.content == b""
-    assert (await client.get("/api/v1/watchlist")).json() == {"items": []}
+    assert (await client.get("/api/v1/watchlist")).json() == {
+        "items": [],
+        "maxItems": 20,
+    }
 
     reactivated = await client.post("/api/v1/watchlist", json=payload)
     assert reactivated.status_code == 201
@@ -278,6 +284,56 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
             "message": "등록되지 않았거나 비활성화된 종목입니다.",
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempotent(
+    db_session: AsyncSession,
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+    watchlist_data: dict[str, object],
+) -> None:
+    client, _state = watchlist_client
+    owner_user_id = watchlist_data["users"][0].id
+    instruments = watchlist_data["search_instruments"]
+
+    for instrument in instruments[:20]:
+        response = await client.post(
+            "/api/v1/watchlist",
+            json={"symbol": instrument.symbol, "market": "KRX"},
+        )
+        assert response.status_code == 201
+
+    listed = await client.get("/api/v1/watchlist")
+    assert listed.status_code == 200
+    assert listed.json()["maxItems"] == 20
+    assert len(listed.json()["items"]) == 20
+
+    duplicate = await client.post(
+        "/api/v1/watchlist",
+        json={"symbol": instruments[0].symbol, "market": "KRX"},
+    )
+    assert duplicate.status_code == 200
+
+    twenty_first_symbol = instruments[20].symbol
+    over_limit = await client.post(
+        "/api/v1/watchlist",
+        json={"symbol": twenty_first_symbol, "market": "KRX"},
+    )
+    assert over_limit.status_code == 409
+    assert over_limit.json() == {
+        "error": {
+            "code": "WATCHLIST_LIMIT_REACHED",
+            "message": "관심종목은 최대 20개까지 등록할 수 있습니다.",
+        }
+    }
+    assert await db_session.scalar(
+        select(func.count())
+        .select_from(UserWatchItem)
+        .where(
+            UserWatchItem.user_id == owner_user_id,
+            UserWatchItem.is_active.is_(True),
+        )
+    ) == 20
 
 
 @pytest.mark.asyncio
@@ -329,7 +385,10 @@ async def test_watchlist_is_isolated_by_authenticated_owner(
     assert owner_a_created.status_code == 201
 
     state["user"] = users[1]
-    assert (await client.get("/api/v1/watchlist")).json() == {"items": []}
+    assert (await client.get("/api/v1/watchlist")).json() == {
+        "items": [],
+        "maxItems": 20,
+    }
     owner_b_created = await client.post("/api/v1/watchlist", json=payload)
     assert owner_b_created.status_code == 201
 

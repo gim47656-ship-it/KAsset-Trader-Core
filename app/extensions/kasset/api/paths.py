@@ -32,6 +32,7 @@ _EXACT_PATHS = frozenset(
 )
 _DYNAMIC_PREFIXES = (
     "/api/v1/brokers/",
+    "/api/v1/market/indices/",
     "/api/v1/orders/",
     "/api/v1/watchlist/",
 )

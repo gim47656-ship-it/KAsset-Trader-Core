@@ -26,6 +26,8 @@ MarketOverviewStatus = Literal["fresh", "partial", "unavailable"]
 MarketOverviewItemStatus = Literal["available", "stale", "unavailable"]
 MarketSessionState = Literal["OPEN", "PREOPEN", "AFTER_HOURS", "CLOSED"]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
+MarketIndexRange = Literal["1W", "1M", "3M", "6M"]
+MAX_WATCHLIST_ITEMS = 20
 
 
 class WatchlistCreateRequest(AndroidWireModel):
@@ -42,6 +44,7 @@ class WatchlistItem(AndroidWireModel):
 
 class WatchlistResponse(AndroidWireModel):
     items: list[WatchlistItem]
+    max_items: int = MAX_WATCHLIST_ITEMS
 
 
 class InstrumentSearchItem(AndroidWireModel):
@@ -78,6 +81,16 @@ class MarketOverviewItem(AndroidWireModel):
     as_of: str | None
     status: MarketOverviewItemStatus
     session_state: MarketSessionState | None
+
+
+class MarketIndexSummary(MarketOverviewItem):
+    market: Literal["KRX", "US"]
+    range: MarketIndexRange
+
+
+class MarketIndexDetailResponse(AndroidWireModel):
+    summary: MarketIndexSummary
+    candles: list[DailyCandle]
 
 
 class MarketOverviewSession(AndroidWireModel):

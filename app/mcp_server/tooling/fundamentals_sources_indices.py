@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import math
 from typing import Any
 
 import httpx
@@ -254,6 +255,142 @@ async def _fetch_index_us_current(
     return result
 
 
+def _batch_ticker_frame(
+    frame: pd.DataFrame,
+    yf_ticker: str,
+) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    if not isinstance(frame.columns, pd.MultiIndex):
+        selected = frame.copy()
+    else:
+        ticker_level = next(
+            (
+                level
+                for level in range(frame.columns.nlevels)
+                if yf_ticker in frame.columns.get_level_values(level)
+            ),
+            None,
+        )
+        if ticker_level is None:
+            return pd.DataFrame()
+        selected = frame.xs(
+            yf_ticker,
+            axis=1,
+            level=ticker_level,
+            drop_level=True,
+        ).copy()
+    if isinstance(selected.columns, pd.MultiIndex):
+        selected.columns = [str(column[0]).lower() for column in selected.columns]
+    else:
+        selected.columns = [str(column).lower() for column in selected.columns]
+    return selected
+
+
+def _batch_float(value: Any) -> float | None:
+    if value is None or not pd.notna(value):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _batch_volume(value: Any) -> int | None:
+    parsed = _batch_float(value)
+    return int(parsed) if parsed is not None else None
+
+
+async def _fetch_indices_us_current_batch(
+    symbols: list[str],
+) -> list[dict[str, Any]]:
+    """Fetch multiple US index current rows through one daily download."""
+
+    normalized_symbols = [symbol.strip().upper() for symbol in symbols]
+    definitions: list[tuple[str, str, str]] = []
+    for symbol in normalized_symbols:
+        meta = _INDEX_META.get(symbol)
+        if meta is None or meta.get("source") != "yfinance":
+            raise ValueError(f"Unsupported US index symbol '{symbol}'")
+        definitions.append((symbol, meta["name"], meta["yf_ticker"]))
+
+    if not definitions:
+        return []
+
+    loop = asyncio.get_running_loop()
+    yf_tickers = [yf_ticker for _symbol, _name, yf_ticker in definitions]
+
+    def download() -> pd.DataFrame:
+        raw_frame = yf.download(
+            yf_tickers,
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            group_by="column",
+            session=session,
+        )
+        return raw_frame if isinstance(raw_frame, pd.DataFrame) else pd.DataFrame()
+
+    with yfinance_tracing_session() as session:
+        frame = await loop.run_in_executor(None, download)
+
+    rows: list[dict[str, Any]] = []
+    for symbol, name, yf_ticker in definitions:
+        ticker_frame = _batch_ticker_frame(frame, yf_ticker)
+        if "close" not in ticker_frame.columns:
+            valid = pd.DataFrame()
+        else:
+            valid = ticker_frame.loc[ticker_frame["close"].notna()].sort_index().tail(2)
+
+        if valid.empty:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "current": None,
+                    "change": None,
+                    "change_pct": None,
+                    "open": None,
+                    "high": None,
+                    "low": None,
+                    "volume": None,
+                    "source": "yfinance",
+                    "unavailable": True,
+                }
+            )
+            continue
+
+        latest = valid.iloc[-1]
+        current = _batch_float(latest.get("close"))
+        previous_close = (
+            _batch_float(valid.iloc[-2].get("close")) if len(valid) >= 2 else None
+        )
+        change: float | None = None
+        change_pct: float | None = None
+        if current is not None and previous_close is not None and previous_close != 0:
+            change = round(current - previous_close, 2)
+            change_pct = round((current - previous_close) / previous_close * 100, 2)
+
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "current": current,
+                "change": change,
+                "change_pct": change_pct,
+                "open": _batch_float(latest.get("open")),
+                "high": _batch_float(latest.get("high")),
+                "low": _batch_float(latest.get("low")),
+                "volume": _batch_volume(latest.get("volume")),
+                "source": "yfinance",
+                **({"unavailable": True} if current is None else {}),
+            }
+        )
+    return rows
+
+
 async def _fetch_index_us_history(
     yf_ticker: str, count: int, period: str
 ) -> list[dict[str, Any]]:
@@ -354,6 +491,7 @@ __all__ = [
     "_fetch_index_kr_current",
     "_fetch_index_kr_history",
     "_fetch_index_us_current",
+    "_fetch_indices_us_current_batch",
     "_fetch_index_us_history",
     "_fetch_index_crypto_current",
 ]

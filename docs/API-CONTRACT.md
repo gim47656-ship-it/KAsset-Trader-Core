@@ -60,11 +60,12 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 - `changeRate` 단위는 퍼센트 포인트다. 예를 들어 `"0.70"`은 `0.70%`이며 클라이언트가 다시 100을 곱하지 않는다.
 - `USDKRW`는 Toss Open API가 설정되어 정상 응답하면 그 값을 우선하고, 실패하거나 미설정이면 open.er-api 값으로 강등한다. `JPYKRW`는 관행적인 100엔 단위가 아니라 **1 JPY당 KRW**, `EURKRW`는 **1 EUR당 KRW**다. 두 교차 환율은 USD-base open.er-api 스냅샷 한 건의 양수 유한 환율만 검증해 계산한다.
 - `status`는 전체 7개 항목이 `available`이면 `fresh`, 하나라도 `stale` 또는 `unavailable`이면 `partial`, 7개 모두 `unavailable`이면 `unavailable`이다. 항목 `status`가 시세 신선도의 권한자이며 클라이언트는 자체 시간 차 계산으로 덮어쓰지 않는다.
-- KRX는 기존 지수 응답의 `data_state`를 그대로 신선도 권한으로 사용한다. US는 정규장 직접 시세만 `available`, 프리마켓·애프터마켓·휴장 또는 일봉 fallback은 `stale`이다. FX는 검증된 스냅샷이면 `available`이며 서버가 항목 시각으로 별도 나이 계산을 하지 않는다.
+- KRX는 기존 지수 응답의 `data_state`를 그대로 신선도 권한으로 사용한다. US는 정규장 기본 batch 또는 직접 시세만 `available`, 프리마켓·애프터마켓·휴장 또는 단일 심볼 current 실패의 일봉 fallback은 `stale`이다. FX는 검증된 스냅샷이면 `available`이며 서버가 항목 시각으로 별도 나이 계산을 하지 않는다.
 - `sessionState`와 `sessions[].state`는 `OPEN`, `PREOPEN`, `AFTER_HOURS`, `CLOSED` 중 하나다. 지수 항목에만 `sessionState`가 있고 FX 항목은 `null`이다. `sessions` 순서는 `KRX`, `US`다.
 - `errors`는 실패 항목마다 `{scope, symbol, code}`를 제공한다. `scope`는 `indices` 또는 `fx`, `code`는 `UNAVAILABLE` 또는 `TIMEOUT`이다. 공급자 이름이나 원본 예외 문자열은 모바일 계약에 노출하지 않는다.
 - `asOf`는 공급자가 제공한 시각만 사용한다. KRX 지수는 실제 quote timestamp, Toss USD/KRW는 `validFrom`, open.er-api는 실제 `time_last_update_unix`가 있을 때만 채운다. US 지수나 공급자 응답에 시각이 없으면 `null`이며 서버 현재 시각을 시세 시각으로 만들지 않는다. 최상위 `asOf`는 파싱 가능한 항목 시각 중 가장 최신 값이고, 아무 값도 없으면 `null`이다.
 - 응답 스냅샷은 프로세스 내에서 60초 동안 단일비행 캐시한다. 지수와 FX 소스는 동시에 조회하며 각각 6초로 제한한다. 한 소스 또는 항목이 실패해도 HTTP `200`으로 `partial`/`unavailable` 계약을 반환한다.
+- 기본 지수 조회에서 KRX 두 종목과 US 조회를 병렬로 실행하고, US의 `SPX`·`NASDAQ`은 한 번의 일봉 batch 조회에서 마지막 두 유효 거래일을 사용해 현재가·전일 대비·시가·고가·저가·거래량을 계산한다. 한 US 심볼의 행이 비어 있어도 다른 심볼은 유지한다. 단일 심볼 지수 조회는 기존 current+history 경로를 그대로 사용한다.
 
 정상 응답 예:
 
@@ -182,5 +183,63 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
   "asOf": null,
   "status": "unavailable",
   "sessionState": "OPEN"
+}
+```
+
+## 홈 지수 상세
+
+`GET /api/v1/market/indices/{symbol}?range=1W|1M|3M|6M`
+
+- 인증된 KAsset 모바일 세션이 필요하다. `{symbol}`은 `KOSPI`, `KOSDAQ`, `SPX`, `NASDAQ` 중 하나이며 대소문자는 구분하지 않는다. 지원하지 않는 심볼은 `404 UNKNOWN_INDEX`, 허용하지 않는 `range`는 `422`다.
+- 응답은 `summary`와 `candles`로 구성한다. `summary`의 가격·등락 값과 모든 candle OHLCV는 JSON number가 아닌 십진수 문자열이다. 공급자 이름, 내부 상태 필드, 원본 예외 문자열은 노출하지 않는다.
+- 범위는 `1W = day/5`, `1M = day/20`, `3M = day/60`, `6M = week/26`으로 기존 실제 지수 history 조회에 전달한다.
+- `candles`는 기존 일봉 계약과 같은 `{time, open, high, low, close, volume}` 형태다. 거래일만 제공되는 history의 `time`은 실제 체결시각으로 만들지 않고 해당 거래일의 `T00:00:00Z` bucket으로 표현한다.
+- candle은 날짜 오름차순이고 같은 bucket은 마지막 실제 행 하나만 유지한다. 날짜 또는 OHLCV 중 하나라도 유효한 실제 값이 없으면 그 행을 제외하며 값을 합성하지 않는다.
+- `summary.status`, `summary.sessionState`, `summary.asOf`는 홈 시장 개요와 같은 서버 규칙을 사용한다. 현재 지수 값이 없거나 조회가 실패하면 숫자와 `asOf`를 `null`, `status`를 `unavailable`로 반환하되 HTTP 상태는 `200`이다.
+- 응답은 정규화된 `symbol + range`별로 프로세스 내 60초 단일비행 캐시한다. 다른 심볼 또는 다른 범위는 별도 키다.
+
+```json
+{
+  "summary": {
+    "symbol": "SPX",
+    "name": "S&P 500",
+    "market": "US",
+    "currency": "USD",
+    "price": "6500.5",
+    "changeAmount": "20.15",
+    "changeRate": "0.31",
+    "asOf": null,
+    "status": "available",
+    "sessionState": "OPEN",
+    "range": "1M"
+  },
+  "candles": [
+    {
+      "time": "2026-08-28T00:00:00Z",
+      "open": "6480",
+      "high": "6510",
+      "low": "6475",
+      "close": "6500.5",
+      "volume": "1000"
+    }
+  ]
+}
+```
+
+## 관심종목
+
+`GET /api/v1/watchlist`
+
+- 응답은 camelCase `{items, maxItems}`이며 `maxItems`는 항상 `20`이다.
+- 활성 관심종목은 사용자당 최대 20개다. 서비스가 사용자 행을 transaction lock한 상태에서 중복 여부와 활성 개수를 확인하므로 같은 사용자의 동시 추가도 한도를 넘지 않는다.
+- 이미 활성인 같은 종목 추가는 20개 한도와 무관하게 기존처럼 멱등 성공(`200`)한다. 비활성 종목 재활성화와 신규 추가는 새 활성 슬롯을 사용한다.
+- 20개가 찬 상태의 21번째 신규 추가는 `409`와 아래 오류를 반환한다.
+
+```json
+{
+  "error": {
+    "code": "WATCHLIST_LIMIT_REACHED",
+    "message": "관심종목은 최대 20개까지 등록할 수 있습니다."
+  }
 }
 ```

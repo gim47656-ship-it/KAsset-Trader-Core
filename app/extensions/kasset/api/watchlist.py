@@ -9,15 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.schemas import (
-    InstrumentSearchMarket,
+    MAX_WATCHLIST_ITEMS,
     InstrumentSearchItem,
+    InstrumentSearchMarket,
     InstrumentSearchResponse,
     WatchlistItem,
     WatchlistMarket,
     WatchlistResponse,
 )
-from app.models.trading import Exchange, Instrument, InstrumentType, UserWatchItem
 from app.models.symbol_master import SymbolMaster
+from app.models.trading import (
+    Exchange,
+    Instrument,
+    InstrumentType,
+    User,
+    UserWatchItem,
+)
 
 _MARKET_TYPES: dict[WatchlistMarket, InstrumentType] = {
     "KRX": InstrumentType.equity_kr,
@@ -59,6 +66,9 @@ class MobileWatchlistService:
         symbol: str,
         market: WatchlistMarket,
     ) -> tuple[WatchlistItem, bool]:
+        await db.scalar(
+            select(User.id).where(User.id == owner_user_id).with_for_update(of=User)
+        )
         normalized_symbol = self._normalize_symbol(symbol)
         row = await self._find_instrument(
             db,
@@ -89,9 +99,24 @@ class MobileWatchlistService:
             if watch_item.is_active:
                 await db.commit()
                 return response_item, False
+            if await self._active_item_count(db, owner_user_id) >= MAX_WATCHLIST_ITEMS:
+                await db.rollback()
+                raise MobileApiError(
+                    409,
+                    "WATCHLIST_LIMIT_REACHED",
+                    "관심종목은 최대 20개까지 등록할 수 있습니다.",
+                )
             watch_item.is_active = True
             await db.commit()
             return response_item, True
+
+        if await self._active_item_count(db, owner_user_id) >= MAX_WATCHLIST_ITEMS:
+            await db.rollback()
+            raise MobileApiError(
+                409,
+                "WATCHLIST_LIMIT_REACHED",
+                "관심종목은 최대 20개까지 등록할 수 있습니다.",
+            )
 
         db.add(
             UserWatchItem(
@@ -103,6 +128,21 @@ class MobileWatchlistService:
         )
         await db.commit()
         return response_item, True
+
+    @staticmethod
+    async def _active_item_count(
+        db: AsyncSession,
+        owner_user_id: int,
+    ) -> int:
+        count = await db.scalar(
+            select(func.count())
+            .select_from(UserWatchItem)
+            .where(
+                UserWatchItem.user_id == owner_user_id,
+                UserWatchItem.is_active.is_(True),
+            )
+        )
+        return int(count or 0)
 
     async def _find_instrument(
         self,
