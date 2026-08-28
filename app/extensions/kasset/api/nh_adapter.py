@@ -320,9 +320,7 @@ class NHSharedMarketData:
             if self._cached is not None:
                 return self._cached
             try:
-                auth_client = NHPlugAuthClient(
-                    app_key=app_key, app_secret=app_secret
-                )
+                auth_client = NHPlugAuthClient(app_key=app_key, app_secret=app_secret)
                 client = NHPlugMockClient(
                     app_key=app_key,
                     app_secret=app_secret,
@@ -391,9 +389,7 @@ class NHSharedMarketData:
             return quote
 
 
-def _quote_from_payload(
-    payload: dict[str, Any], *, market: str, symbol: str
-) -> Quote:
+def _quote_from_payload(payload: dict[str, Any], *, market: str, symbol: str) -> Quote:
     row = _object_block(payload, "Output_0")
     response_symbol = _required_string(row, "iem_cd")
     if response_symbol != symbol:

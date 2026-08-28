@@ -342,8 +342,7 @@ class NHOrderbookSnapshotStore:
                     connection is not self._connection
                     or symbol in self._subscribed
                     or last_requested is None
-                    or time.monotonic() - last_requested
-                    >= _SUBSCRIPTION_TTL_SECONDS
+                    or time.monotonic() - last_requested >= _SUBSCRIPTION_TTL_SECONDS
                 ):
                     return
             try:

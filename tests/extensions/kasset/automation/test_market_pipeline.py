@@ -27,6 +27,7 @@ class FakeRouter:
     def __init__(self, verdict: SimpleNamespace | None = None) -> None:
         self.verdict = verdict
         self.calls: list[tuple[AnalysisKind, dict[str, object], str | None]] = []
+
     analyze_for_owner = OpenAiModelRouter.analyze_for_owner
 
     async def analyze(

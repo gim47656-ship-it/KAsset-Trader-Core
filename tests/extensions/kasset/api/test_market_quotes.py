@@ -206,9 +206,7 @@ def test_batch_quotes_serve_many_symbols_from_one_toss_call(
     )
 
     with _client(db) as client:
-        response = client.get(
-            "/api/v1/market/quotes?market=KRX&symbols=005930,000660"
-        )
+        response = client.get("/api/v1/market/quotes?market=KRX&symbols=005930,000660")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -313,9 +311,7 @@ def test_batch_quotes_degrade_to_nh_then_stored_candles_when_toss_fails(
     )
 
     with _client(db) as client:
-        response = client.get(
-            "/api/v1/market/quotes?market=KRX&symbols=005930,000660"
-        )
+        response = client.get("/api/v1/market/quotes?market=KRX&symbols=005930,000660")
 
     assert response.status_code == 200
     quotes = response.json()["quotes"]
@@ -348,9 +344,7 @@ def test_batch_quotes_omit_symbols_no_channel_can_serve(
     monkeypatch.setattr(krx_quotes, "nh_market_data", _StubNh())
 
     with _client(_FakeDb()) as client:
-        response = client.get(
-            "/api/v1/market/quotes?market=KRX&symbols=005930,000660"
-        )
+        response = client.get("/api/v1/market/quotes?market=KRX&symbols=005930,000660")
 
     assert response.status_code == 200
     assert response.json() == {"quotes": []}

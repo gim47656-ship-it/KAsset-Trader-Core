@@ -164,9 +164,7 @@ def test_fixed_width_parser_rejects_misaligned_or_unterminated_payload() -> None
     with pytest.raises(ValueError, match="record size mismatch"):
         parse_domestic_master(b"short")
 
-    record = bytearray(
-        _global_record(symbol="AAPL", name="애플", name_en="Apple Inc")
-    )
+    record = bytearray(_global_record(symbol="AAPL", name="애플", name_en="Apple Inc"))
     record[-1] = 0x20
     with pytest.raises(ValueError, match="record terminator mismatch"):
         parse_global_master(bytes(record))

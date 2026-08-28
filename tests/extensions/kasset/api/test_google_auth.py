@@ -174,9 +174,10 @@ async def test_google_login_registers_user_issues_tokens_and_supports_auth_me(
         "role": "trader",
     }
     assert me_body["nickname"] is not None
-    assert await db_session.scalar(
-        select(User.nickname).where(User.id == user.id)
-    ) == me_body["nickname"]
+    assert (
+        await db_session.scalar(select(User.nickname).where(User.id == user.id))
+        == me_body["nickname"]
+    )
 
     updated = await client.patch(
         "/api/v1/auth/me",
@@ -185,9 +186,10 @@ async def test_google_login_registers_user_issues_tokens_and_supports_auth_me(
     )
     assert updated.status_code == 200
     assert updated.json()["nickname"] == "나무늘보"
-    assert await db_session.scalar(
-        select(User.nickname).where(User.id == user.id)
-    ) == "나무늘보"
+    assert (
+        await db_session.scalar(select(User.nickname).where(User.id == user.id))
+        == "나무늘보"
+    )
 
     empty = await client.patch(
         "/api/v1/auth/me",

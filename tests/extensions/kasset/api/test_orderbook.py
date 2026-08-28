@@ -72,9 +72,7 @@ def test_orderbook_returns_ready_snapshot_from_injected_store() -> None:
     )
 
     with _client(store) as client:
-        response = client.get(
-            "/api/v1/market/orderbook?market=krx&symbol=005930"
-        )
+        response = client.get("/api/v1/market/orderbook?market=krx&symbol=005930")
 
     assert response.status_code == 200
     assert response.json() == store.response
@@ -97,9 +95,7 @@ def test_orderbook_returns_not_ready_without_snapshot() -> None:
     )
 
     with _client(store) as client:
-        response = client.get(
-            "/api/v1/market/orderbook?market=KRX&symbol=005930"
-        )
+        response = client.get("/api/v1/market/orderbook?market=KRX&symbol=005930")
 
     assert response.status_code == 200
     assert response.json() == store.response
@@ -145,9 +141,7 @@ def test_orderbook_returns_409_when_data_channel_is_unavailable() -> None:
     )
 
     with _client(store) as client:
-        response = client.get(
-            "/api/v1/market/orderbook?market=KRX&symbol=005930"
-        )
+        response = client.get("/api/v1/market/orderbook?market=KRX&symbol=005930")
 
     assert response.status_code == 409
     assert response.json() == {

@@ -47,7 +47,9 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
     ]
     exchanges = [
         Exchange(code=f"WK{suffix}", name="Watch KRX", tz="Asia/Seoul"),
-        Exchange(code=f"WU{suffix}", name="Watch US", country="US", tz="America/New_York"),
+        Exchange(
+            code=f"WU{suffix}", name="Watch US", country="US", tz="America/New_York"
+        ),
         Exchange(code=f"WC{suffix}", name="Watch Crypto", tz="UTC"),
     ]
     db_session.add_all([*users, *exchanges])
@@ -177,9 +179,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
             delete(UserWatchItem).where(UserWatchItem.user_id.in_(user_ids))
         )
         await db_session.execute(
-            delete(Instrument).where(
-                Instrument.symbol.in_(instrument_symbols)
-            )
+            delete(Instrument).where(Instrument.symbol.in_(instrument_symbols))
         )
         await db_session.execute(
             delete(SymbolMaster).where(SymbolMaster.symbol.in_(master_symbols))
@@ -247,11 +247,14 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
     duplicate = await client.post("/api/v1/watchlist", json=payload)
     assert duplicate.status_code == 200
     assert duplicate.json() == expected
-    assert await db_session.scalar(
-        select(func.count())
-        .select_from(UserWatchItem)
-        .where(UserWatchItem.instrument_id == primary.id)
-    ) == 1
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(UserWatchItem)
+            .where(UserWatchItem.instrument_id == primary.id)
+        )
+        == 1
+    )
 
     removed = await client.delete(
         f"/api/v1/watchlist/{primary.symbol.lower()}?market=KRX"
@@ -326,14 +329,17 @@ async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempote
             "message": "관심종목은 최대 20개까지 등록할 수 있습니다.",
         }
     }
-    assert await db_session.scalar(
-        select(func.count())
-        .select_from(UserWatchItem)
-        .where(
-            UserWatchItem.user_id == owner_user_id,
-            UserWatchItem.is_active.is_(True),
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(UserWatchItem)
+            .where(
+                UserWatchItem.user_id == owner_user_id,
+                UserWatchItem.is_active.is_(True),
+            )
         )
-    ) == 20
+        == 20
+    )
 
 
 @pytest.mark.asyncio
@@ -395,11 +401,14 @@ async def test_watchlist_is_isolated_by_authenticated_owner(
     state["user"] = users[0]
     owner_a_items = (await client.get("/api/v1/watchlist")).json()["items"]
     assert owner_a_items == [owner_a_created.json()]
-    assert await db_session.scalar(
-        select(func.count())
-        .select_from(UserWatchItem)
-        .where(UserWatchItem.instrument_id == primary.id)
-    ) == 2
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(UserWatchItem)
+            .where(UserWatchItem.instrument_id == primary.id)
+        )
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -426,9 +435,7 @@ async def test_instrument_search_integrates_markets_and_supports_filters(
     )
     assert explicit_all.json() == integrated.json()
 
-    kr = await client.get(
-        f"/api/v1/instruments/search?q={search_term}&market=KRX"
-    )
+    kr = await client.get(f"/api/v1/instruments/search?q={search_term}&market=KRX")
     assert kr.status_code == 200
     assert len(kr.json()["items"]) == 20
     assert all(item["market"] == "KRX" for item in kr.json()["items"])
@@ -447,9 +454,7 @@ async def test_instrument_search_integrates_markets_and_supports_filters(
         ]
     }
 
-    us = await client.get(
-        f"/api/v1/instruments/search?q={search_term}&market=US"
-    )
+    us = await client.get(f"/api/v1/instruments/search?q={search_term}&market=US")
     assert us.json() == {
         "items": [
             {

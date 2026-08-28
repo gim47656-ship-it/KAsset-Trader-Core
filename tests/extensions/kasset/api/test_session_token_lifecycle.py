@@ -63,9 +63,7 @@ async def created_usernames(db_session: AsyncSession) -> AsyncIterator[list[str]
     finally:
         await db_session.rollback()
         if usernames:
-            await db_session.execute(
-                delete(User).where(User.username.in_(usernames))
-            )
+            await db_session.execute(delete(User).where(User.username.in_(usernames)))
         await db_session.commit()
 
 
@@ -266,9 +264,7 @@ async def test_device_owner_and_signature_mismatches_stay_unauthorized(
 
     # Control: the untampered token for the same session still passes, so the
     # rejections above are caused by the mismatch and nothing else.
-    control = await client.get(
-        "/api/v1/auth/me", headers=_bearer(owner["accessToken"])
-    )
+    control = await client.get("/api/v1/auth/me", headers=_bearer(owner["accessToken"]))
     assert control.status_code == 200, control.text
 
 

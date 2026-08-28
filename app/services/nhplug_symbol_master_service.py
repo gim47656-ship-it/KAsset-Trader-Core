@@ -57,9 +57,7 @@ def parse_domestic_master(payload: bytes) -> list[SymbolMasterRecord]:
     """Parse tradable KRX common stocks and ETFs from ``m_new_stock.mst``."""
 
     rows: list[SymbolMasterRecord] = []
-    for record in _fixed_records(
-        payload, _DOMESTIC_RECORD_SIZE, _DOMESTIC_MASTER_FILE
-    ):
+    for record in _fixed_records(payload, _DOMESTIC_RECORD_SIZE, _DOMESTIC_MASTER_FILE):
         symbol = _decode_field(record, 0, 6).upper()
         market_code = _decode_field(record, 6, 1)
         name = _decode_field(record, 7, 41)
@@ -145,7 +143,9 @@ async def _download_master(client: httpx.AsyncClient, filename: str) -> bytes:
     return response.content
 
 
-async def build_nhplug_symbol_master_snapshot() -> dict[tuple[str, str], SymbolMasterRecord]:
+async def build_nhplug_symbol_master_snapshot() -> dict[
+    tuple[str, str], SymbolMasterRecord
+]:
     timeout = httpx.Timeout(30.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         domestic_payload, global_payload = await asyncio.gather(
