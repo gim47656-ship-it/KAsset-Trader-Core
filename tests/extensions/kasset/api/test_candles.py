@@ -636,10 +636,11 @@ def test_intraday_budget_grows_after_session_close_to_survive_after_hours_bars()
         == 540
     )
 
-    # 상한을 넘기지 않는다.
+    # 며칠이 지나도 시간외 봉 분량 이상으로는 늘지 않는다. 휴장일에는 봉이 생기지 않으므로
+    # 경과 시간을 그대로 더하면 페이지만 늘고 얻는 것이 없다.
     assert (
         router_module._intraday_candle_budget(window, end + timedelta(days=7))
-        == router_module._TOSS_INTRADAY_MAX_CANDLE_COUNT
+        == 390 + router_module._TOSS_INTRADAY_POST_SESSION_ALLOWANCE
     )
 
 
@@ -695,3 +696,52 @@ async def test_intraday_service_pages_beyond_two_pages_when_budget_requires_it(
     assert len(bars) == 540
     assert bars[0].close == Decimal("1")
     assert bars[-1].close == Decimal("540")
+
+
+@pytest.mark.asyncio
+async def test_recent_session_walks_back_to_the_last_trading_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """휴장일에는 최근 거래일로 되짚는다.
+
+    실측(2026-08-29 토요일): KRX 는 `boundary=08-29` 로 창이 없어 빈 배열을 냈고 US 는
+    시차 때문에 금요일 창이 잡혀 분봉이 나왔다. 같은 `1D` 가 시장에 따라 다르게 동작했다.
+    """
+    friday = date(2026, 8, 28)
+    saturday = date(2026, 8, 29)
+    window = TossSessionWindow(
+        start=datetime(2026, 8, 28, 9, 0, tzinfo=UTC),
+        end=datetime(2026, 8, 28, 15, 30, tzinfo=UTC),
+    )
+    asked: list[date] = []
+
+    async def fake_window(market: str, boundary: date) -> TossSessionWindow | None:
+        asked.append(boundary)
+        return window if boundary == friday else None
+
+    monkeypatch.setattr(router_module, "_regular_market_window", fake_window)
+
+    resolved = await router_module._recent_session("kr", saturday)
+
+    assert resolved == (friday, window)
+    # 토요일부터 하루씩만 되짚는다. 건너뛰거나 미래를 보지 않는다.
+    assert asked == [saturday, friday]
+
+
+@pytest.mark.asyncio
+async def test_recent_session_returns_none_when_no_trading_day_is_within_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """되짚기는 무한하지 않다. 상한까지 못 찾으면 빈 응답으로 떨어진다."""
+    asked: list[date] = []
+
+    async def fake_window(market: str, boundary: date) -> TossSessionWindow | None:
+        asked.append(boundary)
+        return None
+
+    monkeypatch.setattr(router_module, "_regular_market_window", fake_window)
+
+    resolved = await router_module._recent_session("us", date(2026, 8, 29))
+
+    assert resolved is None
+    assert len(asked) == router_module._MAX_TRADING_DATE_LOOKBACK_DAYS

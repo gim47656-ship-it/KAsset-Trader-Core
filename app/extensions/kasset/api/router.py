@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from math import ceil
 from typing import Annotated
 
@@ -141,6 +141,12 @@ _CANDLE_RANGE_COUNTS: dict[CandleRange, int] = {
 }
 # 분봉 예산의 상한. 정규장 390분에 시간외 전체를 더해도 남는 여유다.
 _TOSS_INTRADAY_MAX_CANDLE_COUNT = 1200
+# 정규장 종료 후 예산에 더할 상한. 최신 슬롯을 차지하는 것은 그 거래일의 시간외·NXT 봉뿐이고
+# (미국 시간외 240분, KRX 시간외+NXT 270분) 휴장일에는 봉이 아예 생기지 않는다. 경과 시간을
+# 그대로 더하면 주말에 상한까지 부풀어 페이지만 늘어난다.
+_TOSS_INTRADAY_POST_SESSION_ALLOWANCE = 420
+# 휴장일에서 최근 거래일을 되짚는 최대 일수. 설·추석 연휴가 주말에 붙은 최장 구간을 덮는다.
+_MAX_TRADING_DATE_LOOKBACK_DAYS = 10
 
 
 def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
@@ -151,14 +157,38 @@ def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
     앞부분이 잘려 나간다. 실측(2026-08-28 금요일 정규장 종료 후): 390분 중 앞 150분 누락으로
     시가 `72.95`→`72.355`, 고가 `74.18`→`72.56`, 거래량 `5359548`→`2840957`.
 
-    종료 후 경과분만큼 예산을 늘려 그 침식을 정확히 상쇄한다. 장중에는 경과분이 0이라
-    요청량이 그대로이므로 흔한 경로의 호출 수가 늘지 않는다.
+    종료 후 경과분만큼 예산을 늘려 그 침식을 상쇄한다. 장중에는 경과분이 0이라 요청량이
+    그대로이므로 흔한 경로의 호출 수가 늘지 않는다. 경과분은 그 거래일의 시간외 봉 분량으로
+    묶는다 — 휴장일에는 봉이 생기지 않으니 며칠이 지나도 침식량은 더 늘지 않는다.
     """
     regular_minutes = ceil((window.end - window.start).total_seconds() / 60)
     elapsed_after = 0
     if moment > window.end:
-        elapsed_after = ceil((moment - window.end).total_seconds() / 60)
+        elapsed_after = min(
+            ceil((moment - window.end).total_seconds() / 60),
+            _TOSS_INTRADAY_POST_SESSION_ALLOWANCE,
+        )
     return min(regular_minutes + elapsed_after, _TOSS_INTRADAY_MAX_CANDLE_COUNT)
+
+
+async def _recent_session(
+    market: str, boundary: date
+) -> tuple[date, TossSessionWindow] | None:
+    """`boundary` 에서 과거로 되짚어 정규장이 있는 첫 날과 그 창을 돌려준다.
+
+    주말·공휴일에는 그날의 정규장 창이 없다. 거기서 그냥 빈 배열을 내보내면 시장에 따라
+    동작이 갈린다 — 실측(2026-08-29 토요일): KRX 는 `boundary=08-29` 로 창이 없어 빈 배열,
+    US 는 시차 때문에 `boundary=08-28` 이 잡혀 금요일 분봉이 나왔다. `1일` 을 "가장 최근
+    거래일"로 읽으면 두 시장이 같아지고 주말·공휴일에도 마지막 세션의 하루가 보인다.
+
+    개장 전은 되짚지 않는다. 그때는 창이 있고 봉만 없는 상태이므로 `장 시작 전`이 맞다.
+    """
+    for offset in range(_MAX_TRADING_DATE_LOOKBACK_DAYS):
+        candidate = boundary - timedelta(days=offset)
+        window = await _regular_market_window(market, candidate)
+        if window is not None:
+            return candidate, window
+    return None
 
 
 def _current_market_trading_date(market: str) -> date:
@@ -574,10 +604,12 @@ async def market_candles(
         ) from err
 
     if range_ == "1D":
-        boundary = _current_market_trading_date(market)
-        regular_market = await _regular_market_window(candle_market.value, boundary)
-        if regular_market is None:
+        session = await _recent_session(
+            candle_market.value, _current_market_trading_date(market)
+        )
+        if session is None:
             return DailyCandlesResponse(interval="1m", candles=[])
+        boundary, regular_market = session
         bars = await toss_market_data.intraday_bars(
             normalized_symbol,
             count=_intraday_candle_budget(regular_market, datetime.now(UTC)),
