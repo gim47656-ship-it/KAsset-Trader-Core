@@ -46,6 +46,7 @@ from app.extensions.kasset.api.stream.contract import (
     REASON_TOPIC_BUDGET,
     REASON_TOPIC_REJECTED,
     REASON_UPSTREAM_DOWN,
+    REASON_UPSTREAM_SYNCING,
     UpstreamState,
     orderbook_from_frame,
     orderbook_message,
@@ -105,6 +106,7 @@ class MarketStreamRuntime:
         # 소유자가 게시한 최신 상태. 새로 붙은 클라이언트에게 즉시 알려 준다.
         self._live = False
         self._streaming: frozenset[str] = frozenset()
+        self._demoted: frozenset[str] = frozenset()
         self._rejected: frozenset[str] = frozenset()
         self._reason: str | None = REASON_UPSTREAM_DOWN
 
@@ -306,9 +308,9 @@ class MarketStreamRuntime:
     def _notify_status(self, session: StreamSession) -> None:
         """이 세션이 폴링으로 메워야 하는 토픽을 계산해 알린다.
 
-        상향이 살아 있어도 예산 초과·공급자 거부로 스트리밍하지 않는 토픽이
-        있을 수 있다. 그 경우에도 앱이 값을 못 보는 일이 없게 폴링 목록으로
-        내보내고, 사유를 구분해 준다.
+        상향이 살아 있어도 declare ack 대기·예산 초과·공급자 거부로 아직
+        스트리밍하지 않는 토픽이 있을 수 있다. 그 경우에도 앱이 값을 못 보는
+        일이 없게 폴링 목록으로 내보내고, 사유를 구분해 준다.
         """
 
         if not self._live:
@@ -321,17 +323,21 @@ class MarketStreamRuntime:
         polling = sorted(session.topics - self._streaming)
         reason: str | None = None
         if polling:
-            reason = (
-                REASON_TOPIC_REJECTED
-                if self._rejected.intersection(polling)
-                else REASON_TOPIC_BUDGET
-            )
+            if self._rejected.intersection(polling):
+                reason = REASON_TOPIC_REJECTED
+            elif self._demoted.intersection(polling):
+                reason = REASON_TOPIC_BUDGET
+            else:
+                # LIVE지만 allocator의 강등·거부 목록에도 없다면, 선언을 보냈고
+                # 아직 ack로 `_streaming`이 확정되지 않은 과도 상태다.
+                reason = REASON_UPSTREAM_SYNCING
         session.offer_status(upstream="LIVE", reason=reason, polling_topics=polling)
 
     def _absorb_state(self, state: Mapping[str, Any]) -> None:
         self._live = bool(state.get("live"))
         self._streaming = _string_set(state.get("streaming"))
         self._rejected = _string_set(state.get("rejected"))
+        self._demoted = _string_set(state.get("demoted"))
         reason = state.get("reason")
         self._reason = reason if isinstance(reason, str) else None
 

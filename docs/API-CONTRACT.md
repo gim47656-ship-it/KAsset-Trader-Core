@@ -90,6 +90,19 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 }
 ```
 
+## 실시간 시세 스트림
+
+`WS /api/v1/market/stream`
+
+- `status.pollingTopics`는 앱이 기존 REST 시세 경로로 폴링해야 하는 토픽이다. 후속 `status`에서 목록이 비면 폴링을 중단한다.
+- `status.reason`은 다음 값 중 하나다.
+  - `UPSTREAM_UNAVAILABLE`: 토스 상향 연결을 사용할 수 없다.
+  - `UPSTREAM_BLOCKED`: 토스가 상향 연결을 차단했다. 서버 허용 IP 설정을 확인해야 한다.
+  - `UPSTREAM_SYNCING`: 상향 연결은 살아 있지만 declare ack가 아직 확정되지 않았다. 앱은 `pollingTopics`를 임시로 폴링하고 다음 `status`를 기다린다.
+  - `TOPIC_BUDGET_EXCEEDED`: 전체 수요가 토스 연결의 100토픽 상한을 넘어 allocator가 해당 토픽을 제외했다.
+  - `TOPIC_REJECTED_BY_PROVIDER`: 토스가 해당 토픽을 거부했다.
+- `TOPIC_BUDGET_EXCEEDED`는 실제 allocator 제외 토픽에만 사용한다. ack 대기 중인 토픽에는 `UPSTREAM_SYNCING`을 사용한다.
+
 ## 홈 시장 개요
 
 `GET /api/v1/market/overview`

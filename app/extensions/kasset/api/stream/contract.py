@@ -59,9 +59,10 @@ MESSAGE_PONG: Final[str] = "pong"
 
 UpstreamState = Literal["LIVE", "DEGRADED"]
 
-# 강등 사유. 앱은 사유별로 배너를 다르게 낼 수 있고, 아무 경우에도
+# 폴링 강등 사유. 앱은 사유별로 배너를 다르게 낼 수 있고, 아무 경우에도
 # `pollingTopics`만 보면 무엇을 폴링해야 하는지 알 수 있다.
 REASON_UPSTREAM_DOWN: Final[str] = "UPSTREAM_UNAVAILABLE"
+REASON_UPSTREAM_SYNCING: Final[str] = "UPSTREAM_SYNCING"
 REASON_TOPIC_BUDGET: Final[str] = "TOPIC_BUDGET_EXCEEDED"
 REASON_TOPIC_REJECTED: Final[str] = "TOPIC_REJECTED_BY_PROVIDER"
 
@@ -228,8 +229,9 @@ def status_message(
     """스트림 강등 시그널.
 
     `pollingTopics`는 "이 연결이 구독했지만 서버가 지금 스트리밍하지 않는" 토픽
-    이다. 상향 단절·예산 초과·공급자 거부를 한 필드로 흡수하므로, 앱은 사유를
-    분기하지 않고 이 목록만 REST 폴링으로 돌리면 된다. 목록이 비면 폴링을 끈다.
+    이다. 상향 단절·구독 동기화·예산 초과·공급자 거부를 한 필드로 흡수하므로,
+    앱은 사유를 분기하지 않고 이 목록만 REST 폴링으로 돌리면 된다. 목록이 비면
+    폴링을 끈다.
     """
 
     return _dump(

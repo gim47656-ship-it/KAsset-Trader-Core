@@ -1043,6 +1043,42 @@ async def test_runtime_tells_the_client_which_topics_to_poll_when_degraded() -> 
 
 
 @pytest.mark.asyncio
+async def test_runtime_reports_unconfirmed_live_topics_as_upstream_syncing() -> None:
+    bus = _FakeBus()
+    state = {
+        "live": True,
+        "reason": None,
+        "streaming": [],
+        "demoted": [],
+        "rejected": [],
+    }
+    runtime = _runtime(bus, _baseline_quote())
+    sent: list[str] = []
+    session = StreamSession(send=_collect(sent))
+    runtime._absorb_state(state)  # noqa: SLF001 — declare ack 전 상태 주입
+    runtime.register(session)
+
+    await runtime.declare(
+        session,
+        ["quote:US:AAPL", "quote:US:TQQQ", "orderbook:US:TQQQ"],
+    )
+    await session.flush()
+
+    statuses = [
+        json.loads(message)
+        for message in sent
+        if json.loads(message)["type"] == contract.MESSAGE_STATUS
+    ]
+    assert statuses[-1]["upstream"] == "LIVE"
+    assert statuses[-1]["reason"] == "UPSTREAM_SYNCING"
+    assert statuses[-1]["pollingTopics"] == [
+        "orderbook:US:TQQQ",
+        "quote:US:AAPL",
+        "quote:US:TQQQ",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_reports_budget_demoted_topics_as_polling_topics() -> None:
     bus = _FakeBus()
     state = {
