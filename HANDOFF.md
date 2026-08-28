@@ -4,6 +4,13 @@
 
 ## 이번 세션에서 한 일 (2026-08-28)
 
+- **서버 SSH가 Tailscale 전용으로 바뀜 (2026-08-28)**: 접속은
+  `ssh -i <PEM> root@100.73.186.78` (tailnet `vm-naver-kasset`, 계정 gim47656@).
+  공인 `175.45.201.51:22`는 nftables `ssh_guard` 테이블이 차단한다 — 허용은
+  lo / tailscale0 / 웹터미널 게이트웨이 `180.210.76.21`뿐. 규칙 파일
+  `/etc/nftables/kasset-ssh-guard.nft`(+ sysconfig include), `nftables`·`tailscaled`
+  둘 다 enable. 80/443(앱 API)은 계속 공개. 비상 복구는 모두의 AI 실험실 웹터미널.
+  주의: 사무실 PC는 Tailscale 설치 전까지 SSH 불가.
 - **Google 간편로그인**: `POST /api/v1/auth/google` — RS256+JWKS 검증(aud/iss/exp/
   email_verified), `users.google_sub` 식별·자동가입, 미설정 시 503 fail-closed.
   migration `20260828_kasset_google_sub`. checker PASS. 서버 배포 완료(가짜 토큰 → 401).
