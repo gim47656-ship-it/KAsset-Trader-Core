@@ -265,12 +265,40 @@ class NHSharedMarketData:
 
     _FRESH_TTL_SECONDS = 3.0
     _STALE_TTL_SECONDS = 120.0
+    # NH 모의 서버는 초당 호출 유량 제한(429)이 빡빡하다. 전 종목 공용으로
+    # 호출 간격을 강제하고, 429는 기존 토큰 그대로 1회만 재시도한다(공식 가이드).
+    _MIN_CALL_INTERVAL_SECONDS = 0.45
+    _RETRY_AFTER_429_SECONDS = 1.0
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._cached: NHPlugMockClient | None = None
         self._quote_cache: dict[str, tuple[float, Quote]] = {}
         self._symbol_locks: dict[str, asyncio.Lock] = {}
+        self._pace_lock = asyncio.Lock()
+        self._last_call_at = 0.0
+
+    async def _paced_fetch(
+        self, client: NHPlugMockClient, *, market: str, symbol: str
+    ) -> dict[str, Any]:
+        for attempt in (0, 1):
+            async with self._pace_lock:
+                wait = (
+                    self._last_call_at
+                    + self._MIN_CALL_INTERVAL_SECONDS
+                    - time.monotonic()
+                )
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                try:
+                    return await client.fetch_quote(market=market, symbol=symbol)
+                except httpx.HTTPStatusError as err:
+                    if err.response.status_code != 429 or attempt == 1:
+                        raise
+                finally:
+                    self._last_call_at = time.monotonic()
+            await asyncio.sleep(self._RETRY_AFTER_429_SECONDS)
+        raise AssertionError("unreachable")
 
     async def _client(self) -> NHPlugMockClient:
         if not mock_enabled():
@@ -340,7 +368,8 @@ class NHSharedMarketData:
                 return cached[1]
             client = await self._client()
             try:
-                payload = await client.fetch_quote(
+                payload = await self._paced_fetch(
+                    client,
                     market=normalized_market,
                     symbol=normalized_symbol,
                 )
