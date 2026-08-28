@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime
+from math import ceil
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
@@ -138,9 +139,26 @@ _CANDLE_RANGE_COUNTS: dict[CandleRange, int] = {
     "3M": 60,
     "6M": 120,
 }
-# KRX·미국 정규장은 각각 390분이다. Toss의 요청당 200개 상한은 기존
-# `fetch_toss_candles`가 두 페이지로 나눠 필요한 최소 호출 수로 채운다.
-_TOSS_INTRADAY_CANDLE_COUNT = 390
+# 분봉 예산의 상한. 정규장 390분에 시간외 전체를 더해도 남는 여유다.
+_TOSS_INTRADAY_MAX_CANDLE_COUNT = 1200
+
+
+def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
+    """정규장 분수 + 정규장 종료 후 경과 분.
+
+    Toss는 최신 봉부터 거꾸로 주고 `fetch_toss_candles` 는 최신 `count` 개만 남긴다.
+    장이 끝난 뒤에는 **시간외 봉이 최신 슬롯을 차지**하므로 정규장 분수만 요청하면 세션의
+    앞부분이 잘려 나간다. 실측(2026-08-28 금요일 정규장 종료 후): 390분 중 앞 150분 누락으로
+    시가 `72.95`→`72.355`, 고가 `74.18`→`72.56`, 거래량 `5359548`→`2840957`.
+
+    종료 후 경과분만큼 예산을 늘려 그 침식을 정확히 상쇄한다. 장중에는 경과분이 0이라
+    요청량이 그대로이므로 흔한 경로의 호출 수가 늘지 않는다.
+    """
+    regular_minutes = ceil((window.end - window.start).total_seconds() / 60)
+    elapsed_after = 0
+    if moment > window.end:
+        elapsed_after = ceil((moment - window.end).total_seconds() / 60)
+    return min(regular_minutes + elapsed_after, _TOSS_INTRADAY_MAX_CANDLE_COUNT)
 
 
 def _current_market_trading_date(market: str) -> date:
@@ -562,7 +580,7 @@ async def market_candles(
             return DailyCandlesResponse(interval="1m", candles=[])
         bars = await toss_market_data.intraday_bars(
             normalized_symbol,
-            count=_TOSS_INTRADAY_CANDLE_COUNT,
+            count=_intraday_candle_budget(regular_market, datetime.now(UTC)),
         )
         return DailyCandlesResponse(
             interval="1m",

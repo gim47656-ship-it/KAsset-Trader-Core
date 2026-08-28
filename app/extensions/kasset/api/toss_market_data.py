@@ -19,6 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from math import ceil
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -51,6 +52,9 @@ _DAILY_BARS_TTL_SECONDS = 60.0
 
 _MIN_PLAUSIBLE_YEAR = 2000
 _MAX_PLAUSIBLE_YEAR = 2100
+
+# Toss 사양의 요청당 캔들 상한(`count.maximum`). 페이지 수 계산의 분모다.
+_TOSS_CANDLE_PAGE_LIMIT = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,7 +430,11 @@ class TossSharedMarketData:
                 future.set_result(close)
 
     async def intraday_bars(self, symbol: str, *, count: int) -> list[TossDailyBar]:
-        """토스 1분봉을 오래된 순으로 돌려준다. 실패하거나 비면 빈 목록이다."""
+        """토스 1분봉을 오래된 순으로 돌려준다. 실패하거나 비면 빈 목록이다.
+
+        페이지 수는 요청량에서 유도한다. 상수로 묶으면 `count` 를 늘려도 그 상한이 다시
+        봉을 잘라 낸다(2페이지 = 400봉).
+        """
         if not bool(getattr(settings, "toss_api_enabled", False)):
             return []
         normalized = symbol.strip().upper()
@@ -446,7 +454,7 @@ class TossSharedMarketData:
                     interval="1m",
                     count=count,
                     adjusted=True,
-                    max_pages=2,
+                    max_pages=ceil(count / _TOSS_CANDLE_PAGE_LIMIT),
                 )
                 return _daily_bars(TossCandlesPage(candles=rows, next_before=None))
         except Exception as exc:  # noqa: BLE001 — 분봉은 없으면 빈 목록이다

@@ -610,3 +610,88 @@ async def test_intraday_response_keeps_only_current_regular_session(
             }
         ],
     }
+
+
+def test_intraday_budget_grows_after_session_close_to_survive_after_hours_bars() -> (
+    None
+):
+    """장 종료 후 시간외 봉이 세션 앞부분을 밀어내지 않도록 예산이 늘어난다.
+
+    Toss는 최신 봉부터 주고 pager는 최신 `count` 개만 남긴다. 정규장 분수만 요청하면
+    종료 후 생긴 시간외 봉이 그만큼 세션의 시작을 잘라 낸다(실측: 390분 중 앞 150분 누락).
+    """
+    start = datetime(2026, 8, 28, 13, 30, tzinfo=UTC)
+    end = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+    window = TossSessionWindow(start=start, end=end)
+
+    # 장중: 경과분이 없으므로 정규장 분수 그대로 — 흔한 경로의 호출 수가 늘지 않는다.
+    assert router_module._intraday_candle_budget(window, start) == 390
+    assert (
+        router_module._intraday_candle_budget(window, end - timedelta(minutes=1)) == 390
+    )
+
+    # 종료 후: 경과분만큼 정확히 늘어난다.
+    assert (
+        router_module._intraday_candle_budget(window, end + timedelta(minutes=150))
+        == 540
+    )
+
+    # 상한을 넘기지 않는다.
+    assert (
+        router_module._intraday_candle_budget(window, end + timedelta(days=7))
+        == router_module._TOSS_INTRADAY_MAX_CANDLE_COUNT
+    )
+
+
+@pytest.mark.asyncio
+async def test_intraday_service_pages_beyond_two_pages_when_budget_requires_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """페이지 수는 요청량에서 유도한다. 2페이지로 묶으면 늘린 예산이 다시 잘린다."""
+    requested: list[int] = []
+
+    def candle(index: int) -> TossCandle:
+        timestamp = datetime(2026, 8, 28, tzinfo=UTC) + timedelta(minutes=index)
+        price = Decimal(index + 1)
+        return TossCandle(
+            timestamp=timestamp.isoformat(),
+            open_price=price,
+            high_price=price,
+            low_price=price,
+            close_price=price,
+            volume=Decimal("1"),
+            currency="USD",
+        )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self._served = 0
+
+        async def candles(
+            self,
+            symbol: str,
+            *,
+            interval: str,
+            count: int,
+            before: str | None = None,
+            adjusted: bool | None = None,
+        ) -> TossCandlesPage:
+            requested.append(count)
+            newest = 540 - self._served
+            self._served += count
+            oldest = newest - count
+            return TossCandlesPage(
+                candles=[candle(index) for index in range(oldest, newest)],
+                next_before=None if oldest <= 0 else f"before-{oldest}",
+            )
+
+    monkeypatch.setattr(settings, "toss_api_enabled", True, raising=False)
+    service = TossSharedMarketData(client_factory=FakeClient)
+
+    bars = await service.intraday_bars("TQQQ", count=540)
+
+    # 200+200+140 — 세 페이지를 돌아야 540봉이 채워진다.
+    assert requested == [200, 200, 140]
+    assert len(bars) == 540
+    assert bars[0].close == Decimal("1")
+    assert bars[-1].close == Decimal("540")
