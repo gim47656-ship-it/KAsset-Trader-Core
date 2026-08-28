@@ -29,11 +29,11 @@ from app.extensions.kasset.api.toss_market_data import (
     TossQuotePoint,
     toss_market_data,
 )
+from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.models.trading import Instrument
 from app.services.daily_candles.repository import (
     DailyCandleRow,
     DailyCandlesRepository,
-    MarketKey,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,10 @@ CANDLE_QUOTE_SOURCE = "PAPER_CANDLES"
 
 _KRX_SYMBOL_RE = re.compile(r"^\d{6}$")
 _KRX_MARKETS = frozenset({"KRX", "KR"})
+# 미국 종목은 토스가 티커를 그대로 받는다(`GET /api/v1/prices`). 앱은 관심종목
+# 와이어 값 `US`를 보내고, 거래소 표기로 들어오는 경우도 같은 경로로 받는다.
+_US_MARKETS = frozenset({"US", "NASDAQ", "NYSE", "AMEX"})
+_US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
 _KST = ZoneInfo("Asia/Seoul")
 # previousClose 판정에 필요한 최소 행 수는 2다(당일 + 직전 거래일). 여유 1행을
 # 더 읽어 같은 날짜가 중복 저장된 경우에도 직전 거래일을 찾는다.
@@ -88,28 +92,56 @@ def normalize_symbols(symbols: str) -> list[str]:
     return normalized
 
 
+def supports_market(market: str) -> bool:
+    """이 모듈이 시세를 해석할 수 있는 시장인지 알려준다."""
+    normalized = market.strip().upper()
+    return normalized in _KRX_MARKETS or normalized in _US_MARKETS
+
+
+def _wire_market(market: str) -> str:
+    """응답 `market` 표기. 앱은 요청한 시장으로 행을 묶으므로 계약을 지킨다."""
+    normalized = market.strip().upper()
+    return "US" if normalized in _US_MARKETS else "KRX"
+
+
 async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
-    """KRX 단일 시세. 토스 → NH 공용 → PAPER 저장 캔들 순서로 강등한다."""
+    """단일 시세. 토스 → NH 공용 → PAPER 저장 캔들 순서로 강등한다.
+
+    미국 종목은 NH 경로가 없으므로 토스 실패 시 곧바로 PAPER로 내려간다.
+    """
     normalized = symbol.strip().upper()
-    point = (await _toss_points([normalized])).get(normalized)
+    wire_market = _wire_market(market)
+    point = (await _toss_points(market, [normalized])).get(normalized)
     if point is not None:
-        rows = (await _candle_rows(db, [normalized])).get(normalized, ())
+        rows = (await _candle_rows(db, market, [normalized])).get(normalized, ())
         names = await _instrument_names(db, [normalized])
-        return _toss_quote(point, name=names.get(normalized), rows=rows)
-    shared = await _nh_quote(market=market, symbol=normalized)
-    if shared is not None:
-        return shared
+        fallback = await _previous_close_fallback(
+            {normalized: point}, {normalized: rows}
+        )
+        return _toss_quote(
+            point,
+            market=wire_market,
+            name=names.get(normalized),
+            rows=rows,
+            previous_close_fallback=fallback.get(normalized),
+        )
+    if wire_market == "KRX":
+        shared = await _nh_quote(market=market, symbol=normalized)
+        if shared is not None:
+            return shared
     return await paper_account_adapter.quote(db, market=market, symbol=normalized)
 
 
 async def resolve_quotes(
     db: AsyncSession, *, market: str, symbols: Sequence[str]
 ) -> list[Quote]:
-    """KRX 배치 시세. 한 번의 토스 호출 + 한 번의 일봉 조회로 구성한다."""
+    """배치 시세. 한 번의 토스 호출 + 한 번의 일봉 조회로 구성한다."""
     requested = list(symbols)
-    points = await _toss_points(requested)
-    candles = await _candle_rows(db, requested)
+    wire_market = _wire_market(market)
+    points = await _toss_points(market, requested)
+    candles = await _candle_rows(db, market, requested)
     names = await _instrument_names(db, requested)
+    fallback = await _previous_close_fallback(points, candles)
 
     quotes: list[Quote] = []
     nh_deadline = time.monotonic() + _NH_BATCH_BUDGET_SECONDS
@@ -118,26 +150,61 @@ async def resolve_quotes(
         rows = candles.get(symbol, ())
         point = points.get(symbol)
         if point is not None:
-            quotes.append(_toss_quote(point, name=name, rows=rows))
+            quotes.append(
+                _toss_quote(
+                    point,
+                    market=wire_market,
+                    name=name,
+                    rows=rows,
+                    previous_close_fallback=fallback.get(symbol),
+                )
+            )
             continue
-        if time.monotonic() < nh_deadline:
+        if wire_market == "KRX" and time.monotonic() < nh_deadline:
             shared = await _nh_quote(market=market, symbol=symbol)
             if shared is not None:
                 quotes.append(shared)
                 continue
-        candle_quote = _candle_quote(symbol, name=name, rows=rows)
+        candle_quote = _candle_quote(symbol, market=wire_market, name=name, rows=rows)
         if candle_quote is not None:
             quotes.append(candle_quote)
     return quotes
 
 
-async def _toss_points(symbols: Sequence[str]) -> dict[str, TossQuotePoint]:
-    krx_symbols = [
-        symbol for symbol in symbols if _KRX_SYMBOL_RE.fullmatch(symbol) is not None
-    ]
-    if not krx_symbols:
+async def _toss_points(
+    market: str, symbols: Sequence[str]
+) -> dict[str, TossQuotePoint]:
+    pattern = _US_SYMBOL_RE if _wire_market(market) == "US" else _KRX_SYMBOL_RE
+    accepted = [symbol for symbol in symbols if pattern.fullmatch(symbol) is not None]
+    if not accepted:
         return {}
-    return await toss_market_data.prices(krx_symbols)
+    return await toss_market_data.prices(accepted)
+
+
+async def _previous_close_fallback(
+    points: dict[str, TossQuotePoint],
+    candles: dict[str, Sequence[DailyCandleRow]] | dict[str, list[DailyCandleRow]],
+) -> dict[str, Decimal]:
+    """저장 일봉으로 전일 종가를 못 구한 종목만 토스 일봉으로 메운다.
+
+    저장 일봉 유니버스는 관심종목 전체를 담고 있지 않아, 새로 추가한 종목은
+    등락률이 계속 `null`이었다. 저장 값이 있으면 그것을 그대로 쓰고 이 경로는
+    호출하지 않는다.
+    """
+    missing: dict[date, list[str]] = {}
+    for symbol, point in points.items():
+        rows = candles.get(symbol) or ()
+        if _previous_close(rows, before=point.as_of) is not None:
+            continue
+        missing.setdefault(_trading_date(point.as_of), []).append(symbol)
+    if not missing:
+        return {}
+    resolved: dict[str, Decimal] = {}
+    for boundary, symbols in missing.items():
+        resolved.update(
+            await toss_market_data.previous_closes(symbols, boundary=boundary)
+        )
+    return resolved
 
 
 async def _nh_quote(*, market: str, symbol: str) -> Quote | None:
@@ -153,11 +220,16 @@ async def _nh_quote(*, market: str, symbol: str) -> Quote | None:
 def _toss_quote(
     point: TossQuotePoint,
     *,
+    market: str,
     name: str | None,
     rows: Sequence[DailyCandleRow],
+    previous_close_fallback: Decimal | None = None,
 ) -> Quote:
     previous_close = _previous_close(rows, before=point.as_of)
+    if previous_close is None:
+        previous_close = previous_close_fallback
     return _quote(
+        market=market,
         symbol=point.symbol,
         name=name,
         currency=point.currency,
@@ -171,6 +243,7 @@ def _toss_quote(
 def _candle_quote(
     symbol: str,
     *,
+    market: str,
     name: str | None,
     rows: Sequence[DailyCandleRow],
 ) -> Quote | None:
@@ -182,9 +255,10 @@ def _candle_quote(
         return None
     as_of = _aware(latest.time_utc)
     return _quote(
+        market=market,
         symbol=symbol,
         name=name,
-        currency="KRW",
+        currency="USD" if market == "US" else "KRW",
         price=price,
         previous_close=_previous_close(rows, before=as_of),
         as_of=as_of,
@@ -194,6 +268,7 @@ def _candle_quote(
 
 def _quote(
     *,
+    market: str,
     symbol: str,
     name: str | None,
     currency: str,
@@ -206,7 +281,7 @@ def _quote(
     change_rate = _change_rate(change_amount, previous_close)
     return Quote(
         broker="PAPER",
-        market="KRX",
+        market=market,
         symbol=symbol,
         name=name,
         currency=currency,
@@ -273,28 +348,30 @@ def _decimal(value: object) -> Decimal | None:
 
 
 async def _candle_rows(
-    db: AsyncSession, symbols: Sequence[str]
+    db: AsyncSession, market: str, symbols: Sequence[str]
 ) -> dict[str, list[DailyCandleRow]]:
     if not symbols:
         return {}
     try:
+        candle_market, partition, _recommendation_market = _market_route(market)
+    except ValueError:
+        return {}
+    try:
         return await DailyCandlesRepository(session=db).fetch_recent_batch(
-            market=MarketKey.KR,
+            market=candle_market,
             symbols=list(symbols),
-            partition="KRX",
+            partition=partition,
             count=_CANDLE_LOOKBACK_ROWS,
         )
     except Exception as exc:  # noqa: BLE001 — previousClose는 없으면 null이다
         logger.warning(
-            "kasset krx quote candle read failed (%s): previousClose omitted",
+            "kasset quote candle read failed (%s): previousClose omitted",
             type(exc).__name__,
         )
         return {}
 
 
-async def _instrument_names(
-    db: AsyncSession, symbols: Sequence[str]
-) -> dict[str, str]:
+async def _instrument_names(db: AsyncSession, symbols: Sequence[str]) -> dict[str, str]:
     if not symbols:
         return {}
     try:

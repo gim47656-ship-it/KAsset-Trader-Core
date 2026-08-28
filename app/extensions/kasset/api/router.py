@@ -460,10 +460,11 @@ async def market_quote(
     if broker.strip().upper() == "NH":
         return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
-    if market.strip().upper() in {"KRX", "KR"}:
-        # 시세는 계좌 연동과 무관한 공용 데이터다. 토스 실시간 배치를 우선
-        # 쓰고, 실패하면 서버 공용 NH PLUG 채널 → 저장 캔들 기반 PAPER 시세로
-        # 강등한다.
+    if krx_quotes.supports_market(market):
+        # 시세는 계좌 연동과 무관한 공용 데이터다. 토스 실시간을 우선 쓰고,
+        # 실패하면 KRX는 서버 공용 NH PLUG 채널 → 저장 캔들 기반 PAPER 시세로
+        # 강등한다. 미국은 NH 경로가 없어 곧바로 PAPER로 내려간다. 토스가
+        # 미국 티커를 그대로 받으므로 하루 지연되던 PAPER 시세를 대체한다.
         return await krx_quotes.resolve_quote(db, market=market, symbol=symbol)
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
 
@@ -522,23 +523,41 @@ async def market_candles(
             422, "VALIDATION_ERROR", "지원하지 않는 시장입니다."
         ) from err
 
+    limit = min(count, _MAX_CANDLE_COUNT)
     rows = await DailyCandlesRepository(session=db).fetch_recent(
         market=candle_market,
         symbol=normalized_symbol,
         partition=partition,
-        count=min(count, _MAX_CANDLE_COUNT),
+        count=limit,
     )
+    if rows:
+        return DailyCandlesResponse(
+            candles=[
+                DailyCandle(
+                    time=iso_z(row.time_utc),
+                    open=decimal_text(str(row.open)),
+                    high=decimal_text(str(row.high)),
+                    low=decimal_text(str(row.low)),
+                    close=decimal_text(str(row.close)),
+                    volume=decimal_text(str(row.volume)),
+                )
+                for row in rows
+            ]
+        )
+    # 저장 일봉 유니버스는 관심종목 전체를 담고 있지 않아, 새로 추가한 종목의
+    # 차트가 계속 빈 배열이었다. 저장 값이 없을 때만 토스 일봉으로 채운다.
+    bars = await toss_market_data.daily_bars(normalized_symbol, count=limit)
     return DailyCandlesResponse(
         candles=[
             DailyCandle(
-                time=iso_z(row.time_utc),
-                open=decimal_text(str(row.open)),
-                high=decimal_text(str(row.high)),
-                low=decimal_text(str(row.low)),
-                close=decimal_text(str(row.close)),
-                volume=decimal_text(str(row.volume)),
+                time=iso_z(bar.time_utc),
+                open=decimal_text(bar.open),
+                high=decimal_text(bar.high),
+                low=decimal_text(bar.low),
+                close=decimal_text(bar.close),
+                volume=decimal_text(bar.volume),
             )
-            for row in rows
+            for bar in bars
         ]
     )
 
