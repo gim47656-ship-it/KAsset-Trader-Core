@@ -34,7 +34,7 @@ class _FakeResult:
     def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
 
-    def mappings(self) -> "_FakeResult":
+    def mappings(self) -> _FakeResult:
         return self
 
     def all(self) -> list[Any]:
