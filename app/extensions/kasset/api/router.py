@@ -25,7 +25,7 @@ from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_adapter
-from app.extensions.kasset.api.paper import iso_z, paper_account_adapter
+from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
     AiStatus,
@@ -53,6 +53,8 @@ from app.extensions.kasset.api.schemas import (
     BrokerVerifyResponse,
     CredentialRequest,
     CurrentUserResponse,
+    DailyCandle,
+    DailyCandlesResponse,
     DatabaseStatus,
     GoogleLoginRequest,
     HealthResponse,
@@ -69,10 +71,14 @@ from app.extensions.kasset.api.schemas import (
     WatchlistResponse,
 )
 from app.extensions.kasset.api.watchlist import watchlist_service
+from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.models.trading import UserRole
+from app.services.daily_candles.repository import DailyCandlesRepository
 
 public_router = APIRouter(tags=["kasset-android"])
 router = APIRouter(prefix="/api/v1", tags=["kasset-android"])
+
+_MAX_CANDLE_COUNT = 120
 
 
 @public_router.get("/health", response_model=HealthResponse)
@@ -373,6 +379,45 @@ async def market_quote(
         return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
+
+
+@router.get("/market/candles", response_model=DailyCandlesResponse)
+async def market_candles(
+    market: Annotated[str, Query(min_length=1, max_length=20)],
+    symbol: Annotated[str, Query(min_length=1, max_length=64)],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    count: Annotated[int, Query(ge=1)] = 60,
+) -> DailyCandlesResponse:
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol:
+        raise MobileApiError(422, "VALIDATION_ERROR", "종목 코드를 입력해 주세요.")
+    try:
+        candle_market, partition, _recommendation_market = _market_route(market)
+    except ValueError as err:
+        raise MobileApiError(
+            422, "VALIDATION_ERROR", "지원하지 않는 시장입니다."
+        ) from err
+
+    rows = await DailyCandlesRepository(session=db).fetch_recent(
+        market=candle_market,
+        symbol=normalized_symbol,
+        partition=partition,
+        count=min(count, _MAX_CANDLE_COUNT),
+    )
+    return DailyCandlesResponse(
+        candles=[
+            DailyCandle(
+                time=iso_z(row.time_utc),
+                open=decimal_text(str(row.open)),
+                high=decimal_text(str(row.high)),
+                low=decimal_text(str(row.low)),
+                close=decimal_text(str(row.close)),
+                volume=decimal_text(str(row.volume)),
+            )
+            for row in rows
+        ]
+    )
 
 
 @router.get("/market/symbols", response_model=SymbolsResponse)

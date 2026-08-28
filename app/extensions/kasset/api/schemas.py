@@ -19,6 +19,7 @@ class AndroidWireModel(BaseModel):
         extra="forbid",
     )
 
+
 WatchlistMarket = Literal["KRX", "US", "CRYPTO"]
 
 
@@ -46,6 +47,19 @@ class InstrumentSearchItem(AndroidWireModel):
 
 class InstrumentSearchResponse(AndroidWireModel):
     items: list[InstrumentSearchItem]
+
+
+class DailyCandle(AndroidWireModel):
+    time: str
+    open: str
+    high: str
+    low: str
+    close: str
+    volume: str
+
+
+class DailyCandlesResponse(AndroidWireModel):
+    candles: list[DailyCandle]
 
 
 class RegisterRequest(AndroidWireModel):
