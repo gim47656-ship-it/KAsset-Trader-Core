@@ -261,7 +261,7 @@ def _toss_quote(
     previous_close = _previous_close(rows, market=market, before=point.as_of)
     if previous_close is None:
         previous_close = previous_close_fallback
-    return _quote(
+    return build_quote(
         market=market,
         symbol=point.symbol,
         name=name,
@@ -290,7 +290,7 @@ def _candle_quote(
     if price is None:
         return None
     as_of = _aware(latest.time_utc)
-    return _quote(
+    return build_quote(
         market=market,
         symbol=symbol,
         name=name,
@@ -302,7 +302,7 @@ def _candle_quote(
     )
 
 
-def _quote(
+def build_quote(
     *,
     market: str,
     symbol: str,
@@ -313,8 +313,15 @@ def _quote(
     as_of: datetime,
     source: str,
 ) -> Quote:
+    """`Quote` 와이어 응답의 단일 생성점.
+
+    REST 경로(토스 배치·저장 일봉)와 실시간 스트림 경로가 같이 쓴다. 등락
+    계산과 문자열 표기가 두 경로에서 갈라지면 앱이 폴링 결과와 스트림 결과를
+    같은 모델로 다룰 수 없으므로, 생성점을 하나로 유지한다.
+    """
+
     change_amount = price - previous_close if previous_close is not None else None
-    change_rate = _change_rate(change_amount, previous_close)
+    rate = change_rate(change_amount, previous_close)
     return Quote(
         broker="PAPER",
         market=market,
@@ -328,13 +335,13 @@ def _quote(
         change_amount=(
             decimal_text(change_amount) if change_amount is not None else None
         ),
-        change_rate=decimal_text(change_rate) if change_rate is not None else None,
+        change_rate=decimal_text(rate) if rate is not None else None,
         as_of=iso_z(as_of),
         source=source,
     )
 
 
-def _change_rate(
+def change_rate(
     change_amount: Decimal | None, previous_close: Decimal | None
 ) -> Decimal | None:
     if change_amount is None or previous_close is None or previous_close == 0:

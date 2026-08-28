@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paths import is_android_compat_path
 from app.extensions.kasset.api.router import public_router, router
+from app.extensions.kasset.api.stream import stream_router
 
 
 def install_android_compat_api(app: FastAPI) -> None:
@@ -15,6 +16,8 @@ def install_android_compat_api(app: FastAPI) -> None:
 
     app.include_router(public_router)
     app.include_router(router)
+    # 실시간 시세·호가 WebSocket. 기존 REST 시세 라우트는 그대로 남아 폴백이다.
+    app.include_router(stream_router)
 
     @app.exception_handler(MobileApiError)
     async def mobile_api_error_handler(

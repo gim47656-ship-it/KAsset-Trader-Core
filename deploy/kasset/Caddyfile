@@ -44,6 +44,13 @@
 		reverse_proxy {$KASSET_WEB_TERMINAL_UPSTREAM:127.0.0.1:65535}
 	}
 
+	# 실시간 시세 WebSocket(`/api/v1/market/stream`)은 아래 catch-all 이 그대로
+	# 통과시킨다. Caddy 의 reverse_proxy 는 HTTP/1.1 Upgrade 를 자동으로 나르고
+	# 101 응답에는 `encode` 가 개입하지 않으므로 추가 지시어가 필요 없다.
+	# 주의: 이 catch-all 위에 응답을 버퍼링하는 지시어(`request_body`,
+	# `handle_response` 등)를 끼우면 스트림이 끊긴다. 스트림 전용 경로를 따로
+	# 만들 때는 `reverse_proxy api:8000` 그대로 두고 timeout 을 넣지 마라 —
+	# 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
 	handle {
 		reverse_proxy api:8000 {
 			header_up X-Real-IP {remote_host}
