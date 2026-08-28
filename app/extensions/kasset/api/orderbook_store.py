@@ -24,7 +24,9 @@ from app.services.brokers.nhplug.gating import mock_enabled
 
 logger = logging.getLogger(__name__)
 
-_MOCK_WEBSOCKET_URL: Final[str] = "wss://moapi.nhplug.com:17070/websocket"
+# 시세 실시간 TR(`ob`)은 모의 WS(moapi:17070)가 WSS10006으로 거부한다.
+# 실측(2026-08-28): 운영 시세 WS만 `ob`를 허용하며 시세는 계좌 무관 read-only다.
+_MARKET_WEBSOCKET_URL: Final[str] = "wss://api.nhplug.com:7070/websocket"
 _ORDERBOOK_TR_CD: Final[str] = "ob"
 _SUBSCRIPTION_TTL_SECONDS: Final[float] = 60.0
 _RECEIVE_POLL_SECONDS: Final[float] = 1.0
@@ -271,7 +273,7 @@ class NHOrderbookSnapshotStore:
         connection: ClientConnection | None = None
         try:
             async with connect(
-                _MOCK_WEBSOCKET_URL,
+                _MARKET_WEBSOCKET_URL,
                 open_timeout=10,
                 close_timeout=5,
                 ping_interval=None,
