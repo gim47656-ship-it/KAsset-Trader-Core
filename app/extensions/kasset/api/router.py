@@ -1,9 +1,11 @@
 """Android TraderApi-compatible routes."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.web_router import limiter
@@ -25,6 +27,12 @@ from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_adapter, nh_market_data
+from app.extensions.kasset.api.orderbook_store import (
+    NHOrderbookSnapshotStore,
+    get_orderbook_store,
+    nh_orderbook_store,
+    normalize_orderbook_key,
+)
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
@@ -62,6 +70,7 @@ from app.extensions.kasset.api.schemas import (
     InstrumentSearchMarket,
     LoginRequest,
     NicknameUpdateRequest,
+    OrderbookResponse,
     RefreshRequest,
     RegisterRequest,
     SessionTokens,
@@ -78,7 +87,21 @@ from app.models.trading import UserRole
 from app.services.daily_candles.repository import DailyCandlesRepository
 
 public_router = APIRouter(tags=["kasset-android"])
-router = APIRouter(prefix="/api/v1", tags=["kasset-android"])
+
+
+@asynccontextmanager
+async def _kasset_api_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await nh_orderbook_store.close()
+
+
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["kasset-android"],
+    lifespan=_kasset_api_lifespan,
+)
 
 _MAX_CANDLE_COUNT = 120
 
@@ -405,6 +428,24 @@ async def market_quote(
         except MobileApiError:
             pass
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
+
+
+@router.get("/market/orderbook", response_model=OrderbookResponse)
+async def market_orderbook(
+    market: str,
+    symbol: str,
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    store: Annotated[NHOrderbookSnapshotStore, Depends(get_orderbook_store)],
+) -> OrderbookResponse:
+    normalized_market, normalized_symbol = normalize_orderbook_key(
+        market=market,
+        symbol=symbol,
+    )
+    snapshot = await store.get_snapshot(
+        market=normalized_market,
+        symbol=normalized_symbol,
+    )
+    return OrderbookResponse.model_validate(snapshot)
 
 
 @router.get("/market/candles", response_model=DailyCandlesResponse)

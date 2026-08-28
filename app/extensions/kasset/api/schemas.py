@@ -63,6 +63,23 @@ class DailyCandlesResponse(AndroidWireModel):
     candles: list[DailyCandle]
 
 
+class OrderbookLevel(AndroidWireModel):
+    price: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+    volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+
+
+class OrderbookResponse(AndroidWireModel):
+    symbol: str = Field(pattern=r"^\d{6}$")
+    market: Literal["KRX"]
+    ready: bool
+    as_of: str | None
+    source: Literal["NH_PLUG_WS"]
+    asks: list[OrderbookLevel] = Field(max_length=10)
+    bids: list[OrderbookLevel] = Field(max_length=10)
+    total_ask_volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+    total_bid_volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+
+
 class RegisterRequest(AndroidWireModel):
     username: str = Field(min_length=1, max_length=50)
     email: EmailStr
