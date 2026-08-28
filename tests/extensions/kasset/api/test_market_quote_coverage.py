@@ -387,3 +387,67 @@ def test_previous_close_miss_is_not_refetched_within_cooldown(
     import asyncio
 
     asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_quote_for_market_resolves_supported_markets_through_toss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """주문 기준가 진입점이 표시 경로와 같은 토스 시세를 준다.
+
+    실측 결함(2026-08-28): 표시는 토스 실시간(TQQQ 73.06)인데 주문 미리보기는
+    Yahoo 하루 지연값(73.30000305175781)을 기준가로 썼다.
+    """
+
+    client = _StubTossClient(
+        prices={
+            "TQQQ": _toss_price(
+                "TQQQ",
+                price="73.05",
+                timestamp="2026-08-28T21:23:04+09:00",
+                currency="USD",
+            )
+        },
+        candles={"TQQQ": [("2026-08-27T13:00:00+09:00", "73.30")]},
+    )
+    _install(monkeypatch, client)
+
+    async def scenario() -> None:
+        quote = await krx_quotes.quote_for_market(_FakeDb(), market="US", symbol="TQQQ")
+        assert quote.source == "TOSS_API_PRICES"
+        assert quote.price == "73.05"
+        assert quote.currency == "USD"
+        assert quote.change_rate == "-0.34"
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_quote_for_market_falls_back_for_unsupported_markets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """토스가 못 받는 시장은 기존 PAPER 어댑터로 내려간다."""
+
+    _install(monkeypatch, _StubTossClient())
+    calls: list[str] = []
+
+    async def fake_quote(db: object, *, market: str, symbol: str) -> object:
+        calls.append(market)
+        return "paper-quote"
+
+    monkeypatch.setattr(
+        krx_quotes.paper_account_adapter, "quote", fake_quote, raising=True
+    )
+
+    async def scenario() -> None:
+        result = await krx_quotes.quote_for_market(
+            _FakeDb(), market="CRYPTO", symbol="KRW-BTC"
+        )
+        assert result == "paper-quote"
+        assert calls == ["CRYPTO"]
+
+    import asyncio
+
+    asyncio.run(scenario())

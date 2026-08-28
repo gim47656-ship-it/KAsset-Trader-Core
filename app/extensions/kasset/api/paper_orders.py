@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_schemas import (
@@ -46,7 +47,7 @@ class PaperOrderFacade:
         account = await paper_account_adapter.resolve_account(
             db, owner_user_id, request.account_id
         )
-        quote = await paper_account_adapter.quote(
+        quote = await krx_quotes.quote_for_market(
             db, market=request.market, symbol=request.symbol
         )
         state = await runtime_state.get(db, owner_user_id)
@@ -135,7 +136,7 @@ class PaperOrderFacade:
             account = await paper_account_adapter.resolve_account(
                 db, owner_user_id, request.account_id
             )
-            quote = await paper_account_adapter.quote(
+            quote = await krx_quotes.quote_for_market(
                 db, market=request.market, symbol=request.symbol
             )
             order = AndroidPaperOrder(

@@ -460,13 +460,11 @@ async def market_quote(
     if broker.strip().upper() == "NH":
         return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
-    if krx_quotes.supports_market(market):
-        # 시세는 계좌 연동과 무관한 공용 데이터다. 토스 실시간을 우선 쓰고,
-        # 실패하면 KRX는 서버 공용 NH PLUG 채널 → 저장 캔들 기반 PAPER 시세로
-        # 강등한다. 미국은 NH 경로가 없어 곧바로 PAPER로 내려간다. 토스가
-        # 미국 티커를 그대로 받으므로 하루 지연되던 PAPER 시세를 대체한다.
-        return await krx_quotes.resolve_quote(db, market=market, symbol=symbol)
-    return await paper_account_adapter.quote(db, market=market, symbol=symbol)
+    # 시세는 계좌 연동과 무관한 공용 데이터다. 토스 실시간을 우선 쓰고, 실패하면
+    # KRX는 서버 공용 NH PLUG 채널 → 저장 캔들 기반 PAPER 시세로 강등한다. 미국은
+    # NH 경로가 없어 곧바로 PAPER로 내려간다. 주문 기준가(`paper_orders`)도 같은
+    # 진입점을 쓰므로 화면 가격과 체결 기준가가 갈라지지 않는다.
+    return await krx_quotes.quote_for_market(db, market=market, symbol=symbol)
 
 
 @router.get("/market/quotes", response_model=QuotesResponse)

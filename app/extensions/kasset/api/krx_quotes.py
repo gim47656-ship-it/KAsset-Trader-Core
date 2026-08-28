@@ -104,6 +104,21 @@ def _wire_market(market: str) -> str:
     return "US" if normalized in _US_MARKETS else "KRX"
 
 
+async def quote_for_market(db: AsyncSession, *, market: str, symbol: str) -> Quote:
+    """PAPER 시세의 단일 진입점.
+
+    표시 경로(`/market/quote`)와 주문 기준가(`paper_orders`)가 서로 다른 시세를
+    쓰면 화면 가격과 체결 기준가가 갈라진다. 실측 결함(2026-08-28): 표시는
+    토스 실시간(TQQQ 73.06)이었는데 주문 미리보기는 Yahoo 하루 지연값
+    (73.30000305175781)을 기준가로 썼고, 저장 일봉이 없는 KRX 종목은 주문
+    미리보기가 `NOT_FOUND`로 실패했다. 두 경로가 이 함수만 쓰게 해서 계약을
+    한곳에 고정한다.
+    """
+    if supports_market(market):
+        return await resolve_quote(db, market=market, symbol=symbol)
+    return await paper_account_adapter.quote(db, market=market, symbol=symbol)
+
+
 async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     """단일 시세. 토스 → NH 공용 → PAPER 저장 캔들 순서로 강등한다.
 
