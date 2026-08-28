@@ -231,6 +231,34 @@ class PaperAccountAdapter:
             ]
         )
 
+    async def _quote_from_candles(
+        self,
+        db: AsyncSession,
+        symbol: str,
+    ) -> dict[str, object]:
+        """KIS 실시세가 막힌 서버에서 Toss 수집 일봉 종가로 시세를 만든다."""
+        from sqlalchemy import text as sql_text
+
+        rows = (
+            await db.execute(
+                sql_text(
+                    "SELECT time, close FROM kr_candles_1d "
+                    "WHERE symbol = :symbol ORDER BY time DESC LIMIT 2"
+                ),
+                {"symbol": symbol},
+            )
+        ).all()
+        if not rows:
+            raise ValueError(f"no stored candles for {symbol}")
+        latest_time, latest_close = rows[0]
+        previous_close = rows[1][1] if len(rows) > 1 else None
+        return {
+            "price": latest_close,
+            "previous_close": previous_close,
+            "price_as_of": latest_time,
+            "source": "CANDLES",
+        }
+
     async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
         normalized_market = market.strip().upper()
         normalized_symbol = symbol.strip().upper()
@@ -240,7 +268,13 @@ class PaperAccountAdapter:
                     _fetch_quote_equity_kr,
                 )
 
-                raw = await _fetch_quote_equity_kr(normalized_symbol)
+                try:
+                    raw = await _fetch_quote_equity_kr(normalized_symbol)
+                except ValueError:
+                    raise
+                except Exception:
+                    # KIS 자격 미보유/무효 서버: 저장 캔들 종가로 강등.
+                    raw = await self._quote_from_candles(db, normalized_symbol)
                 market_name = "KRX"
                 currency = "KRW"
             elif normalized_market in {"US", "NYSE", "NASDAQ"}:

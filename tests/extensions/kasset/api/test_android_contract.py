@@ -287,3 +287,47 @@ def test_nh_quote_normalizes_official_current_price_fields(
     }
     assert quote.as_of.endswith("Z")
     fetch_quote.assert_awaited_once_with(market="KRX", symbol="005930")
+
+
+def test_paper_kr_quote_falls_back_to_stored_candles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KIS 자격이 없거나 무효여도 저장 캔들 종가로 시세를 내려준다."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from app.extensions.kasset.api import paper as paper_module
+
+    adapter = paper_module.PaperAccountAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "_instrument_names",
+        AsyncMock(return_value={"005930": "삼성전자"}),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_quote_from_candles",
+        AsyncMock(
+            return_value={
+                "price": Decimal("71500"),
+                "previous_close": Decimal("71000"),
+                "price_as_of": datetime(2026, 8, 28, 6, 30, tzinfo=UTC),
+                "source": "CANDLES",
+            }
+        ),
+    )
+
+    async def _boom(symbol: str) -> dict[str, object]:
+        raise RuntimeError("KIS token refresh failed")
+
+    monkeypatch.setattr(
+        "app.mcp_server.tooling.market_data_quotes._fetch_quote_equity_kr",
+        _boom,
+    )
+
+    quote = asyncio.run(adapter.quote(object(), market="KRX", symbol="005930"))
+
+    assert quote.price == "71500"
+    assert quote.previous_close == "71000"
+    assert quote.change_amount == "500"
+    assert quote.source == "PAPER_CANDLES"
