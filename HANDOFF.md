@@ -1,6 +1,30 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 (Google 로그인 + Luna/Terra/Sol 3단 AI 라우터 배포·실검증)
+갱신: 2026-08-28 (관심종목 API·다중 trader 스캔 가동, warm MCP 서비스, Toss 키 대기)
+
+## 이번 세션에서 한 일 (2026-08-28 심야)
+
+- **관심종목 API** (`app/extensions/kasset/api/watchlist.py`, 커밋 `524728ac`):
+  owner-scoped GET/POST/DELETE `/api/v1/watchlist` + 활성 instrument 부분검색.
+  재등록 idempotent, 삭제는 soft(is_active=false).
+- **다중 trader 스캔**: `kasset_market_events.run`이 활성 trader 전원을 독립 순회
+  (한 owner 실패가 다른 owner를 중단시키지 않음). 서버 실검증: user 1(0종목),
+  user 4(3종목 스캔, 캔들 부재로 insufficient_data 정직 skip).
+- **스캔 인프라 가동(서버)**: compose에 worker/scheduler 추가 —
+  `taskiq worker|scheduler ... app.tasks.kasset_market_events_tasks`(모듈 한정 로드).
+  `.env.kasset`에 `KASSET_MARKET_EVENTS_ENABLED=true`. KRX exchange +
+  005930/000660/035420 instruments + user 4 watch items 시드 완료.
+- **관심종목 일봉 수집 태스크** (`kasset_watchlist_candles.sync`, 커밋 `b21bcc1c`):
+  KST 평일 9-16시 매시 5분, Toss 일봉 60개 → kr_candles_1d(source='toss') upsert,
+  종목별 실패 격리. **차단: Toss Open API 키 미보유** —
+  `TOSS_API_ENABLED/TOSS_API_CLIENT_ID/TOSS_API_CLIENT_SECRET`을 `.env.kasset`에
+  넣으면 즉시 동작. NH PLUG는 계좌/잔고/현재가 3경로 고정이라 차트 불가.
+- **warm MCP 서비스**: compose `mcp` 서비스(auto-trader-mcp, analysis_readonly,
+  streamable-http :8768, 토큰 `MCP_ANALYSIS_AUTH_TOKEN`) + 호스트 127.0.0.1:8768
+  노출, `/root/.codex/config.toml`에 등록(`/root/.codex/env.sh` source 필요).
+  **헤드리스 `codex exec`는 MCP 도구 승인을 우회할 수 없음**(openai/codex#24135;
+  유일 우회는 `--dangerously-bypass...`라 프롬프트 인젝션 시 셸 위험 → 미채택).
+  구독 브리지는 evidence-in-prompt 방식 유지, MCP는 대화형 codex/타 에이전트용.
 
 ## 이번 세션에서 한 일 (2026-08-28)
 
@@ -155,6 +179,7 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
+- 2026-08-28: 관심종목 API·다중 trader 스캔·일봉 수집 태스크 배포, worker/scheduler·warm MCP 가동, Toss 키 대기.
 - 2026-08-27: Naver Cloud에 main 76923cfe 배포, 볼륨 결함 사고를 pg_dump로 복구, live 계정·추천 E2E 실측.
 - 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결.
 - 2026-08-26: Android 호환 API, PAPER facade, NH Mock Read-Only, Credential Vault, 검증·런북 완료; 독립 고위험 재검수 PASS.
