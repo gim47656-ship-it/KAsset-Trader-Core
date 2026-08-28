@@ -17,6 +17,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.nickname import (
+    ensure_user_nickname,
+    generate_random_nickname,
+    normalize_nickname,
+)
 from app.auth.security import (
     create_access_token,
     create_refresh_token,
@@ -31,6 +36,7 @@ from app.extensions.kasset.api.schemas import (
     CurrentUserResponse,
     GoogleLoginRequest,
     LoginRequest,
+    NicknameUpdateRequest,
     RegisterRequest,
     SessionTokens,
 )
@@ -75,6 +81,7 @@ class MobileAuthService:
         user = User(
             username=username,
             email=email,
+            nickname=generate_random_nickname(),
             hashed_password=get_password_hash(request.password),
             role=UserRole.trader,
             is_active=True,
@@ -162,6 +169,7 @@ class MobileAuthService:
             user = User(
                 username=await self._available_google_username(db, google_sub),
                 email=email,
+                nickname=generate_random_nickname(),
                 google_sub=google_sub,
                 hashed_password=None,
                 role=UserRole.trader,
@@ -278,17 +286,41 @@ class MobileAuthService:
         session_record.revoked_at = datetime.now(UTC)
         await db.commit()
 
-    @staticmethod
-    def current_user(session: MobileSession) -> CurrentUserResponse:
+    async def current_user(
+        self,
+        db: AsyncSession,
+        session: MobileSession,
+    ) -> CurrentUserResponse:
         user = session.user
         if not user.username or not user.email:
             raise unauthorized()
+        nickname = await ensure_user_nickname(db, user)
         return CurrentUserResponse(
             id=user.id,
             username=user.username,
             email=user.email,
+            nickname=nickname,
             role=user.role,
         )
+
+    async def update_nickname(
+        self,
+        db: AsyncSession,
+        session: MobileSession,
+        request: NicknameUpdateRequest,
+    ) -> CurrentUserResponse:
+        try:
+            nickname = normalize_nickname(request.nickname)
+        except ValueError as err:
+            raise MobileApiError(
+                422,
+                "VALIDATION_ERROR",
+                "닉네임은 공백을 제외하고 1자에서 16자 사이여야 합니다.",
+            ) from err
+        session.user.nickname = nickname
+        await db.commit()
+        await db.refresh(session.user)
+        return await self.current_user(db, session)
 
     async def _issue(
         self,

@@ -6,9 +6,11 @@ from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
 from app.extensions.kasset.ai.base import AiProviderUnavailable
+from app.extensions.kasset.ai.prompt_context import build_owner_address_instruction
 
 
 class AnalysisKind(StrEnum):
@@ -128,12 +130,30 @@ class OpenAiModelRouter:
             else None
         )
 
+    async def analyze_for_owner(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        kind: AnalysisKind,
+        payload: dict[str, object],
+        *,
+        correlation_id: str | None = None,
+    ) -> TierVerdict:
+        address_instruction = await build_owner_address_instruction(db, owner_user_id)
+        return await self.analyze(
+            kind,
+            payload,
+            correlation_id=correlation_id,
+            address_instruction=address_instruction,
+        )
+
     async def analyze(
         self,
         kind: AnalysisKind,
         payload: dict[str, object],
         *,
         correlation_id: str | None = None,
+        address_instruction: str | None = None,
     ) -> TierVerdict:
         kind = AnalysisKind(kind)
         tier = _STARTING_TIER[kind]
@@ -142,6 +162,7 @@ class OpenAiModelRouter:
             kind,
             payload,
             correlation_id=correlation_id,
+            address_instruction=address_instruction,
         )
 
         if tier == "sol":
@@ -158,6 +179,7 @@ class OpenAiModelRouter:
                 kind,
                 self._with_prior(payload, verdict),
                 correlation_id=correlation_id,
+                address_instruction=address_instruction,
             )
 
         if (
@@ -171,6 +193,7 @@ class OpenAiModelRouter:
             AnalysisKind.CRITICAL_REVIEW,
             self._with_prior(payload, verdict),
             correlation_id=correlation_id,
+            address_instruction=address_instruction,
         )
 
     async def _run_tier(
@@ -180,6 +203,7 @@ class OpenAiModelRouter:
         payload: dict[str, object],
         *,
         correlation_id: str | None,
+        address_instruction: str | None,
     ) -> TierVerdict:
         primary_model = self._models[tier]
         if self._primary_client is None:
@@ -194,6 +218,7 @@ class OpenAiModelRouter:
                 payload=payload,
                 correlation_id=correlation_id,
                 include_reasoning=True,
+                address_instruction=address_instruction,
             )
         except AiProviderUnavailable as exc:
             primary_error = exc
@@ -209,6 +234,7 @@ class OpenAiModelRouter:
                 payload=payload,
                 correlation_id=correlation_id,
                 include_reasoning=False,
+                address_instruction=address_instruction,
             )
         except AiProviderUnavailable as fallback_error:
             raise AiProviderUnavailable(
@@ -225,6 +251,7 @@ class OpenAiModelRouter:
         payload: dict[str, object],
         correlation_id: str | None,
         include_reasoning: bool,
+        address_instruction: str | None,
     ) -> TierVerdict:
         raw = await client.request_json(
             model=model,
@@ -232,6 +259,7 @@ class OpenAiModelRouter:
             reasoning_effort=_REASONING_EFFORT[kind] if include_reasoning else None,
             schema_name="kasset_tier_verdict",
             schema=_TIER_ANALYSIS_SCHEMA,
+            additional_instructions=address_instruction,
         )
         analysis = _TierAnalysis.model_validate(raw)
         return TierVerdict(

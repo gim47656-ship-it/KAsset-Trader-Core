@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_active_user
+from app.auth.nickname import generate_random_nickname
 from app.auth.schemas import (
     RefreshTokenRequest,
     Token,
@@ -91,6 +92,7 @@ async def register(
     db_user = User(
         email=user_data.email,
         username=user_data.username,
+        nickname=generate_random_nickname(),
         role=UserRole.viewer,
         hashed_password=hashed_password,
         is_active=True,

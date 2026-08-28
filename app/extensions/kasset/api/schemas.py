@@ -87,7 +87,12 @@ class CurrentUserResponse(AndroidWireModel):
     id: int
     username: str
     email: str
+    nickname: str
     role: UserRole
+
+
+class NicknameUpdateRequest(AndroidWireModel):
+    nickname: str
 
 
 class RefreshRequest(AndroidWireModel):

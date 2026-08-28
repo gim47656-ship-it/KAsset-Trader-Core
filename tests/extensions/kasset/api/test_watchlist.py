@@ -53,6 +53,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
         exchange_id=exchanges[0].id,
         symbol=f"K{suffix}",
         name="삼성전자 테스트",
+        aliases=["삼성", "samsung", "젬스"],
         type=InstrumentType.equity_kr,
         base_currency="KRW",
         is_active=True,
@@ -295,6 +296,28 @@ async def test_instrument_search_matches_name_and_symbol_with_market_limit_and_a
                 "symbol": watchlist_data["crypto_instrument"].symbol,
                 "name": "검색대상 코인",
                 "market": "CRYPTO",
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_instrument_search_matches_alias(
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+    watchlist_data: dict[str, object],
+) -> None:
+    client, _state = watchlist_client
+    primary = watchlist_data["primary"]
+
+    response = await client.get("/api/v1/instruments/search?q=젬스&market=KRX")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "symbol": primary.symbol,
+                "name": primary.name,
+                "market": "KRX",
             }
         ]
     }

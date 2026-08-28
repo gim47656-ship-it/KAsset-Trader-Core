@@ -10,9 +10,11 @@ from sqlalchemy import (
     Index,
     Interval,
     Numeric,
+    String,
     Text,
     func,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -58,6 +60,7 @@ class Instrument(Base):
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     full_symbol: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str | None] = mapped_column(Text)
+    aliases: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     type: Mapped[InstrumentType] = mapped_column(
         Enum(InstrumentType, name="instrument_type"), nullable=False
     )
@@ -75,7 +78,7 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(Text, unique=True)
     google_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashed_password: Mapped[str | None] = mapped_column(Text)
-    nickname: Mapped[str | None] = mapped_column(Text)
+    nickname: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="user_role"), default=UserRole.viewer, nullable=False
     )

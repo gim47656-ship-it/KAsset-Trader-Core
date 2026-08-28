@@ -156,6 +156,9 @@ class MobileWatchlistService:
                 or_(
                     Instrument.symbol.ilike(pattern, escape="\\"),
                     Instrument.name.ilike(pattern, escape="\\"),
+                    func.array_to_string(Instrument.aliases, " ").ilike(
+                        pattern, escape="\\"
+                    ),
                 ),
             )
             .order_by(Instrument.symbol, Instrument.id)

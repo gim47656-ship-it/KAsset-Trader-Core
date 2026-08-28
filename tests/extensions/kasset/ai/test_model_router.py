@@ -140,6 +140,7 @@ async def test_high_confidence_luna_hold_stops_after_one_call(
         AnalysisKind.MARKET_STATE,
         {"market": "kr", "breadth": 0.52},
         correlation_id="corr-luna",
+        address_instruction="사용자를 '침착한수달42님'으로 부른다.",
     )
 
     assert len(transport.requests) == 1
@@ -151,6 +152,7 @@ async def test_high_confidence_luna_hold_stops_after_one_call(
     body = json.loads(transport.requests[0].content)
     assert str(transport.requests[0].url) == "https://example.test/v1/responses"
     assert set(body) == {"model", "instructions", "input", "reasoning", "text"}
+    assert "사용자를 '침착한수달42님'으로 부른다." in body["instructions"]
     assert body["model"] == "test-luna"
     assert body["reasoning"] == {"effort": "low"}
     assert json.loads(body["input"]) == {

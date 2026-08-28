@@ -80,7 +80,9 @@ class MarketEventPipeline:
         from app.extensions.kasset.ai.model_router import AnalysisKind
 
         try:
-            verdict = await self._router.analyze(
+            verdict = await self._router.analyze_for_owner(
+                self._session,
+                owner_user_id,
                 AnalysisKind.CANDIDATE_SCAN,
                 payload,
                 correlation_id=correlation_id,

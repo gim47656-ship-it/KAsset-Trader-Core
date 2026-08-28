@@ -10,7 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.ai.base import AiProviderUnavailable
-from app.extensions.kasset.ai.model_router import AnalysisKind
+from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
 from app.extensions.kasset.automation.market_pipeline import MarketEventPipeline
 from app.models.ai_recommendations import AIRecommendation
 from app.models.trading import User, UserRole
@@ -27,6 +27,7 @@ class FakeRouter:
     def __init__(self, verdict: SimpleNamespace | None = None) -> None:
         self.verdict = verdict
         self.calls: list[tuple[AnalysisKind, dict[str, object], str | None]] = []
+    analyze_for_owner = OpenAiModelRouter.analyze_for_owner
 
     async def analyze(
         self,
@@ -34,7 +35,10 @@ class FakeRouter:
         payload: dict[str, object],
         *,
         correlation_id: str | None = None,
+        address_instruction: str | None = None,
     ) -> SimpleNamespace:
+        assert address_instruction is not None
+        assert "님'으로 부른다." in address_instruction
         self.calls.append((kind, payload, correlation_id))
         assert self.verdict is not None
         return self.verdict
@@ -47,6 +51,7 @@ class UnavailableRouter(FakeRouter):
         payload: dict[str, object],
         *,
         correlation_id: str | None = None,
+        address_instruction: str | None = None,
     ) -> SimpleNamespace:
         self.calls.append((kind, payload, correlation_id))
         raise AiProviderUnavailable("not configured")

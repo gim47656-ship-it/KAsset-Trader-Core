@@ -60,6 +60,7 @@ from app.extensions.kasset.api.schemas import (
     HealthResponse,
     InstrumentSearchResponse,
     LoginRequest,
+    NicknameUpdateRequest,
     RefreshRequest,
     RegisterRequest,
     SessionTokens,
@@ -123,8 +124,18 @@ async def google_login(
 @router.get("/auth/me", response_model=CurrentUserResponse)
 async def me(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CurrentUserResponse:
-    return mobile_auth.current_user(session)
+    return await mobile_auth.current_user(db, session)
+
+
+@router.patch("/auth/me", response_model=CurrentUserResponse)
+async def update_nickname(
+    payload: NicknameUpdateRequest,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CurrentUserResponse:
+    return await mobile_auth.update_nickname(db, session, payload)
 
 
 @router.post("/auth/refresh", response_model=SessionTokens)

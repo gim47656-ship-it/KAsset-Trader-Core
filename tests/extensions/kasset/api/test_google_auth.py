@@ -152,18 +152,55 @@ async def test_google_login_registers_user_issues_tokens_and_supports_auth_me(
     assert user.hashed_password is None
     assert user.role == UserRole.trader
     assert user.is_active is True
+    assert user.nickname is not None
+    assert user.nickname[-2:].isdigit()
+    assert len(user.nickname) <= 16
+
+    user.nickname = None
+    await db_session.commit()
+    await db_session.refresh(user)
 
     me = await client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {tokens['accessToken']}"},
     )
     assert me.status_code == 200
-    assert me.json() == {
+    me_body = me.json()
+    assert me_body == {
         "id": user.id,
         "username": user.username,
         "email": user.email,
+        "nickname": user.nickname,
         "role": "trader",
     }
+    assert me_body["nickname"] is not None
+    assert await db_session.scalar(
+        select(User.nickname).where(User.id == user.id)
+    ) == me_body["nickname"]
+
+    updated = await client.patch(
+        "/api/v1/auth/me",
+        json={"nickname": "  나무늘보  "},
+        headers={"Authorization": f"Bearer {tokens['accessToken']}"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["nickname"] == "나무늘보"
+    assert await db_session.scalar(
+        select(User.nickname).where(User.id == user.id)
+    ) == "나무늘보"
+
+    empty = await client.patch(
+        "/api/v1/auth/me",
+        json={"nickname": "   "},
+        headers={"Authorization": f"Bearer {tokens['accessToken']}"},
+    )
+    too_long = await client.patch(
+        "/api/v1/auth/me",
+        json={"nickname": "가" * 17},
+        headers={"Authorization": f"Bearer {tokens['accessToken']}"},
+    )
+    assert empty.status_code == 422
+    assert too_long.status_code == 422
 
 
 @pytest.mark.asyncio

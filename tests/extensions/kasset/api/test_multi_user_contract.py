@@ -125,10 +125,11 @@ async def test_public_auth_device_revoke_is_owner_and_device_scoped(
         assert session_a.user.role == UserRole.trader
         assert session_b.user.role == UserRole.trader
         assert session_a.user.id != session_b.user.id
-        assert auth.current_user(session_a).model_dump() == {
+        assert (await auth.current_user(db_session, session_a)).model_dump() == {
             "id": session_a.user.id,
             "username": usernames[0],
             "email": f"{usernames[0]}@example.com",
+            "nickname": session_a.user.nickname,
             "role": UserRole.trader,
         }
 

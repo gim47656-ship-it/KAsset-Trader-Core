@@ -95,12 +95,16 @@ class OpenAiResponsesClient:
         reasoning_effort: ReasoningEffort | None,
         schema_name: str,
         schema: dict[str, object],
+        additional_instructions: str | None = None,
     ) -> dict[str, object]:
         """Request one strict structured response without exposing any tools."""
 
+        instructions = _SYSTEM_CONTRACT
+        if additional_instructions is not None and additional_instructions.strip():
+            instructions = f"{instructions} {additional_instructions.strip()}"
         body: dict[str, object] = {
             "model": model,
-            "instructions": _SYSTEM_CONTRACT,
+            "instructions": instructions,
             "input": json.dumps(
                 input_payload,
                 ensure_ascii=False,
