@@ -1,8 +1,26 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 (관심종목 스캔 전 구간 실가동: Toss 일봉 수집 → 3단 AI 판정까지 검증)
+갱신: 2026-08-28 (Cloudflare Tunnel 컷오버·VPS 이전 런북·캔들 API·스캔 쿨다운)
 
 ## 이번 세션에서 한 일 (2026-08-28 심야)
+
+- **Cloudflare Tunnel 컷오버**: 신규 터널 `kasset-trader`(id 75836947-…)로
+  `https://api.hsps-portal.xyz` 공개(HANSE_ERP 터널 무접촉). compose에 `cloudflared`
+  추가(`--protocol http2` — Naver가 UDP 7844 차단), `TUNNEL_TOKEN`은 `.env.kasset`.
+  Android 기본 URL을 터널 도메인으로 컷오버(앱 커밋 `ae69d587`)하고 sslip.io Caddy
+  edge 제거(`2206aa14`, 443 refused 확인). 대시보드 mutating API는 `x-atok` 헤더 필요.
+- **VPS 이전 런북** `docs/runbooks/vps-migration.md`: 상태 인벤토리, Toss/NH 허용 IP
+  갱신 필요성, 단계별 이전 명령. compose 스택은 저장소로 편입(`18203413`).
+- **DB 백업/복원**: `/etc/cron.d/kasset-db-backup` 매일 03:30 KST pg_dump(7일 보존,
+  실행 검증) + `/usr/local/sbin/kasset-db-restore.sh`(사본 `deploy/`).
+- **캔들 API**: `GET /api/v1/market/candles`(count≤120 클램프, 문자열 OHLCV 오름차순,
+  NXT→NTX) 배포(`dbbd7a50`), 55 passed.
+- **스캔 쿨다운·cron 정렬**(`619cb807`): 유효 PENDING 추천 있으면 재분석 skip,
+  스캔은 KST 평일 9-16시 매시 :10(기존 UTC */15의 야간 공회전 제거).
+- **Android 리디자인 진행 중**: 정본은 KAsset-Trader `docs/design/redesign-spec.md`
+  + `docs/design/stitch/*.html`(KR Pro Style 11장, 커밋 `7a517356`). 종목 로고는
+  Toss CDN `icn-sec-fill-{symbol}.png` + 이니셜 폴백. 주문 UI는 PAPER 전용으로
+  계약 개정(`10dbf2f2`).
 
 - **관심종목 API** (`app/extensions/kasset/api/watchlist.py`, 커밋 `524728ac`):
   owner-scoped GET/POST/DELETE `/api/v1/watchlist` + 활성 instrument 부분검색.
