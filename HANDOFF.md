@@ -4,6 +4,15 @@
 
 ## 이번 세션에서 한 일 (2026-08-28)
 
+- **구독형 AI 브리지 가동 (2026-08-28)**: 서버 호스트에 Codex CLI 0.150.1 설치,
+  ChatGPT 구독으로 로그인(auth는 `/root/.codex` + 컨테이너용 사본 `/opt/kasset-codex`,
+  uid 10001). api 컨테이너에 codex 바이너리·`CODEX_HOME=/var/lib/kasset-codex` 마운트,
+  `.env.kasset`에 `KASSET_AI_SUBSCRIPTION_CMD=codex exec --skip-git-repo-check
+  --sandbox read-only -`. `subscription_cli.py` invoker(커밋 `19797c21`)가 stdin으로
+  계약을 주고 마지막 JSON을 SkillResult로 검증, 실패는 전부 AiProviderUnavailable로
+  API 티어 폴스루. 실검증: 컨테이너 내 codex JSON 응답 + API/OR 키 비운 구독 단독
+  run_skill 성공(HOLD/0.62). run_skill 경로는 이제 구독→API(gpt-5.6)→OpenRouter 순.
+  다음 후보: codex config에 Core `app/mcp_server` 도구(stdio) 등록.
 - **서버 SSH가 Tailscale 전용으로 바뀜 (2026-08-28)**: 접속은
   `ssh -i <PEM> root@100.73.186.78` (tailnet `vm-naver-kasset`, 계정 gim47656@).
   공인 `175.45.201.51:22`는 nftables `ssh_guard` 테이블이 차단한다 — 허용은
