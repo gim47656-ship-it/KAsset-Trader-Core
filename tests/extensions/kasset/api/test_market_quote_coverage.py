@@ -451,3 +451,115 @@ def test_quote_for_market_falls_back_for_unsupported_markets(
     import asyncio
 
     asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_us_previous_close_uses_et_trading_date_across_kst_midnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """미국 정규장이 KST 자정을 넘어도 진행 중 봉을 전일종가로 쓰지 않는다.
+
+    검수 지적(2026-08-28): 기준일을 KST 날짜로 잡으면 01:00 KST 시세가
+    boundary를 하루 앞세워 진행 중인 당일 봉을 "직전 거래일"로 집었다.
+    토스는 미국 일봉을 ET 자정(`13:00+09:00`)으로 라벨한다.
+    """
+
+    client = _StubTossClient(
+        # 01:00 KST 2026-08-29 = 12:00 ET 2026-08-28 (정규장 진행 중)
+        prices={
+            "TQQQ": _toss_price(
+                "TQQQ",
+                price="80",
+                timestamp="2026-08-29T01:00:00+09:00",
+                currency="USD",
+            )
+        },
+        candles={
+            "TQQQ": [
+                ("2026-08-27T13:00:00+09:00", "70"),
+                # 진행 중인 08-28 세션 봉. 전일종가로 쓰면 안 된다.
+                ("2026-08-28T13:00:00+09:00", "75"),
+            ]
+        },
+    )
+    _install(monkeypatch, client)
+
+    async def scenario() -> None:
+        quote = await krx_quotes.resolve_quote(
+            _FakeDb(), market="NASDAQ", symbol="TQQQ"
+        )
+        # 08-27 종가 70이어야 한다. 75(진행 중 봉)면 등락률이 위조된다.
+        assert quote.previous_close == "70"
+        assert quote.change_amount == "10"
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_daily_close_single_flight_does_not_leak_across_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """단일비행이 기준 거래일을 무시해 남의 결과를 주지 않는다.
+
+    검수 지적(2026-08-28): 키가 `symbol`만이면 거래일이 바뀌는 순간 다른
+    기준일을 기다리던 호출자가 앞선 기준일의 종가를 받았다.
+    """
+
+    client = _StubTossClient(
+        candles={
+            "005930": [
+                ("2026-08-26T00:00:00+09:00", "100"),
+                ("2026-08-27T00:00:00+09:00", "200"),
+                ("2026-08-28T00:00:00+09:00", "300"),
+            ]
+        }
+    )
+    service = _install(monkeypatch, client)
+
+    async def scenario() -> None:
+        first, second = await asyncio.gather(
+            service.previous_closes(["005930"], boundary=date(2026, 8, 28)),
+            service.previous_closes(["005930"], boundary=date(2026, 8, 27)),
+        )
+        # 각 기준일의 직전 거래일 종가를 각각 받아야 한다.
+        assert first == {"005930": Decimal("200")}
+        assert second == {"005930": Decimal("100")}
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_us_quote_currency_comes_from_market_not_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """통화는 시장이 결정한다. 공급자가 KRW를 줘도 미국은 USD다.
+
+    검수 지적(2026-08-28): 공급자 필드를 그대로 신뢰하면 수수료 자산군이
+    `equity_kr`로 잘못 키잉될 수 있다.
+    """
+
+    client = _StubTossClient(
+        prices={
+            "TQQQ": _toss_price(
+                "TQQQ",
+                price="80",
+                timestamp="2026-08-28T23:30:00+09:00",
+                currency="KRW",  # 공급자 오표기
+            )
+        }
+    )
+    _install(monkeypatch, client)
+
+    async def scenario() -> None:
+        quote = await krx_quotes.resolve_quote(
+            _FakeDb(), market="NASDAQ", symbol="TQQQ"
+        )
+        assert quote.currency == "USD"
+
+    import asyncio
+
+    asyncio.run(scenario())

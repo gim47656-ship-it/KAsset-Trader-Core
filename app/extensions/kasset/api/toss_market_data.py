@@ -128,9 +128,14 @@ def _quote_point(row: object) -> TossQuotePoint | None:
 def _previous_daily_close(page: object, *, boundary: date) -> Decimal | None:
     """일봉 페이지에서 `boundary` 직전 거래일의 종가를 고른다.
 
-    기준일은 저장 일봉 경로와 같은 KST 날짜다. 국내와 미국 일봉이 같은 규칙을
-    쓰므로 미국 종목도 마지막으로 완결된 세션의 종가를 얻는다. `boundary`
-    당일 봉은 진행 중일 수 있어 전일 종가로 쓰지 않는다.
+    봉의 거래일은 라벨 타임스탬프의 KST 날짜로 읽는다. 토스는 국내 봉을
+    `00:00+09:00`, 미국 봉을 `13:00+09:00`(= ET 자정)으로 라벨하므로 두 시장
+    모두 라벨의 KST 날짜가 곧 그 시장의 거래일이다.
+
+    `boundary`는 호출부가 **시장의 거래일 기준**으로 넘겨야 한다. 미국 시세를
+    KST 날짜로 넘기면 정규장(22:30~05:00 KST)이 자정을 넘는 순간 boundary가
+    하루 앞서가고, 그러면 진행 중인 당일 봉이 "직전 거래일"로 잡혀 전일 종가가
+    위조된다. `boundary` 당일 봉은 진행 중일 수 있어 항상 제외한다.
     """
     rows = getattr(page, "candles", None)
     if not rows:
@@ -227,7 +232,11 @@ class TossSharedMarketData:
         # `_daily_close_miss`의 만료 시각까지만 유효하다.
         self._daily_close: dict[str, tuple[date, Decimal | None]] = {}
         self._daily_close_miss: dict[str, float] = {}
-        self._daily_close_inflight: dict[str, asyncio.Future[Decimal | None]] = {}
+        # 단일비행 키는 `(symbol, 기준 거래일)`이다. symbol만 키로 쓰면 거래일이
+        # 바뀌는 순간 다른 기준일을 기다리던 호출자가 남의 결과를 받는다.
+        self._daily_close_inflight: dict[
+            tuple[str, date], asyncio.Future[Decimal | None]
+        ] = {}
         self._daily_close_gate = asyncio.Semaphore(_DAILY_CLOSE_CONCURRENCY)
         # (symbol, count) -> (만료 시각, 일봉). 차트 응답 전용 캐시다.
         self._daily_bars: dict[tuple[str, int], tuple[float, list[TossDailyBar]]] = {}
@@ -328,12 +337,12 @@ class TossSharedMarketData:
                     continue
                 if now < self._daily_close_miss.get(symbol, 0.0):
                     continue
-            inflight = self._daily_close_inflight.get(symbol)
+            inflight = self._daily_close_inflight.get((symbol, boundary))
             if inflight is not None:
                 pending[symbol] = inflight
                 continue
             future: asyncio.Future[Decimal | None] = loop.create_future()
-            self._daily_close_inflight[symbol] = future
+            self._daily_close_inflight[(symbol, boundary)] = future
             owned[symbol] = future
 
         if owned:
@@ -375,7 +384,7 @@ class TossSharedMarketData:
                 self._daily_close_miss[symbol] = now + _DAILY_CLOSE_MISS_TTL_SECONDS
             else:
                 self._daily_close_miss.pop(symbol, None)
-            future = self._daily_close_inflight.pop(symbol, None)
+            future = self._daily_close_inflight.pop((symbol, boundary), None)
             if future is not None and not future.done():
                 future.set_result(close)
 

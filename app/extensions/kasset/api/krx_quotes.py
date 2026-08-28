@@ -48,6 +48,8 @@ _KRX_MARKETS = frozenset({"KRX", "KR"})
 _US_MARKETS = frozenset({"US", "NASDAQ", "NYSE", "AMEX"})
 _US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
 _KST = ZoneInfo("Asia/Seoul")
+# 미국 거래일 경계. 정규장이 KST 자정을 넘으므로 KST 날짜로 판정하면 안 된다.
+_ET = ZoneInfo("America/New_York")
 # previousClose 판정에 필요한 최소 행 수는 2다(당일 + 직전 거래일). 여유 1행을
 # 더 읽어 같은 날짜가 중복 저장된 경우에도 직전 거래일을 찾는다.
 _CANDLE_LOOKBACK_ROWS = 3
@@ -104,6 +106,17 @@ def _wire_market(market: str) -> str:
     return "US" if normalized in _US_MARKETS else "KRX"
 
 
+def _market_trading_date(market: str, value: datetime) -> date:
+    """시장 기준 거래일. 미국은 ET, 국내는 KST 날짜다.
+
+    토스는 미국 일봉을 ET 자정(= `13:00+09:00`)으로 라벨하므로 라벨의 KST
+    날짜가 곧 미국 거래일이다. 반대로 미국 시세 시각을 KST 날짜로 읽으면
+    정규장(22:30~05:00 KST)이 자정을 넘는 순간 하루 앞서간다.
+    """
+    zone = _ET if _wire_market(market) == "US" else _KST
+    return value.astimezone(zone).date()
+
+
 async def quote_for_market(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     """PAPER 시세의 단일 진입점.
 
@@ -131,7 +144,7 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
         rows = (await _candle_rows(db, market, [normalized])).get(normalized, ())
         names = await _instrument_names(db, [normalized])
         fallback = await _previous_close_fallback(
-            {normalized: point}, {normalized: rows}
+            market, {normalized: point}, {normalized: rows}
         )
         return _toss_quote(
             point,
@@ -156,7 +169,7 @@ async def resolve_quotes(
     points = await _toss_points(market, requested)
     candles = await _candle_rows(db, market, requested)
     names = await _instrument_names(db, requested)
-    fallback = await _previous_close_fallback(points, candles)
+    fallback = await _previous_close_fallback(market, points, candles)
 
     quotes: list[Quote] = []
     nh_deadline = time.monotonic() + _NH_BATCH_BUDGET_SECONDS
@@ -197,6 +210,7 @@ async def _toss_points(
 
 
 async def _previous_close_fallback(
+    market: str,
     points: dict[str, TossQuotePoint],
     candles: dict[str, Sequence[DailyCandleRow]] | dict[str, list[DailyCandleRow]],
 ) -> dict[str, Decimal]:
@@ -205,13 +219,17 @@ async def _previous_close_fallback(
     저장 일봉 유니버스는 관심종목 전체를 담고 있지 않아, 새로 추가한 종목은
     등락률이 계속 `null`이었다. 저장 값이 있으면 그것을 그대로 쓰고 이 경로는
     호출하지 않는다.
+
+    기준일은 **시장의 거래일**이다. 미국을 KST 날짜로 넘기면 정규장이 자정을
+    넘는 순간 진행 중인 당일 봉이 전일 종가로 잡힌다.
     """
     missing: dict[date, list[str]] = {}
     for symbol, point in points.items():
         rows = candles.get(symbol) or ()
-        if _previous_close(rows, before=point.as_of) is not None:
+        if _previous_close(rows, market=market, before=point.as_of) is not None:
             continue
-        missing.setdefault(_trading_date(point.as_of), []).append(symbol)
+        boundary = _market_trading_date(market, point.as_of)
+        missing.setdefault(boundary, []).append(symbol)
     if not missing:
         return {}
     resolved: dict[str, Decimal] = {}
@@ -240,14 +258,17 @@ def _toss_quote(
     rows: Sequence[DailyCandleRow],
     previous_close_fallback: Decimal | None = None,
 ) -> Quote:
-    previous_close = _previous_close(rows, before=point.as_of)
+    previous_close = _previous_close(rows, market=market, before=point.as_of)
     if previous_close is None:
         previous_close = previous_close_fallback
     return _quote(
         market=market,
         symbol=point.symbol,
         name=name,
-        currency=point.currency,
+        # 통화는 시장이 결정한다. 공급자 필드를 그대로 믿으면 수수료 자산군이
+        # (`equity_kr` / `equity_us`) 잘못 키잉될 수 있다. `_candle_quote`와
+        # 같은 규칙을 쓴다.
+        currency="USD" if market == "US" else "KRW",
         price=point.price,
         previous_close=previous_close,
         as_of=point.as_of,
@@ -275,7 +296,7 @@ def _candle_quote(
         name=name,
         currency="USD" if market == "US" else "KRW",
         price=price,
-        previous_close=_previous_close(rows, before=as_of),
+        previous_close=_previous_close(rows, market=market, before=as_of),
         as_of=as_of,
         source=CANDLE_QUOTE_SOURCE,
     )
@@ -323,23 +344,22 @@ def _change_rate(
 
 
 def _previous_close(
-    rows: Sequence[DailyCandleRow], *, before: datetime
+    rows: Sequence[DailyCandleRow], *, market: str, before: datetime
 ) -> Decimal | None:
     """`before` 거래일 직전 거래일의 저장 종가. 없으면 `None`.
 
     당일 종가만 저장된 종목은 직전 거래일 값이 없으므로 `None`을 준다. 당일
     종가를 previousClose로 재사용해 등락을 0으로 만들지 않는다.
+
+    거래일 판정은 토스 폴백과 같은 시장 기준(미국 ET / 국내 KST)이다. 저장
+    일봉도 미국 봉을 ET 자정으로 라벨하므로 두 경로의 경계가 일치한다.
     """
-    boundary = _trading_date(before)
+    boundary = _market_trading_date(market, before)
     for row in reversed(rows):
-        if _trading_date(_aware(row.time_utc)) >= boundary:
+        if _market_trading_date(market, _aware(row.time_utc)) >= boundary:
             continue
         return _decimal(row.close)
     return None
-
-
-def _trading_date(value: datetime) -> date:
-    return value.astimezone(_KST).date()
 
 
 def _aware(value: datetime) -> datetime:
