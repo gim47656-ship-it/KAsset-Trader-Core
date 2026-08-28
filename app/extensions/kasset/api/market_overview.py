@@ -53,9 +53,7 @@ SOURCE_TIMEOUT_SECONDS = 6.0
 
 _IndexMarket = Literal["KRX", "US"]
 _IndexCurrency = Literal["KRW", "USD"]
-_INDEX_DEFINITIONS: tuple[
-    tuple[str, str, _IndexMarket, _IndexCurrency], ...
-] = (
+_INDEX_DEFINITIONS: tuple[tuple[str, str, _IndexMarket, _IndexCurrency], ...] = (
     ("KOSPI", "KOSPI", "KRX", "KRW"),
     ("KOSDAQ", "KOSDAQ", "KRX", "KRW"),
     ("SPX", "S&P 500", "US", "USD"),
@@ -469,8 +467,12 @@ def _fx_items(
         )
         values = (
             (usd_krw, toss_as_of or snapshot_as_of),
-            (snapshot.jpy_krw, snapshot_as_of) if snapshot is not None else (None, None),
-            (snapshot.eur_krw, snapshot_as_of) if snapshot is not None else (None, None),
+            (snapshot.jpy_krw, snapshot_as_of)
+            if snapshot is not None
+            else (None, None),
+            (snapshot.eur_krw, snapshot_as_of)
+            if snapshot is not None
+            else (None, None),
         )
     except DecimalException:
         values = ((None, None), (None, None), (None, None))
@@ -521,6 +523,7 @@ def _fx_items(
 
 async def _bounded[T](source: Awaitable[T]) -> T:
     return await asyncio.wait_for(source, timeout=SOURCE_TIMEOUT_SECONDS)
+
 
 async def _toss_usd_quote() -> UsdKrwExchangeRateQuote | None:
     if not settings.toss_api_enabled:
@@ -593,7 +596,7 @@ async def _build_market_overview() -> MarketOverviewResponse:
 
 
 async def get_market_overview() -> MarketOverviewResponse:
-    """Return one 60-second single-flight market overview snapshot."""
+    """Return one single-flight market overview snapshot, cached for the overview TTL."""
 
     now = time.monotonic()
     cached = _get_cached(now)
