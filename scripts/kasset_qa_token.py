@@ -30,6 +30,7 @@ import argparse
 import base64
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -56,14 +57,25 @@ def _load() -> dict[str, str]:
 
 
 def _save(data: dict[str, str]) -> None:
+    """캐시를 0600으로 원자적으로 쓴다.
+
+    권한을 나중에 chmod 하면 생성 직후 한순간 다른 사용자가 읽을 수 있는 창이
+    생긴다. 그래서 ``os.open`` 으로 처음부터 0600 으로 만든다. 또 갱신은
+    refresh token 을 회전시키므로, 쓰는 중에 죽으면 회전된 값을 잃고 다시
+    심어야 한다. 임시 파일에 먼저 쓰고 ``os.replace`` 로 갈아끼워 반쯤 쓰인
+    파일이 남지 않게 한다.
+    """
     path = _cache_path()
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    # 살아 있는 refresh token 이므로 소유자만 읽게 둔다.
+    payload = json.dumps(data, ensure_ascii=False)
+    temp = path.with_name(path.name + ".tmp")
+    descriptor = os.open(temp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        path.chmod(0o600)
-    except OSError:
-        # Windows 등 chmod 가 의미 없는 환경에서는 조용히 넘긴다.
-        pass
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    os.replace(temp, path)
 
 
 def _jwt_expiry(token: str) -> int:
@@ -130,7 +142,18 @@ def main() -> None:
             "accessToken": body["accessToken"],
             "refreshToken": body["refreshToken"],
         }
-        _save(cached)
+        try:
+            _save(cached)
+        except OSError as exc:
+            # 서버 쪽 refresh 는 이미 회전됐다. 캐시에 못 남기면 직전 값은
+            # 죽었으므로 그냥 죽으면 SSH 재발급밖에 남지 않는다. 회전된 값을
+            # stderr 로 내보내 --seed-refresh 로 복구할 수 있게 한다.
+            print(f"캐시 저장 실패: {exc}", file=sys.stderr)
+            print(
+                "아래 refreshToken 을 --seed-refresh 로 다시 심어라(직전 값은 죽었다):",
+                file=sys.stderr,
+            )
+            print(cached["refreshToken"], file=sys.stderr)
         access_token = cached["accessToken"]
 
     print(access_token)

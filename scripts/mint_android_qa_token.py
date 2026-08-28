@@ -18,6 +18,10 @@
 만료 없는 토큰은 만들지 않는다. access 는 짧게 두고, 7일짜리 refresh 로
 ``POST /auth/refresh`` 를 돌려 끊김 없이 쓰는 것이 의도된 사용법이다.
 갱신은 SSH 없이 순수 HTTP 로 가능하다 - ``scripts/kasset_qa_token.py`` 를 쓴다.
+
+출력에는 살아 있는 refresh token 이 들어 있다. 터미널에 그대로 띄우지 말고
+파일로 리다이렉트해라. 셸 히스토리·CI 로그·스크롤백에 남으면 7일 동안
+유효한 자격이 그대로 노출된다.
 """
 
 from __future__ import annotations
