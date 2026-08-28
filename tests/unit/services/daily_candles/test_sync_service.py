@@ -178,6 +178,95 @@ async def test_crypto_universe_uses_canonical_upbit_partition() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kr_universe_unions_active_watchlist_symbols() -> None:
+    """관심종목이 유니버스에 없으면 그 종목 일봉이 영구히 비어 있다.
+
+    실측 결함(2026-08-28): `kr_symbol_universe`가 0행이라 이 job이 매일 대상
+    0건으로 끝났고, 사용자가 추가한 종목은 전일종가·차트가 계속 비었다.
+    """
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(symbol="005930")],
+            [SimpleNamespace(symbol="005380"), SimpleNamespace(symbol="005930")],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc._resolve_universe(market="kr")
+
+    # 중복 없이 합쳐지고 정렬된다.
+    assert targets == [
+        SyncTarget(market=MarketKey.KR, symbol="005380", partition="KRX"),
+        SyncTarget(market=MarketKey.KR, symbol="005930", partition="KRX"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_us_watchlist_without_exchange_defaults_to_nasd_partition() -> None:
+    """거래소 행이 없는 관심종목도 읽기 경로가 조회하는 파티션으로 들어간다."""
+
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(symbol="AAPL", exchange="NASD")],
+            [
+                SimpleNamespace(symbol="TQQQ", exchange=None),
+                SimpleNamespace(symbol="SOXL", exchange="NASDAQ"),
+            ],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc._resolve_universe(market="us")
+
+    assert targets == [
+        SyncTarget(market=MarketKey.US, symbol="AAPL", partition="NASD"),
+        SyncTarget(market=MarketKey.US, symbol="SOXL", partition="NASD"),
+        SyncTarget(market=MarketKey.US, symbol="TQQQ", partition="NASD"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_universe_table_partition_wins_over_watchlist() -> None:
+    """같은 종목이 양쪽에 있으면 유니버스 테이블의 파티션을 유지한다."""
+
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(symbol="TQQQ", exchange="NYSE")],
+            [SimpleNamespace(symbol="TQQQ", exchange=None)],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc._resolve_universe(market="us")
+
+    assert targets == [SyncTarget(market=MarketKey.US, symbol="TQQQ", partition="NYSE")]
+
+
+@pytest.mark.asyncio
 async def test_crypto_sync_rejects_partition_that_disagrees_with_symbol() -> None:
     repo = MagicMock()
     repo.session = MagicMock()

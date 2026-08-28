@@ -31,6 +31,19 @@ from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
 
 logger = logging.getLogger(__name__)
 
+# Watchlist instruments may carry no exchange row yet. The Android market
+# routing maps both "US" and "NASDAQ" onto the "NASD" candle partition, so
+# default to it rather than inventing a partition the read path never queries.
+_DEFAULT_US_PARTITION = "NASD"
+_US_PARTITION_ALIASES = {"US": "NASD", "NASDAQ": "NASD"}
+
+
+def _us_partition(exchange: str | None) -> str:
+    normalized = (exchange or "").strip().upper()
+    if not normalized:
+        return _DEFAULT_US_PARTITION
+    return _US_PARTITION_ALIASES.get(normalized, normalized)
+
 
 @dataclass(frozen=True, slots=True)
 class SyncTarget:
@@ -260,32 +273,67 @@ class DailyCandleSyncService:
         the per-market universe tables directly via the repository's
         session (we get it from the repository which already holds an
         AsyncSession).
+
+        Active watchlist symbols are unioned in. Without them a symbol a user
+        adds is never synced, so its stored daily candles stay empty and the
+        app shows no previousClose and no chart for it (observed 2026-08-28:
+        ``kr_symbol_universe`` was empty, so this job ran with zero targets
+        every day while three manually seeded symbols were the only stored
+        candles). Universe-table rows win on partition when a symbol appears
+        in both sources.
         """
         from sqlalchemy import text
 
         session = self._repository.session
 
         if market == "kr":
-            sql = text(
-                "SELECT symbol FROM public.kr_symbol_universe"
-                " WHERE is_active = TRUE ORDER BY symbol"
+            targets: dict[str, str] = {}
+            result = await session.execute(
+                text(
+                    "SELECT symbol FROM public.kr_symbol_universe"
+                    " WHERE is_active = TRUE"
+                )
             )
-            result = await session.execute(sql)
+            for row in result:
+                targets[row.symbol] = "KRX"
+            result = await session.execute(
+                text(
+                    "SELECT DISTINCT i.symbol AS symbol"
+                    " FROM public.user_watch_items w"
+                    " JOIN public.instruments i ON i.id = w.instrument_id"
+                    " WHERE w.is_active = TRUE AND i.type = 'equity_kr'"
+                )
+            )
+            for row in result:
+                targets.setdefault(row.symbol, "KRX")
             return [
-                SyncTarget(market=MarketKey.KR, symbol=row.symbol, partition="KRX")
-                for row in result
+                SyncTarget(market=MarketKey.KR, symbol=symbol, partition=partition)
+                for symbol, partition in sorted(targets.items())
             ]
         if market == "us":
-            sql = text(
-                "SELECT symbol, exchange FROM public.us_symbol_universe"
-                " WHERE is_active = TRUE ORDER BY symbol"
-            )
-            result = await session.execute(sql)
-            return [
-                SyncTarget(
-                    market=MarketKey.US, symbol=row.symbol, partition=row.exchange
+            targets = {}
+            result = await session.execute(
+                text(
+                    "SELECT symbol, exchange FROM public.us_symbol_universe"
+                    " WHERE is_active = TRUE"
                 )
-                for row in result
+            )
+            for row in result:
+                targets[row.symbol] = row.exchange
+            result = await session.execute(
+                text(
+                    "SELECT DISTINCT i.symbol AS symbol, e.code AS exchange"
+                    " FROM public.user_watch_items w"
+                    " JOIN public.instruments i ON i.id = w.instrument_id"
+                    " LEFT JOIN public.exchanges e ON e.id = i.exchange_id"
+                    " WHERE w.is_active = TRUE AND i.type = 'equity_us'"
+                )
+            )
+            for row in result:
+                targets.setdefault(row.symbol, _us_partition(row.exchange))
+            return [
+                SyncTarget(market=MarketKey.US, symbol=symbol, partition=partition)
+                for symbol, partition in sorted(targets.items())
             ]
         if market == "crypto":
             sql = text(
