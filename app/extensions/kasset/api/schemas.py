@@ -27,6 +27,22 @@ MarketOverviewItemStatus = Literal["available", "stale", "unavailable"]
 MarketSessionState = Literal["OPEN", "PREOPEN", "AFTER_HOURS", "CLOSED"]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
 MarketIndexRange = Literal["1W", "1M", "3M", "6M"]
+MarketIndicatorKey = Literal[
+    "VIX",
+    "US10Y",
+    "KR_BOND_2Y",
+    "KR_BOND_3Y",
+    "KR_BOND_5Y",
+    "KR_BOND_10Y",
+    "KR_BOND_20Y",
+    "KR_BOND_30Y",
+    "WTI",
+    "BRENT",
+    "GOLD",
+    "BTC",
+]
+MarketIndicatorGroup = Literal["VOLATILITY", "RATE", "COMMODITY", "CRYPTO"]
+MarketIndicatorUnit = Literal["POINT", "PERCENT", "USD", "KRW"]
 MAX_WATCHLIST_ITEMS = 20
 
 
@@ -115,15 +131,39 @@ class MarketOverviewSession(AndroidWireModel):
 
 
 class MarketOverviewError(AndroidWireModel):
-    scope: Literal["indices", "fx"]
+    scope: Literal["indices", "fx", "indicators"]
     symbol: str
     code: MarketOverviewErrorCode
+
+
+class MarketIndicatorItem(AndroidWireModel):
+    """비주식 시장 지표 한 줄(변동성·금리·원자재·암호화폐).
+
+    ``market`` 필드가 없다: 이 지표들은 KRX/US 세션 상태와 결합하지 않으므로
+    세션 딕셔너리를 심볼별 키로 인덱싱하는 경로를 아예 만들지 않는다. 단위는
+    ``unit``으로만 구분하며, ``US10Y``는 가격이 아니라 % 값이라서
+    ``unit="PERCENT"``로 그대로 전달한다.
+    """
+
+    key: MarketIndicatorKey
+    name: str
+    group: MarketIndicatorGroup
+    # 공급자가 값을 주지 못하면 status="unavailable"과 함께 null로 내려간다
+    # (0이나 전일값으로 채우지 않는다).
+    value: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    previous_close: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    change_amount: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    change_rate: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    unit: MarketIndicatorUnit
+    as_of: str | None
+    status: MarketOverviewItemStatus
 
 
 class MarketOverviewResponse(AndroidWireModel):
     as_of: str | None
     status: MarketOverviewStatus
     indices: list[MarketOverviewItem]
+    indicators: list[MarketIndicatorItem]
     fx: list[MarketOverviewItem]
     sessions: list[MarketOverviewSession]
     errors: list[MarketOverviewError]

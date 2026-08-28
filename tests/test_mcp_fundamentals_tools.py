@@ -2742,13 +2742,17 @@ class TestGetMarketIndex:
         result = await tools["get_market_index"]()
 
         assert "indices" in result
-        assert len(result["indices"]) == 4
+        # 기본 배치는 주식 지수 7종(KOSPI/KOSDAQ + SPX/NASDAQ/DJI/RUT/SOX)이다.
+        assert len(result["indices"]) == len(
+            fundamentals_sources_indices._DEFAULT_INDICES
+        )
         assert "history" not in result
 
         # Verify we got both Korean and US indices
         symbols = [idx.get("symbol") for idx in result["indices"]]
         assert "KOSPI" in symbols
         assert "KOSDAQ" in symbols
+        assert {"DJI", "RUT", "SOX"} <= set(symbols)
 
     async def test_alias_sp500(self, monkeypatch):
         """Test SP500 alias resolves to same as SPX."""
@@ -2858,7 +2862,9 @@ class TestGetMarketIndex:
 
         result = await tools["get_market_index"]()
 
-        assert len(result["indices"]) == 4
+        assert len(result["indices"]) == len(
+            fundamentals_sources_indices._DEFAULT_INDICES
+        )
         kr_results = [
             idx for idx in result["indices"] if idx.get("symbol") in ("KOSPI", "KOSDAQ")
         ]
@@ -5203,10 +5209,23 @@ class TestIndexMeta:
             assert "naver_code" in meta
 
     def test_us_indices_have_yf_ticker(self):
-        for sym in ("SPX", "NASDAQ", "DJI"):
+        for sym in ("SPX", "NASDAQ", "DJI", "RUT", "SOX"):
             meta = fundamentals_sources_indices._INDEX_META[sym]
             assert meta["source"] == "yfinance"
             assert "yf_ticker" in meta
+
+    def test_non_equity_indicators_have_yf_ticker(self):
+        # 금리·원자재·변동성 지표도 yfinance 심볼로 등록되어 있어야 한다.
+        for sym, ticker in (
+            ("VIX", "^VIX"),
+            ("US10Y", "^TNX"),
+            ("WTI", "CL=F"),
+            ("BRENT", "BZ=F"),
+            ("GOLD", "GC=F"),
+        ):
+            meta = fundamentals_sources_indices._INDEX_META[sym]
+            assert meta["source"] == "yfinance"
+            assert meta["yf_ticker"] == ticker
 
     def test_aliases(self):
         assert (
@@ -5227,6 +5246,12 @@ class TestIndexMeta:
     def test_crypto_not_in_default_indices(self):
         # Crypto is fetched explicitly, never in the no-arg equity default list.
         for sym in ("CRYPTO", "BTC.D"):
+            assert sym not in fundamentals_sources_indices._DEFAULT_INDICES
+
+    def test_non_equity_indicators_not_in_default_indices(self):
+        # 기본 배치는 주식 지수 전용이다. 금리(%)·원자재·변동성 지표가 섞이면
+        # 이 목록을 소비하는 대시보드·리포트가 "해외 지수"로 잘못 표시한다.
+        for sym in ("VIX", "US10Y", "WTI", "BRENT", "GOLD"):
             assert sym not in fundamentals_sources_indices._DEFAULT_INDICES
 
 

@@ -23,6 +23,18 @@ _INDEX_META: dict[str, dict[str, str]] = {
     "DJI": {"name": "다우존스", "source": "yfinance", "yf_ticker": "^DJI"},
     "DOW": {"name": "다우존스", "source": "yfinance", "yf_ticker": "^DJI"},
     "VIX": {"name": "CBOE 변동성지수(VIX)", "source": "yfinance", "yf_ticker": "^VIX"},
+    "RUT": {"name": "러셀2000", "source": "yfinance", "yf_ticker": "^RUT"},
+    "SOX": {
+        "name": "필라델피아 반도체지수",
+        "source": "yfinance",
+        "yf_ticker": "^SOX",
+    },
+    # ^TNX는 가격이 아니라 미국 10년물 금리(%)를 그대로 싣는다. 통화 환산·가격
+    # 취급을 하면 값의 의미가 깨지므로 소비자가 % 단위로 읽어야 한다.
+    "US10Y": {"name": "미국 10년물 금리", "source": "yfinance", "yf_ticker": "^TNX"},
+    "WTI": {"name": "WTI 유가", "source": "yfinance", "yf_ticker": "CL=F"},
+    "BRENT": {"name": "브렌트유", "source": "yfinance", "yf_ticker": "BZ=F"},
+    "GOLD": {"name": "금", "source": "yfinance", "yf_ticker": "GC=F"},
     "CRYPTO": {
         "name": "암호화폐 총 시가총액",
         "source": "coingecko",
@@ -35,7 +47,9 @@ _INDEX_META: dict[str, dict[str, str]] = {
     },
 }
 
-_DEFAULT_INDICES = ["KOSPI", "KOSDAQ", "SPX", "NASDAQ"]
+# 무인자 기본 배치는 여전히 주식 지수만 담는다(금리·원자재·암호화폐는 제외).
+# 여기 없는 심볼은 /market/overview에서 unavailable로 떨어진다.
+_DEFAULT_INDICES = ["KOSPI", "KOSDAQ", "SPX", "NASDAQ", "DJI", "RUT", "SOX"]
 
 NAVER_INDEX_BASIC_URL = "https://m.stock.naver.com/api/index/{code}/basic"
 NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{code}/price"
@@ -350,6 +364,7 @@ async def _fetch_indices_us_current_batch(
                     "symbol": symbol,
                     "name": name,
                     "current": None,
+                    "previous_close": None,
                     "change": None,
                     "change_pct": None,
                     "open": None,
@@ -378,6 +393,7 @@ async def _fetch_indices_us_current_batch(
                 "symbol": symbol,
                 "name": name,
                 "current": current,
+                "previous_close": previous_close,
                 "change": change,
                 "change_pct": change_pct,
                 "open": _batch_float(latest.get("open")),

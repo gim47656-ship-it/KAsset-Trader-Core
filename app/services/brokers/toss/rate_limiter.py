@@ -19,6 +19,11 @@ class TossApiGroup(StrEnum):
     MARKET_INFO = "MARKET_INFO"
     MARKET_DATA = "MARKET_DATA"
     MARKET_DATA_CHART = "MARKET_DATA_CHART"
+    # 시장지표(/api/v1/market-indicators/*)는 주식 시세와 별도 그룹이다. 기존
+    # MARKET_DATA 버킷에 섞으면 지표 폴링이 주식 시세 예산을 먹는다. prices와
+    # investor-trading이 MARKET_INDICATOR, candles가 MARKET_INDICATOR_CHART다.
+    MARKET_INDICATOR = "MARKET_INDICATOR"
+    MARKET_INDICATOR_CHART = "MARKET_INDICATOR_CHART"
     ORDER = "ORDER"
     ORDER_HISTORY = "ORDER_HISTORY"
     ORDER_INFO = "ORDER_INFO"
@@ -32,6 +37,13 @@ _BASE_LIMITS: dict[TossApiGroup, int] = {
     TossApiGroup.MARKET_INFO: 3,
     TossApiGroup.MARKET_DATA: 10,
     TossApiGroup.MARKET_DATA_CHART: 5,
+    # 시장지표 그룹은 공식 Rate Limits 표(openapi.tossinvest.com/openapi-docs/
+    # overview.md)의 초당 한도를 그대로 옮긴 값이다. 표 서문에 한도가 사전 공지
+    # 없이 조정될 수 있고 현재 한도는 응답 헤더로 확인하라고 적혀 있으므로, 이
+    # 값은 프로세스 로컬 가드일 뿐이고 실제 상한은
+    # `TossRateLimitHeaders.limit`으로 읽어야 한다.
+    TossApiGroup.MARKET_INDICATOR: 10,
+    TossApiGroup.MARKET_INDICATOR_CHART: 5,
     TossApiGroup.ORDER: 6,
     TossApiGroup.ORDER_HISTORY: 5,
     TossApiGroup.ORDER_INFO: 6,

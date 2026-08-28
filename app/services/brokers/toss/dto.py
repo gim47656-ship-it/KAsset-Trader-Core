@@ -44,6 +44,20 @@ class TossPrice:
 
 
 @dataclass(frozen=True)
+class TossMarketIndicatorPrice:
+    """시장지표 현재가 한 건.
+
+    ``/api/v1/market-indicators/prices``는 ``currency``를 주지 않고 장 마감
+    상태에서는 ``timestamp``가 ``null``로 온다. 단위(포인트/%)는 응답에 없고
+    심볼 카탈로그 지식으로만 붙일 수 있으므로 여기서는 값과 시각만 담는다.
+    """
+
+    symbol: str
+    timestamp: str | None
+    last_price: Decimal
+
+
+@dataclass(frozen=True)
 class TossStockInfo:
     symbol: str
     name: str
@@ -125,6 +139,19 @@ def parse_prices(raw: list[dict[str, Any]]) -> list[TossPrice]:
             timestamp=row.get("timestamp"),
             last_price=parse_decimal_string(row["lastPrice"]),
             currency=str(row["currency"]),
+        )
+        for row in raw
+    ]
+
+
+def parse_market_indicator_prices(
+    raw: list[dict[str, Any]],
+) -> list[TossMarketIndicatorPrice]:
+    return [
+        TossMarketIndicatorPrice(
+            symbol=str(row["symbol"]),
+            timestamp=row.get("timestamp"),
+            last_price=parse_decimal_string(row["lastPrice"]),
         )
         for row in raw
     ]

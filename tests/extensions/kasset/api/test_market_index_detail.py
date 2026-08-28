@@ -95,6 +95,51 @@ async def test_index_detail_maps_each_public_range(
     source.assert_awaited_once_with(symbol="SPX", period=period, count=count)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["DJI", "RUT", "SOX"])
+@pytest.mark.parametrize(
+    ("range_", "period", "count"),
+    [
+        ("1W", "day", 5),
+        ("1M", "day", 20),
+        ("3M", "day", 60),
+        ("6M", "week", 26),
+    ],
+)
+async def test_new_us_indices_are_whitelisted_for_every_public_range(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+    range_: MarketIndexRange,
+    period: str,
+    count: int,
+) -> None:
+    """신설 지수도 상세 화이트리스트와 range 4종을 그대로 탄다."""
+    source = AsyncMock(return_value=_index_result(symbol))
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
+    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
+
+    response = await mod.get_market_index_detail(symbol.lower(), range_)
+
+    assert response.summary.symbol == symbol
+    assert response.summary.market == "US"
+    assert response.summary.currency == "USD"
+    assert response.summary.range == range_
+    assert response.summary.price == "6500.50"
+    assert response.summary.status == "available"
+    assert len(response.candles) == 1
+    source.assert_awaited_once_with(symbol=symbol, period=period, count=count)
+
+
+@pytest.mark.asyncio
+async def test_indicator_keys_are_not_reachable_as_index_details() -> None:
+    """지표 심볼(_INDEX_META에 있어도)은 지수 상세 화이트리스트가 아니다."""
+    for key in ("VIX", "US10Y", "WTI", "GOLD", "KR_BOND_10Y", "BTC"):
+        with pytest.raises(mod.MobileApiError) as excinfo:
+            await mod.get_market_index_detail(key, "1W")
+        assert excinfo.value.code == "UNKNOWN_INDEX"
+
+
 def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

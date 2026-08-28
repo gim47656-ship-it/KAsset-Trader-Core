@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -156,18 +157,40 @@ async def handle_get_market_index(
         except Exception as exc:
             return _error_payload(source=meta["source"], message=str(exc), symbol=sym)
 
-    # _DEFAULT_INDICES is equity-only (naver/yfinance). Fetch the two KRX
-    # currents independently while the default US pair shares one yfinance
-    # daily download. The single-symbol path above remains unchanged.
+    return await handle_get_market_index_current_batch(_DEFAULT_INDICES)
+
+
+async def handle_get_market_index_current_batch(
+    symbols: Sequence[str],
+) -> dict[str, Any]:
+    """현재가 전용 다중 심볼 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
+
+    naver 심볼은 각각의 현재가 요청으로, yfinance 심볼은
+    ``_fetch_indices_us_current_batch``(``yf.download`` 1회)로 처리한다. history는
+    조회하지 않으며 응답은 ``handle_get_market_index(symbol=None)``과 같은
+    ``{"indices": [...]}`` 모양이고 요청 순서를 유지한다. 무인자 기본 배치가 이
+    함수에 위임하므로 두 경로의 동작이 갈리지 않는다. coingecko 심볼은 배치로
+    묶을 대상이 아니므로 명시적으로 거부한다(단일 심볼 경로를 쓰면 된다).
+    """
+    normalized = [str(symbol).strip().upper() for symbol in symbols]
+    unsupported = sorted(
+        {
+            symbol
+            for symbol in normalized
+            if _INDEX_META.get(symbol, {}).get("source") not in ("naver", "yfinance")
+        }
+    )
+    if unsupported:
+        raise ValueError(
+            "Unsupported batch index symbols: "
+            f"{', '.join(unsupported)}. Batch supports naver/yfinance sources only."
+        )
+
     kr_symbols = [
-        symbol
-        for symbol in _DEFAULT_INDICES
-        if _INDEX_META[symbol]["source"] == "naver"
+        symbol for symbol in normalized if _INDEX_META[symbol]["source"] == "naver"
     ]
     us_symbols = [
-        symbol
-        for symbol in _DEFAULT_INDICES
-        if _INDEX_META[symbol]["source"] == "yfinance"
+        symbol for symbol in normalized if _INDEX_META[symbol]["source"] == "yfinance"
     ]
     results = await asyncio.gather(
         *(
@@ -210,7 +233,7 @@ async def handle_get_market_index(
         for symbol in us_symbols:
             rows_by_symbol[symbol] = {"symbol": symbol, "error": str(us_result)}
 
-    return {"indices": [rows_by_symbol[symbol] for symbol in _DEFAULT_INDICES]}
+    return {"indices": [rows_by_symbol[symbol] for symbol in normalized]}
 
 
 async def handle_get_market_index_current_only(symbol: str) -> dict[str, Any]:

@@ -72,6 +72,20 @@ class TossDailyBar:
     volume: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class TossIndicatorPoint:
+    """토스 시장지표 한 건.
+
+    지표 응답에는 통화가 없고, 장 마감 상태에서는 `timestamp`가 `null`로 온다.
+    시각을 신뢰할 수 없으면 서버 시각으로 대체하지 않고 `as_of`를 `None`으로
+    두어, 호출부가 그 항목을 `stale`로 표시할 수 있게 한다.
+    """
+
+    symbol: str
+    last_price: Decimal
+    as_of: datetime | None
+
+
 def _normalized_as_of(value: object) -> datetime | None:
     """공급자 시각을 tz-aware UTC로 정규화한다. 신뢰할 수 없으면 `None`.
 
@@ -123,6 +137,26 @@ def _quote_point(row: object) -> TossQuotePoint | None:
         currency=currency or "KRW",
         as_of=as_of,
     )
+
+
+def _indicator_point(row: object) -> TossIndicatorPoint | None:
+    """`TossMarketIndicatorPrice` 한 건을 지표 포인트로 바꾼다. 이상하면 `None`.
+
+    시세 포인트와 달리 `as_of`가 `None`이어도 값은 살린다. 지표 응답의
+    `timestamp`는 장 마감 상태에서 `null`로 오는 것이 정상이고, 값 자체는
+    유효하기 때문이다. 음수 금리를 배제하지 않기 위해 부호는 검사하지 않는다.
+    """
+    try:
+        symbol = str(getattr(row, "symbol", "")).strip().upper()
+        last_price = getattr(row, "last_price", None)
+        as_of = _normalized_as_of(getattr(row, "timestamp", None))
+    except Exception:  # noqa: BLE001 — 공급자 응답 변형은 폴백 사유일 뿐이다
+        return None
+    if not symbol:
+        return None
+    if not isinstance(last_price, Decimal) or not last_price.is_finite():
+        return None
+    return TossIndicatorPoint(symbol=symbol, last_price=last_price, as_of=as_of)
 
 
 def _previous_daily_close(page: object, *, boundary: date) -> Decimal | None:
@@ -428,6 +462,48 @@ class TossSharedMarketData:
             return []
         self._daily_bars[key] = (time.monotonic() + _DAILY_BARS_TTL_SECONDS, bars)
         return bars
+
+    async def market_indicators(
+        self, symbols: Sequence[str]
+    ) -> dict[str, TossIndicatorPoint]:
+        """토스 시장지표 현재가를 한 번의 배치 호출로 모은다.
+
+        호출부(`/market/overview`)가 이미 15초 캐시 + 단일비행이라 여기에 별도
+        캐시 층을 두지 않는다. 실패하면 빈 사전을 돌려주고 호출부가 해당 지표를
+        `unavailable`로 표시한다. 값을 만들어내지 않는다.
+        """
+        if not bool(getattr(settings, "toss_api_enabled", False)):
+            return {}
+        requested = list(
+            dict.fromkeys(
+                symbol.strip().upper()
+                for symbol in symbols
+                if symbol and symbol.strip()
+            )
+        )
+        if not requested:
+            return {}
+        self._reset_if_loop_changed()
+
+        points: dict[str, TossIndicatorPoint] = {}
+        try:
+            client = await self._ensure_client()
+            # 좁은 `TossPriceClient` 프로토콜을 넓히지 않고 기존 `candles`와 같은
+            # 방식으로 선택적 메서드를 읽는다(테스트 대역도 그대로 동작한다).
+            fetch = getattr(client, "market_indicator_prices", None)
+            if fetch is not None:
+                for row in await fetch(requested):
+                    point = _indicator_point(row)
+                    if point is not None and point.symbol in requested:
+                        points[point.symbol] = point
+        except Exception as exc:  # noqa: BLE001 — 지표는 없으면 unavailable이다
+            # 자격·응답 원문은 로그로 흘리지 않는다.
+            logger.warning(
+                "kasset toss market indicators unavailable (%s): indicators omitted",
+                type(exc).__name__,
+            )
+            return {}
+        return points
 
     async def _ensure_client(self) -> TossPriceClient:
         client = self._client

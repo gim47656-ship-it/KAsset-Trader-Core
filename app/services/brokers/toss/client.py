@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.services.brokers.toss.auth import TossOAuthTokenManager
 from app.services.brokers.toss.dto import (
     TossAccount,
+    TossMarketIndicatorPrice,
     TossOrderOperationResult,
     TossOrderPlacementResult,
     TossWarningInfo,
@@ -18,6 +19,7 @@ from app.services.brokers.toss.dto import (
     parse_candles,
     parse_commissions,
     parse_holdings,
+    parse_market_indicator_prices,
     parse_order,
     parse_order_operation_result,
     parse_order_placement_result,
@@ -255,6 +257,22 @@ class TossReadClient:
                 "GET",
                 "/api/v1/prices",
                 group=TossApiGroup.MARKET_DATA,
+                params={"symbols": self._symbols_param(symbols)},
+            )
+        )
+
+    async def market_indicator_prices(
+        self, symbols: list[str] | tuple[str, ...]
+    ) -> list[TossMarketIndicatorPrice]:
+        """시장지표 현재가. 지원 심볼 외에는 400 unsupported-symbol이다.
+
+        지표 그룹은 주식 시세(MARKET_DATA)와 별도 rate limit 버킷을 쓴다.
+        """
+        return parse_market_indicator_prices(
+            await self._request(
+                "GET",
+                "/api/v1/market-indicators/prices",
+                group=TossApiGroup.MARKET_INDICATOR,
                 params={"symbols": self._symbols_param(symbols)},
             )
         )

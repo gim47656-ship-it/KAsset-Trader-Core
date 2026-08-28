@@ -77,6 +77,7 @@ async def test_us_index_batch_download_computes_rows_and_isolates_missing_symbol
         "symbol": "SPX",
         "name": "S&P 500",
         "current": 105.0,
+        "previous_close": 100.0,
         "change": 5.0,
         "change_pct": 5.0,
         "open": 101.0,
@@ -88,6 +89,7 @@ async def test_us_index_batch_download_computes_rows_and_isolates_missing_symbol
     assert nasdaq["symbol"] == "NASDAQ"
     assert nasdaq["unavailable"] is True
     assert nasdaq["current"] is None
+    assert nasdaq["previous_close"] is None
 
 
 @pytest.mark.asyncio
@@ -130,14 +132,88 @@ async def test_default_indices_use_one_us_batch_and_never_call_us_fast_info(
 
     result = await handler.handle_get_market_index(symbol=None)
 
-    batch.assert_awaited_once_with(["SPX", "NASDAQ"])
+    batch.assert_awaited_once_with(["SPX", "NASDAQ", "DJI", "RUT", "SOX"])
     individual_us.assert_not_awaited()
     assert [row["symbol"] for row in result["indices"]] == [
         "KOSPI",
         "KOSDAQ",
         "SPX",
         "NASDAQ",
+        "DJI",
+        "RUT",
+        "SOX",
     ]
+
+
+@pytest.mark.asyncio
+async def test_current_batch_shares_one_us_download_across_indices_and_indicators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """지수 + 지표 심볼을 한 번에 요청해도 US 다운로드는 1회다(왕복 증가 없음)."""
+
+    async def kr_current(code: str, name: str) -> dict[str, Any]:
+        return {"symbol": code, "name": name, "current": 100.0}
+
+    requested: list[list[str]] = []
+
+    async def batch(symbols: list[str]) -> list[dict[str, Any]]:
+        requested.append(list(symbols))
+        return [
+            {"symbol": symbol, "current": 1.0, "source": "yfinance"}
+            for symbol in symbols
+        ]
+
+    history = AsyncMock(side_effect=AssertionError("current batch fetches no history"))
+    monkeypatch.setattr(handler, "_fetch_index_kr_current", kr_current)
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", batch)
+    monkeypatch.setattr(handler, "_fetch_index_us_history", history)
+    monkeypatch.setattr(handler, "kr_market_data_state", lambda: "fresh")
+
+    result = await handler.handle_get_market_index_current_batch(
+        ["KOSPI", "SPX", "vix", "US10Y", "GOLD"]
+    )
+
+    assert requested == [["SPX", "VIX", "US10Y", "GOLD"]]
+    history.assert_not_awaited()
+    assert "history" not in result
+    # 요청 순서를 그대로 유지한다.
+    assert [row["symbol"] for row in result["indices"]] == [
+        "KOSPI",
+        "SPX",
+        "VIX",
+        "US10Y",
+        "GOLD",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_current_batch_isolates_a_failed_kr_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def kr_current(code: str, name: str) -> dict[str, Any]:
+        raise RuntimeError(f"naver down: {code}")
+
+    batch = AsyncMock(
+        return_value=[{"symbol": "SPX", "current": 6500.0, "source": "yfinance"}]
+    )
+    monkeypatch.setattr(handler, "_fetch_index_kr_current", kr_current)
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", batch)
+    monkeypatch.setattr(handler, "kr_market_data_state", lambda: "fresh")
+
+    result = await handler.handle_get_market_index_current_batch(["KOSPI", "SPX"])
+
+    kospi, spx = result["indices"]
+    assert "error" in kospi
+    assert spx["current"] == 6500.0
+
+
+@pytest.mark.asyncio
+async def test_current_batch_rejects_symbols_it_cannot_batch() -> None:
+    # coingecko 지표는 배치 대상이 아니다. 조용히 빠뜨리지 않고 거부한다.
+    with pytest.raises(ValueError, match="CRYPTO"):
+        await handler.handle_get_market_index_current_batch(["KOSPI", "CRYPTO"])
+    with pytest.raises(ValueError, match="NOPE"):
+        await handler.handle_get_market_index_current_batch(["NOPE"])
 
 
 @pytest.mark.asyncio

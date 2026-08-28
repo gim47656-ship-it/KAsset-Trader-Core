@@ -16,6 +16,10 @@ from app.extensions.kasset.api.schemas import (
     MarketIndexDetailResponse,
     MarketIndexRange,
     MarketIndexSummary,
+    MarketIndicatorGroup,
+    MarketIndicatorItem,
+    MarketIndicatorKey,
+    MarketIndicatorUnit,
     MarketOverviewError,
     MarketOverviewErrorCode,
     MarketOverviewItem,
@@ -24,8 +28,13 @@ from app.extensions.kasset.api.schemas import (
     MarketOverviewSession,
     MarketSessionState,
 )
+from app.extensions.kasset.api.toss_market_data import (
+    TossIndicatorPoint,
+    toss_market_data,
+)
 from app.mcp_server.tooling.fundamentals._market_index import (
     handle_get_market_index,
+    handle_get_market_index_current_batch,
 )
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
@@ -39,6 +48,7 @@ from app.mcp_server.tooling.market_session import (
     kr_market_data_state,
     us_market_session,
 )
+from app.services.brokers.upbit.client import fetch_multiple_tickers
 from app.services.exchange_rate_service import (
     OpenErApiUsdSnapshot,
     UsdKrwExchangeRateQuote,
@@ -58,6 +68,9 @@ _INDEX_DEFINITIONS: tuple[tuple[str, str, _IndexMarket, _IndexCurrency], ...] = 
     ("KOSDAQ", "KOSDAQ", "KRX", "KRW"),
     ("SPX", "S&P 500", "US", "USD"),
     ("NASDAQ", "NASDAQ", "US", "USD"),
+    ("DJI", "다우지수", "US", "USD"),
+    ("RUT", "러셀2000", "US", "USD"),
+    ("SOX", "필라델피아 반도체", "US", "USD"),
 )
 _INDEX_DEFINITIONS_BY_SYMBOL: dict[
     str,
@@ -77,6 +90,51 @@ _FX_DEFINITIONS = (
     ("JPYKRW", "JPY/KRW"),
     ("EURKRW", "EUR/KRW"),
 )
+# 비주식 지표. market 필드를 두지 않으므로 세션 딕셔너리를 심볼로 인덱싱하는
+# 경로가 생기지 않는다. provider는 이 행을 채우는 소스이며, 상태 판정과 그룹
+# 실패 코드 배정이 provider별로 갈린다.
+_IndicatorProvider = Literal["us_batch", "upbit", "toss"]
+_INDICATOR_DEFINITIONS: tuple[
+    tuple[
+        MarketIndicatorKey,
+        str,
+        MarketIndicatorGroup,
+        MarketIndicatorUnit,
+        _IndicatorProvider,
+    ],
+    ...,
+] = (
+    ("VIX", "변동성지수", "VOLATILITY", "POINT", "us_batch"),
+    # ^TNX는 가격이 아니라 % 수익률이다. 통화 환산·가격 취급을 하지 않는다.
+    ("US10Y", "미국 10년물", "RATE", "PERCENT", "us_batch"),
+    # 한국 국채는 토스 시장지표가 % 수익률로 준다. 토스는 국내 국채만 주므로
+    # 미국 10년물은 계속 yfinance(^TNX)에서 온다.
+    ("KR_BOND_2Y", "국고채 2년", "RATE", "PERCENT", "toss"),
+    ("KR_BOND_3Y", "국고채 3년", "RATE", "PERCENT", "toss"),
+    ("KR_BOND_5Y", "국고채 5년", "RATE", "PERCENT", "toss"),
+    ("KR_BOND_10Y", "국고채 10년", "RATE", "PERCENT", "toss"),
+    ("KR_BOND_20Y", "국고채 20년", "RATE", "PERCENT", "toss"),
+    ("KR_BOND_30Y", "국고채 30년", "RATE", "PERCENT", "toss"),
+    ("WTI", "WTI", "COMMODITY", "USD", "us_batch"),
+    ("BRENT", "브렌트유", "COMMODITY", "USD", "us_batch"),
+    ("GOLD", "금", "COMMODITY", "USD", "us_batch"),
+    ("BTC", "비트코인", "CRYPTO", "KRW", "upbit"),
+)
+# yfinance 지표는 지수와 같은 배치(yf.download 1회)에 합류한다. 왕복이 늘지 않는다.
+_OVERVIEW_BATCH_SYMBOLS: tuple[str, ...] = tuple(
+    symbol for symbol, _name, _market, _currency in _INDEX_DEFINITIONS
+) + tuple(
+    key
+    for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
+    if provider == "us_batch"
+)
+# 토스 지표는 한 번의 배치 호출(최대 200심볼)로 함께 조회한다.
+_TOSS_INDICATOR_SYMBOLS: tuple[str, ...] = tuple(
+    key
+    for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
+    if provider == "toss"
+)
+_UPBIT_BTC_MARKET = "KRW-BTC"
 _KR_SESSION_STATES: dict[str, MarketSessionState] = {
     DATA_STATE_FRESH: "OPEN",
     DATA_STATE_PREMARKET_UNAVAILABLE: "PREOPEN",
@@ -445,6 +503,161 @@ def _index_items(
     return items, errors
 
 
+def _upbit_btc_row(ticker: object) -> dict[str, Any] | None:
+    """Upbit KRW-BTC 티커를 지수 행과 같은 모양으로 정규화한다.
+
+    ``signed_change_rate``는 비율(0.01 = 1%)이므로 지수 행의 관례(퍼센트포인트)에
+    맞춰 100을 곱한다. 전일종가가 없으면 등락을 계산하지 않고 그대로 비운다.
+    """
+    if not isinstance(ticker, dict):
+        return None
+    trade_price = ticker.get("trade_price")
+    if trade_price is None:
+        return None
+    previous_close = ticker.get("prev_closing_price")
+    change = ticker.get("signed_change_price") if previous_close is not None else None
+    raw_rate = ticker.get("signed_change_rate") if previous_close is not None else None
+    try:
+        change_pct = (
+            Decimal(str(raw_rate)) * 100
+            if raw_rate is not None and not isinstance(raw_rate, bool)
+            else None
+        )
+    except (InvalidOperation, ValueError):
+        change_pct = None
+
+    timestamp = ticker.get("trade_timestamp") or ticker.get("timestamp")
+    quote_asof: str | None = None
+    if isinstance(timestamp, int | float) and not isinstance(timestamp, bool):
+        quote_asof = datetime.fromtimestamp(timestamp / 1000, tz=UTC).isoformat()
+
+    return {
+        "symbol": "BTC",
+        "current": trade_price,
+        "previous_close": previous_close,
+        "change": change,
+        "change_pct": change_pct,
+        "quote_asof": quote_asof,
+        "source": "upbit",
+    }
+
+
+def _toss_indicator_rows(points: object) -> dict[str, dict[str, Any]]:
+    """토스 지표 포인트를 지수 행과 같은 모양으로 정규화한다.
+
+    지표 현재가 응답에는 전일종가·등락 필드가 없다. 당일 값을 전일종가로
+    재사용하면 등락이 0으로 위조되므로 그대로 비워 둔다(일봉에서 직전 거래일
+    종가를 뽑는 경로는 별도 슬라이스다).
+    """
+    if not isinstance(points, dict):
+        return {}
+    rows: dict[str, dict[str, Any]] = {}
+    for symbol, point in points.items():
+        last_price = getattr(point, "last_price", None)
+        if not isinstance(symbol, str) or last_price is None:
+            continue
+        as_of = getattr(point, "as_of", None)
+        rows[symbol] = {
+            "symbol": symbol,
+            "current": last_price,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "quote_asof": _datetime_text(as_of) if as_of is not None else None,
+            "source": "toss",
+        }
+    return rows
+
+
+def _indicator_status(
+    row: dict[str, Any],
+    *,
+    provider: _IndicatorProvider,
+    sessions: dict[str, MarketSessionState],
+) -> MarketOverviewItemStatus:
+    """지표 한 줄의 신선도. 지표는 세션 필드를 노출하지 않으므로 여기서만 쓴다."""
+    if provider == "toss":
+        # 토스 지표 현재가는 장 마감 상태에서 timestamp가 null로 온다. 기준
+        # 시각을 증명할 수 없으면 available이라고 말하지 않는다.
+        return "available" if row.get("quote_asof") else "stale"
+    # Upbit(암호화폐)는 24시간 시장이라 세션 개념이 없다. US 배치 지표만 미국
+    # 세션 상태로 판정한다(고정 키 조회이므로 sessions KeyError 경로가 없다).
+    session_state: MarketSessionState = (
+        sessions["US"] if provider == "us_batch" else "OPEN"
+    )
+    return _index_status(row, session_state=session_state)
+
+
+def _indicator_items(
+    index_result: object,
+    btc_ticker: object,
+    toss_points: object,
+    *,
+    sessions: dict[str, MarketSessionState],
+    us_batch_error_code: MarketOverviewErrorCode | None = None,
+    upbit_error_code: MarketOverviewErrorCode | None = None,
+    toss_error_code: MarketOverviewErrorCode | None = None,
+) -> tuple[list[MarketIndicatorItem], list[MarketOverviewError]]:
+    """비주식 지표 행을 조립한다. 한 공급자가 죽어도 그 항목만 unavailable이다."""
+
+    rows_by_symbol = _index_rows_by_symbol(index_result)
+    btc_row = _upbit_btc_row(btc_ticker)
+    if btc_row is not None:
+        rows_by_symbol["BTC"] = btc_row
+    rows_by_symbol.update(_toss_indicator_rows(toss_points))
+
+    group_error_codes: dict[_IndicatorProvider, MarketOverviewErrorCode | None] = {
+        "us_batch": us_batch_error_code,
+        "upbit": upbit_error_code,
+        "toss": toss_error_code,
+    }
+    items: list[MarketIndicatorItem] = []
+    errors: list[MarketOverviewError] = []
+    for key, name, group, unit, provider in _INDICATOR_DEFINITIONS:
+        usable = _usable_index_row(rows_by_symbol, key)
+        if usable is None:
+            items.append(
+                MarketIndicatorItem(
+                    key=key,
+                    name=name,
+                    group=group,
+                    value=None,
+                    previous_close=None,
+                    change_amount=None,
+                    change_rate=None,
+                    unit=unit,
+                    as_of=None,
+                    status="unavailable",
+                )
+            )
+            errors.append(
+                MarketOverviewError(
+                    scope="indicators",
+                    symbol=key,
+                    code=group_error_codes[provider] or "UNAVAILABLE",
+                )
+            )
+            continue
+
+        row, value = usable
+        items.append(
+            MarketIndicatorItem(
+                key=key,
+                name=name,
+                group=group,
+                value=value,
+                previous_close=_decimal_text(row.get("previous_close")),
+                change_amount=_decimal_text(row.get("change")),
+                # 공급자가 이미 퍼센트포인트로 준 등락률을 그대로 싣는다.
+                change_rate=_decimal_text(row.get("change_pct")),
+                unit=unit,
+                as_of=_source_as_of(row),
+                status=_indicator_status(row, provider=provider, sessions=sessions),
+            )
+        )
+    return items, errors
+
+
 def _fx_items(
     snapshot: OpenErApiUsdSnapshot | None,
     toss_usd_quote: UsdKrwExchangeRateQuote | None,
@@ -532,12 +745,38 @@ async def _toss_usd_quote() -> UsdKrwExchangeRateQuote | None:
     return quote if quote.source == "toss" else None
 
 
+async def _upbit_btc_ticker() -> dict[str, Any] | None:
+    """Upbit 공개 티커에서 KRW-BTC 한 건만 읽는다(인증 불필요)."""
+    rows = await fetch_multiple_tickers([_UPBIT_BTC_MARKET])
+    for row in rows:
+        if isinstance(row, dict) and row.get("market") == _UPBIT_BTC_MARKET:
+            return row
+    return None
+
+
+async def _toss_indicator_points() -> dict[str, TossIndicatorPoint]:
+    """토스 시장지표(한국 국채) 현재가. 토스 게이트가 꺼져 있으면 빈 사전이다."""
+    return await toss_market_data.market_indicators(_TOSS_INDICATOR_SYMBOLS)
+
+
 async def _build_market_overview() -> MarketOverviewResponse:
     sessions, session_states = _session_snapshot()
-    index_result, fx_result, toss_usd_result = await asyncio.gather(
-        _bounded(handle_get_market_index(symbol=None)),
+    # 소스는 모두 동시에 나가고 각각 SOURCE_TIMEOUT_SECONDS로 묶인다. yfinance
+    # 지표는 지수와 같은 배치 한 번에 들어가고 토스 국채도 배치 1회이므로,
+    # 지표를 추가해도 늘어나는 소스는 둘(Upbit·토스)뿐이고 이들은 기존 소스와
+    # 병렬로 나가므로 전체 지연 예산은 그대로다.
+    (
+        index_result,
+        fx_result,
+        toss_usd_result,
+        btc_result,
+        toss_indicator_result,
+    ) = await asyncio.gather(
+        _bounded(handle_get_market_index_current_batch(_OVERVIEW_BATCH_SYMBOLS)),
         _bounded(get_open_er_api_usd_snapshot()),
         _bounded(_toss_usd_quote()),
+        _bounded(_upbit_btc_ticker()),
+        _bounded(_toss_indicator_points()),
         return_exceptions=True,
     )
 
@@ -553,6 +792,34 @@ async def _build_market_overview() -> MarketOverviewResponse:
         index_payload,
         sessions=session_states,
         group_error_code=index_error_code,
+    )
+
+    btc_error_code: MarketOverviewErrorCode | None = None
+    if isinstance(btc_result, BaseException):
+        btc_error_code = (
+            "TIMEOUT" if isinstance(btc_result, TimeoutError) else "UNAVAILABLE"
+        )
+        btc_payload: object = None
+    else:
+        btc_payload = btc_result
+    toss_indicator_error_code: MarketOverviewErrorCode | None = None
+    if isinstance(toss_indicator_result, BaseException):
+        toss_indicator_error_code = (
+            "TIMEOUT"
+            if isinstance(toss_indicator_result, TimeoutError)
+            else "UNAVAILABLE"
+        )
+        toss_indicator_payload: object = None
+    else:
+        toss_indicator_payload = toss_indicator_result
+    indicators, indicator_errors = _indicator_items(
+        index_payload,
+        btc_payload,
+        toss_indicator_payload,
+        sessions=session_states,
+        us_batch_error_code=index_error_code,
+        upbit_error_code=btc_error_code,
+        toss_error_code=toss_indicator_error_code,
     )
 
     fx_error_code: MarketOverviewErrorCode | None = None
@@ -577,10 +844,12 @@ async def _build_market_overview() -> MarketOverviewResponse:
     )
 
     all_items = [*indices, *fx]
-    unavailable_count = sum(item.status == "unavailable" for item in all_items)
-    if unavailable_count == len(all_items):
+    # 지표는 상태 집계에는 넣되 as_of 계산에서는 뺀다. BTC는 초 단위로 갱신되므로
+    # 개요의 "기준 시각"이 지수·환율 블록과 무관한 값으로 튀면 표시가 어긋난다.
+    statuses = [item.status for item in (*all_items, *indicators)]
+    if all(status == "unavailable" for status in statuses):
         status = "unavailable"
-    elif any(item.status != "available" for item in all_items):
+    elif any(status != "available" for status in statuses):
         status = "partial"
     else:
         status = "fresh"
@@ -589,9 +858,10 @@ async def _build_market_overview() -> MarketOverviewResponse:
         as_of=_latest_as_of(all_items),
         status=status,
         indices=indices,
+        indicators=indicators,
         fx=fx,
         sessions=sessions,
-        errors=[*index_errors, *fx_errors],
+        errors=[*index_errors, *indicator_errors, *fx_errors],
     )
 
 
