@@ -156,14 +156,6 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", "${TUNNEL_TOKEN}"]
-    depends_on:
-      - api
-    logging: *default-logging
-    restart: unless-stopped
-
 volumes:
   postgres_data:
   redis_data:
