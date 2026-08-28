@@ -1,6 +1,6 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 (관심종목 API·다중 trader 스캔 가동, warm MCP 서비스, Toss 키 대기)
+갱신: 2026-08-28 (관심종목 스캔 전 구간 실가동: Toss 일봉 수집 → 3단 AI 판정까지 검증)
 
 ## 이번 세션에서 한 일 (2026-08-28 심야)
 
@@ -16,9 +16,12 @@
   005930/000660/035420 instruments + user 4 watch items 시드 완료.
 - **관심종목 일봉 수집 태스크** (`kasset_watchlist_candles.sync`, 커밋 `b21bcc1c`):
   KST 평일 9-16시 매시 5분, Toss 일봉 60개 → kr_candles_1d(source='toss') upsert,
-  종목별 실패 격리. **차단: Toss Open API 키 미보유** —
-  `TOSS_API_ENABLED/TOSS_API_CLIENT_ID/TOSS_API_CLIENT_SECRET`을 `.env.kasset`에
-  넣으면 즉시 동작. NH PLUG는 계좌/잔고/현재가 3경로 고정이라 차트 불가.
+  종목별 실패 격리. 사용자가 Toss Open API 키 발급(허용 IP `175.45.201.51`),
+  `.env.kasset`에 `TOSS_API_ENABLED/CLIENT_ID/CLIENT_SECRET` 반영 완료.
+  실검증: 3종목 × 60일 캔들 적재(2026-06-04~08-28) → 스캔 실행 시 3단 라우터가
+  실지표로 판정(035420 HOLD/0.84/sol, 005930 HOLD/0.70/sol, 000660 IGNORE/0.84/luna).
+  HOLD/IGNORE는 설계대로 미저장(BUY/SELL·conf≥0.60만 저장). NH PLUG는
+  계좌/잔고/현재가 3경로 고정이라 차트 불가(대안 아님).
 - **warm MCP 서비스**: compose `mcp` 서비스(auto-trader-mcp, analysis_readonly,
   streamable-http :8768, 토큰 `MCP_ANALYSIS_AUTH_TOKEN`) + 호스트 127.0.0.1:8768
   노출, `/root/.codex/config.toml`에 등록(`/root/.codex/env.sh` source 필요).
