@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -45,6 +47,114 @@ def test_parse_open_er_api_quote_exposes_same_rate_and_mid_rate() -> None:
     assert quote.default_rate == pytest.approx(1498.7)
     assert quote.valid_from is None
     assert quote.valid_until is None
+
+
+def test_open_er_api_snapshot_validates_cross_rates_and_source_time() -> None:
+    as_of = datetime(2026, 8, 28, 6, 0, tzinfo=UTC)
+
+    snapshot = mod._parse_open_er_api_usd_snapshot(
+        {
+            "result": "success",
+            "base_code": "USD",
+            "time_last_update_unix": int(as_of.timestamp()),
+            "rates": {
+                "KRW": "1500.00",
+                "JPY": "150",
+                "EUR": "0.75",
+            },
+        }
+    )
+
+    assert snapshot.usd_krw == Decimal("1500.00")
+    assert snapshot.jpy_krw == Decimal("10.00")
+    assert snapshot.eur_krw == Decimal("2000")
+    assert snapshot.as_of == as_of
+
+
+def test_parse_open_er_api_usd_snapshot_keeps_missing_source_time_null() -> None:
+    snapshot = mod._parse_open_er_api_usd_snapshot(
+        {
+            "result": "success",
+            "base_code": "USD",
+            "rates": {
+                "KRW": "1500",
+                "JPY": "150",
+                "EUR": "0.75",
+            },
+        }
+    )
+
+    assert snapshot.as_of is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "result": "error",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.75"},
+            },
+            "result is not success",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "EUR",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.75"},
+            },
+            "base_code is not USD",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "0", "EUR": "0.75"},
+            },
+            "rates.JPY must be a positive decimal",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "NaN", "JPY": "150", "EUR": "0.75"},
+            },
+            "rates.KRW must be a positive decimal",
+        ),
+    ],
+)
+def test_parse_open_er_api_usd_snapshot_rejects_invalid_base_or_cross_rates(
+    payload: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        mod._parse_open_er_api_usd_snapshot(payload)
+
+
+@pytest.mark.asyncio
+async def test_open_er_api_snapshot_cache_is_single_flight(monkeypatch) -> None:
+    calls = 0
+    expected = mod.OpenErApiUsdSnapshot(
+        usd_krw=Decimal("1500"),
+        jpy_per_usd=Decimal("150"),
+        eur_per_usd=Decimal("0.75"),
+    )
+
+    async def fetch() -> mod.OpenErApiUsdSnapshot:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return expected
+
+    monkeypatch.setattr(mod, "_fetch_open_er_api_usd_snapshot", fetch)
+
+    results = await asyncio.gather(
+        *(mod.get_open_er_api_usd_snapshot() for _ in range(5))
+    )
+
+    assert calls == 1
+    assert all(result is expected for result in results)
 
 
 @pytest.mark.asyncio

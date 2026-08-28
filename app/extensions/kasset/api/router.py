@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.web_router import limiter
 from app.core.config import settings
 from app.core.db import get_db
+from app.extensions.kasset.api import market_overview as market_overview_service
 from app.extensions.kasset.api.ai_briefing import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -66,9 +67,10 @@ from app.extensions.kasset.api.schemas import (
     DatabaseStatus,
     GoogleLoginRequest,
     HealthResponse,
-    InstrumentSearchResponse,
     InstrumentSearchMarket,
+    InstrumentSearchResponse,
     LoginRequest,
+    MarketOverviewResponse,
     NicknameUpdateRequest,
     OrderbookResponse,
     RefreshRequest,
@@ -406,6 +408,13 @@ async def positions(
         return await nh_adapter.positions(db, session.user.id)
     _require_paper(broker)
     return await paper_account_adapter.positions(db, session.user.id)
+
+
+@router.get("/market/overview", response_model=MarketOverviewResponse)
+async def market_overview(
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+) -> MarketOverviewResponse:
+    return await market_overview_service.get_market_overview()
 
 
 @router.get("/market/quote", response_model=Quote)

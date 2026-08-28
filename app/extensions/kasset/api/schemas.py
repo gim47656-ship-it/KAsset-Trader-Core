@@ -22,6 +22,10 @@ class AndroidWireModel(BaseModel):
 
 WatchlistMarket = Literal["KRX", "US", "CRYPTO"]
 InstrumentSearchMarket = Literal["ALL", "KRX", "US"]
+MarketOverviewStatus = Literal["fresh", "partial", "unavailable"]
+MarketOverviewItemStatus = Literal["available", "stale", "unavailable"]
+MarketSessionState = Literal["OPEN", "PREOPEN", "AFTER_HOURS", "CLOSED"]
+MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
 
 
 class WatchlistCreateRequest(AndroidWireModel):
@@ -61,6 +65,39 @@ class DailyCandle(AndroidWireModel):
 
 class DailyCandlesResponse(AndroidWireModel):
     candles: list[DailyCandle]
+
+
+class MarketOverviewItem(AndroidWireModel):
+    symbol: str
+    name: str
+    market: Literal["KRX", "US", "FX"]
+    currency: Literal["KRW", "USD"]
+    price: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    change_amount: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    change_rate: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    as_of: str | None
+    status: MarketOverviewItemStatus
+    session_state: MarketSessionState | None
+
+
+class MarketOverviewSession(AndroidWireModel):
+    market: Literal["KRX", "US"]
+    state: MarketSessionState
+
+
+class MarketOverviewError(AndroidWireModel):
+    scope: Literal["indices", "fx"]
+    symbol: str
+    code: MarketOverviewErrorCode
+
+
+class MarketOverviewResponse(AndroidWireModel):
+    as_of: str | None
+    status: MarketOverviewStatus
+    indices: list[MarketOverviewItem]
+    fx: list[MarketOverviewItem]
+    sessions: list[MarketOverviewSession]
+    errors: list[MarketOverviewError]
 
 
 class OrderbookLevel(AndroidWireModel):

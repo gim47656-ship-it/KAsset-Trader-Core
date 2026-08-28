@@ -17,6 +17,7 @@ _EXACT_PATHS = frozenset(
         "/api/v1/account/balance",
         "/api/v1/positions",
         "/api/v1/market/quote",
+        "/api/v1/market/overview",
         "/api/v1/market/candles",
         "/api/v1/market/symbols",
         "/api/v1/instruments/search",

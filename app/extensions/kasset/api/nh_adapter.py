@@ -403,14 +403,28 @@ def _quote_from_payload(
             "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
         )
     price = Decimal(_decimal_string(row, "stck_prpr"))
-    change = _signed_change(
-        Decimal(_decimal_string(row, "prdy_vrss")),
-        row.get("prdy_vrss_sign"),
-    )
-    change_rate = _signed_change(
-        Decimal(_decimal_string(row, "prdy_ctrt")),
-        row.get("prdy_vrss_sign"),
-    )
+    raw_previous_close = row.get("stck_prdy_clpr")
+    if raw_previous_close not in {None, ""}:
+        previous_close = Decimal(_decimal_string(row, "stck_prdy_clpr"))
+        change = price - previous_close
+        rate_magnitude = abs(Decimal(_decimal_string(row, "prdy_ctrt")))
+        change_rate = (
+            rate_magnitude
+            if change > 0
+            else -rate_magnitude
+            if change < 0
+            else Decimal("0")
+        )
+    else:
+        change = _signed_change(
+            Decimal(_decimal_string(row, "prdy_vrss")),
+            row.get("prdy_vrss_sign"),
+        )
+        previous_close = price - change
+        change_rate = _signed_change(
+            Decimal(_decimal_string(row, "prdy_ctrt")),
+            row.get("prdy_vrss_sign"),
+        )
     name_value = row.get("iem_nm")
     name = name_value.strip() if isinstance(name_value, str) else None
     return Quote(
@@ -420,7 +434,7 @@ def _quote_from_payload(
         name=name or None,
         currency="KRW",
         price=format(price, "f"),
-        previous_close=format(price - change, "f"),
+        previous_close=format(previous_close, "f"),
         change_amount=format(change, "f"),
         change_rate=format(change_rate, "f"),
         as_of=iso_z(),

@@ -91,6 +91,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/account/balance": {"get"},
         "/api/v1/positions": {"get"},
         "/api/v1/market/quote": {"get"},
+        "/api/v1/market/overview": {"get"},
         "/api/v1/market/symbols": {"get"},
         "/api/v1/instruments/search": {"get"},
         "/api/v1/orders": {"get", "post"},
@@ -253,6 +254,7 @@ def test_nh_quote_normalizes_official_current_price_fields(
                 "iem_cd": "005930",
                 "iem_nm": "삼성전자",
                 "stck_prpr": 71500,
+                "stck_prdy_clpr": 71000,
                 "prdy_vrss_sign": "2",
                 "prdy_vrss": 500,
                 "prdy_ctrt": 0.70,
@@ -287,6 +289,40 @@ def test_nh_quote_normalizes_official_current_price_fields(
     }
     assert quote.as_of.endswith("Z")
     fetch_quote.assert_awaited_once_with(market="KRX", symbol="005930")
+
+
+def test_nh_quote_uses_previous_close_when_mock_sign_field_is_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetch_quote = AsyncMock(
+        return_value={
+            "Output_0": {
+                "iem_cd": "005930",
+                "iem_nm": "삼성전자",
+                "stck_prpr": 257000,
+                "stck_prdy_clpr": 266000,
+                "prdy_vrss_sign": "",
+                "prdy_vrss": 9000,
+                "prdy_ctrt": 3.38,
+            }
+        }
+    )
+    context = SimpleNamespace(client=SimpleNamespace(fetch_quote=fetch_quote))
+    monkeypatch.setattr(
+        nh_adapter,
+        "prepare_read",
+        AsyncMock(return_value=context),
+    )
+
+    quote = asyncio.run(
+        nh_adapter.quote(  # type: ignore[arg-type]
+            object(), 101, market="krx", symbol="005930"
+        )
+    )
+
+    assert quote.previous_close == "266000"
+    assert quote.change_amount == "-9000"
+    assert quote.change_rate == "-3.38"
 
 
 def test_paper_kr_quote_falls_back_to_stored_candles(

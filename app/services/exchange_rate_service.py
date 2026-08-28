@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal, TypedDict, cast
 
 import httpx
@@ -18,9 +18,12 @@ _EXCHANGE_RATE_URL = "https://open.er-api.com/v6/latest/USD"
 _CACHE_KEY = "usd_krw"
 _OPEN_ER_API_CACHE_TTL_SECONDS = 300.0
 _MIN_TOSS_CACHE_TTL_SECONDS = 1.0
+_OPEN_ER_API_SNAPSHOT_CACHE_KEY = "open_er_api_usd_snapshot"
 _cache: dict[str, dict[str, object]] = {}
 _lock: asyncio.Lock | None = None
 _lock_loop: asyncio.AbstractEventLoop | None = None
+_open_er_api_snapshot_lock: asyncio.Lock | None = None
+_open_er_api_snapshot_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 @dataclass(frozen=True)
@@ -38,8 +41,33 @@ class UsdKrwExchangeRateQuote:
         return self.mid_rate
 
 
-class _ExchangeRatePayload(TypedDict):
+@dataclass(frozen=True)
+class OpenErApiUsdSnapshot:
+    """Validated USD-base rates from one open.er-api response."""
+
+    usd_krw: Decimal
+    jpy_per_usd: Decimal
+    eur_per_usd: Decimal
+    as_of: datetime | None = None
+
+    @property
+    def jpy_krw(self) -> Decimal:
+        """KRW value of one JPY (not the customary 100-JPY display unit)."""
+
+        return self.usd_krw / self.jpy_per_usd
+
+    @property
+    def eur_krw(self) -> Decimal:
+        """KRW value of one EUR."""
+
+        return self.usd_krw / self.eur_per_usd
+
+
+class _ExchangeRatePayload(TypedDict, total=False):
+    result: str
+    base_code: str
     rates: dict[str, float]
+    time_last_update_unix: int
 
 
 def _parse_decimal_float(value: object) -> float:
@@ -81,6 +109,59 @@ def _parse_toss_usd_krw_quote(raw: dict[str, Any]) -> UsdKrwExchangeRateQuote:
     )
 
 
+def _strict_positive_decimal(value: object, *, field: str) -> Decimal:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{field} must be a positive decimal")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be a positive decimal") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError(f"{field} must be a positive decimal")
+    return parsed
+
+
+def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
+    if not isinstance(data, dict):
+        raise TypeError("open.er-api response must be an object")
+    if data.get("result") != "success":
+        raise ValueError("open.er-api response result is not success")
+    if data.get("base_code") != "USD":
+        raise ValueError("open.er-api response base_code is not USD")
+
+    rates = data.get("rates")
+    if not isinstance(rates, dict):
+        raise TypeError("open.er-api response rates must be an object")
+    usd_krw = _strict_positive_decimal(rates.get("KRW"), field="rates.KRW")
+    jpy_per_usd = _strict_positive_decimal(rates.get("JPY"), field="rates.JPY")
+    eur_per_usd = _strict_positive_decimal(rates.get("EUR"), field="rates.EUR")
+    try:
+        cross_rates = (usd_krw / jpy_per_usd, usd_krw / eur_per_usd)
+    except DecimalException as exc:
+        raise ValueError("open.er-api cross rates are not computable") from exc
+    if any(not rate.is_finite() or rate <= 0 for rate in cross_rates):
+        raise ValueError("open.er-api cross rates must be positive finite decimals")
+
+    raw_as_of = data.get("time_last_update_unix")
+    as_of: datetime | None = None
+    if raw_as_of is not None:
+        if type(raw_as_of) is not int or raw_as_of < 0:
+            raise ValueError("time_last_update_unix must be a non-negative integer")
+        try:
+            as_of = datetime.fromtimestamp(raw_as_of, tz=UTC)
+        except (OSError, OverflowError, ValueError) as exc:
+            raise ValueError(
+                "time_last_update_unix is outside the supported range"
+            ) from exc
+
+    return OpenErApiUsdSnapshot(
+        usd_krw=usd_krw,
+        jpy_per_usd=jpy_per_usd,
+        eur_per_usd=eur_per_usd,
+        as_of=as_of,
+    )
+
+
 def _parse_open_er_api_usd_krw_quote(
     data: _ExchangeRatePayload,
 ) -> UsdKrwExchangeRateQuote:
@@ -99,6 +180,18 @@ def _get_lock() -> asyncio.Lock:
         _lock = asyncio.Lock()
         _lock_loop = loop
     return _lock
+
+
+def _get_open_er_api_snapshot_lock() -> asyncio.Lock:
+    global _open_er_api_snapshot_lock, _open_er_api_snapshot_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _open_er_api_snapshot_lock is None
+        or _open_er_api_snapshot_lock_loop is not loop
+    ):
+        _open_er_api_snapshot_lock = asyncio.Lock()
+        _open_er_api_snapshot_lock_loop = loop
+    return _open_er_api_snapshot_lock
 
 
 def _now_utc() -> datetime:
@@ -137,6 +230,24 @@ def _set_cached_quote(quote: UsdKrwExchangeRateQuote, now: float) -> None:
     }
 
 
+def _get_cached_open_er_api_snapshot(now: float) -> OpenErApiUsdSnapshot | None:
+    cached = _cache.get(_OPEN_ER_API_SNAPSHOT_CACHE_KEY)
+    if cached and float(cached["expires_at"]) > now:
+        snapshot = cached.get("snapshot")
+        if isinstance(snapshot, OpenErApiUsdSnapshot):
+            return snapshot
+    return None
+
+
+def _set_cached_open_er_api_snapshot(
+    snapshot: OpenErApiUsdSnapshot, now: float
+) -> None:
+    _cache[_OPEN_ER_API_SNAPSHOT_CACHE_KEY] = {
+        "snapshot": snapshot,
+        "expires_at": now + _OPEN_ER_API_CACHE_TTL_SECONDS,
+    }
+
+
 async def _fetch_toss_usd_krw_quote() -> UsdKrwExchangeRateQuote:
     from app.services.brokers.toss.client import TossReadClient
 
@@ -155,6 +266,34 @@ async def _fetch_toss_usd_krw_quote() -> UsdKrwExchangeRateQuote:
         quote.valid_until,
     )
     return quote
+
+
+async def _fetch_open_er_api_usd_snapshot() -> OpenErApiUsdSnapshot:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(_EXCHANGE_RATE_URL)
+        _ = response.raise_for_status()
+        data = response.json()
+
+    return _parse_open_er_api_usd_snapshot(data)
+
+
+async def get_open_er_api_usd_snapshot() -> OpenErApiUsdSnapshot:
+    """Return a cached, validated USD-base snapshot for cross-rate consumers."""
+
+    now = time.monotonic()
+    cached_snapshot = _get_cached_open_er_api_snapshot(now)
+    if cached_snapshot is not None:
+        return cached_snapshot
+
+    async with _get_open_er_api_snapshot_lock():
+        now = time.monotonic()
+        cached_snapshot = _get_cached_open_er_api_snapshot(now)
+        if cached_snapshot is not None:
+            return cached_snapshot
+
+        snapshot = await _fetch_open_er_api_usd_snapshot()
+        _set_cached_open_er_api_snapshot(snapshot, now)
+        return snapshot
 
 
 async def _fetch_open_er_api_usd_krw_quote() -> UsdKrwExchangeRateQuote:
