@@ -1,8 +1,120 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 밤 (Cloudflare 우회 제거·호가 401·시세 커버리지·실시간 소스 확정)
+갱신: 2026-08-29 (실시간 WS 스트림·시장지표 12종·와이어 정밀도·CI 수집 공백 수리)
 
-## 이번 세션에서 한 일 (2026-08-28 밤)
+## 이번 세션에서 한 일 (2026-08-29)
+
+### 0. 요약 — 시세 지연을 REST 폴링에서 WS 푸시로 바꿨다
+
+서버측은 완료·배포·라이브 검증까지 끝났다. **앱 WS 클라이언트는 별도 슬라이스**이며
+그것이 붙기 전까지 사용자 체감 지연은 그대로다.
+
+운영 라이브 측정(`wss://175-45-201-51.sslip.io/api/v1/market/stream`, 미국 dayMarket):
+
+| 항목 | 값 |
+|---|---|
+| 60초 홀드 프레임 | `TOSS_API_WS` **243건** vs REST baseline 2건 |
+| AAPL | 214건 수신, 가격 변화 85회 |
+| 지연(공급자 `asOf`→수신, n=415) | median **1117ms**, p95 1290ms, min 353ms |
+| 도착 간격 | median 0.6ms(버스트), p95 789ms |
+
+기존 REST 경로는 2초 폴링 + 서버 2초 캐시라 체감 2~4초였다. 재현 스크립트는
+`E:/tmp/ws_live_hold.py`, `E:/tmp/ws_latency.py`(커밋 대상 아님).
+
+### 1. 실시간 시세 스트림 (`app/extensions/kasset/api/stream/`, 9개 신규 모듈)
+
+`GET /api/v1/market/stream` WebSocket. 상향 Toss WS는 **Redis 리스로 단일 소유자**를
+선출해 전역 1개만 유지한다. 명세상 동시 연결이 계정당 2개이고 초과 시 가장 오래된
+연결이 서버에 의해 조용히 종료되므로, 프로세스별 연결은 서로를 죽이며 무한 재연결
+루프가 된다. 선택이 아니라 필수다.
+
+- 구독은 상향과 동일한 **선언형 full-replace**. `unsubscribe` verb가 없어 놓친 해제로
+  예산이 새는 경로가 구조적으로 없다. 연결이 끊기면 그 연결의 구독분을 회수한다.
+- 100건 예산(채널×종목) 초과분은 조용히 누락되지 않고 `status.pollingTopics`로 강등
+  통보한다. 불변식 `streaming ∪ demoted == 요청 전체`를 테스트로 고정했다.
+- keepalive는 명세대로 **평문 `PING` 60초**. 서버 송신은 idle 타이머를 리셋하지 않으므로
+  시세가 쏟아지는 중에도 보내야 한다(서버 idle 한도 180초).
+- 배포 표면 변경 0: 새 서비스·이미지·환경변수 없음. Caddy는 `reverse_proxy`가 Upgrade를
+  자동으로 나르므로 기능 변경 없이 handshake 101이 실측 확인됐다(주석 7줄만 추가).
+
+### 2. 시장지표 12종 + 지수 3종 (`market_overview.py`, `schemas.py`)
+
+`MarketOverviewResponse.indicators[]` 신설. VIX, US10Y, 국고채 6종, WTI/BRENT/GOLD, BTC.
+지수에 DJI/RUT/SOX 추가. US 지표는 기존 지수 배치에 합쳐 왕복을 늘리지 않았고 Upbit·Toss는
+기존 소스와 병렬이다. 국고채는 전일종가 소스가 없어 등락을 `null`로 두고 위조하지 않았다.
+
+### 3. 와이어 정밀도 — 앱이 `7767.33984375`를 렌더하고 있었다
+
+`_decimal_text()`가 `Decimal(str(value))` 후 양자화를 하지 않아 yfinance float32 잔재와
+FX Decimal 나눗셈 결과(`8.671256687620105017577911603`, 28자리)가 그대로 나갔다.
+Naver·Toss 문자열 공급자만 우연히 무사했다. **소수 최대 2자리**로 양자화한다(KRW는 정수).
+`Decimal.normalize()`는 큰 정수를 `1E+8`로 바꿔 와이어 정규식을 깨므로 쓰지 않는다.
+
+### 4. CI가 kasset 테스트를 한 번도 돌리지 않고 있었다
+
+CI는 `ci_shards/shard-N.txt` 매니페스트에서 파일 목록을 읽고, 그 매니페스트는
+`pytest --collect-only` 결과를 기준 집합으로 쓴다. `tests/extensions/kasset/api/`가
+패키지가 아니어서 `test_candles.py`·`test_market_stream.py`가
+`tests/brokers/kis/mock_scalping_ws/`의 동명 파일과 모듈명 충돌(`import file mismatch`)을
+일으켜 **수집 자체가 실패**했고, 수집되지 않은 파일은 매니페스트에 들어가지 못해
+영구히 실행되지 않았다. 실제로 kasset 시세·세션·호가 테스트 11개가 미실행이었다.
+`tests/extensions/kasset/api/__init__.py`를 추가해 해결했다(`tests/services/brokers/toss/`가
+같은 이유로 이미 두고 있던 관례).
+
+**남은 조치**: 이제 수집되므로 shard 매니페스트를 재생성해야 CI가 실제로 돌린다.
+Windows에서 재생성하면 안 된다 — `tests/scripts/b0x/*`가 POSIX 전용 `fcntl`로,
+`tests/research/*`가 CRLF 민감 frozen SHA 가드로 로컬에서만 실패해 기준 집합이 좁아지고
+오히려 테스트를 CI에서 빼버린다. Linux에서 `test-durations-refresh.yml`로 재생성할 것.
+
+### 5. QA 토큰 자동 갱신 (`scripts/`)
+
+access 30분·refresh 7일이고 갱신마다 refresh가 회전한다. SSH 1회로 쌍을 받고 이후
+7일간 순수 HTTP로 무한 갱신한다. `mint_android_qa_token.py`는 claim을 손으로 조립하지
+않고 운영 경로 `MobileAuthService._issue`를 호출하므로 게이트가 바뀌어도 조용히 401이
+되지 않는다. `device_id=qa-cli`라 실기기 세션을 빼앗지 않는다.
+
+```bash
+TOK=$(python scripts/kasset_qa_token.py)   # 이 한 줄로 끝
+```
+
+### 6. 확정한 외부 계약 사실 (추측 아님, 명세·실측)
+
+- **Toss는 미국도 된다.** 공식 소개문 "Korean (KRX) and US stock market data".
+  `/api/v1/prices`가 **KR+US 혼합 배치**를 받는다(005930·000660·TQQQ·AAPL 동시 응답 확인).
+  미국 개별 종목 `source=TOSS_API_PRICES`.
+- US 4세션: dayMarket 09:00–17:00 / preMarket 17:00–22:30 / regularMarket 22:30–05:00 /
+  afterMarket 05:00–08:50 (KST). 10분 빼고 사실상 24시간이다.
+- 공식 레이트리밋: `MARKET_DATA` 15, `MARKET_DATA_CHART` 20, `MARKET_INDICATOR` 10,
+  `MARKET_INDICATOR_CHART` 5. 우리 로컬 `_BASE_LIMITS`의 `MARKET_DATA` 10 /
+  `MARKET_DATA_CHART` 5는 과도하게 보수적이다(미조정, 차트 처리량 여유 있음).
+- WS: 동시 연결 계정당 2개(초과 시 최오래 연결 종료), 연결당 구독 100건(채널×종목),
+  선언 빈도 5회/초, `trade`·`orderbook`은 LOSSY / `personal:order`는 LOSSLESS.
+
+### 7. 검수
+
+`b16f9261..71e442db` 고정 Diff에 `checker` 1회 → **REWORK**(MAJOR 2건).
+① `ping_interval=None`으로 dead-peer 감지를 끈 상태에서 수동 `PING` 무응답을 추적하지
+않아 half-open TCP에서 소유자가 리스를 쥔 채 시세가 무기한 정지하고 `DEGRADED` 통보조차
+안 갔다. ② 느린 소비자 종료가 클라이언트의 다음 프레임 수신 뒤에만 감지되어 수신 전용
+백그라운드 클라이언트가 좀비로 잔존했다. 둘 다 실제 경쟁 조건 재현 테스트와 함께 수정
+→ 독립 재검토 **PASS**.
+
+## 알려진 미해결
+
+- **앱 WS 클라이언트 미구현**(별도 슬라이스 진행 중). 이것이 붙기 전까지 사용자 체감
+  지연은 개선되지 않는다. 계약 문서는 `docs/API-CONTRACT.md`.
+- `personal:order` WS 채널 미착수. LOSSLESS라 conflation을 적용하면 안 되고(2초 이상
+  막히면 서버가 연결 종료), 재연결 뒤 `GET /api/v1/orders` 재동기화가 필수다. 시세와
+  전달 보장이 정반대여서 같은 세션 파이프라인에 얹으면 안 된다.
+- `tests/extensions/kasset` 기존 실패 1건: `test_multi_user_migration_guards.py`의 alembic
+  `DuplicateColumnError: instruments.aliases`. 세션 시작 커밋(`14d16241`)에도 있었다.
+  하네스가 `create_all`로 스키마를 만든 뒤 alembic이 같은 컬럼을 다시 추가하는 순서 문제다.
+  **운영 DB는 정상**(alembic head `20260828_nhplug_symbol_master`, `instruments.aliases text[]` 존재).
+- `ruff format --check` 실패 11건은 세션 시작 커밋에도 있던 기존 실패다(범위 밖으로 뒀다).
+  CI가 이 명령을 돌리므로 게이트로 의존하려면 정리해야 한다.
+- Toss `dayMarket`(09:00–17:00 KST) 구간을 우리 세션 모델이 `CLOSED`로 표시한다. Toss는
+  그 시간 미국 거래를 허용한다. 5번째 상태 추가는 스키마·앱 변경이 필요해 미착수.
+
 
 ### 1. 시세 지연의 실제 원인 제거 — Cloudflare 우회
 
@@ -310,6 +422,7 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
+- 2026-08-29: WS 실시간 스트림 신설(Redis 리스 단일 소유자, 선언형 full-replace, 라이브 지연 median 1117ms·60초 243틱), 시장지표 12종·지수 3종 추가, 와이어 소수점 2자리 양자화, CI가 kasset 테스트 11개를 수집 실패로 한 번도 돌리지 않던 공백 수리, QA 토큰 7일 무한 갱신 도구. checker REWORK(MAJOR 2건) → 수정 후 재검토 PASS. 소비자 범위 1801 passed.
 - 2026-08-28 밤: Cloudflare LAX 우회 제거(오리진 Caddy TLS, RTT 585~983ms→27~67ms), 호가 401 허용목록 수정, 저장 일봉 밖 종목의 시세·차트 복구(Toss 일봉 폴백 + 관심종목 유니버스 합집합), 미국 시세를 Yahoo→Toss로 전환, 실시간 소스 Toss 단독 확정(5세션 실측).
 - 2026-08-28 저녁: 시장 개요·지수 상세·배치 시세 API 신설과 Toss 실시간 시세 연결, access token sid 게이트 제거로 세션 유지 수정, checker PASS 후 운영 배포.
 - 2026-08-28: 관심종목 API·다중 trader 스캔·일봉 수집 태스크 배포, worker/scheduler·warm MCP 가동, Toss 키 대기.
