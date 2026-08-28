@@ -181,22 +181,35 @@ async def _fetch_index_us_current(
     yf_ticker: str, name: str, symbol: str
 ) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
-    # fast_info acquisition itself can fail (network / yfinance internals); never
-    # let it crash the current-quote path.
-    info: Any = None
-    try:
-        with yfinance_tracing_session() as session:
-            ticker_obj = yf.Ticker(yf_ticker, session=session)
-            info = await loop.run_in_executor(None, lambda: ticker_obj.fast_info)
-    except Exception:  # noqa: BLE001 — degrade to history fallback below
-        info = None
 
-    current = _safe_fast_info_attr(info, "last_price")
-    previous_close = _safe_fast_info_attr(info, "regular_market_previous_close")
-    open_ = _safe_fast_info_attr(info, "open")
-    high = _safe_fast_info_attr(info, "day_high")
-    low = _safe_fast_info_attr(info, "day_low")
-    volume = _safe_fast_info_attr(info, "last_volume")
+    def load_fast_info() -> dict[str, Any]:
+        # FastInfo resolves attributes lazily. Read them while the traced session
+        # is still open; returning the FastInfo object closes its transport first.
+        with yfinance_tracing_session() as session:
+            info = yf.Ticker(yf_ticker, session=session).fast_info
+            return {
+                "current": _safe_fast_info_attr(info, "last_price"),
+                "previous_close": _safe_fast_info_attr(
+                    info,
+                    "regular_market_previous_close",
+                ),
+                "open": _safe_fast_info_attr(info, "open"),
+                "high": _safe_fast_info_attr(info, "day_high"),
+                "low": _safe_fast_info_attr(info, "day_low"),
+                "volume": _safe_fast_info_attr(info, "last_volume"),
+            }
+
+    try:
+        fast_info = await loop.run_in_executor(None, load_fast_info)
+    except Exception:  # noqa: BLE001 — degrade to history fallback below
+        fast_info = {}
+
+    current = fast_info.get("current")
+    previous_close = fast_info.get("previous_close")
+    open_ = fast_info.get("open")
+    high = fast_info.get("high")
+    low = fast_info.get("low")
+    volume = fast_info.get("volume")
     source = "yfinance"
 
     # ROB-365 hotfix: when fast_info yields no current price (failed internally or

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal
 
+from app.core.config import settings
 from app.extensions.kasset.api.schemas import (
     MarketOverviewError,
     MarketOverviewErrorCode,
@@ -35,7 +36,9 @@ from app.mcp_server.tooling.market_session import (
 )
 from app.services.exchange_rate_service import (
     OpenErApiUsdSnapshot,
+    UsdKrwExchangeRateQuote,
     get_open_er_api_usd_snapshot,
+    get_usd_krw_rate_details,
 )
 
 OVERVIEW_CACHE_TTL_SECONDS = 60.0
@@ -262,22 +265,39 @@ def _index_items(
 
 def _fx_items(
     snapshot: OpenErApiUsdSnapshot | None,
+    toss_usd_quote: UsdKrwExchangeRateQuote | None,
     *,
     group_error_code: MarketOverviewErrorCode | None = None,
 ) -> tuple[list[MarketOverviewItem], list[MarketOverviewError]]:
-    as_of = _datetime_text(snapshot.as_of) if snapshot is not None else None
+    snapshot_as_of = _datetime_text(snapshot.as_of) if snapshot is not None else None
+    toss_as_of = (
+        _datetime_text(toss_usd_quote.valid_from)
+        if toss_usd_quote is not None
+        else None
+    )
     try:
-        values = (
-            (snapshot.usd_krw, snapshot.jpy_krw, snapshot.eur_krw)
+        usd_krw = (
+            Decimal(str(toss_usd_quote.default_rate))
+            if toss_usd_quote is not None
+            else snapshot.usd_krw
             if snapshot is not None
-            else (None, None, None)
+            else None
+        )
+        values = (
+            (usd_krw, toss_as_of or snapshot_as_of),
+            (snapshot.jpy_krw, snapshot_as_of) if snapshot is not None else (None, None),
+            (snapshot.eur_krw, snapshot_as_of) if snapshot is not None else (None, None),
         )
     except DecimalException:
-        values = (None, None, None)
+        values = ((None, None), (None, None), (None, None))
 
     items: list[MarketOverviewItem] = []
     errors: list[MarketOverviewError] = []
-    for (symbol, name), raw_price in zip(_FX_DEFINITIONS, values, strict=True):
+    for (symbol, name), (raw_price, as_of) in zip(
+        _FX_DEFINITIONS,
+        values,
+        strict=True,
+    ):
         price = _decimal_text(raw_price)
         if price is None:
             items.append(
@@ -318,12 +338,19 @@ def _fx_items(
 async def _bounded[T](source: Awaitable[T]) -> T:
     return await asyncio.wait_for(source, timeout=SOURCE_TIMEOUT_SECONDS)
 
+async def _toss_usd_quote() -> UsdKrwExchangeRateQuote | None:
+    if not settings.toss_api_enabled:
+        return None
+    quote = await get_usd_krw_rate_details()
+    return quote if quote.source == "toss" else None
+
 
 async def _build_market_overview() -> MarketOverviewResponse:
     sessions, session_states = _session_snapshot()
-    index_result, fx_result = await asyncio.gather(
+    index_result, fx_result, toss_usd_result = await asyncio.gather(
         _bounded(handle_get_market_index(symbol=None)),
         _bounded(get_open_er_api_usd_snapshot()),
+        _bounded(_toss_usd_quote()),
         return_exceptions=True,
     )
 
@@ -351,7 +378,16 @@ async def _build_market_overview() -> MarketOverviewResponse:
         snapshot = fx_result
     else:
         snapshot = None
-    fx, fx_errors = _fx_items(snapshot, group_error_code=fx_error_code)
+    toss_usd_quote = (
+        toss_usd_result
+        if isinstance(toss_usd_result, UsdKrwExchangeRateQuote)
+        else None
+    )
+    fx, fx_errors = _fx_items(
+        snapshot,
+        toss_usd_quote,
+        group_error_code=fx_error_code,
+    )
 
     all_items = [*indices, *fx]
     unavailable_count = sum(item.status == "unavailable" for item in all_items)

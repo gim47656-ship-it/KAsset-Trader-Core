@@ -24,7 +24,10 @@ from app.mcp_server.tooling.market_session import (
     US_SESSION_REGULAR,
 )
 from app.middleware.auth import AuthMiddleware
-from app.services.exchange_rate_service import OpenErApiUsdSnapshot
+from app.services.exchange_rate_service import (
+    OpenErApiUsdSnapshot,
+    UsdKrwExchangeRateQuote,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +159,32 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         {"market": "US", "state": "OPEN"},
     ]
     assert body["errors"] == []
+
+@pytest.mark.asyncio
+async def test_overview_prefers_configured_toss_for_usd_krw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_successful_sources(monkeypatch)
+    monkeypatch.setattr(mod.settings, "toss_api_enabled", True)
+    monkeypatch.setattr(
+        mod,
+        "get_usd_krw_rate_details",
+        AsyncMock(
+            return_value=UsdKrwExchangeRateQuote(
+                rate=1512.25,
+                mid_rate=1512.25,
+                source="toss",
+                valid_from=datetime(2026, 8, 28, 6, 5, tzinfo=UTC),
+            )
+        ),
+    )
+
+    response = await mod._build_market_overview()
+
+    assert response.fx[0].price == "1512.25"
+    assert response.fx[0].as_of == "2026-08-28T06:05:00Z"
+    assert response.fx[1].price == "10.00"
+    assert response.fx[2].price == "2000"
 
 
 @pytest.mark.asyncio
