@@ -1,8 +1,32 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 (Cloudflare Tunnel 컷오버·VPS 이전 런북·캔들 API·스캔 쿨다운)
+갱신: 2026-08-28 저녁 (시장 데이터 표면 3종·Toss 실시간 시세·세션 토큰 계약 수정)
 
-## 이번 세션에서 한 일 (2026-08-28 심야)
+## 이번 세션에서 한 일 (2026-08-28 저녁)
+
+- **시장 데이터 표면 3종**(`app/extensions/kasset/api/market_overview.py`,
+  `krx_quotes.py`, `toss_market_data.py`, 라우팅은 `router.py`):
+  - `GET /market/overview` — KOSPI/KOSDAQ/SPX/NASDAQ + FX, 단일비행 15초 캐시
+    (기존 60초에서 하향, 앱 폴링과 동일 주기). 지수는 provider-neutral 심볼만 노출한다.
+  - `GET /market/indices/{symbol}?range=1W|1M|3M|6M` — 요약 + 일봉. KR 지수는 거래량이
+    없으므로 `volume:null`을 그대로 내보내고 값을 만들어내지 않는다.
+  - `GET /market/quotes?market=KRX&symbols=…` — 최대 50종목 배치. Toss Open API
+    `/api/v1/prices`(종목당 2초 캐시·단일비행·실패 2초 냉각) → NH PLUG(2.5초 예산) →
+    저장 일봉 종가 순으로 폴백한다. 전일종가는 저장 일봉의 직전 거래일 종가만 쓰고,
+    없으면 `previousClose/changeAmount/changeRate`를 모두 `null`로 둔다.
+  - 앱 첫 요청이 6초 공급자 지연을 맞지 않도록 lifespan에서 `warm_market_sources`를
+    백그라운드로 예열하고 종료 시 취소·정리한다.
+- **세션 토큰 계약 수정**(`app/auth/dependencies.py`, `app/extensions/kasset/api/auth.py`):
+  access token의 `sid` claim을 `KAssetDeviceSession.refresh_token_hash`와 비교하던 게이트를
+  제거했다. refresh 때 해시가 회전하므로 직전 access token이 즉시 401이 되어 앱이 로그인
+  화면으로 튕겼다. 세션 identity(id/owner/device)·revoke·expiry 게이트는 유지하며
+  `tests/extensions/kasset/api/test_session_token_lifecycle.py`가 refresh 후 유효성,
+  revoke 즉시 차단, 세션 만료 차단을 방어한다.
+- 검증: 집중 스위트 재실행(시장/지수/시세/세션 계약) 통과, ruff format·check clean,
+  최종 통합 Diff `checker` 1회 PASS(minor 1건 주석 드리프트 수정 `0b1650f2`).
+  운영 재배포 후 Toss 실시세 실측(005930 256,500 / 000660 1,658,000 / 035420 219,000).
+
+## 직전 세션 기록 (2026-08-28 심야)
 
 - **Cloudflare Tunnel 컷오버**: 신규 터널 `kasset-trader`(id 75836947-…)로
   `https://api.hsps-portal.xyz` 공개(HANSE_ERP 터널 무접촉). compose에 `cloudflared`
@@ -200,6 +224,7 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
+- 2026-08-28 저녁: 시장 개요·지수 상세·배치 시세 API 신설과 Toss 실시간 시세 연결, access token sid 게이트 제거로 세션 유지 수정, checker PASS 후 운영 배포.
 - 2026-08-28: 관심종목 API·다중 trader 스캔·일봉 수집 태스크 배포, worker/scheduler·warm MCP 가동, Toss 키 대기.
 - 2026-08-27: Naver Cloud에 main 76923cfe 배포, 볼륨 결함 사고를 pg_dump로 복구, live 계정·추천 E2E 실측.
 - 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결.
