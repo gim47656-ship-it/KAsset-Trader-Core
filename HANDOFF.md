@@ -1,8 +1,100 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-29 (실시간 WS 스트림·시장지표 12종·와이어 정밀도·CI 수집 공백 수리)
+갱신: 2026-08-29 심야 (`range=1D` 분봉 서빙 배포·마이그레이션 테스트 프라이밍·shard exact-cover·CI 전체 초록)
 
-## 이번 세션에서 한 일 (2026-08-29)
+## 이번 세션에서 한 일 (2026-08-29 심야)
+
+### 0. 요약 — CI가 처음으로 전 잡 초록이 됐고, `1일` 분봉이 운영에 붙었다
+
+run `33194653480` **success**. `lint`, `taskiq-smoke`, `test (3.13, 1..4)`, `security`,
+`frontend`, `ci-required` 전부 통과. 직전 run `33192185520`의 유일한 실패였던
+shard 1을 원인까지 확정해 닫았다.
+
+### 1. `GET /api/v1/market/candles?range=1D` 분봉
+
+`range` 집합 `1D|1W|1M|3M|6M`, 응답 최상위에 `interval`(`"1m"`/`"1d"`) 추가. 캔들 요소
+스키마는 불변이다.
+
+- 상향 엔드포인트를 실측으로 정정했다: `GET /api/v1/candles?symbol=…&interval=1m` = **200**,
+  `/api/v1/stocks/{symbol}/candles` = **404**.
+- 기존 pager(`app/services/brokers/toss/candles.py`, 요청당 `min(remaining, 200)`)를 재사용해
+  정규장 390분을 200+190 두 호출로 받는다. Toss `count.maximum = 200`, rate limit 그룹은
+  기존 `MARKET_DATA_CHART`.
+- Toss market calendar의 `regular_market` window로 당일 정규장만 남긴다 → `20:00 KST`
+  시간외 봉이 섞이지 않는다.
+- **빈 분봉에 일봉을 대체하지 않는다.** 장 마감이면 `{"interval":"1m","candles":[]}`를 그대로
+  내보내고 앱이 `장 시작 전`을 그린다. 없는 가격을 만들지 않는다.
+
+운영 실측(배포 후, 미국 정규장 중):
+
+```text
+KRX 035420 range=1D → {"interval":"1m","candles":[]}          (KRX 마감)
+KRX 035420 range=1W → interval "1d"
+US  TQQQ   range=1D → interval "1m", 235봉, 13:30Z~17:18Z 1분 간격
+                       open 72.95 / high 74.18 / low 71.42 / volume 합 5359548
+```
+
+### 2. CI shard 1 실패 — run-owned database guard 누락
+
+`tests/infra/test_database_guard_completeness.py::test_every_noconftest_postgresql_survivor_calls_the_database_guard`
+단일 실패(6229 passed). `tests/extensions/kasset/test_multi_user_migration_guards.py`가
+`asyncpg.connect` + `create_async_engine`으로 PostgreSQL을 직접 열면서
+`validate_run_owned_database_url`을 호출하지 않았다. `--noconftest`로 conftest 가드가
+우회될 때 실행 소유가 아닌 DB에 붙는 것을 막는 소스 수준 계약이다.
+
+수리는 한 줄이다: `make_url(settings.DATABASE_URL)` →
+`validate_run_owned_database_url(settings.DATABASE_URL)` (`tests/services/paper_evaluation/test_migration.py:151`과
+동일 패턴). 이 계약은 allowlist가 아니라 실제 가드 호출을 요구하므로 예외 등록으로 피하지 않았다.
+
+### 3. 마이그레이션 테스트 프라이밍 수리 (리비전 무변경)
+
+`DuplicateColumnError: instruments.aliases`의 원인은 마이그레이션이 아니라 **테스트가
+과거 스키마를 재구성하는 방식**이었다. `instruments` 실제 생성자는
+`alembic/versions/b3e58be9e79b_init.py:54-66`(aliases 없음)이고 `aliases`는
+`20260828_kasset_nickname_aliases.py:31-34`에서만 추가되는데, ORM
+`app/models/trading.py:56-69`가 이미 `Instrument.aliases`를 선언한다. 실패 테스트들이
+current-head `Base.metadata.create_all` → 과거 리비전 `stamp` → 체인 재생 순서로 돌면서
+후대 산물(`instruments.aliases`, `symbol_master`)을 되돌리지 않아 충돌했다.
+
+**리비전 ID·순서·DDL은 건드리지 않았다.** 운영 `alembic_version`이 계산되지 않게 되는
+위험이 그쪽에 있다. 수정 파일은 테스트 4개(`paper_evaluation/test_migration.py`,
+`order_proposals/callback_inbox/test_migration_chain.py`,
+`extensions/kasset/test_multi_user_migration_guards.py`, `paper_cohort/test_migration.py`).
+`test_alembic_reports_exactly_one_head`는 하드코딩된 낡은 `HEAD_REVISION`을 쓰고 있었고
+`ScriptDirectory`가 보고하는 head와 대조하도록 바꿨다.
+
+### 4. `taskiq-smoke` shard exact-cover
+
+`ci_shards/shard-*.txt`에 없던 15개 파일(이번에 추가한 kasset/nhplug 테스트)을 가장 가벼운
+shard에 정렬 위치로 삽입했다. shard 크기 `468/446/446/445`, 총 1805 유일.
+`file_shard_plan generate`는 **돌리지 않았다** — 전체 재배치로 무관한 churn을 만들고,
+Windows 수집 결손 때문에 POSIX 전용 39개 파일이 manifest에서 빠진다.
+
+`docs/runbooks/ci-file-shard-manifests.md` §4.3을 신설해 Windows에서 `check`를 재현할 수
+없는 이유와 대체 절차를 남겼다. 문서의 명령을 그대로 실행해 검증했다(누락 0, 중복 없음).
+함정 3가지가 문서에 있다: `cmd.exe /c "..."`로 `-m "not live"` 전달 시 인자 분리, manifest
+CRLF(`tr -d '\r'`), Windows Python 텍스트 모드 CRLF 변환(`newline="\n"`), `<(...)` 불가.
+
+### 5. 배포
+
+`d2e90eb6` 이미지 재빌드 후 `api worker scheduler mcp` 재생성. 서버 git은 `a83d0e7c`까지
+동기화했고 그 델타는 `tests/` 한 파일이라 재빌드하지 않았다. api·mcp healthy.
+
+서버 `remote.origin.fetch`가 `kasset-integration` 한 브랜치로 제한돼 있어 `origin/main`이
+없었다. `+refs/heads/*:refs/remotes/origin/*`로 고쳤다 — 다음 배포에서 같은 곳에 걸리지 않는다.
+
+### 6. 검증
+
+```text
+ruff check app/ tests/ research/ scripts/     → All checks passed!
+ruff format --check (4303 files)              → already formatted
+ty check app/ --error-on-warning              → All checks passed!
+pytest tests/infra/test_database_guard_completeness.py
+     + tests/extensions/kasset/test_multi_user_migration_guards.py → 2 passed
+CI run 33194653480                            → 전 잡 success
+```
+
+## 직전 세션 기록 (2026-08-29 저녁)
 
 ### 0. 요약 — 시세 지연을 REST 폴링에서 WS 푸시로 바꿨다
 
@@ -101,19 +193,16 @@ TOK=$(python scripts/kasset_qa_token.py)   # 이 한 줄로 끝
 
 ## 알려진 미해결
 
-- **앱 WS 클라이언트 미구현**(별도 슬라이스 진행 중). 이것이 붙기 전까지 사용자 체감
-  지연은 개선되지 않는다. 계약 문서는 `docs/API-CONTRACT.md`.
 - `personal:order` WS 채널 미착수. LOSSLESS라 conflation을 적용하면 안 되고(2초 이상
   막히면 서버가 연결 종료), 재연결 뒤 `GET /api/v1/orders` 재동기화가 필수다. 시세와
   전달 보장이 정반대여서 같은 세션 파이프라인에 얹으면 안 된다.
-- `tests/extensions/kasset` 기존 실패 1건: `test_multi_user_migration_guards.py`의 alembic
-  `DuplicateColumnError: instruments.aliases`. 세션 시작 커밋(`14d16241`)에도 있었다.
-  하네스가 `create_all`로 스키마를 만든 뒤 alembic이 같은 컬럼을 다시 추가하는 순서 문제다.
-  **운영 DB는 정상**(alembic head `20260828_nhplug_symbol_master`, `instruments.aliases text[]` 존재).
-- `ruff format --check` 실패 11건은 세션 시작 커밋에도 있던 기존 실패다(범위 밖으로 뒀다).
-  CI가 이 명령을 돌리므로 게이트로 의존하려면 정리해야 한다.
 - Toss `dayMarket`(09:00–17:00 KST) 구간을 우리 세션 모델이 `CLOSED`로 표시한다. Toss는
   그 시간 미국 거래를 허용한다. 5번째 상태 추가는 스키마·앱 변경이 필요해 미착수.
+- LIVE 주문은 아직 닫혀 있다(`LIVE_TRADING_ENABLED=false`, `NHPLUG_MOCK_ENABLED=true`).
+  개방은 사용자 결정 사항이다.
+
+해소됨(이 세션): 앱 WS 클라이언트 구현·실기기 확인, `test_multi_user_migration_guards.py`
+alembic 충돌, `ruff format --check` 기존 실패 11건, CI shard 1 실패.
 
 
 ### 1. 시세 지연의 실제 원인 제거 — Cloudflare 우회
@@ -357,7 +446,7 @@ NH 호가 WS 수집과 라우트가 모두 정상인데 앱의 1초 호가 폴�
   약 3개월 후(지원 자원 종료 전)에 진행한다. 그때까지 현 Naver Cloud 서버를 유지하고,
   `scripts/kasset_backup.sh` 기반 주기 백업과 `/root/backups`의 pg_dump 보관을 전제로 한다.
 
-현재 브랜치: `main` `76923cfe` (origin/main 동일). 서버도 동일 커밋.
+현재 브랜치: `main` `a83d0e7c` (origin/main 동일). 서버도 동일 커밋.
 
 ## 이번 세션에서 한 일
 
@@ -402,12 +491,12 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 다음 세션이 바로 할 일
 
-1. 사용자가 배포를 승인하면: `integrate/pr1-pr3`를 main에 merge·push하고
-   `/opt/kasset-trader-core`에 배포, `alembic upgrade head`(가드가 단일 trader를 요구함),
-   `scripts/kasset_smoke.sh` 실행.
-2. 배포 후 Android 계정 가입→로그인→PAPER→NH 조회→추천 승인/거절 live E2E와
-   주문 ledger 불변을 확인한다.
-3. `AI_PAPER_AUTO_EXECUTION_ENABLED`는 운영자가 명시적으로 켤 때까지 false로 둔다.
+1. 장중(KRX 09:00–15:30 KST)에 KRX `range=1D`가 실제 분봉을 채우는지 확인한다. 지금은
+   마감이라 빈 배열 경로만 확인됐다(미국 종목으로는 235봉 실측 완료).
+   `curl -s -H "Authorization: Bearer $TOK" "$B/market/candles?market=KRX&symbol=005930&range=1D"`
+2. LIVE 주문 개방 여부를 사용자와 확정한다. 켜기 전 `NHPLUG_MOCK_ENABLED=false`와 실계좌
+   자격증명, kill switch 동작을 순서대로 확인해야 한다.
+3. `personal:order` WS 채널은 시세와 전달 보장이 반대이므로 별도 슬라이스로 설계한다.
 4. 빈 Linux 호스트 복원 리허설은 대상 호스트 확보 후 `scripts/kasset_backup.sh`/`restore`로 진행.
 
 남은 기술 위험:
@@ -422,10 +511,8 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
+- 2026-08-29 심야: `range=1D` 분봉 서빙(상향 엔드포인트 실측 정정, 정규장 필터, 빈 분봉 일봉 대체 금지) 배포, CI shard 1의 run-owned DB guard 누락 수리로 **전 잡 초록**(run 33194653480), 마이그레이션 테스트 프라이밍 수리(리비전 무변경), shard exact-cover와 런북 §4.3 신설.
 - 2026-08-29: WS 실시간 스트림 신설(Redis 리스 단일 소유자, 선언형 full-replace, 라이브 지연 median 1117ms·60초 243틱), 시장지표 12종·지수 3종 추가, 와이어 소수점 2자리 양자화, CI가 kasset 테스트 11개를 수집 실패로 한 번도 돌리지 않던 공백 수리, QA 토큰 7일 무한 갱신 도구. checker REWORK(MAJOR 2건) → 수정 후 재검토 PASS. 소비자 범위 1801 passed.
 - 2026-08-28 밤: Cloudflare LAX 우회 제거(오리진 Caddy TLS, RTT 585~983ms→27~67ms), 호가 401 허용목록 수정, 저장 일봉 밖 종목의 시세·차트 복구(Toss 일봉 폴백 + 관심종목 유니버스 합집합), 미국 시세를 Yahoo→Toss로 전환, 실시간 소스 Toss 단독 확정(5세션 실측).
 - 2026-08-28 저녁: 시장 개요·지수 상세·배치 시세 API 신설과 Toss 실시간 시세 연결, access token sid 게이트 제거로 세션 유지 수정, checker PASS 후 운영 배포.
-- 2026-08-28: 관심종목 API·다중 trader 스캔·일봉 수집 태스크 배포, worker/scheduler·warm MCP 가동, Toss 키 대기.
-- 2026-08-27: Naver Cloud에 main 76923cfe 배포, 볼륨 결함 사고를 pg_dump로 복구, live 계정·추천 E2E 실측.
 - 2026-08-27: 다중 사용자 컷오버·AI PAPER 자동화·배포 매니페스트를 실제 PostgreSQL로 검증하고 checker PASS로 종결.
-- 2026-08-26: Android 호환 API, PAPER facade, NH Mock Read-Only, Credential Vault, 검증·런북 완료; 독립 고위험 재검수 PASS.
