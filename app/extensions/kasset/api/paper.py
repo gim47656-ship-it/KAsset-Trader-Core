@@ -243,7 +243,8 @@ class PaperAccountAdapter:
             await db.execute(
                 sql_text(
                     "SELECT time, close FROM kr_candles_1d "
-                    "WHERE symbol = :symbol ORDER BY time DESC LIMIT 2"
+                    "WHERE symbol = :symbol AND venue = 'KRX' "
+                    "ORDER BY time DESC LIMIT 2"
                 ),
                 {"symbol": symbol},
             )
