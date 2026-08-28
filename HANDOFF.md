@@ -1,30 +1,116 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-28 저녁 (시장 데이터 표면 3종·Toss 실시간 시세·세션 토큰 계약 수정)
+갱신: 2026-08-28 밤 (Cloudflare 우회 제거·호가 401·시세 커버리지·실시간 소스 확정)
 
-## 이번 세션에서 한 일 (2026-08-28 저녁)
+## 이번 세션에서 한 일 (2026-08-28 밤)
 
-- **시장 데이터 표면 3종**(`app/extensions/kasset/api/market_overview.py`,
-  `krx_quotes.py`, `toss_market_data.py`, 라우팅은 `router.py`):
-  - `GET /market/overview` — KOSPI/KOSDAQ/SPX/NASDAQ + FX, 단일비행 15초 캐시
-    (기존 60초에서 하향, 앱 폴링과 동일 주기). 지수는 provider-neutral 심볼만 노출한다.
-  - `GET /market/indices/{symbol}?range=1W|1M|3M|6M` — 요약 + 일봉. KR 지수는 거래량이
-    없으므로 `volume:null`을 그대로 내보내고 값을 만들어내지 않는다.
-  - `GET /market/quotes?market=KRX&symbols=…` — 최대 50종목 배치. Toss Open API
-    `/api/v1/prices`(종목당 2초 캐시·단일비행·실패 2초 냉각) → NH PLUG(2.5초 예산) →
-    저장 일봉 종가 순으로 폴백한다. 전일종가는 저장 일봉의 직전 거래일 종가만 쓰고,
-    없으면 `previousClose/changeAmount/changeRate`를 모두 `null`로 둔다.
-  - 앱 첫 요청이 6초 공급자 지연을 맞지 않도록 lifespan에서 `warm_market_sources`를
-    백그라운드로 예열하고 종료 시 취소·정리한다.
-- **세션 토큰 계약 수정**(`app/auth/dependencies.py`, `app/extensions/kasset/api/auth.py`):
-  access token의 `sid` claim을 `KAssetDeviceSession.refresh_token_hash`와 비교하던 게이트를
-  제거했다. refresh 때 해시가 회전하므로 직전 access token이 즉시 401이 되어 앱이 로그인
-  화면으로 튕겼다. 세션 identity(id/owner/device)·revoke·expiry 게이트는 유지하며
-  `tests/extensions/kasset/api/test_session_token_lifecycle.py`가 refresh 후 유효성,
-  revoke 즉시 차단, 세션 만료 차단을 방어한다.
-- 검증: 집중 스위트 재실행(시장/지수/시세/세션 계약) 통과, ruff format·check clean,
-  최종 통합 Diff `checker` 1회 PASS(minor 1건 주석 드리프트 수정 `0b1650f2`).
-  운영 재배포 후 Toss 실시세 실측(005930 256,500 / 000660 1,658,000 / 035420 219,000).
+### 1. 시세 지연의 실제 원인 제거 — Cloudflare 우회
+
+집→서버 RTT가 **280~930ms**였다. 원인은 Cloudflare가 한국 트래픽을 **LAX**로
+우회시킨 것(`CF-RAY: …-LAX`, free tier). 오리진에 직접 TLS 엣지를 세워 컷오버했다.
+
+- `docker-compose.kasset.yml`에 `caddy` 서비스 추가(기존 `deploy/kasset/Caddyfile` 재사용),
+  `KASSET_DOMAIN=175-45-201-51.sslip.io`로 Let's Encrypt 자동 발급.
+- Android 기본 URL을 `https://175-45-201-51.sslip.io`로 컷오버(앱 `29e43dc4`).
+- 터널 삭제 후 `cloudflared` 서비스 제거. `hsps-portal.xyz` zone **무접촉**(ERP `erp` 302 /
+  `service` 200 기준선 동일 확인).
+- 실측: TLS 핸드셰이크 **585~983ms → 27~67ms**, 앱 요청 서버 처리 6~11ms.
+  15초 폴링 지속 관측 `/market/overview` 평균 367ms, `/market/quotes` 137ms.
+- **도메인은 사지 않는다**(사용자 결정). sslip.io가 곧 공인 IP이고 인증서·DNS 무료다.
+  생 IP는 TLS 불가(실측: IP SAN 인증서 없음 → 핸드셰이크 실패, 앱도 `BaseUrl.kt:41`에서
+  `http://` 거부). VPS 이전 시 `KASSET_DOMAIN`과 앱 기본 URL 두 줄만 바꾸면 된다.
+
+### 2. 호가 401 — Android 토큰 허용목록 누락
+
+NH 호가 WS 수집과 라우트가 모두 정상인데 앱의 1초 호가 폴링이 **전부 401**이었다.
+`app/extensions/kasset/api/paths.py`의 `_EXACT_PATHS`에 `/api/v1/market/orderbook`이
+없어 `AuthMiddleware` → `get_current_user`가 막았다. 기존 `test_orderbook.py`는
+미들웨어 없는 bare FastAPI + `dependency_overrides`라 구조적으로 못 잡았다.
+
+- 허용목록에 추가하고, **설치된 라우트 전수**를 검사하는 계약 테스트를 신설
+  (`tests/extensions/kasset/api/test_token_path_allowlist.py`, 4 passed).
+- 실측: 배포 전 프로브 `android routes: 35 | NOT allowed: 1 | MISSING: /api/v1/market/orderbook`
+  → 배포 후 앱 1초 폴링 19회 **전부 200**.
+
+### 3. "일부 시세가 안 불러와짐" — 근본 원인 2건
+
+`kr_symbol_universe`가 **0행**이라 `candles.daily.kr.sync`가 매일 대상 0건으로 공전했고,
+저장 일봉은 수동 시드된 3종목(005930/000660/035420)뿐이었다. 그 결과:
+
+| 결함 | 증상 | 수정 |
+|---|---|---|
+| D1 | 관심종목에 새로 넣은 KRX 종목의 `previousClose`가 `null` → 등락률 `-`, 차트 빈 배열 | 읽기 경로에 Toss 일봉 폴백 |
+| D2 | 미국 종목이 `PAPER_YAHOO`로 내려가 **한 세션 지연**된 종가를 현재가로 표시, `changeRate` 미양자화(27자리) | 미국을 Toss 경로로 |
+
+- `toss_market_data.py`: `previous_closes()`(거래일 단위 캐시, 종목당 하루 1회, 실패 60초
+  음성 캐시, 동시 4개 제한), `daily_bars()`(60초 캐시). 당일 봉을 전일 종가로 쓰지 않는다.
+- `krx_quotes.py`: 시장을 인자로 받아 미국 티커를 Toss `prices`로 해석. 응답 `market`·통화를
+  시장에 맞추고 일봉 파티션은 기존 `_market_route`를 재사용. NH 폴백은 KRX에만 유지.
+- `router.py`: `/market/quote` 미국 분기를 Toss로, `/market/candles`는 저장 일봉이
+  **비었을 때만** Toss로 폴백(저장 우선 규칙 유지).
+- `daily_candles/sync_service.py`: `_resolve_universe`에 **활성 관심종목 합집합**을 추가.
+  거래소 행 없는 미국 종목은 읽기 경로가 조회하는 `NASD` 파티션 기본값.
+- 실측(프로덕션): 005380 `None/None → 401000 / -0.62`, 035720 `→ 36000 / 2.36`,
+  000270 `→ 127100 / 0.39`, TQQQ `73.30000305175781 / 4.0158958167… / PAPER_YAHOO`
+  → `73.06 / -0.33 / USD / TOSS_API_PRICES`. 차트 005380·035720·TQQQ 전부 5행 복구,
+  005930은 저장 경로 유지. 일봉 동기화 대상 **0건 → 3건**, `sync_one`으로 005380
+  60행 기록 확인.
+
+### 4. 실시간 소스 확정 — Toss 단독
+
+사용자 요구: US 프리/정규/애프터 + KR 정규장/NXT **5개 세션 전부 실시간**.
+
+- **Toss가 전부 커버**한다. AsyncAPI 3.0.0 v1.2.2(`/openapi-docs/latest/asyncapi.json`)
+  원문: "푸시는 모든 세션에서 제공됩니다. 미국은 프리·정규·애프터·데이마켓, 국내는
+  KRX 정규장과 NXT 프리·정규·애프터마켓 합산입니다." 토픽은 `trade:us` `orderbook:us`
+  `trade:kr` `orderbook:kr` `personal:order` 5개. 상한 **계정당 2연결 × 연결당 100구독**,
+  선언 5회/초, 180초 무송신 종료(60초 PING), 구독 직후 스냅샷 없음(REST 선조회 필요),
+  시세 LOSSY·주문이벤트 LOSSLESS.
+- **우리 운영 키로 실측 성공**: `subscribed:[trade:us:TQQQ, …, orderbook:us:TQQQ,
+  trade:kr:005930] rejected:[]`, 미국 프리마켓 체결·호가 프레임 2초에 10건 수신.
+  → 미국 실시간 **유료 약정 불필요**(스펙에도 언급 0건).
+- **NH는 구조적으로 불가**: WS 상한 2 tr_cd × 30종목이라 KRX(`ob`+`oc`) + NXT(`nb`+`nc`)
+  4채널을 못 붙인다. 통합 채널 `mb`/`mc`는 `oc`와 24필드가 완전 동일해 **시장 식별
+  필드가 없어** KRX/NXT 분리 불가. 미국은 `RH`/`RC`가 "유료시세 사용 약정 고객만"이고
+  무약정은 지연(`rh`/`rc`).
+- **Toss에 모의투자·가상계좌는 없다**(실측: openapi/asyncapi `servers`가 운영 단 하나,
+  두 스펙 전문에서 모의/샌드박스/mock/virtual/가상 **매치 0건**, `accountType`은 실계좌
+  enum만). 따라서 Toss 주문은 곧 실제 돈이고, **서버 PAPER 시뮬레이션이 유일한 안전
+  리허설 경로**로 남는다. NH 코드는 삭제하지 않고 미배선 휴면 어댑터로 둔다.
+- `market_calendar.py`에 세션 판별기(`KrTossSession`/`UsTossSession`)가 **이미 구현**돼 있다.
+
+### 검증
+
+- `tests/extensions/kasset/api/` 117 passed, `tests/extensions/kasset/` 248 passed,
+  `tests/unit/services/daily_candles/test_sync_service.py` 13 passed,
+  신설 `test_market_quote_coverage.py` 7 passed. ruff format·check clean.
+- **기존 실패 1건(내 변경과 무관)**: `tests/extensions/kasset/test_multi_user_migration_guards.py`
+  `DuplicateColumnError: column "aliases" of relation "instruments" already exists`.
+  변경분을 `git stash`한 원본 HEAD에서도 동일 재현 확인.
+- 테스트 DB는 `AUTO_TRADER_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5434/test_db`
+  (기본값 5432는 이 PC에서 안 뜬다).
+- 앱 화면 시각 확인은 **미완**: 폰 무선 디버깅 포트가 세션 중 끊겼다(`100.90.45.34:46079`
+  connection refused). API 계약은 앱과 동일한 요청·토큰으로 프로덕션 실측 완료.
+
+### 알려진 잔여 결함 (이번에 고치지 않음)
+
+- `DailyCandlesRepository.upsert_rows`가 `result.rowcount`를 반환하는데 asyncpg는
+  executemany에서 의미 있는 값을 주지 않아 **항상 0**이다. 005380 60행을 실제로 쓰고도
+  `rows_upserted: 0`을 보고했다. 데이터는 정상이고 지표만 틀렸지만, 이 지표 때문에
+  유니버스 0행 결함이 오래 보이지 않았다.
+- `orderbook_store.py:_require_configuration()`이 `mock_enabled()`를 요구하면서 **운영 WS**
+  (`api.nhplug.com:7070`)에 접속한다. `NHPLUG_MOCK_ENABLED=false`로 실전 전환하는 순간
+  실시간 호가가 409 `BROKER_NOT_CONNECTED`로 죽는다.
+- `docs/API-CONTRACT.md:51`이 모의 WS(`moapi:17070`)를 정본으로 기술 — 코드는 운영 `:7070`.
+- 미국 `orderbook:us`는 **1단계(최우선 호가)만** 준다. 10단 사다리는 KRX REST에서만 가능.
+
+## 직전 세션 기록 (2026-08-28 저녁)
+
+- 시장 데이터 표면 3종(`/market/overview` 15초 캐시, `/market/indices/{symbol}`,
+  `/market/quotes` 50종목 배치) + Toss 실시간 시세 1순위 폴백 체인.
+- 세션 토큰 계약 수정: access token `sid`를 `refresh_token_hash`와 비교하던 게이트 제거
+  (refresh 직후 이전 토큰이 401이 되어 로그인 화면으로 튕겼다).
+- 검증: 집중 스위트 통과, `checker` 1회 PASS(`0b1650f2`), 운영 재배포 후 Toss 실시세 실측.
 
 ## 직전 세션 기록 (2026-08-28 심야)
 
@@ -224,6 +310,7 @@ Android :app:testDebugUnitTest                           → 55 tests, 0 failure
 
 ## 세션 이력
 
+- 2026-08-28 밤: Cloudflare LAX 우회 제거(오리진 Caddy TLS, RTT 585~983ms→27~67ms), 호가 401 허용목록 수정, 저장 일봉 밖 종목의 시세·차트 복구(Toss 일봉 폴백 + 관심종목 유니버스 합집합), 미국 시세를 Yahoo→Toss로 전환, 실시간 소스 Toss 단독 확정(5세션 실측).
 - 2026-08-28 저녁: 시장 개요·지수 상세·배치 시세 API 신설과 Toss 실시간 시세 연결, access token sid 게이트 제거로 세션 유지 수정, checker PASS 후 운영 배포.
 - 2026-08-28: 관심종목 API·다중 trader 스캔·일봉 수집 태스크 배포, worker/scheduler·warm MCP 가동, Toss 키 대기.
 - 2026-08-27: Naver Cloud에 main 76923cfe 배포, 볼륨 결함 사고를 pg_dump로 복구, live 계정·추천 E2E 실측.
