@@ -61,6 +61,10 @@ class Quote(AndroidWireModel):
     source: str
 
 
+class QuotesResponse(AndroidWireModel):
+    quotes: list[Quote]
+
+
 class SymbolItem(AndroidWireModel):
     market: str
     symbol: str

@@ -137,8 +137,11 @@ async def test_public_auth_device_revoke_is_owner_and_device_scoped(
         with pytest.raises(MobileApiError) as replayed_refresh:
             await auth.refresh(db_session, tokens_a.refresh_token)
         assert replayed_refresh.value.code == "UNAUTHORIZED"
-        with pytest.raises(MobileApiError):
+        # Rotating the refresh token must not strand access tokens the device
+        # already has in flight; only revoke/expiry end a session.
+        assert (
             await auth.authenticate(db_session, tokens_a.access_token)
+        ).user.id == session_a.user.id
         session_a = await auth.authenticate(db_session, rotated_a.access_token)
 
         await auth.revoke(db_session, session_a)

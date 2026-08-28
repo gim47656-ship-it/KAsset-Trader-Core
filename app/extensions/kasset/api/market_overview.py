@@ -46,7 +46,9 @@ from app.services.exchange_rate_service import (
     get_usd_krw_rate_details,
 )
 
-OVERVIEW_CACHE_TTL_SECONDS = 60.0
+# 홈 화면 지연 예산: 앱이 15초 주기로 폴링하므로 서버 캐시도 15초다. 60초였을
+# 때는 앱 폴링 주기와 겹쳐 최악 약 2분까지 오래된 값이 보였다.
+OVERVIEW_CACHE_TTL_SECONDS = 15.0
 SOURCE_TIMEOUT_SECONDS = 6.0
 
 _IndexMarket = Literal["KRX", "US"]

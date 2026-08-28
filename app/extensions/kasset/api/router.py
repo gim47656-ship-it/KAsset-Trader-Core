@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.web_router import limiter
 from app.core.config import settings
 from app.core.db import get_db
+from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api import market_overview as market_overview_service
 from app.extensions.kasset.api.ai_briefing import (
     DEFAULT_LIMIT,
@@ -28,7 +29,7 @@ from app.extensions.kasset.api.auth import (
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.nh_adapter import nh_adapter, nh_market_data
+from app.extensions.kasset.api.nh_adapter import nh_adapter
 from app.extensions.kasset.api.orderbook_store import (
     NHOrderbookSnapshotStore,
     get_orderbook_store,
@@ -49,6 +50,7 @@ from app.extensions.kasset.api.paper_schemas import (
     OrdersResponse,
     PositionsResponse,
     Quote,
+    QuotesResponse,
     RiskAssessment,
     RiskPolicy,
     RiskPolicyUpdate,
@@ -86,6 +88,7 @@ from app.extensions.kasset.api.schemas import (
     WatchlistMarket,
     WatchlistResponse,
 )
+from app.extensions.kasset.api.toss_market_data import toss_market_data
 from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.models.trading import UserRole
@@ -99,7 +102,7 @@ async def _kasset_api_lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # The first market read in a fresh process pays a one-time ~6s provider
     # client warmup (measured on the deployed API), which the app sees as a
     # stalled home screen right after a deploy. Pay it in the background at
-    # startup so the first real request hits the warm 60-second cache. The test
+    # startup so the first real request hits the warm overview cache. The test
     # environment stays offline by contract, so it never warms.
     warmup: asyncio.Task[None] | None = None
     if settings.ENVIRONMENT != "test":
@@ -112,6 +115,8 @@ async def _kasset_api_lifespan(_app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await warmup
         await nh_orderbook_store.close()
+        # 토스 공용 시세 클라이언트는 프로세스에서 재사용하므로 여기서만 닫는다.
+        await toss_market_data.aclose()
 
 
 router = APIRouter(
@@ -456,14 +461,29 @@ async def market_quote(
         return await nh_adapter.quote(db, session.user.id, market=market, symbol=symbol)
     _require_paper(broker)
     if market.strip().upper() in {"KRX", "KR"}:
-        # 시세는 계좌 연동과 무관한 공용 데이터다. 서버 공용 NH PLUG 채널을
-        # 우선 쓰고, 불가하면 저장 캔들 기반 PAPER 시세로 강등한다.
-        try:
-            shared = await nh_market_data.quote(market=market, symbol=symbol)
-            return shared.model_copy(update={"broker": "PAPER"})
-        except MobileApiError:
-            pass
+        # 시세는 계좌 연동과 무관한 공용 데이터다. 토스 실시간 배치를 우선
+        # 쓰고, 실패하면 서버 공용 NH PLUG 채널 → 저장 캔들 기반 PAPER 시세로
+        # 강등한다.
+        return await krx_quotes.resolve_quote(db, market=market, symbol=symbol)
     return await paper_account_adapter.quote(db, market=market, symbol=symbol)
+
+
+@router.get("/market/quotes", response_model=QuotesResponse)
+async def market_quotes(
+    market: Annotated[str, Query(min_length=1, max_length=20)],
+    symbols: Annotated[str, Query(min_length=1, max_length=512)],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuotesResponse:
+    normalized_market = krx_quotes.normalize_market(market)
+    normalized_symbols = krx_quotes.normalize_symbols(symbols)
+    return QuotesResponse(
+        quotes=await krx_quotes.resolve_quotes(
+            db,
+            market=normalized_market,
+            symbols=normalized_symbols,
+        )
+    )
 
 
 @router.get("/market/orderbook", response_model=OrderbookResponse)

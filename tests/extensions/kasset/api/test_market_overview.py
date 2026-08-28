@@ -305,7 +305,7 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
 
 
 @pytest.mark.asyncio
-async def test_overview_cache_is_sixty_seconds_and_refresh_is_single_flight(
+async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
@@ -332,11 +332,11 @@ async def test_overview_cache_is_sixty_seconds_and_refresh_is_single_flight(
     assert calls == 1
     assert all(item is first_batch[0] for item in first_batch)
 
-    monotonic_now = 1059.9
+    monotonic_now = 1014.9
     assert await mod.get_market_overview() is first_batch[0]
     assert calls == 1
 
-    monotonic_now = 1060.1
+    monotonic_now = 1015.1
     refreshed_batch = await asyncio.gather(
         *(mod.get_market_overview() for _ in range(5))
     )

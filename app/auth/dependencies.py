@@ -81,7 +81,6 @@ async def get_current_user(
         uid = payload.get("uid")
         device_id = payload.get("deviceId")
         session_id = payload.get("sessionId")
-        session_token_hash = payload.get("sid")
         if (
             not isinstance(uid, str)
             or not uid.isascii()
@@ -91,16 +90,18 @@ async def get_current_user(
             or not device_id
             or not isinstance(session_id, str)
             or not session_id
-            or not isinstance(session_token_hash, str)
-            or not session_token_hash
         ):
             raise credentials_exception
+        # The device session's refresh_token_hash rotates on every refresh, so
+        # requiring the access token's `sid` to still match it would kill every
+        # unexpired access token the moment one request refreshes. Session
+        # identity, revocation and expiry below are the real gate; the access
+        # token's own signature and short expiry cover the rest.
         session_result = await db.execute(
             select(KAssetDeviceSession).where(
                 KAssetDeviceSession.id == session_id,
                 KAssetDeviceSession.owner_user_id == user.id,
                 KAssetDeviceSession.device_id == device_id,
-                KAssetDeviceSession.refresh_token_hash == session_token_hash,
                 KAssetDeviceSession.revoked_at.is_(None),
             )
         )

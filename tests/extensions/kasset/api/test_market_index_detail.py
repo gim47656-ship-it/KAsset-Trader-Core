@@ -296,7 +296,7 @@ async def test_index_detail_returns_sanitized_unavailable_contract(
 
 
 @pytest.mark.asyncio
-async def test_index_detail_cache_is_keyed_single_flight_for_sixty_seconds(
+async def test_index_detail_cache_is_keyed_single_flight_for_fifteen_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, int]] = []
@@ -318,12 +318,12 @@ async def test_index_detail_cache_is_keyed_single_flight_for_sixty_seconds(
     assert calls == [("SPX", "day", 5)]
     assert all(response is same_key[0] for response in same_key)
 
-    monotonic_now = 1059.9
+    monotonic_now = 1014.9
     assert await mod.get_market_index_detail("SPX", "1W") is same_key[0]
     await mod.get_market_index_detail("SPX", "1M")
     assert calls[-1] == ("SPX", "day", 20)
 
-    monotonic_now = 1060.1
+    monotonic_now = 1015.1
     refreshed = await mod.get_market_index_detail("SPX", "1W")
     assert calls.count(("SPX", "day", 5)) == 2
     assert refreshed is not same_key[0]

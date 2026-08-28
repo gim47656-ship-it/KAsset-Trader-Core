@@ -50,6 +50,46 @@
 
 NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지목한 국내주식 `openapi.json`의 `x-realtime-channels`이다. 모의투자 접속 주소는 `wss://moapi.nhplug.com:17070/websocket`, 채널은 `tr_cd=ob`, 구독 키는 6자리 `code`다. access token은 WebSocket HTTP 헤더가 아니라 구독 메시지의 `header.token`으로 전달한다.
 
+## 국내주식 시세 (단일·배치)
+
+`GET /api/v1/market/quote?broker=PAPER&market=KRX&symbol=005930`
+
+`GET /api/v1/market/quotes?market=KRX&symbols=005930,000660`
+
+- 인증된 KAsset 모바일 세션이 필요하다. 미인증은 `401 UNAUTHORIZED`다.
+- 배치 응답은 `{"quotes": [Quote, ...]}`이며 `Quote`는 단일 조회와 완전히 같은 camelCase 계약(`broker`, `market`, `symbol`, `name`, `currency`, `price`, `previousClose`, `changeAmount`, `changeRate`, `asOf`, `source`)이다. 모든 가격·등락 값은 JSON number가 아닌 십진수 문자열이다.
+- `symbols`는 콤마 구분 1~50개이며 6자리 KRX 종목코드만 허용한다. 중복은 서버가 제거하고 응답에서도 한 번만 나온다. 개수·형식 위반과 `market`이 `KRX`(또는 `KR`)가 아닌 경우는 `422 VALIDATION_ERROR`다.
+- 조회에 실패한 종목은 값을 만들어내지 않고 응답 배열에서 제외한다. 요청 순서는 성공한 종목 사이에서 유지된다.
+- KRX 시세 우선순위는 **토스 인증 REST 배치 → 서버 공용 NH PLUG 채널 → 저장 일봉(PAPER)** 이다. 앞 단계가 실패하면 조용히 다음 단계로 강등하며, 어떤 단계도 서버 현재 시각을 시세 시각으로 위조하지 않는다. `source`가 그 응답이 실제로 어느 채널에서 나왔는지 알려준다(`TOSS_API_PRICES`, `NH_PLUG_MOCK`, `PAPER_CANDLES`). 자격증명이나 공급자 원문 예외는 응답·로그 어디에도 담지 않는다.
+- `TOSS_API_ENABLED`가 꺼져 있으면 토스 단계를 아예 시도하지 않고 기존 NH → 저장 일봉 경로만 쓴다.
+- 토스 단계는 종목당 2초 캐시 + 종목별 단일비행으로 보호한다. 같은 종목을 동시에 조회하는 여러 요청은 한 번의 배치 호출로 합쳐지고, 배치 호출 실패 직후 2초는 재호출하지 않는다. `TossReadClient`는 프로세스에서 한 번 만들어 재사용하고 앱 lifespan 종료 때 닫는다.
+- 배치에서 NH 공용 채널은 전 종목 공용 호출 간격(0.45초)에 묶여 있어 총 2.5초 예산까지만 시도하고, 예산을 넘긴 종목은 저장 일봉으로 강등한다. 응답 안에서 종목별 `source`가 서로 다를 수 있다.
+- `asOf`는 항상 UTC `Z` 표기다. 토스가 `+09:00` 오프셋으로 준 시각은 UTC로 정규화해 내려보내며(예: `2026-08-28T18:44:26+09:00` → `2026-08-28T09:44:26Z`), 공급자가 시각을 주지 않거나 오프셋 없는 시각을 주면 그 종목은 이 채널에서 제외하고 다음 폴백으로 내려간다. 저장 일봉 시세의 `asOf`는 그 일봉 거래일의 `T00:00:00Z`다.
+- `previousClose`는 저장 일봉에서 **해당 시세 거래일의 직전 거래일 종가**를 읽는다. 당일 일봉만 있거나 저장 일봉이 없으면 값을 만들지 않고 `null`이며, 이때 `changeAmount`·`changeRate`도 `null`이다. `changeRate` 단위는 퍼센트 포인트이고 소수 둘째 자리로 반올림한다.
+- 클라이언트는 홈 화면과 관심종목 시세를 15초 주기로 폴링한다. 서버 개요 캐시도 15초라 최악 지연이 폴링 주기 수준으로 유지된다.
+
+배치 응답 예:
+
+```json
+{
+  "quotes": [
+    {
+      "broker": "PAPER",
+      "market": "KRX",
+      "symbol": "005930",
+      "name": "삼성전자",
+      "currency": "KRW",
+      "price": "256500",
+      "previousClose": "250000",
+      "changeAmount": "6500",
+      "changeRate": "2.60",
+      "asOf": "2026-08-28T09:44:26Z",
+      "source": "TOSS_API_PRICES"
+    }
+  ]
+}
+```
+
 ## 홈 시장 개요
 
 `GET /api/v1/market/overview`
@@ -64,7 +104,7 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 - `sessionState`와 `sessions[].state`는 `OPEN`, `PREOPEN`, `AFTER_HOURS`, `CLOSED` 중 하나다. 지수 항목에만 `sessionState`가 있고 FX 항목은 `null`이다. `sessions` 순서는 `KRX`, `US`다.
 - `errors`는 실패 항목마다 `{scope, symbol, code}`를 제공한다. `scope`는 `indices` 또는 `fx`, `code`는 `UNAVAILABLE` 또는 `TIMEOUT`이다. 공급자 이름이나 원본 예외 문자열은 모바일 계약에 노출하지 않는다.
 - `asOf`는 공급자가 제공한 시각만 사용한다. KRX 지수는 실제 quote timestamp, Toss USD/KRW는 `validFrom`, open.er-api는 실제 `time_last_update_unix`가 있을 때만 채운다. US 지수나 공급자 응답에 시각이 없으면 `null`이며 서버 현재 시각을 시세 시각으로 만들지 않는다. 최상위 `asOf`는 파싱 가능한 항목 시각 중 가장 최신 값이고, 아무 값도 없으면 `null`이다.
-- 응답 스냅샷은 프로세스 내에서 60초 동안 단일비행 캐시한다. 지수와 FX 소스는 동시에 조회하며 각각 6초로 제한한다. 한 소스 또는 항목이 실패해도 HTTP `200`으로 `partial`/`unavailable` 계약을 반환한다.
+- 응답 스냅샷은 프로세스 내에서 15초 동안 단일비행 캐시한다. 앱 홈 폴링 주기(15초)와 같은 값이라 서버 캐시와 앱 폴링이 겹쳐 지연이 누적되지 않는다. 지수와 FX 소스는 동시에 조회하며 각각 6초로 제한한다. 한 소스 또는 항목이 실패해도 HTTP `200`으로 `partial`/`unavailable` 계약을 반환한다.
 - 기본 지수 조회에서 KRX 두 종목과 US 조회를 병렬로 실행하고, US의 `SPX`·`NASDAQ`은 한 번의 일봉 batch 조회에서 마지막 두 유효 거래일을 사용해 현재가·전일 대비·시가·고가·저가·거래량을 계산한다. 한 US 심볼의 행이 비어 있어도 다른 심볼은 유지한다. 단일 심볼 지수 조회는 기존 current+history 경로를 그대로 사용한다.
 
 정상 응답 예:
@@ -197,7 +237,7 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 - `volume`은 `null`일 수 있다. 국내 지수 시세 원천은 지수 봉의 거래량을 제공하지 않으며, 이때 `0`을 만들어 넣지 않고 `null`로 둔다. 클라이언트는 가격만 표시한다.
 - candle은 날짜 오름차순이고 같은 bucket은 마지막 실제 행 하나만 유지한다. 날짜 또는 OHLC 중 하나라도 유효한 실제 값이 없으면 그 행을 제외하며 값을 합성하지 않는다.
 - `summary.status`, `summary.sessionState`, `summary.asOf`는 홈 시장 개요와 같은 서버 규칙을 사용한다. 현재 지수 값이 없거나 조회가 실패하면 숫자와 `asOf`를 `null`, `status`를 `unavailable`로 반환하되 HTTP 상태는 `200`이다.
-- 응답은 정규화된 `symbol + range`별로 프로세스 내 60초 단일비행 캐시한다. 다른 심볼 또는 다른 범위는 별도 키다.
+- 응답은 정규화된 `symbol + range`별로 프로세스 내 15초 단일비행 캐시한다. 다른 심볼 또는 다른 범위는 별도 키다.
 
 ```json
 {

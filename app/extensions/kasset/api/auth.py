@@ -251,15 +251,19 @@ class MobileAuthService:
         username = self._claim(payload, "sub")
         device_id = self._claim(payload, "deviceId")
         session_id = self._claim(payload, "sessionId")
-        session_token_hash = self._claim(payload, "sid")
         user = await self._active_user(db, user_id=user_id, username=username)
 
+        # Deliberately does not compare the token's "sid" claim against
+        # ``refresh_token_hash``: that hash rotates on every refresh, so one
+        # refresh would invalidate every unexpired access token already in
+        # flight on the device. Revocation stays immediate (``revoked_at``),
+        # the session still expires (``expires_at``), and the access token's
+        # own short ``exp`` bounds how long a leaked token survives.
         result = await db.execute(
             select(KAssetDeviceSession).where(
                 KAssetDeviceSession.id == session_id,
                 KAssetDeviceSession.owner_user_id == user.id,
                 KAssetDeviceSession.device_id == device_id,
-                KAssetDeviceSession.refresh_token_hash == session_token_hash,
                 KAssetDeviceSession.revoked_at.is_(None),
             )
         )
