@@ -6,6 +6,8 @@ The event pipeline uses the OpenAI-only Luna/Terra/Sol router. The legacy
 
 from __future__ import annotations
 
+import shlex
+
 from app.core.config import settings
 from app.extensions.kasset.ai.api_provider import (
     ApiProviderProfile,
@@ -15,6 +17,7 @@ from app.extensions.kasset.ai.api_provider import (
 from app.extensions.kasset.ai.base import ExternalSkillRunner
 from app.extensions.kasset.ai.model_router import OpenAiModelRouter
 from app.extensions.kasset.ai.provider_router import AiProviderRouter
+from app.extensions.kasset.ai.subscription_cli import build_cli_invoker
 from app.extensions.kasset.ai.subscription_provider import (
     SubscriptionAgentProvider,
     SubscriptionInvoker,
@@ -90,12 +93,18 @@ def build_ai_provider_router(
 ) -> AiProviderRouter:
     """Assemble the full stack from settings.
 
-    ``subscription_invoker`` is the process-external bridge for the operator's
-    subscription account (an OpenAI/Codex account today; any agent CLI that
-    reaches the same MCP server works). Without it the subscription tier
+    An explicit ``subscription_invoker`` takes precedence over the configured
+    subscription CLI command. Without either bridge the subscription tier
     reports unavailable and hybrid mode falls through to the API chain:
     the primary OpenAI-format endpoint first, then OpenRouter when configured.
     """
+    if subscription_invoker is None:
+        subscription_command = settings.KASSET_AI_SUBSCRIPTION_CMD.strip()
+        if subscription_command:
+            subscription_invoker = build_cli_invoker(
+                shlex.split(subscription_command),
+                settings.KASSET_AI_SUBSCRIPTION_TIMEOUT_SECONDS,
+            )
 
     return AiProviderRouter(
         mode=settings.KASSET_AI_PROVIDER_MODE,

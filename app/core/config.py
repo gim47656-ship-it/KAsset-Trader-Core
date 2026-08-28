@@ -716,6 +716,8 @@ class Settings(BaseSettings):
     # The legacy run_skill provider chain remains for existing MCP consumers;
     # every API-backed path stays inactive until an API key is configured.
     KASSET_AI_PROVIDER_MODE: Literal["subscription", "api", "hybrid"] = "hybrid"
+    KASSET_AI_SUBSCRIPTION_CMD: str = ""
+    KASSET_AI_SUBSCRIPTION_TIMEOUT_SECONDS: float = 120.0
     KASSET_AI_API_BASE_URL: str = "https://api.openai.com/v1"
     KASSET_AI_API_KEY: SecretStr | None = None
     KASSET_AI_API_MODEL: str = ""

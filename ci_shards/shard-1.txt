@@ -18,6 +18,7 @@ tests/ci/test_file_shard_plan_workflow_entrypoint.py
 tests/core/test_exceptions.py
 tests/extensions/kasset/ai/test_api_provider.py
 tests/extensions/kasset/ai/test_model_router.py
+tests/extensions/kasset/ai/test_subscription_cli.py
 tests/extensions/kasset/api/test_ai_briefing.py
 tests/extensions/kasset/api/test_android_contract.py
 tests/extensions/kasset/api/test_google_auth.py
