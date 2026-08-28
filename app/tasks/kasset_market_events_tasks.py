@@ -145,6 +145,67 @@ async def kasset_market_events_run() -> dict[str, object]:
     }
 
 
+@broker.task(
+    task_name="kasset_watchlist_candles.sync",
+    schedule=[{"cron": "5 9-16 * * 1-5", "cron_offset": "Asia/Seoul"}],
+)
+async def kasset_watchlist_candles_sync() -> dict[str, object]:
+    """Backfill/refresh daily candles for KR watchlist symbols via Toss.
+
+    The event scan reads ``kr_candles_1d`` but this deployment has no KIS
+    holdings-driven ingestion, so the watchlist is its own candle universe.
+    Toss daily rows upsert as ``source='toss'``; the repository's conflict
+    guard keeps them from overwriting KIS-sourced rows.
+    """
+    if not settings.KASSET_MARKET_EVENTS_ENABLED:
+        return {"enabled": False, "synced": []}
+
+    symbols = await _watchlist_kr_symbols()
+    synced: list[dict[str, object]] = []
+    for symbol in symbols:
+        try:
+            synced.append(await _sync_watchlist_symbol(symbol))
+        except Exception as exc:  # noqa: BLE001 - one symbol must not stop the rest
+            synced.append({"symbol": symbol, "error": str(exc)})
+    return {"enabled": True, "synced": synced}
+
+
+async def _watchlist_kr_symbols() -> list[str]:
+    async with _session() as session:
+        rows = await session.execute(
+            select(Instrument.symbol)
+            .join(UserWatchItem, UserWatchItem.instrument_id == Instrument.id)
+            .join(User, User.id == UserWatchItem.user_id)
+            .where(
+                UserWatchItem.is_active.is_(True),
+                Instrument.is_active.is_(True),
+                Instrument.type == InstrumentType.equity_kr,
+                User.role == UserRole.trader,
+                User.is_active.is_(True),
+            )
+            .distinct()
+            .order_by(Instrument.symbol)
+        )
+        return [str(symbol) for symbol in rows.scalars().all()]
+
+
+async def _sync_watchlist_symbol(symbol: str) -> dict[str, object]:
+    from app.services.daily_candles.converters import frame_to_rows
+    from app.services.daily_candles.repository import (
+        DailyCandlesRepository,
+        MarketKey,
+    )
+    from app.services.market_data.toss_ohlcv import fetch_daily_toss_frame
+
+    frame = await fetch_daily_toss_frame(symbol=symbol, count=60)
+    rows = frame_to_rows(frame, symbol=symbol, partition="KRX", source="toss")
+    async with _session() as session:
+        repository = DailyCandlesRepository(session=session)
+        upserted = await repository.upsert_rows(market=MarketKey.KR, rows=rows)
+        await session.commit()
+    return {"symbol": symbol, "rows": len(rows), "upserted": upserted}
+
+
 async def _active_watch_items(
     session: AsyncSession,
     owner_user_id: int,
@@ -190,4 +251,4 @@ def _utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
 
-__all__ = ["kasset_market_events_run"]
+__all__ = ["kasset_market_events_run", "kasset_watchlist_candles_sync"]

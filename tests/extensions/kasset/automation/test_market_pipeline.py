@@ -341,6 +341,59 @@ async def test_disabled_market_event_task_is_database_free(
 
 
 @pytest.mark.asyncio
+async def test_disabled_watchlist_candle_sync_is_database_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", False)
+
+    def forbidden_session() -> None:
+        raise AssertionError("disabled task must not open a database session")
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "AsyncSessionLocal",
+        forbidden_session,
+    )
+    assert await kasset_market_events_tasks.kasset_watchlist_candles_sync() == {
+        "enabled": False,
+        "synced": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_watchlist_candle_sync_isolates_per_symbol_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+
+    async def fake_symbols() -> list[str]:
+        return ["000660", "005930"]
+
+    async def fake_sync(symbol: str) -> dict[str, object]:
+        if symbol == "000660":
+            raise RuntimeError("toss unavailable")
+        return {"symbol": symbol, "rows": 60, "upserted": 60}
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks, "_watchlist_kr_symbols", fake_symbols
+    )
+    monkeypatch.setattr(kasset_market_events_tasks, "_sync_watchlist_symbol", fake_sync)
+    assert await kasset_market_events_tasks.kasset_watchlist_candles_sync() == {
+        "enabled": True,
+        "synced": [
+            {"symbol": "000660", "error": "toss unavailable"},
+            {"symbol": "005930", "rows": 60, "upserted": 60},
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_market_event_task_reports_when_no_active_trader_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
