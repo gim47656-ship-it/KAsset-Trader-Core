@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.schemas import (
+    InstrumentSearchMarket,
     InstrumentSearchItem,
     InstrumentSearchResponse,
     WatchlistItem,
@@ -16,13 +17,13 @@ from app.extensions.kasset.api.schemas import (
     WatchlistResponse,
 )
 from app.models.trading import Exchange, Instrument, InstrumentType, UserWatchItem
+from app.models.symbol_master import SymbolMaster
 
 _MARKET_TYPES: dict[WatchlistMarket, InstrumentType] = {
     "KRX": InstrumentType.equity_kr,
     "US": InstrumentType.equity_us,
     "CRYPTO": InstrumentType.crypto,
 }
-_MAX_SEARCH_RESULTS = 20
 
 
 class MobileWatchlistService:
@@ -59,25 +60,17 @@ class MobileWatchlistService:
         market: WatchlistMarket,
     ) -> tuple[WatchlistItem, bool]:
         normalized_symbol = self._normalize_symbol(symbol)
-        row = (
-            await db.execute(
-                select(Instrument, Exchange.code)
-                .outerjoin(Exchange, Exchange.id == Instrument.exchange_id)
-                .where(
-                    func.upper(Instrument.symbol) == normalized_symbol,
-                    Instrument.type == _MARKET_TYPES[market],
-                    Instrument.is_active.is_(True),
-                )
-                .order_by(Instrument.id)
-                .limit(1)
-                .with_for_update(of=Instrument)
-            )
-        ).first()
+        row = await self._find_instrument(
+            db,
+            normalized_symbol,
+            market,
+            active_only=True,
+        )
         if row is None:
-            raise MobileApiError(
-                404,
-                "UNKNOWN_SYMBOL",
-                "등록되지 않았거나 비활성화된 종목입니다.",
+            row = await self._materialize_instrument_from_master(
+                db,
+                normalized_symbol,
+                market,
             )
 
         instrument, exchange_code = row
@@ -111,6 +104,80 @@ class MobileWatchlistService:
         await db.commit()
         return response_item, True
 
+    async def _find_instrument(
+        self,
+        db: AsyncSession,
+        symbol: str,
+        market: WatchlistMarket,
+        *,
+        active_only: bool,
+    ) -> tuple[Instrument, str | None] | None:
+        statement = (
+            select(Instrument, Exchange.code)
+            .outerjoin(Exchange, Exchange.id == Instrument.exchange_id)
+            .where(
+                func.upper(Instrument.symbol) == symbol,
+                Instrument.type == _MARKET_TYPES[market],
+            )
+            .order_by(Instrument.id)
+            .limit(1)
+            .with_for_update(of=Instrument)
+        )
+        if active_only:
+            statement = statement.where(Instrument.is_active.is_(True))
+        row = (await db.execute(statement)).first()
+        return None if row is None else (row[0], row[1])
+
+    async def _materialize_instrument_from_master(
+        self,
+        db: AsyncSession,
+        symbol: str,
+        market: WatchlistMarket,
+    ) -> tuple[Instrument, str | None]:
+        master = None
+        if market in {"KRX", "US"}:
+            master = await db.scalar(
+                select(SymbolMaster)
+                .where(
+                    SymbolMaster.market == market,
+                    func.upper(SymbolMaster.symbol) == symbol,
+                    SymbolMaster.is_active.is_(True),
+                )
+                .with_for_update()
+            )
+        if master is None:
+            raise MobileApiError(
+                404,
+                "UNKNOWN_SYMBOL",
+                "등록되지 않았거나 비활성화된 종목입니다.",
+            )
+
+        existing = await self._find_instrument(
+            db,
+            symbol,
+            market,
+            active_only=False,
+        )
+        if existing is not None:
+            instrument, exchange_code = existing
+            instrument.is_active = True
+            if not instrument.name:
+                instrument.name = master.name
+            await db.flush()
+            return instrument, exchange_code
+
+        instrument = Instrument(
+            symbol=master.symbol,
+            full_symbol=master.symbol,
+            name=master.name,
+            type=_MARKET_TYPES[market],
+            base_currency="KRW" if market == "KRX" else "USD",
+            is_active=True,
+        )
+        db.add(instrument)
+        await db.flush()
+        return instrument, None
+
     async def remove_item(
         self,
         db: AsyncSession,
@@ -141,37 +208,77 @@ class MobileWatchlistService:
         db: AsyncSession,
         *,
         query: str,
-        market: WatchlistMarket,
+        market: InstrumentSearchMarket,
+        limit: int = 20,
     ) -> InstrumentSearchResponse:
         normalized_query = query.strip()
         if not normalized_query:
             raise MobileApiError(422, "VALIDATION_ERROR", "검색어를 입력해 주세요.")
-        pattern = f"%{self._escape_like(normalized_query)}%"
-        rows = await db.execute(
-            select(Instrument, Exchange.code)
-            .outerjoin(Exchange, Exchange.id == Instrument.exchange_id)
-            .where(
-                Instrument.type == _MARKET_TYPES[market],
+
+        escaped_query = self._escape_like(normalized_query)
+        prefix_pattern = f"{escaped_query}%"
+        contains_pattern = f"%{escaped_query}%"
+        alias_match = exists(
+            select(Instrument.id).where(
                 Instrument.is_active.is_(True),
+                func.upper(Instrument.symbol) == func.upper(SymbolMaster.symbol),
                 or_(
-                    Instrument.symbol.ilike(pattern, escape="\\"),
-                    Instrument.name.ilike(pattern, escape="\\"),
-                    func.array_to_string(Instrument.aliases, " ").ilike(
-                        pattern, escape="\\"
+                    and_(
+                        SymbolMaster.market == "KRX",
+                        Instrument.type == InstrumentType.equity_kr,
+                    ),
+                    and_(
+                        SymbolMaster.market == "US",
+                        Instrument.type == InstrumentType.equity_us,
                     ),
                 ),
+                func.array_to_string(Instrument.aliases, " ").ilike(
+                    contains_pattern,
+                    escape="\\",
+                ),
             )
-            .order_by(Instrument.symbol, Instrument.id)
-            .limit(_MAX_SEARCH_RESULTS)
+        )
+        matches = or_(
+            SymbolMaster.symbol.ilike(prefix_pattern, escape="\\"),
+            SymbolMaster.name.ilike(contains_pattern, escape="\\"),
+            SymbolMaster.name_en.ilike(contains_pattern, escape="\\"),
+            alias_match,
+        )
+        statement = select(SymbolMaster).where(
+            SymbolMaster.is_active.is_(True),
+            matches,
+        )
+        if market != "ALL":
+            statement = statement.where(SymbolMaster.market == market)
+
+        prefix_rank = case(
+            (
+                or_(
+                    SymbolMaster.symbol.ilike(prefix_pattern, escape="\\"),
+                    SymbolMaster.name.ilike(prefix_pattern, escape="\\"),
+                    SymbolMaster.name_en.ilike(prefix_pattern, escape="\\"),
+                ),
+                0,
+            ),
+            else_=1,
+        )
+        market_rank = case((SymbolMaster.market == "KRX", 0), else_=1)
+        capped_limit = min(max(limit, 1), 100)
+        rows = await db.scalars(
+            statement.order_by(
+                prefix_rank,
+                market_rank,
+                SymbolMaster.symbol,
+            ).limit(capped_limit)
         )
         return InstrumentSearchResponse(
             items=[
                 InstrumentSearchItem(
-                    symbol=instrument.symbol,
-                    name=instrument.name or instrument.symbol,
-                    market=self._wire_market(instrument.type, exchange_code),
+                    symbol=row.symbol,
+                    name=row.name,
+                    market=row.market,
                 )
-                for instrument, exchange_code in rows.all()
+                for row in rows.all()
             ]
         )
 

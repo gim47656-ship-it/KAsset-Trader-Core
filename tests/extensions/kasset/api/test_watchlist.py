@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
+from app.models.symbol_master import SymbolMaster
 from app.models.trading import (
     Exchange,
     Instrument,
@@ -27,6 +28,9 @@ from app.models.trading import (
 @pytest_asyncio.fixture
 async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, object]]:
     suffix = uuid4().hex[:10].upper()
+    search_term = f"검색대상{suffix}"
+    english_term = f"Samsung{suffix}"
+    alias_term = f"젬스{suffix}"
     users = [
         User(
             username=f"watch-a-{suffix.lower()}",
@@ -53,7 +57,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
         exchange_id=exchanges[0].id,
         symbol=f"K{suffix}",
         name="삼성전자 테스트",
-        aliases=["삼성", "samsung", "젬스"],
+        aliases=["삼성", "samsung", alias_term],
         type=InstrumentType.equity_kr,
         base_currency="KRW",
         is_active=True,
@@ -62,7 +66,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
         Instrument(
             exchange_id=exchanges[0].id,
             symbol=f"S{index:02d}{suffix}",
-            name=f"검색대상 {index:02d}",
+            name=f"{search_term} {index:02d}",
             type=InstrumentType.equity_kr,
             base_currency="KRW",
             is_active=True,
@@ -72,7 +76,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
     inactive = Instrument(
         exchange_id=exchanges[0].id,
         symbol=f"ZINACTIVE{suffix}",
-        name="검색대상 비활성",
+        name=f"{search_term} 비활성",
         type=InstrumentType.equity_kr,
         base_currency="KRW",
         is_active=False,
@@ -80,7 +84,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
     us_instrument = Instrument(
         exchange_id=exchanges[1].id,
         symbol=f"US{suffix}",
-        name="검색대상 미국",
+        name=f"{search_term} 미국",
         type=InstrumentType.equity_us,
         base_currency="USD",
         is_active=True,
@@ -88,11 +92,56 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
     crypto_instrument = Instrument(
         exchange_id=exchanges[2].id,
         symbol=f"KRW-{suffix}",
-        name="검색대상 코인",
+        name=f"{search_term} 코인",
         type=InstrumentType.crypto,
         base_currency="KRW",
         is_active=True,
     )
+    master_only = SymbolMaster(
+        market="KRX",
+        symbol=f"M{suffix}",
+        name="마스터 전용 종목",
+        name_en="Master Only Security",
+        security_type="COMMON_STOCK",
+        is_active=True,
+    )
+    symbol_master_rows = [
+        SymbolMaster(
+            market="KRX",
+            symbol=primary.symbol,
+            name=primary.name,
+            name_en=f"{english_term} Test",
+            security_type="COMMON_STOCK",
+            is_active=True,
+        ),
+        *[
+            SymbolMaster(
+                market="KRX",
+                symbol=instrument.symbol,
+                name=instrument.name,
+                name_en=f"Search Target {index:02d}",
+                security_type="COMMON_STOCK",
+                is_active=True,
+            )
+            for index, instrument in enumerate(search_instruments)
+        ],
+        SymbolMaster(
+            market="KRX",
+            symbol=inactive.symbol,
+            name=inactive.name,
+            security_type="COMMON_STOCK",
+            is_active=False,
+        ),
+        SymbolMaster(
+            market="US",
+            symbol=us_instrument.symbol,
+            name=us_instrument.name,
+            name_en=f"{english_term} America",
+            security_type="COMMON_STOCK",
+            is_active=True,
+        ),
+        master_only,
+    ]
     instruments = [
         primary,
         *search_instruments,
@@ -100,11 +149,14 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
         us_instrument,
         crypto_instrument,
     ]
-    db_session.add_all(instruments)
+    db_session.add_all([*instruments, *symbol_master_rows])
     await db_session.commit()
+    instrument_symbols = [instrument.symbol for instrument in instruments] + [
+        master_only.symbol
+    ]
+    master_symbols = [row.symbol for row in symbol_master_rows]
 
     user_ids = [user.id for user in users]
-    instrument_ids = [instrument.id for instrument in instruments]
     exchange_ids = [exchange.id for exchange in exchanges]
     try:
         yield {
@@ -114,16 +166,24 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
             "inactive": inactive,
             "us_instrument": us_instrument,
             "crypto_instrument": crypto_instrument,
+            "master_only": master_only,
+            "search_term": search_term,
+            "english_term": english_term,
+            "alias_term": alias_term,
         }
     finally:
         await db_session.rollback()
         await db_session.execute(
-            delete(UserWatchItem).where(
-                UserWatchItem.user_id.in_(user_ids),
-                UserWatchItem.instrument_id.in_(instrument_ids),
+            delete(UserWatchItem).where(UserWatchItem.user_id.in_(user_ids))
+        )
+        await db_session.execute(
+            delete(Instrument).where(
+                Instrument.symbol.in_(instrument_symbols)
             )
         )
-        await db_session.execute(delete(Instrument).where(Instrument.id.in_(instrument_ids)))
+        await db_session.execute(
+            delete(SymbolMaster).where(SymbolMaster.symbol.in_(master_symbols))
+        )
         await db_session.execute(delete(Exchange).where(Exchange.id.in_(exchange_ids)))
         await db_session.execute(delete(User).where(User.id.in_(user_ids)))
         await db_session.commit()
@@ -221,6 +281,40 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
 
 
 @pytest.mark.asyncio
+async def test_watchlist_add_materializes_master_only_instrument(
+    db_session: AsyncSession,
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+    watchlist_data: dict[str, object],
+) -> None:
+    client, _state = watchlist_client
+    master = watchlist_data["master_only"]
+
+    response = await client.post(
+        "/api/v1/watchlist",
+        json={"symbol": master.symbol.lower(), "market": "KRX"},
+    )
+
+    assert response.status_code == 201
+    instrument = await db_session.scalar(
+        select(Instrument).where(
+            Instrument.symbol == master.symbol,
+            Instrument.type == InstrumentType.equity_kr,
+        )
+    )
+    assert instrument is not None
+    assert response.json() == {
+        "symbol": master.symbol,
+        "name": master.name,
+        "market": "KRX",
+        "instrumentId": instrument.id,
+    }
+    watch_item = await db_session.scalar(
+        select(UserWatchItem).where(UserWatchItem.instrument_id == instrument.id)
+    )
+    assert watch_item is not None
+
+
+@pytest.mark.asyncio
 async def test_watchlist_is_isolated_by_authenticated_owner(
     db_session: AsyncSession,
     watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
@@ -250,7 +344,7 @@ async def test_watchlist_is_isolated_by_authenticated_owner(
 
 
 @pytest.mark.asyncio
-async def test_instrument_search_matches_name_and_symbol_with_market_limit_and_active_filter(
+async def test_instrument_search_integrates_markets_and_supports_filters(
     watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
     watchlist_data: dict[str, object],
 ) -> None:
@@ -258,12 +352,27 @@ async def test_instrument_search_matches_name_and_symbol_with_market_limit_and_a
     inactive = watchlist_data["inactive"]
     search_instruments = watchlist_data["search_instruments"]
 
-    kr = await client.get("/api/v1/instruments/search?q=검색대상&market=KRX")
+    search_term = watchlist_data["search_term"]
+    integrated = await client.get(
+        f"/api/v1/instruments/search?q={search_term}&limit=100"
+    )
+    assert integrated.status_code == 200
+    integrated_items = integrated.json()["items"]
+    assert len(integrated_items) == 23
+    assert [item["market"] for item in integrated_items] == ["KRX"] * 22 + ["US"]
+    assert inactive.symbol not in {item["symbol"] for item in integrated_items}
+
+    explicit_all = await client.get(
+        f"/api/v1/instruments/search?q={search_term}&market=ALL&limit=100"
+    )
+    assert explicit_all.json() == integrated.json()
+
+    kr = await client.get(
+        f"/api/v1/instruments/search?q={search_term}&market=KRX"
+    )
     assert kr.status_code == 200
-    kr_items = kr.json()["items"]
-    assert len(kr_items) == 20
-    assert all(item["market"] == "KRX" for item in kr_items)
-    assert inactive.symbol not in {item["symbol"] for item in kr_items}
+    assert len(kr.json()["items"]) == 20
+    assert all(item["market"] == "KRX" for item in kr.json()["items"])
 
     symbol_match = await client.get(
         f"/api/v1/instruments/search?q={search_instruments[21].symbol}&market=KRX"
@@ -279,26 +388,27 @@ async def test_instrument_search_matches_name_and_symbol_with_market_limit_and_a
         ]
     }
 
-    us = await client.get("/api/v1/instruments/search?q=검색대상&market=US")
-    crypto = await client.get("/api/v1/instruments/search?q=검색대상&market=CRYPTO")
+    us = await client.get(
+        f"/api/v1/instruments/search?q={search_term}&market=US"
+    )
     assert us.json() == {
         "items": [
             {
                 "symbol": watchlist_data["us_instrument"].symbol,
-                "name": "검색대상 미국",
+                "name": watchlist_data["us_instrument"].name,
                 "market": "US",
             }
         ]
     }
-    assert crypto.json() == {
-        "items": [
-            {
-                "symbol": watchlist_data["crypto_instrument"].symbol,
-                "name": "검색대상 코인",
-                "market": "CRYPTO",
-            }
-        ]
-    }
+    english = await client.get(
+        f"/api/v1/instruments/search?q={watchlist_data['english_term']}"
+    )
+    assert [item["market"] for item in english.json()["items"]] == ["KRX", "US"]
+
+    invalid_market = await client.get(
+        f"/api/v1/instruments/search?q={search_term}&market=CRYPTO"
+    )
+    assert invalid_market.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -309,7 +419,9 @@ async def test_instrument_search_matches_alias(
     client, _state = watchlist_client
     primary = watchlist_data["primary"]
 
-    response = await client.get("/api/v1/instruments/search?q=젬스&market=KRX")
+    response = await client.get(
+        f"/api/v1/instruments/search?q={watchlist_data['alias_term']}&market=KRX"
+    )
 
     assert response.status_code == 200
     assert response.json() == {

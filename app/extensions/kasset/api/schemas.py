@@ -21,6 +21,7 @@ class AndroidWireModel(BaseModel):
 
 
 WatchlistMarket = Literal["KRX", "US", "CRYPTO"]
+InstrumentSearchMarket = Literal["ALL", "KRX", "US"]
 
 
 class WatchlistCreateRequest(AndroidWireModel):

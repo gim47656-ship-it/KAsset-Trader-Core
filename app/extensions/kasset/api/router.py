@@ -59,6 +59,7 @@ from app.extensions.kasset.api.schemas import (
     GoogleLoginRequest,
     HealthResponse,
     InstrumentSearchResponse,
+    InstrumentSearchMarket,
     LoginRequest,
     NicknameUpdateRequest,
     RefreshRequest,
@@ -347,11 +348,17 @@ async def delete_watchlist_item(
 @router.get("/instruments/search", response_model=InstrumentSearchResponse)
 async def search_instruments(
     q: Annotated[str, Query(min_length=1, max_length=100)],
-    market: WatchlistMarket,
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    market: Annotated[InstrumentSearchMarket, Query()] = "ALL",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> InstrumentSearchResponse:
-    return await watchlist_service.search_instruments(db, query=q, market=market)
+    return await watchlist_service.search_instruments(
+        db,
+        query=q,
+        market=market,
+        limit=limit,
+    )
 
 
 @router.get("/account/balance", response_model=Balance)
