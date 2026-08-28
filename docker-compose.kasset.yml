@@ -45,7 +45,7 @@ services:
       - .env.kasset
       - .env.nhplug-mock.native
     volumes:
-      - /root/.nhplug:/root/.nhplug
+      - /opt/kasset-nhplug:/home/appuser/.nhplug
       - /usr/local/bin/codex:/usr/local/bin/codex:ro
       - /usr/local/bin/codex-code-mode-host:/usr/local/bin/codex-code-mode-host:ro
       - /opt/kasset-codex:/var/lib/kasset-codex
