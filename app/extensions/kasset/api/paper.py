@@ -265,17 +265,10 @@ class PaperAccountAdapter:
         normalized_symbol = symbol.strip().upper()
         try:
             if normalized_market in {"KRX", "KR"}:
-                from app.mcp_server.tooling.market_data_quotes import (
-                    _fetch_quote_equity_kr,
-                )
-
-                try:
-                    raw = await _fetch_quote_equity_kr(normalized_symbol)
-                except ValueError:
-                    raise
-                except Exception:
-                    # KIS 자격 미보유/무효 서버: 저장 캔들 종가로 강등.
-                    raw = await self._quote_from_candles(db, normalized_symbol)
+                # KIS는 미연결 브로커라 토큰 시도 자체가 수 초를 태운다.
+                # KRX PAPER 시세는 곧장 저장 캔들 종가로 만든다(상위에서 NH 공용
+                # 채널이 먼저 시도된 뒤에만 이 경로에 온다).
+                raw = await self._quote_from_candles(db, normalized_symbol)
                 market_name = "KRX"
                 currency = "KRW"
             elif normalized_market in {"US", "NYSE", "NASDAQ"}:

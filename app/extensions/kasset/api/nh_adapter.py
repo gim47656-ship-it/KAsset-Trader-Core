@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -262,9 +263,14 @@ class NHSharedMarketData:
     (NHPLUG_APP_KEY/SECRET + NHPLUG_MOCK_ACCOUNT_NO)으로 모두에게 제공한다.
     """
 
+    _FRESH_TTL_SECONDS = 3.0
+    _STALE_TTL_SECONDS = 120.0
+
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._cached: NHPlugMockClient | None = None
+        self._quote_cache: dict[str, tuple[float, Quote]] = {}
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
 
     async def _client(self) -> NHPlugMockClient:
         if not mock_enabled():
@@ -321,22 +327,39 @@ class NHSharedMarketData:
                 "VALIDATION_ERROR",
                 "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
             )
-        client = await self._client()
-        try:
-            payload = await client.fetch_quote(
-                market=normalized_market,
-                symbol=normalized_symbol,
+        now = time.monotonic()
+        cached = self._quote_cache.get(normalized_symbol)
+        if cached is not None and now - cached[0] < self._FRESH_TTL_SECONDS:
+            return cached[1]
+        # 종목별 단일비행: 같은 종목 동시 요청이 NH 레이트리밋(429)을 두드리지 않게 한다.
+        symbol_lock = self._symbol_locks.setdefault(normalized_symbol, asyncio.Lock())
+        async with symbol_lock:
+            now = time.monotonic()
+            cached = self._quote_cache.get(normalized_symbol)
+            if cached is not None and now - cached[0] < self._FRESH_TTL_SECONDS:
+                return cached[1]
+            client = await self._client()
+            try:
+                payload = await client.fetch_quote(
+                    market=normalized_market,
+                    symbol=normalized_symbol,
+                )
+            except (NHPlugMockError, httpx.HTTPError) as err:
+                # 레이트리밋·일시 장애: 최근 스냅샷이 있으면 그것으로 응답한다.
+                if cached is not None and now - cached[0] < self._STALE_TTL_SECONDS:
+                    return cached[1]
+                if not isinstance(err, httpx.HTTPStatusError):
+                    self._cached = None
+                raise MobileApiError(
+                    502,
+                    "NH_QUOTE_FAILED",
+                    "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
+                ) from err
+            quote = _quote_from_payload(
+                payload, market=normalized_market, symbol=normalized_symbol
             )
-        except (NHPlugMockError, httpx.HTTPError) as err:
-            self._cached = None
-            raise MobileApiError(
-                502,
-                "NH_QUOTE_FAILED",
-                "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
-            ) from err
-        return _quote_from_payload(
-            payload, market=normalized_market, symbol=normalized_symbol
-        )
+            self._quote_cache[normalized_symbol] = (time.monotonic(), quote)
+            return quote
 
 
 def _quote_from_payload(
