@@ -193,9 +193,13 @@ TOK=$(python scripts/kasset_qa_token.py)   # 이 한 줄로 끝
 
 ## 알려진 미해결
 
-- `personal:order` WS 채널 미착수. LOSSLESS라 conflation을 적용하면 안 되고(2초 이상
-  막히면 서버가 연결 종료), 재연결 뒤 `GET /api/v1/orders` 재동기화가 필수다. 시세와
-  전달 보장이 정반대여서 같은 세션 파이프라인에 얹으면 안 된다.
+- **결정(2026-08-29 심야) — WS 스트림 범위는 `quote:` + `orderbook:` 두 종류로 확정하고
+  `personal:order`는 LIVE 개방까지 보류한다.** 지금 붙여도 전달할 것이 없다: PAPER 체결은
+  제출 응답 안에서 동기 확정되고(`app/extensions/kasset/api/paper_orders.py:271-285`) OPEN
+  주문을 나중에 채우는 스윕이 `app/tasks/`에 없다. LIVE도 닫혀 있다. 게다가
+  `personal:order`는 LOSSLESS라 conflation을 적용하면 안 되고(2초 이상 막히면 서버가 연결
+  종료), 재연결 뒤 `GET /api/v1/orders` 재동기화가 필수다. 전달 보장이 시세와 정반대여서
+  같은 소켓 상태기계에 얹으면 conflation이 체결을 삼킨다. LIVE를 열 때 별도 슬라이스로 설계한다.
 - Toss `dayMarket`(09:00–17:00 KST) 구간을 우리 세션 모델이 `CLOSED`로 표시한다. Toss는
   그 시간 미국 거래를 허용한다. 5번째 상태 추가는 스키마·앱 변경이 필요해 미착수.
 - LIVE 주문은 아직 닫혀 있다(`LIVE_TRADING_ENABLED=false`, `NHPLUG_MOCK_ENABLED=true`).
