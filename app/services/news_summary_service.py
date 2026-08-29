@@ -57,6 +57,10 @@ _SUMMARY_INSTRUCTIONS = (
     "raw_excerpt를 그대로 복제하지 말고 핵심 사실을 간결하게 재서술하라. sentiment는 "
     "기사 서술의 정서만 positive, negative, neutral 중 하나로 분류하라."
 )
+_TITLE_ONLY_INSTRUCTIONS = (
+    "article_content와 raw_excerpt가 모두 없으면 title의 사실만 자연스러운 한국어 한 문장으로 "
+    "번역하라. 배경 설명이나 원인, 전망을 추가하지 마라."
+)
 _NUMBER_RETRY_INSTRUCTIONS = (
     "직전 시도는 입력에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. 수치를 쓸 "
     "때는 입력에 보이는 숫자 토큰과 단위를 문자 그대로 복사하라. 반올림, 자릿수 "
@@ -70,6 +74,7 @@ _INVESTMENT_ADVICE_RE = re.compile(
     r"목표\s*주가|목표가"
 )
 _HANGUL_RE = re.compile(r"[가-힣]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
 _ENGLISH_MONTHS = (
     "january",
     "february",
@@ -176,30 +181,39 @@ def _usable_body(value: str | None, *, title: str, source: str | None) -> str | 
 
 
 def _summary_input_for(article: NewsArticle) -> NewsSummaryInput | None:
+    title = _normalized_text(article.title)
+    source = _normalized_text(article.source) or None
     content = _usable_body(
         article.article_content,
-        title=article.title,
-        source=article.source,
+        title=title,
+        source=source,
     )
     if content is not None:
         return NewsSummaryInput(
-            title=_normalized_text(article.title),
-            source=_normalized_text(article.source) or None,
+            title=title,
+            source=source,
             article_content=content,
             raw_excerpt=None,
         )
     excerpt = _usable_body(
         article.summary,
-        title=article.title,
-        source=article.source,
+        title=title,
+        source=source,
     )
-    if excerpt is None:
+    if excerpt is not None:
+        return NewsSummaryInput(
+            title=title,
+            source=source,
+            article_content=None,
+            raw_excerpt=excerpt,
+        )
+    if not title or _HANGUL_RE.search(title) is not None or _LATIN_RE.search(title) is None:
         return None
     return NewsSummaryInput(
-        title=_normalized_text(article.title),
-        source=_normalized_text(article.source) or None,
+        title=title,
+        source=source,
         article_content=None,
-        raw_excerpt=excerpt,
+        raw_excerpt=None,
     )
 
 
@@ -254,8 +268,11 @@ def _validated_summary(summary: object, news: NewsSummaryInput) -> str:
         for sentence in _SENTENCE_SPLIT_RE.split(normalized)
         if sentence.strip()
     ]
-    if len(sentences) < 2 or len(sentences) > 4:
-        raise ValueError("news summary must contain 2 to 4 sentences")
+    minimum_sentences = 2 if news.body else 1
+    if len(sentences) < minimum_sentences or len(sentences) > 4:
+        raise ValueError(
+            f"news summary must contain {minimum_sentences} to 4 sentences"
+        )
     if _HANGUL_RE.search(normalized) is None:
         raise ValueError("news summary must be written in Korean")
     if _INVESTMENT_ADVICE_RE.search(normalized):
@@ -295,6 +312,12 @@ def _validated_confidence(value: object) -> int:
     return value
 
 
+def _instructions_for(news: NewsSummaryInput) -> str:
+    if news.body:
+        return _SUMMARY_INSTRUCTIONS
+    return f"{_SUMMARY_INSTRUCTIONS} {_TITLE_ONLY_INSTRUCTIONS}"
+
+
 class OpenAiNewsSummaryGenerator:
     """기존 Responses API와 Luna tier로 일반 뉴스 요약을 생성한다."""
 
@@ -318,7 +341,7 @@ class OpenAiNewsSummaryGenerator:
         confidence = _validated_confidence(response.get("confidence"))
         prompt = json.dumps(
             {
-                "instructions": _SUMMARY_INSTRUCTIONS,
+                "instructions": _instructions_for(news),
                 "input": news.to_payload(),
             },
             ensure_ascii=False,
@@ -351,9 +374,9 @@ class OpenAiNewsSummaryGenerator:
             schema_name="kasset_news_summary_retry" if retry else "kasset_news_summary",
             schema=_SUMMARY_SCHEMA,
             additional_instructions=(
-                f"{_SUMMARY_INSTRUCTIONS} {_NUMBER_RETRY_INSTRUCTIONS}"
+                f"{_instructions_for(news)} {_NUMBER_RETRY_INSTRUCTIONS}"
                 if retry
-                else _SUMMARY_INSTRUCTIONS
+                else _instructions_for(news)
             ),
         )
         if set(response) != {"summary", "sentiment", "confidence"}:

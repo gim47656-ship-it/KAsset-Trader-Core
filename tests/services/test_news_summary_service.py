@@ -121,6 +121,32 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_openai_generator_translates_foreign_title_when_body_is_missing() -> None:
+    client = FakeResponsesClient(
+        [
+            {
+                "summary": "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다.",
+                "sentiment": "neutral",
+                "confidence": 72,
+            }
+        ]
+    )
+    generator = OpenAiNewsSummaryGenerator(client, model="gpt-5.6-luna")
+    news = NewsSummaryInput(
+        title="Asian Stocks Mixed After Nvidia Earnings",
+        source="Example Wire",
+        article_content=None,
+        raw_excerpt=None,
+    )
+
+    result = await generator.summarize(news)
+
+    assert result.summary == "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다."
+    assert "한국어 한 문장" in client.calls[0]["additional_instructions"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
     raw_copy = (
         "회사는 신규 제품 출시 계획을 발표했다. "
