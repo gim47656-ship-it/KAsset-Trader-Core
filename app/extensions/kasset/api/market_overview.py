@@ -43,6 +43,9 @@ from app.mcp_server.tooling.market_session import (
     DATA_STATE_PREMARKET_UNAVAILABLE,
     DATA_STATE_STALE,
 )
+from app.services.brokers.toss.market_calendar import (
+    get_latest_completed_regular_window_from_toss,
+)
 from app.services.brokers.upbit.client import fetch_multiple_tickers
 from app.services.exchange_rate_service import (
     OpenErApiUsdSnapshot,
@@ -295,10 +298,12 @@ def _latest_as_of(items: list[MarketOverviewItem]) -> str | None:
     return max(parsed_values, key=lambda pair: pair[0])[1]
 
 
-async def _session_snapshot() -> tuple[list[MarketOverviewSession], _SessionStates]:
+async def _session_snapshot(
+    *, moment: datetime | None = None
+) -> tuple[list[MarketOverviewSession], _SessionStates]:
     kr_state, us_state = await asyncio.gather(
-        krx_quotes.resolve_market_session_state("KRX"),
-        krx_quotes.resolve_market_session_state("US"),
+        krx_quotes.resolve_market_session_state("KRX", moment=moment),
+        krx_quotes.resolve_market_session_state("US", moment=moment),
     )
     states: _SessionStates = {"KRX": kr_state, "US": us_state}
     return (
@@ -824,42 +829,77 @@ async def _toss_indicator_points() -> dict[str, TossIndicatorPoint]:
     return await toss_market_data.market_indicators(_TOSS_INDICATOR_SYMBOLS)
 
 
+async def _completed_index_snapshot() -> tuple[
+    object,
+    list[MarketOverviewSession],
+    _SessionStates,
+    MarketOverviewErrorCode | None,
+]:
+    """시장 캘린더가 증명한 최신 완료 정규장으로 지수 행을 제한한다."""
+    moment = datetime.now(UTC)
+    sessions, session_states = await _session_snapshot(moment=moment)
+    kr_window, us_window = await asyncio.gather(
+        get_latest_completed_regular_window_from_toss("kr", moment),
+        get_latest_completed_regular_window_from_toss("us", moment),
+    )
+    completed_as_of_by_market = {
+        market: window.end
+        for market, window in (("KRX", kr_window), ("US", us_window))
+        if window is not None
+    }
+    try:
+        result = await _bounded(
+            handle_get_market_index_current_batch(
+                _OVERVIEW_BATCH_SYMBOLS,
+                completed_as_of_by_market=completed_as_of_by_market,
+            )
+        )
+    except TimeoutError:
+        return None, sessions, session_states, "TIMEOUT"
+    except Exception:
+        return None, sessions, session_states, "UNAVAILABLE"
+    return result, sessions, session_states, None
+
+
 async def _build_market_overview() -> MarketOverviewResponse:
-    # 소스는 모두 동시에 나가고 각각 SOURCE_TIMEOUT_SECONDS로 묶인다. calendar도
-    # 같은 fan-out에 합류하므로 첫 조회에서 소스 왕복이 직렬로 늘지 않는다.
+    # 환율·BTC·시장지표는 지수의 완료 세션 확인과 동시에 조회한다. 지수 가격은
+    # 캘린더가 증명한 정규장 종료 시각을 얻은 뒤에만 일봉에서 고른다.
     (
-        index_result,
+        index_snapshot_result,
         fx_result,
         toss_usd_result,
         btc_result,
         toss_indicator_result,
-        session_result,
     ) = await asyncio.gather(
-        _bounded(handle_get_market_index_current_batch(_OVERVIEW_BATCH_SYMBOLS)),
+        _completed_index_snapshot(),
         _bounded(get_open_er_api_usd_snapshot()),
         _bounded(_toss_usd_quote()),
         _bounded(_upbit_btc_ticker()),
         _bounded(_toss_indicator_points()),
-        _session_snapshot(),
         return_exceptions=True,
     )
-    if isinstance(session_result, BaseException):
+
+    index_error_code: MarketOverviewErrorCode | None = None
+    if isinstance(index_snapshot_result, BaseException):
+        index_error_code = (
+            "TIMEOUT"
+            if isinstance(index_snapshot_result, TimeoutError)
+            else "UNAVAILABLE"
+        )
+        index_payload: object = None
         sessions = [
             MarketOverviewSession(market="KRX", state=None),
             MarketOverviewSession(market="US", state=None),
         ]
         session_states: _SessionStates = {"KRX": None, "US": None}
     else:
-        sessions, session_states = session_result
+        (
+            index_payload,
+            sessions,
+            session_states,
+            index_error_code,
+        ) = index_snapshot_result
 
-    index_error_code: MarketOverviewErrorCode | None = None
-    if isinstance(index_result, BaseException):
-        index_error_code = (
-            "TIMEOUT" if isinstance(index_result, TimeoutError) else "UNAVAILABLE"
-        )
-        index_payload: object = None
-    else:
-        index_payload = index_result
     indices, index_errors = _index_items(
         index_payload,
         sessions=session_states,

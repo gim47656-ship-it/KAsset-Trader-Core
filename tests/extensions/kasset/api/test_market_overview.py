@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,6 +21,7 @@ from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.schemas import MarketOverviewResponse
 from app.extensions.kasset.api.toss_market_data import TossIndicatorPoint
+from app.mcp_server.tooling import fundamentals_sources_indices as index_sources
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
     DATA_STATE_MARKET_CLOSED,
@@ -28,6 +31,9 @@ from app.services.exchange_rate_service import (
     OpenErApiUsdSnapshot,
     UsdKrwExchangeRateQuote,
 )
+
+_KR_COMPLETED_END = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
+_US_COMPLETED_END = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -69,13 +75,14 @@ def _index_payload() -> dict[str, Any]:
                 "change": "84.5",
                 "change_pct": "0.40",
                 "source": "yfinance",
+                "quote_asof": _US_COMPLETED_END.isoformat(),
             },
             {
                 "symbol": "KOSDAQ",
                 "current": "900.20",
                 "change": "-2.10",
                 "change_pct": "-0.23",
-                "quote_asof": "2026-08-28T14:01:00+09:00",
+                "quote_asof": _KR_COMPLETED_END.isoformat(),
                 "data_state": DATA_STATE_FRESH,
                 "source": "naver",
             },
@@ -85,13 +92,14 @@ def _index_payload() -> dict[str, Any]:
                 "change": "20.15",
                 "change_pct": "0.31",
                 "source": "yfinance",
+                "quote_asof": _US_COMPLETED_END.isoformat(),
             },
             {
                 "symbol": "KOSPI",
                 "current": "2700.10",
                 "change": "18.90",
                 "change_pct": "0.70",
-                "quote_asof": "2026-08-28T14:00:00+09:00",
+                "quote_asof": _KR_COMPLETED_END.isoformat(),
                 "data_state": DATA_STATE_FRESH,
                 "source": "naver",
             },
@@ -102,6 +110,7 @@ def _index_payload() -> dict[str, Any]:
                 "change": "181.19",
                 "change_pct": "0.34",
                 "source": "yfinance",
+                "quote_asof": _US_COMPLETED_END.isoformat(),
             },
             {
                 "symbol": "RUT",
@@ -110,6 +119,7 @@ def _index_payload() -> dict[str, Any]:
                 "change": "14.38",
                 "change_pct": "0.48",
                 "source": "yfinance",
+                "quote_asof": _US_COMPLETED_END.isoformat(),
             },
             {
                 "symbol": "SOX",
@@ -118,6 +128,7 @@ def _index_payload() -> dict[str, Any]:
                 "change": "135.79",
                 "change_pct": "1.17",
                 "source": "yfinance",
+                "quote_asof": _US_COMPLETED_END.isoformat(),
             },
             *_indicator_rows(),
         ]
@@ -224,6 +235,17 @@ def _stub_sessions(
 
     monkeypatch.setattr(mod.krx_quotes, "resolve_market_session_state", resolve)
 
+    async def latest_completed(market: str, moment: datetime) -> object:
+        del moment
+        end = _US_COMPLETED_END if market == "us" else _KR_COMPLETED_END
+        return SimpleNamespace(end=end)
+
+    monkeypatch.setattr(
+        mod,
+        "get_latest_completed_regular_window_from_toss",
+        latest_completed,
+    )
+
 
 def _stub_successful_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_sessions(monkeypatch)
@@ -254,7 +276,7 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "fresh"
-    assert body["asOf"] == "2026-08-28T06:00:00Z"
+    assert body["asOf"] == "2026-08-28T20:00:00Z"
     assert [item["symbol"] for item in body["indices"]] == [
         "KOSPI",
         "KOSDAQ",
@@ -310,7 +332,7 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert body["indices"][0]["changeRate"] == "0.7"
     assert body["indices"][0]["changeAmount"] == "18.9"
     assert "change_rate" not in body["indices"][0]
-    assert body["indices"][2]["asOf"] is None
+    assert body["indices"][2]["asOf"] == "2026-08-28T20:00:00Z"
     assert [item["price"] for item in body["fx"]] == [
         "1500",
         "10",
@@ -324,6 +346,94 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         {"market": "US", "state": "REGULAR"},
     ]
     assert body["errors"] == []
+
+
+def test_completed_kr_index_row_uses_one_session_for_price_direction_and_asof() -> None:
+    rows = [
+        {
+            "localTradedAt": "2026-08-31",
+            "closePrice": "7,000.00",
+            "openPrice": "6,700.00",
+        },
+        {
+            "localTradedAt": "2026-08-28",
+            "closePrice": "6,788.88",
+            "openPrice": "6,846.54",
+            "highPrice": "6,901.78",
+            "lowPrice": "6,780.13",
+        },
+        {
+            "localTradedAt": "2026-08-27",
+            "closePrice": "6,912.37",
+        },
+    ]
+
+    row = index_sources._naver_completed_index_row(
+        rows,
+        naver_code="KOSPI",
+        name="코스피",
+        completed_as_of=_KR_COMPLETED_END,
+    )
+
+    assert row["current"] == 6788.88
+    assert row["previous_close"] == 6912.37
+    assert row["change"] == -123.49
+    assert row["change_pct"] == -1.79
+    assert row["quote_asof"] == "2026-08-28T06:30:00+00:00"
+    assert row["data_state"] == "market_closed"
+
+
+@pytest.mark.asyncio
+async def test_us_completed_batch_excludes_forming_session_and_preserves_close_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "Open": [99.0, 101.0, 106.0],
+            "High": [102.0, 106.0, 107.0],
+            "Low": [98.0, 100.0, 89.0],
+            "Close": [100.0, 105.0, 90.0],
+            "Volume": [1000.0, 1200.0, 300.0],
+        },
+        index=pd.to_datetime(["2026-08-27", "2026-08-28", "2026-08-31"]),
+    )
+
+    def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
+        return frame
+
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(index_sources.yf, "download", download)
+    monkeypatch.setattr(
+        index_sources,
+        "yfinance_tracing_session",
+        traced_session,
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["SPX"],
+        completed_as_of=_US_COMPLETED_END,
+    )
+
+    assert rows == [
+        {
+            "symbol": "SPX",
+            "name": "S&P 500",
+            "current": 105.0,
+            "previous_close": 100.0,
+            "change": 5.0,
+            "change_pct": 5.0,
+            "open": 101.0,
+            "high": 106.0,
+            "low": 100.0,
+            "volume": 1200,
+            "source": "yfinance",
+            "quote_asof": "2026-08-28T20:00:00+00:00",
+            "data_state": "market_closed",
+        }
+    ]
 
 
 def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:
@@ -559,7 +669,12 @@ async def test_overview_retains_failed_item_with_null_numbers_and_partial_status
 async def test_overview_returns_all_fixed_entries_when_both_source_groups_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_indices(symbols: tuple[str, ...]) -> dict[str, Any]:
+    async def fail_indices(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
+        del completed_as_of_by_market
         raise RuntimeError(f"indices failed: {symbols}")
 
     async def fail_fx() -> OpenErApiUsdSnapshot:
@@ -619,7 +734,12 @@ async def test_overview_returns_all_fixed_entries_when_both_source_groups_fail(
 async def test_overview_marks_a_bounded_source_group_timeout_without_losing_other_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def slow_indices(symbols: tuple[str, ...]) -> dict[str, Any]:
+    async def slow_indices(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
+        del completed_as_of_by_market
         await asyncio.Event().wait()
         raise AssertionError(symbols)
 
@@ -641,6 +761,11 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
     assert response.status == "partial"
     assert all(item.status == "unavailable" for item in response.indices)
     assert all(item.status == "available" for item in response.fx)
+    assert [(session.market, session.state) for session in response.sessions] == [
+        ("KRX", "REGULAR"),
+        ("US", "REGULAR"),
+    ]
+    assert all(item.session_state == "REGULAR" for item in response.indices)
     # 배치 타임아웃은 지수 7건과 US 배치 지표 5건만 때린다. Upbit BTC는 살아 있다.
     assert [error.code for error in response.errors] == ["TIMEOUT"] * 12
     btc = next(item for item in response.indicators if item.key == "BTC")
@@ -655,10 +780,18 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     calls = 0
     monotonic_now = 1000.0
 
-    async def indices(symbols: tuple[str, ...]) -> dict[str, Any]:
+    async def indices(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
         nonlocal calls
         # 지수와 US 배치 지표가 한 번의 호출로 함께 요청된다(왕복 증가 없음).
         assert symbols == mod._OVERVIEW_BATCH_SYMBOLS
+        assert completed_as_of_by_market == {
+            "KRX": _KR_COMPLETED_END,
+            "US": _US_COMPLETED_END,
+        }
         calls += 1
         await asyncio.sleep(0)
         return _index_payload()

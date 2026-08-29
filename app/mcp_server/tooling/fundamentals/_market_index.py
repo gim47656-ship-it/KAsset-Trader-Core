@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +12,7 @@ from app.mcp_server.tooling.fundamentals_sources_indices import (
     _DEFAULT_INDICES,
     _INDEX_META,
     _fetch_index_crypto_current,
+    _fetch_index_kr_completed,
     _fetch_index_kr_current,
     _fetch_index_kr_history,
     _fetch_index_us_current,
@@ -162,15 +163,14 @@ async def handle_get_market_index(
 
 async def handle_get_market_index_current_batch(
     symbols: Sequence[str],
+    *,
+    completed_as_of_by_market: Mapping[str, datetime] | None = None,
 ) -> dict[str, Any]:
-    """현재가 전용 다중 심볼 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
+    """다중 심볼 지수 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
 
-    naver 심볼은 각각의 현재가 요청으로, yfinance 심볼은
-    ``_fetch_indices_us_current_batch``(``yf.download`` 1회)로 처리한다. history는
-    조회하지 않으며 응답은 ``handle_get_market_index(symbol=None)``과 같은
-    ``{"indices": [...]}`` 모양이고 요청 순서를 유지한다. 무인자 기본 배치가 이
-    함수에 위임하므로 두 경로의 동작이 갈리지 않는다. coingecko 심볼은 배치로
-    묶을 대상이 아니므로 명시적으로 거부한다(단일 심볼 경로를 쓰면 된다).
+    기본 호출은 기존 현재가 의미를 유지한다. ``completed_as_of_by_market``를
+    넘기는 overview 호출은 각 시장의 최신 완료 정규장 일봉만 고르며, 해당
+    세션을 증명할 캘린더 시각이 없으면 값을 만들지 않는다.
     """
     normalized = [str(symbol).strip().upper() for symbol in symbols]
     unsupported = sorted(
@@ -192,15 +192,54 @@ async def handle_get_market_index_current_batch(
     us_symbols = [
         symbol for symbol in normalized if _INDEX_META[symbol]["source"] == "yfinance"
     ]
+
+    async def load_kr(symbol: str) -> dict[str, Any]:
+        meta = _INDEX_META[symbol]
+        if completed_as_of_by_market is None:
+            return await _fetch_index_kr_current(meta["naver_code"], meta["name"])
+        completed_as_of = completed_as_of_by_market.get("KRX")
+        if completed_as_of is None:
+            return {
+                "symbol": symbol,
+                "source": "naver",
+                "unavailable": True,
+            }
+        return await _fetch_index_kr_completed(
+            meta["naver_code"],
+            meta["name"],
+            completed_as_of=completed_as_of,
+        )
+
+    async def load_us() -> list[dict[str, Any]]:
+        if completed_as_of_by_market is None:
+            return await _fetch_indices_us_current_batch(us_symbols)
+        completed_symbols = tuple(
+            symbol for symbol in us_symbols if symbol in _DEFAULT_INDICES
+        )
+        completed_as_of = completed_as_of_by_market.get("US")
+        if completed_as_of is None:
+            rows = await _fetch_indices_us_current_batch(us_symbols)
+            return [
+                (
+                    {
+                        "symbol": symbol,
+                        "source": "yfinance",
+                        "unavailable": True,
+                    }
+                    if symbol in completed_symbols
+                    else row
+                )
+                for symbol, row in zip(us_symbols, rows, strict=True)
+            ]
+        return await _fetch_indices_us_current_batch(
+            us_symbols,
+            completed_as_of=completed_as_of,
+            completed_symbols=completed_symbols,
+        )
+
     results = await asyncio.gather(
-        *(
-            _fetch_index_kr_current(
-                _INDEX_META[symbol]["naver_code"],
-                _INDEX_META[symbol]["name"],
-            )
-            for symbol in kr_symbols
-        ),
-        _fetch_indices_us_current_batch(us_symbols),
+        *(load_kr(symbol) for symbol in kr_symbols),
+        load_us(),
         return_exceptions=True,
     )
 
@@ -209,7 +248,11 @@ async def handle_get_market_index_current_batch(
         if isinstance(result, BaseException):
             rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
         elif isinstance(result, dict):
-            rows_by_symbol[symbol] = _tag_kr_index_data_state(result)
+            rows_by_symbol[symbol] = (
+                _tag_kr_index_data_state(result)
+                if completed_as_of_by_market is None
+                else result
+            )
         else:
             rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
 

@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import datetime
 import math
+from collections.abc import Collection
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
 import yfinance as yf
 
+from app.mcp_server.tooling.market_session import DATA_STATE_MARKET_CLOSED
 from app.monitoring import yfinance_tracing_session
 from app.services.external.btc_dominance import fetch_btc_dominance
 
@@ -53,6 +56,9 @@ _DEFAULT_INDICES = ["KOSPI", "KOSDAQ", "SPX", "NASDAQ", "DJI", "RUT", "SOX"]
 
 NAVER_INDEX_BASIC_URL = "https://m.stock.naver.com/api/index/{code}/basic"
 NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{code}/price"
+
+_KST = ZoneInfo("Asia/Seoul")
+_US_EASTERN = ZoneInfo("America/New_York")
 
 
 def _parse_naver_num(value: Any) -> float | None:
@@ -115,6 +121,109 @@ async def _fetch_index_kr_current(naver_code: str, name: str) -> dict[str, Any]:
         "quote_asof": basic.get("localTradedAt"),
         "source": "naver",
     }
+
+
+def _naver_completed_index_row(
+    price_list: object,
+    *,
+    naver_code: str,
+    name: str,
+    completed_as_of: datetime.datetime,
+) -> dict[str, Any]:
+    """완료된 정규장 날짜와 일치하는 네이버 일봉 두 개로 등락을 계산한다."""
+    if completed_as_of.tzinfo is None:
+        raise ValueError("completed_as_of must be timezone-aware")
+    completed_date = completed_as_of.astimezone(_KST).date()
+    dated_rows: list[tuple[datetime.date, dict[str, Any]]] = []
+    if isinstance(price_list, list):
+        for item in price_list:
+            if not isinstance(item, dict):
+                continue
+            raw_date = item.get("localTradedAt")
+            if not isinstance(raw_date, str):
+                continue
+            try:
+                trading_date = datetime.date.fromisoformat(raw_date[:10])
+            except ValueError:
+                continue
+            dated_rows.append((trading_date, item))
+
+    dated_rows.sort(key=lambda pair: pair[0])
+    latest_pair = next(
+        (pair for pair in reversed(dated_rows) if pair[0] == completed_date),
+        None,
+    )
+    if latest_pair is None:
+        return {
+            "symbol": naver_code,
+            "name": name,
+            "current": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "source": "naver",
+            "unavailable": True,
+        }
+
+    latest_date, latest = latest_pair
+    previous = next(
+        (
+            item
+            for trading_date, item in reversed(dated_rows)
+            if trading_date < latest_date
+        ),
+        None,
+    )
+    current = _parse_naver_num(latest.get("closePrice"))
+    previous_close = (
+        _parse_naver_num(previous.get("closePrice")) if previous is not None else None
+    )
+    change: float | None = None
+    change_pct: float | None = None
+    if current is not None and previous_close is not None and previous_close != 0:
+        change = round(current - previous_close, 2)
+        change_pct = round((current - previous_close) / previous_close * 100, 2)
+
+    return {
+        "symbol": naver_code,
+        "name": name,
+        "current": current,
+        "previous_close": previous_close,
+        "change": change,
+        "change_pct": change_pct,
+        "open": _parse_naver_num(latest.get("openPrice")),
+        "high": _parse_naver_num(latest.get("highPrice")),
+        "low": _parse_naver_num(latest.get("lowPrice")),
+        "volume": _parse_naver_int(latest.get("accumulatedTradingVolume")),
+        "quote_asof": completed_as_of.isoformat(),
+        "source": "naver",
+        "data_state": DATA_STATE_MARKET_CLOSED,
+        **({"unavailable": True} if current is None else {}),
+    }
+
+
+async def _fetch_index_kr_completed(
+    naver_code: str,
+    name: str,
+    *,
+    completed_as_of: datetime.datetime,
+) -> dict[str, Any]:
+    """완료된 KRX 정규장 일봉과 그 직전 일봉만 조회한다."""
+    price_url = NAVER_INDEX_PRICE_URL.format(code=naver_code)
+    async with httpx.AsyncClient(timeout=10) as cli:
+        response = await cli.get(
+            price_url,
+            params={"pageSize": 3, "page": 1, "timeframe": "day"},
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+        price_list = response.json()
+    return _naver_completed_index_row(
+        price_list,
+        naver_code=naver_code,
+        name=name,
+        completed_as_of=completed_as_of,
+    )
 
 
 async def _fetch_index_kr_history(
@@ -316,10 +425,31 @@ def _batch_volume(value: Any) -> int | None:
     return int(parsed) if parsed is not None else None
 
 
+def _batch_session_date(value: object) -> datetime.date | None:
+    """yfinance 일봉 인덱스를 미국 거래일로 정규화한다."""
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        return timestamp.date()
+    return timestamp.tz_convert(_US_EASTERN).date()
+
+
 async def _fetch_indices_us_current_batch(
     symbols: list[str],
+    *,
+    completed_as_of: datetime.datetime | None = None,
+    completed_symbols: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch multiple US index current rows through one daily download."""
+    """Fetch multiple US index rows through one daily download.
+
+    ``completed_as_of`` 대상 심볼은 그 정규장 날짜의 확정 일봉만 고른다. 장중
+    형성 중인 마지막 행을 ``current``로 쓰거나 다른 날짜의 종가와 섞지 않는다.
+    ``completed_symbols``를 생략하면 요청 심볼 전체가 대상이다.
+    """
 
     normalized_symbols = [symbol.strip().upper() for symbol in symbols]
     definitions: list[tuple[str, str, str]] = []
@@ -350,14 +480,42 @@ async def _fetch_indices_us_current_batch(
     with yfinance_tracing_session() as session:
         frame = await loop.run_in_executor(None, download)
 
+    completed_date: datetime.date | None = None
+    if completed_as_of is not None:
+        if completed_as_of.tzinfo is None:
+            raise ValueError("completed_as_of must be timezone-aware")
+        completed_date = completed_as_of.astimezone(_US_EASTERN).date()
+    completed_symbol_set = (
+        {symbol.strip().upper() for symbol in completed_symbols}
+        if completed_symbols is not None
+        else None
+    )
+
     rows: list[dict[str, Any]] = []
     for symbol, name, yf_ticker in definitions:
+        use_completed_session = completed_date is not None and (
+            completed_symbol_set is None or symbol in completed_symbol_set
+        )
         ticker_frame = _batch_ticker_frame(frame, yf_ticker)
         if "close" not in ticker_frame.columns:
             valid = pd.DataFrame()
         else:
-            valid = ticker_frame.loc[ticker_frame["close"].notna()].sort_index().tail(2)
-
+            valid = ticker_frame.loc[ticker_frame["close"].notna()].sort_index()
+            if use_completed_session:
+                valid = valid.loc[
+                    [
+                        session_date is not None and session_date <= completed_date
+                        for session_date in (
+                            _batch_session_date(value) for value in valid.index
+                        )
+                    ]
+                ]
+                if (
+                    valid.empty
+                    or _batch_session_date(valid.index[-1]) != completed_date
+                ):
+                    valid = pd.DataFrame()
+            valid = valid.tail(2)
         if valid.empty:
             rows.append(
                 {
@@ -401,6 +559,16 @@ async def _fetch_indices_us_current_batch(
                 "low": _batch_float(latest.get("low")),
                 "volume": _batch_volume(latest.get("volume")),
                 "source": "yfinance",
+                **(
+                    {"quote_asof": completed_as_of.isoformat()}
+                    if use_completed_session and completed_as_of is not None
+                    else {}
+                ),
+                **(
+                    {"data_state": DATA_STATE_MARKET_CLOSED}
+                    if use_completed_session
+                    else {}
+                ),
                 **({"unavailable": True} if current is None else {}),
             }
         )
@@ -504,6 +672,7 @@ async def _fetch_index_crypto_current(
 __all__ = [
     "_DEFAULT_INDICES",
     "_INDEX_META",
+    "_fetch_index_kr_completed",
     "_fetch_index_kr_current",
     "_fetch_index_kr_history",
     "_fetch_index_us_current",
