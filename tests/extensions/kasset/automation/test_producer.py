@@ -13,6 +13,7 @@ from app.extensions.kasset.automation import (
     StrategyName,
     StrategyResult,
 )
+from app.extensions.kasset.automation.ai_shadow import AI_SHADOW_SCHEMA_VERSION
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
@@ -71,6 +72,30 @@ def _external(action: str = "buy") -> dict[str, object]:
     }
 
 
+def _ai_shadow() -> dict[str, object]:
+    return {
+        "title": "AI shadow final selection",
+        "source": "kasset_ai_shadow",
+        "kind": "ai_shadow",
+        "schemaVersion": AI_SHADOW_SCHEMA_VERSION,
+        "inputHash": "a" * 64,
+        "provider": "direct-api",
+        "tier": "terra",
+        "modelId": "configured-terra-model",
+        "validatedResponse": {
+            "action": "BUY",
+            "risk": "LOW",
+            "bullishScore": 88,
+            "bearishScore": 12,
+            "rationaleTags": ["confirmed"],
+        },
+        "confidence": "0.75",
+        "selected": True,
+        "selectionReason": "ranked_final_selection_after_strategy_ai_agreement",
+        "observedAt": "2026-08-27T12:00:00Z",
+    }
+
+
 @pytest.mark.asyncio
 async def test_producer_persists_owner_scoped_consensus_without_order_side_effect() -> (
     None
@@ -89,6 +114,7 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
         external_evidence=_external(),
         suggested_quantity="2",
         now=_NOW,
+        ai_shadow_evidence=_ai_shadow(),
     )
 
     assert persisted["id"] == "rec-1"  # type: ignore[index]
@@ -100,7 +126,7 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
     assert draft.suggested_quantity == Decimal("2")  # type: ignore[attr-defined]
     assert draft.reference_price == Decimal("100")  # type: ignore[attr-defined]
     assert draft.source == "kasset-automation"  # type: ignore[attr-defined]
-    assert len(draft.evidence) == 5  # type: ignore[attr-defined]
+    assert len(draft.evidence) == 6  # type: ignore[attr-defined]
     assert draft.name == "Apple Inc."  # type: ignore[attr-defined]
     assert draft.headline == "Apple Inc. 매수 검토 의견"  # type: ignore[attr-defined]
     assert draft.rationale == (  # type: ignore[attr-defined]
@@ -147,6 +173,12 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
         },
     ]
     assert detail["aiRationale"] == ["Deterministic upstream indicators agree."]
+    shadow = next(
+        item
+        for item in draft.evidence  # type: ignore[attr-defined]
+        if item["kind"] == "ai_shadow"
+    )
+    assert shadow == _ai_shadow()
 
 
 @pytest.mark.asyncio
@@ -184,9 +216,7 @@ async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
     risks = draft.risks  # type: ignore[attr-defined]
     evidence = draft.evidence  # type: ignore[attr-defined]
     assert "hard risk blocked: currency-market mismatch" in risks
-    detail = next(
-        item for item in evidence if item["kind"] == "ai_vertical_slice"
-    )
+    detail = next(item for item in evidence if item["kind"] == "ai_vertical_slice")
     assert detail["hardRisk"] == hard_risk
 
 

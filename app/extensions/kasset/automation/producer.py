@@ -8,6 +8,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, cast
 
+from app.extensions.kasset.automation.ai_shadow import (
+    validate_selected_ai_shadow_evidence,
+)
 from app.extensions.kasset.automation.contracts import (
     Action,
     ExternalEvidence,
@@ -290,6 +293,7 @@ class RecommendationProducer:
         portfolio: Mapping[str, object] | None = None,
         hard_risk: Mapping[str, object] | None = None,
         strategy_promotion: Mapping[str, object] | None = None,
+        ai_shadow_evidence: Mapping[str, object] | None = None,
     ) -> object:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
         normalized_symbol = symbol.strip().upper()
@@ -448,6 +452,26 @@ class RecommendationProducer:
                 "artifactFingerprint": artifact_fingerprint,
             }
 
+        normalized_ai_shadow = (
+            validate_selected_ai_shadow_evidence(ai_shadow_evidence)
+            if ai_shadow_evidence is not None
+            else None
+        )
+        if normalized_ai_shadow is not None:
+            shadow_response = cast(
+                dict[str, object],
+                normalized_ai_shadow["validatedResponse"],
+            )
+            if (
+                shadow_response["action"] != external.action.value
+                or Decimal(cast(str, normalized_ai_shadow["confidence"]))
+                != external.confidence
+            ):
+                raise ValueError(
+                    "ai_shadow evidence must match the validated external action "
+                    "and confidence"
+                )
+
         rationale = [
             _korean_vote_rationale(valid_results),
             (
@@ -525,6 +549,8 @@ class RecommendationProducer:
                 "hardRisk": normalized_hard_risk,
             }
         )
+        if normalized_ai_shadow is not None:
+            evidence.append(normalized_ai_shadow)
         if normalized_strategy_promotion is not None:
             evidence.append(normalized_strategy_promotion)
 

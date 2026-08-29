@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Literal
 
@@ -15,6 +16,7 @@ from app.extensions.kasset.ai.structured_router import (
     AvailabilityRoutedJsonClient,
     StructuredJsonRoute,
 )
+from app.services.research_canonical_hash import canonical_sha256
 
 
 class AnalysisKind(StrEnum):
@@ -51,6 +53,10 @@ class _TierAnalysis(BaseModel):
 
 class TierVerdict(_TierAnalysis):
     tier_used: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    tier: Literal["luna", "terra", "sol"]
+    model_id: str = Field(min_length=1)
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     kind: AnalysisKind
     correlation_id: str | None
 
@@ -85,6 +91,25 @@ _MCP_REVIEW_KINDS = frozenset(
 
 
 _TIER_ANALYSIS_SCHEMA: dict[str, object] = _TierAnalysis.model_json_schema()
+
+
+def _normalized_request_input(
+    kind: AnalysisKind,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Normalize the exact JSON-safe object sent to the selected provider."""
+
+    encoded = json.dumps(
+        {"kind": kind.value, "payload": payload},
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    normalized = json.loads(encoded)
+    if type(normalized) is not dict:
+        raise ValueError("structured AI input must normalize to a JSON object")
+    return normalized
 
 
 class OpenAiModelRouter:
@@ -253,10 +278,14 @@ class OpenAiModelRouter:
             name=f"{kind.value}:{tier}",
             routes=routes,
         )
-        request_model = primary_model or fallback_model or tier
+        request_model = next(
+            (route.model or "" for route in routes if route.model),
+            "",
+        )
         return await self._request_verdict(
             routed_client,
             model=request_model,
+            tier=tier,
             kind=kind,
             payload=payload,
             correlation_id=correlation_id,
@@ -269,24 +298,42 @@ class OpenAiModelRouter:
         client: StructuredJsonClient,
         *,
         model: str,
+        tier: _Tier,
         kind: AnalysisKind,
         payload: dict[str, object],
         correlation_id: str | None,
         include_reasoning: bool,
         address_instruction: str | None,
     ) -> TierVerdict:
+        request_input = _normalized_request_input(kind, payload)
+        input_hash = canonical_sha256(request_input)
         raw = await client.request_json(
             model=model,
-            input_payload={"kind": kind.value, "payload": payload},
+            input_payload=request_input,
             reasoning_effort=_REASONING_EFFORT[kind] if include_reasoning else None,
             schema_name="kasset_tier_verdict",
             schema=_TIER_ANALYSIS_SCHEMA,
             additional_instructions=address_instruction,
         )
+        provider = getattr(raw, "provider_name", None)
+        model_id = getattr(raw, "model_name", None)
+        if (
+            type(provider) is not str
+            or not provider.strip()
+            or type(model_id) is not str
+            or not model_id.strip()
+        ):
+            raise RuntimeError(
+                "structured AI route did not expose its selected provider and model"
+            )
         analysis = _TierAnalysis.model_validate(raw)
         return TierVerdict(
             **analysis.model_dump(),
-            tier_used=str(getattr(raw, "model_name", model)),
+            tier_used=model_id,
+            provider=provider,
+            tier=tier,
+            model_id=model_id,
+            input_hash=input_hash,
             kind=kind,
             correlation_id=correlation_id,
         )

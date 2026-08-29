@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.extensions.kasset.ai.base import AiProviderUnavailable
 from app.extensions.kasset.ai.factory import build_model_router
 from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
+from app.services.research_canonical_hash import canonical_sha256
 
 
 class _Transport(httpx.AsyncBaseTransport):
@@ -146,6 +147,15 @@ async def test_high_confidence_luna_hold_stops_after_one_call(
     assert len(transport.requests) == 1
     assert result.action == "HOLD"
     assert result.tier_used == "test-luna"
+    assert result.provider == "direct-api"
+    assert result.tier == "luna"
+    assert result.model_id == "test-luna"
+    assert result.input_hash == canonical_sha256(
+        {
+            "kind": "market_state",
+            "payload": {"market": "kr", "breadth": 0.52},
+        }
+    )
     assert result.kind is AnalysisKind.MARKET_STATE
     assert result.correlation_id == "corr-luna"
 
@@ -173,6 +183,26 @@ async def test_high_confidence_luna_hold_stops_after_one_call(
         "escalate",
         "rationale_tags",
     }
+
+
+@pytest.mark.asyncio
+async def test_normalized_input_hash_is_stable_across_mapping_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = _Transport([_verdict(), _verdict()])
+    _patch_transport(monkeypatch, transport)
+    router = _router()
+
+    first = await router.analyze(
+        AnalysisKind.MARKET_STATE,
+        {"market": "kr", "breadth": 0.52},
+    )
+    second = await router.analyze(
+        AnalysisKind.MARKET_STATE,
+        {"breadth": 0.52, "market": "kr"},
+    )
+
+    assert first.input_hash == second.input_hash
 
 
 @pytest.mark.asyncio
@@ -244,6 +274,10 @@ async def test_terra_high_risk_escalates_to_sol_as_critical_review(
         "bearish_score": 45,
     }
     assert result.tier_used == "test-sol"
+    assert result.provider == "direct-api"
+    assert result.tier == "sol"
+    assert result.model_id == "test-sol"
+    assert result.input_hash == canonical_sha256(json.loads(bodies[1]["input"]))
     assert result.kind is AnalysisKind.CRITICAL_REVIEW
     assert result.correlation_id == "corr-sol"
 
@@ -290,11 +324,11 @@ async def test_missing_api_key_factory_router_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("kind", "expected_fallback_model"),
+    ("kind", "expected_fallback_model", "expected_tier"),
     [
-        (AnalysisKind.MARKET_STATE, "test-openrouter-flash"),
-        (AnalysisKind.CANDIDATE_REVIEW, "test-openrouter-pro"),
-        (AnalysisKind.CRITICAL_REVIEW, "test-openrouter-pro"),
+        (AnalysisKind.MARKET_STATE, "test-openrouter-flash", "luna"),
+        (AnalysisKind.CANDIDATE_REVIEW, "test-openrouter-pro", "terra"),
+        (AnalysisKind.CRITICAL_REVIEW, "test-openrouter-pro", "sol"),
     ],
 )
 @pytest.mark.asyncio
@@ -302,6 +336,7 @@ async def test_primary_unavailable_uses_tier_openrouter_fallback(
     monkeypatch: pytest.MonkeyPatch,
     kind: AnalysisKind,
     expected_fallback_model: str,
+    expected_tier: str,
 ) -> None:
     primary = _ScriptedTransport([httpx.Response(503, json={"error": "busy"})])
     fallback = _ScriptedTransport([_wire_response(_verdict())])
@@ -320,6 +355,9 @@ async def test_primary_unavailable_uses_tier_openrouter_fallback(
     assert len(primary.requests) == 1
     assert len(fallback.requests) == 1
     assert result.tier_used == expected_fallback_model
+    assert result.provider == "openrouter"
+    assert result.tier == expected_tier
+    assert result.model_id == expected_fallback_model
     primary_body = json.loads(primary.requests[0].content)
     fallback_body = json.loads(fallback.requests[0].content)
     assert primary_body["reasoning"]["effort"] in {"low", "medium", "high"}
@@ -399,7 +437,7 @@ async def test_missing_openrouter_key_does_not_attempt_fallback(
     assert fallback.requests == []
 
 
-@pytest.mark.parametrize("status", [400, 408, 429])
+@pytest.mark.parametrize("status", [400, 408])
 @pytest.mark.asyncio
 async def test_primary_nonretryable_4xx_does_not_attempt_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -422,3 +460,27 @@ async def test_primary_nonretryable_4xx_does_not_attempt_fallback(
 
     assert len(primary.requests) == 1
     assert fallback.requests == []
+
+
+@pytest.mark.asyncio
+async def test_primary_429_falls_back_and_reports_selected_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _ScriptedTransport([httpx.Response(429, text="rate limited")])
+    fallback = _ScriptedTransport([_wire_response(_verdict())])
+    _patch_transports(
+        monkeypatch,
+        {
+            "https://example.test": primary,
+            "https://openrouter.test": fallback,
+        },
+    )
+
+    result = await _router(openrouter_api_key="openrouter-key").analyze(
+        AnalysisKind.MARKET_STATE, {"sample": 1}
+    )
+
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 1
+    assert result.provider == "openrouter"
+    assert result.model_id == "test-openrouter-flash"

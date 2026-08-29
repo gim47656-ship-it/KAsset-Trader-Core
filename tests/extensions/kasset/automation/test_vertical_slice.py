@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.extensions.kasset.automation import vertical_slice
+from app.extensions.kasset.automation.ai_shadow import build_ai_shadow_observation
 from app.extensions.kasset.automation.candidate_ranker import CandidateRankResult
 from app.extensions.kasset.automation.contracts import (
     Action,
@@ -110,6 +111,21 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         events=(),
         event_score=Decimal("0"),
         score=Decimal("0.525"),
+        ai_shadow=build_ai_shadow_observation(
+            SimpleNamespace(
+                input_hash="b" * 64,
+                provider="direct-api",
+                tier="terra",
+                model_id="configured-terra-model",
+                action="BUY",
+                risk="LOW",
+                bullish_score=88,
+                bearish_score=12,
+                rationale_tags=["confirmed"],
+                confidence=0.8,
+            ),
+            observed_at=_NOW,
+        ),
     )
     captured: dict[str, object] = {}
 
@@ -172,6 +188,11 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         "version": "1.0.0",
         "artifactFingerprint": "a" * 64,
     }
+    ai_shadow = captured["ai_shadow_evidence"]
+    assert isinstance(ai_shadow, dict)
+    assert ai_shadow["kind"] == "ai_shadow"
+    assert ai_shadow["modelId"] == "configured-terra-model"
+    assert ai_shadow["selected"] is True
 
 
 @pytest.mark.asyncio

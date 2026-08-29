@@ -18,6 +18,10 @@ from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.ai.base import AiProviderUnavailable
 from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
 from app.extensions.kasset.api.watchlist import watchlist_service
+from app.extensions.kasset.automation.ai_shadow import (
+    AiShadowObservation,
+    build_ai_shadow_observation,
+)
 from app.extensions.kasset.automation.candidate_ranker import (
     DEFAULT_CANDIDATE_RANKER_CONFIG,
     CandidateKey,
@@ -109,6 +113,7 @@ class ReviewedCandidate:
     events: tuple[Mapping[str, object], ...]
     event_score: Decimal
     score: Decimal
+    ai_shadow: AiShadowObservation
 
 
 async def _load_live_kr_candidates(
@@ -715,6 +720,10 @@ class AIRecommendationVerticalSlice:
                 f"{item.candidate.symbol}:{int(self._now.timestamp())}"
             ),
         )
+        shadow_observation = build_ai_shadow_observation(
+            verdict,
+            observed_at=self._now,
+        )
         action_text = str(verdict.action).strip().upper()
         action = (
             Action(action_text)
@@ -743,7 +752,7 @@ class AIRecommendationVerticalSlice:
         if valid_until <= self._now:
             return None
         external = ExternalEvidence(
-            source=f"model_router:{verdict.tier_used}",
+            source=f"model_router:{verdict.model_id}",
             symbol=item.candidate.symbol,
             market=cast(Any, item.candidate.market),
             action=action,
@@ -755,7 +764,7 @@ class AIRecommendationVerticalSlice:
             evidence=(
                 {
                     "title": "AI candidate review",
-                    "source": f"model_router:{verdict.tier_used}",
+                    "source": f"model_router:{verdict.model_id}",
                     "kind": "ai_analysis",
                     "tier": verdict.tier_used,
                     "confidence": str(confidence),
@@ -783,6 +792,7 @@ class AIRecommendationVerticalSlice:
             events=events,
             event_score=event_score,
             score=score,
+            ai_shadow=shadow_observation,
         )
 
     async def _persist_recommendation(
@@ -874,6 +884,7 @@ class AIRecommendationVerticalSlice:
                 "version": DEFAULT_PAPER_STRATEGY_VERSION,
                 "artifactFingerprint": current_strategy_artifact().fingerprint,
             },
+            ai_shadow_evidence=item.ai_shadow.as_selected_evidence(),
         )
         return cast(AIRecommendation, row)
 

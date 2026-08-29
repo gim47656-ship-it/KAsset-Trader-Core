@@ -112,9 +112,7 @@ def _responses_result(payload: dict[str, object]) -> httpx.Response:
             "output": [
                 {
                     "type": "message",
-                    "content": [
-                        {"type": "output_text", "text": json.dumps(payload)}
-                    ],
+                    "content": [{"type": "output_text", "text": json.dumps(payload)}],
                 }
             ]
         },
@@ -180,6 +178,9 @@ async def test_candidate_review_uses_mcp_before_direct_and_openrouter(
     attempts = _provider_attempt_requests(transport.requests)
     assert [request.url.host for request in attempts] == ["mcp.test"]
     assert result.tier_used == "tool:run_skill"
+    assert result.provider == "mcp"
+    assert result.tier == "terra"
+    assert result.model_id == "tool:run_skill"
     body = json.loads(attempts[0].content)
     assert body["params"]["name"] == "run_skill"
     assert body["params"]["arguments"]["context"] == {
@@ -213,6 +214,9 @@ async def test_trade_review_availability_falls_back_mcp_direct_openrouter(
         "openrouter.test",
     ]
     assert result.tier_used == "z-ai/glm-5.3-flash"
+    assert result.provider == "openrouter"
+    assert result.tier == "terra"
+    assert result.model_id == "z-ai/glm-5.3-flash"
     assert json.loads(attempts[1].content)["model"] == "direct-terra"
     openrouter_body = json.loads(attempts[2].content)
     assert openrouter_body["model"] == "z-ai/glm-5.3-flash"
@@ -242,8 +246,7 @@ async def test_mcp_auth_or_schema_failure_does_not_fallback(
         )
 
     assert [
-        request.url.host
-        for request in _provider_attempt_requests(transport.requests)
+        request.url.host for request in _provider_attempt_requests(transport.requests)
     ] == ["mcp.test"]
 
 
@@ -261,6 +264,9 @@ async def test_candidate_review_skips_unconfigured_mcp(
 
     assert [request.url.host for request in transport.requests] == ["direct.test"]
     assert result.tier_used == "direct-terra"
+    assert result.provider == "direct-api"
+    assert result.tier == "terra"
+    assert result.model_id == "direct-terra"
 
 
 @pytest.mark.asyncio
@@ -276,35 +282,41 @@ async def test_candidate_scan_does_not_use_mcp(
     )
 
     assert [
-        request.url.host
-        for request in _provider_attempt_requests(transport.requests)
+        request.url.host for request in _provider_attempt_requests(transport.requests)
     ] == ["direct.test"]
     assert result.tier_used == "direct-luna"
 
 
 @pytest.mark.asyncio
-async def test_direct_api_4xx_does_not_fallback_to_openrouter(
+async def test_direct_api_429_falls_back_to_openrouter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport = _DispatchTransport({"direct.test": [httpx.Response(429)]})
+    transport = _DispatchTransport(
+        {
+            "direct.test": [httpx.Response(429)],
+            "openrouter.test": [_responses_result(_verdict())],
+        }
+    )
     _patch_transport(monkeypatch, transport)
 
-    with pytest.raises(ValueError, match="HTTP 429"):
-        await _router(with_mcp=False).analyze(
-            AnalysisKind.CANDIDATE_REVIEW,
-            {"symbol": "005930"},
-        )
+    result = await _router(with_mcp=False).analyze(
+        AnalysisKind.CANDIDATE_REVIEW,
+        {"symbol": "005930"},
+    )
 
-    assert [request.url.host for request in transport.requests] == ["direct.test"]
+    assert [request.url.host for request in transport.requests] == [
+        "direct.test",
+        "openrouter.test",
+    ]
+    assert result.provider == "openrouter"
+    assert result.model_id == "z-ai/glm-5.3-flash"
 
 
 @pytest.mark.asyncio
 async def test_unconfigured_direct_provider_skips_to_openrouter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport = _DispatchTransport(
-        {"openrouter.test": [_responses_result(_verdict())]}
-    )
+    transport = _DispatchTransport({"openrouter.test": [_responses_result(_verdict())]})
     _patch_transport(monkeypatch, transport)
 
     result = await _router(with_mcp=False, api_key=None).analyze(
@@ -312,9 +324,7 @@ async def test_unconfigured_direct_provider_skips_to_openrouter(
         {"headline": "sample"},
     )
 
-    assert [request.url.host for request in transport.requests] == [
-        "openrouter.test"
-    ]
+    assert [request.url.host for request in transport.requests] == ["openrouter.test"]
     assert result.tier_used == "z-ai/glm-5.3-flash"
 
 
