@@ -416,10 +416,7 @@ async def _candidate_ids(
                 NewsArticle.feed_source.is_(None),
                 NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
             ),
-            ~exists().where(
-                NewsAnalysisResult.article_id == NewsArticle.id,
-                NewsAnalysisResult.summary.is_not(None),
-            ),
+            ~exists().where(NewsAnalysisResult.article_id == NewsArticle.id),
         )
         .order_by(
             NewsArticle.article_published_at.desc().nullslast(),
@@ -498,10 +495,7 @@ async def _run_batch(
                 continue
             existing_id = await db.scalar(
                 select(NewsAnalysisResult.id)
-                .where(
-                    NewsAnalysisResult.article_id == article_id,
-                    NewsAnalysisResult.summary.is_not(None),
-                )
+                .where(NewsAnalysisResult.article_id == article_id)
                 .limit(1)
             )
             if existing_id is not None:

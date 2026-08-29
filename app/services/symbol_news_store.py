@@ -87,6 +87,12 @@ def _utcnow() -> datetime:
     return datetime.now(tz=UTC).replace(tzinfo=None)
 
 
+def _naive_utc(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def derive_status(relationship: str, relevance: str) -> str:
     """Server-owned status rule — the judgment job never writes status itself."""
     if relationship == "unrelated" or relevance == "low":
@@ -167,9 +173,7 @@ async def upsert_feed_articles(
             "article_content": None,
             "market": market,
             "feed_source": feed_source,
-            "article_published_at": item.published_at.replace(tzinfo=None)
-            if item.published_at
-            else None,
+            "article_published_at": _naive_utc(item.published_at),
             "is_analyzed": False,
             "stock_symbol": None,
             "stock_name": None,
@@ -463,7 +467,7 @@ async def upsert_disclosures(
                 "is_analyzed": False,
                 "stock_symbol": stock_symbol,
                 "stock_name": stock_name,
-                "article_published_at": item.published_at,
+                "article_published_at": _naive_utc(item.published_at),
                 "scraped_at": now,
                 "created_at": now,
                 "updated_at": now,

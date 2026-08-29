@@ -183,7 +183,6 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     failed_url = f"https://news.test.invalid/{suffix}/failed"
     thin_url = f"https://news.test.invalid/{suffix}/thin"
     disclosure_url = f"https://news.test.invalid/{suffix}/disclosure"
-    legacy_url = f"https://news.test.invalid/{suffix}/legacy-analysis"
     success = _article(
         url=success_url,
         title="해외 기업 실적 발표",
@@ -215,37 +214,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         feed_source="dart",
         published_at=datetime(2026, 8, 29, 9, 0),
     )
-    legacy = _article(
-        url=legacy_url,
-        title="기존 감성 분석만 있는 뉴스",
-        summary=(
-            "The company updated its outlook after reviewing current demand. "
-            "Management said the revised view reflects recent order trends."
-        ),
-        published_at=datetime(2026, 8, 29, 8, 0),
-    )
-    db_session.add_all([success, failed, thin, disclosure, legacy])
-    await db_session.flush()
-    db_session.add(
-        NewsAnalysisResult(
-            article_id=legacy.id,
-            model_name="legacy-sentiment-only",
-            sentiment=Sentiment.NEUTRAL,
-            sentiment_score=None,
-            summary=None,
-            key_points=[],
-            topics=None,
-            price_impact=None,
-            price_impact_score=None,
-            confidence=70,
-            analysis_quality="medium",
-            prompt="legacy prompt",
-            raw_response="{}",
-            processing_time_ms=1,
-            created_at=datetime(2026, 8, 29, 8, 1),
-            updated_at=None,
-        )
-    )
+    db_session.add_all([success, failed, thin, disclosure])
     await db_session.commit()
     generator = FakeSummaryGenerator(
         {
@@ -253,23 +222,19 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
                 "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
             ),
             "공급 계약 발표": RuntimeError("fake provider failure"),
-            "기존 감성 분석만 있는 뉴스": (
-                "회사는 현재 수요를 검토한 뒤 전망을 수정했다. "
-                "최근 주문 추세를 반영한 결과라고 설명했다."
-            ),
         }
     )
 
     first = await summarize_pending_news(
         db_session,
         batch_size=4,
-        article_urls=[success_url, failed_url, thin_url, disclosure_url, legacy_url],
+        article_urls=[success_url, failed_url, thin_url, disclosure_url],
         generator=generator,
     )
 
     assert first.status == "partial"
-    assert first.selected == 4
-    assert first.summarized == 2
+    assert first.selected == 3
+    assert first.summarized == 1
     assert first.skipped_insufficient == 1
     assert first.failed == 1
     stored = await db_session.scalar(
@@ -282,19 +247,6 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
     )
     assert stored.model_name == "test-news-summary"
-    legacy_summaries = list(
-        (
-            await db_session.scalars(
-                select(NewsAnalysisResult.summary)
-                .where(NewsAnalysisResult.article_id == legacy.id)
-                .order_by(NewsAnalysisResult.id)
-            )
-        ).all()
-    )
-    assert legacy_summaries == [
-        None,
-        "회사는 현재 수요를 검토한 뒤 전망을 수정했다. 최근 주문 추세를 반영한 결과라고 설명했다.",
-    ]
     assert success.summary.startswith("The company reported")
     await db_session.refresh(success)
     await db_session.refresh(failed)
@@ -309,7 +261,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     second = await summarize_pending_news(
         db_session,
         batch_size=4,
-        article_urls=[success_url, failed_url, thin_url, disclosure_url, legacy_url],
+        article_urls=[success_url, failed_url, thin_url, disclosure_url],
         generator=generator,
     )
 
@@ -322,14 +274,12 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         (
             await db_session.scalars(
                 select(NewsAnalysisResult.id).where(
-                    NewsAnalysisResult.article_id.in_(
-                        [success.id, failed.id, legacy.id]
-                    )
+                    NewsAnalysisResult.article_id.in_([success.id, failed.id])
                 )
             )
         ).all()
     )
-    assert len(analysis_ids) == 4
+    assert len(analysis_ids) == 2
 
 
 @pytest.mark.unit
