@@ -125,10 +125,11 @@ async def handle_get_market_index(
 ) -> dict[str, Any]:
     """지수 현재 요약과 범위 이력을 조회한다.
 
-    기본 호출은 기존 현재가 의미를 유지한다. 완료 시각 사전을 넘기면 요약만
-    해당 시장의 완료 정규장 일봉으로 만들고, 범위 이력은 기존 계약대로 조회한다.
-    사전에 대상 시장이 없으면 진행 중 봉으로 대체하지 않고 요약을 unavailable로
-    둔다.
+    기본 호출은 기존 현재가 의미를 유지한다. 완료 시각 사전을 넘기면 요약은
+    해당 시장의 완료 정규장 cutoff를 공통 선택기에 전달한다. US provider가
+    target 봉을 비운 경우에만 XNYS 직전 1개 세션을 실제 시각의 stale 값으로
+    허용한다. 범위 이력은 기존 계약대로 조회하며, cutoff가 없으면 진행 중 봉으로
+    대체하지 않고 요약을 unavailable로 둔다.
     """
     period = (period or "day").strip().lower()
     if period not in ("day", "week", "month"):
@@ -222,8 +223,9 @@ async def handle_get_market_index_current_batch(
     """다중 심볼 지수 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
 
     기본 호출은 기존 현재가 의미를 유지한다. ``completed_as_of_by_market``를
-    넘기는 overview 호출은 각 시장의 최신 완료 정규장 일봉만 고르며, 해당
-    세션을 증명할 캘린더 시각이 없으면 값을 만들지 않는다.
+    넘기는 home/detail 호출은 같은 provider 선택기를 쓰며, target 봉 또는
+    XNYS 직전 1개 세션의 명시적 stale 봉만 허용한다. 해당 세션을 증명할
+    캘린더 시각이 없으면 값을 만들지 않는다.
     """
     normalized = [str(symbol).strip().upper() for symbol in symbols]
     unsupported = sorted(

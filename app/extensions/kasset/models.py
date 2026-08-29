@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     TIMESTAMP,
-    BigInteger,
+    Date,
     Boolean,
     CheckConstraint,
     ForeignKey,
@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -252,3 +253,38 @@ class BrokerCredential(Base):
         onupdate=func.now(),
     )
     last_verified_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class KAssetDailyRoutineSetting(Base):
+    """One owner-scoped routine selection for one KST calendar date."""
+
+    __tablename__ = "kasset_ai_daily_routine_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(enabled_routines) = 'array'",
+            name="enabled_routines_array",
+        ),
+        CheckConstraint(
+            "jsonb_array_length(enabled_routines) <= 4",
+            name="enabled_routines_bounded",
+        ),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    routine_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    enabled_routines: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

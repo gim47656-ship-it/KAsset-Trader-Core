@@ -104,7 +104,7 @@ class MobileWatchlistService:
                 raise MobileApiError(
                     409,
                     "WATCHLIST_LIMIT_REACHED",
-                    "관심종목은 최대 20개까지 등록할 수 있습니다.",
+                    "관심종목은 최대 50개까지 등록할 수 있습니다.",
                 )
             watch_item.is_active = True
             await db.commit()
@@ -115,7 +115,7 @@ class MobileWatchlistService:
             raise MobileApiError(
                 409,
                 "WATCHLIST_LIMIT_REACHED",
-                "관심종목은 최대 20개까지 등록할 수 있습니다.",
+                "관심종목은 최대 50개까지 등록할 수 있습니다.",
             )
 
         db.add(

@@ -53,7 +53,7 @@ MarketIndicatorKey = Literal[
 ]
 MarketIndicatorGroup = Literal["VOLATILITY", "RATE", "COMMODITY", "CRYPTO"]
 MarketIndicatorUnit = Literal["POINT", "PERCENT", "USD", "KRW"]
-MAX_WATCHLIST_ITEMS = 20
+MAX_WATCHLIST_ITEMS = 50
 
 
 class WatchlistCreateRequest(AndroidWireModel):

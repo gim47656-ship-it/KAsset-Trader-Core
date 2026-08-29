@@ -306,6 +306,53 @@ async def test_dart_landing_without_viewer_uses_opendart_document_zip(
         ("opendart.fss.or.kr", "/api/document.xml"),
     ]
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dart_zip_prioritizes_correction_table_before_long_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "opendart_api_key", "test-opendart-secret")
+    landing_url = (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829009999"
+    )
+    noise = "반복 안내 문구와 서식 설명 " * 600
+    document = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<DOCUMENT><TITLE>[기재정정] 단일판매ㆍ공급계약체결</TITLE>"
+        f"<P>{noise}</P>"
+        "<TABLE>"
+        "<TR><TH>정정사유</TH><TD>계약금액 변경</TD></TR>"
+        "<TR><TH>항목</TH><TH>정정 전</TH><TH>정정 후</TH></TR>"
+        "<TR><TD>계약금액</TD><TD>12,000,000,000원</TD>"
+        "<TD>18,000,000,000원</TD></TR>"
+        "<TR><TD>계약기간</TD><TD>2026-09-01</TD><TD>2029-08-31</TD></TR>"
+        "</TABLE></DOCUMENT>"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(
+                200,
+                text="<html><body>DART landing without viewer metadata</body></html>",
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            content=_document_zip(document),
+            headers={"Content-Type": "application/zip"},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        text = await DisclosureTextFetcher(client, max_text_chars=500).fetch(
+            landing_url
+        )
+
+    assert text.startswith("정정사유 | 계약금액 변경")
+    assert "항목 | 정정 전 | 정정 후" in text
+    assert "계약금액 | 12,000,000,000원 | 18,000,000,000원" in text
+    assert "계약기간 | 2026-09-01 | 2029-08-31" in text
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

@@ -459,3 +459,139 @@ async def test_every_disclosure_provider_maps_to_disclosure_kind(
     news_titles = {item["title"] for item in news_items}
     assert disclosure_titles == {"미국 공시"}
     assert news_titles == {"다른 시장 뉴스"}
+
+@pytest.mark.asyncio
+async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
+    market_news_client: tuple[httpx.AsyncClient, _NewsSeed],
+    db_session: AsyncSession,
+) -> None:
+    client, seed = market_news_client
+    prefix = uuid4().hex
+    published_at = datetime(2099, 8, 29, 0, 0)
+    important = _article(
+        prefix=prefix,
+        slug="important-listed",
+        title="단일판매ㆍ공급계약체결",
+        symbol=seed.symbol,
+        feed_source="dart",
+        published_at=published_at,
+        source="DART",
+    )
+    routine = _article(
+        prefix=prefix,
+        slug="routine-listed",
+        title="주주총회소집결의",
+        symbol=seed.symbol,
+        feed_source="dart",
+        published_at=published_at,
+        source="DART",
+    )
+    low_information = _article(
+        prefix=prefix,
+        slug="low-information-listed",
+        title="대규모기업집단현황공시[개별회사]",
+        symbol=seed.symbol,
+        feed_source="dart",
+        published_at=published_at,
+        source="DART",
+    )
+    unlisted = _article(
+        prefix=prefix,
+        slug="important-unlisted",
+        title="유상증자결정",
+        symbol=None,
+        feed_source="dart",
+        published_at=published_at,
+        source="DART",
+    )
+    analyzed_news = _article(
+        prefix=prefix,
+        slug="analyzed-news",
+        title="원문 기반 분석 뉴스",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2099, 8, 29, 10, 0),
+        source="Example Wire",
+    )
+    title_only_news = _article(
+        prefix=prefix,
+        slug="title-only-news",
+        title="제목만 있는 최신 뉴스",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2099, 8, 29, 11, 0),
+        source="Example Wire",
+    )
+    db_session.add_all(
+        [
+            important,
+            routine,
+            low_information,
+            unlisted,
+            analyzed_news,
+            title_only_news,
+        ]
+    )
+    await db_session.flush()
+    db_session.add(
+        _analysis(
+            analyzed_news.id,
+            summary="상장사가 실제 계약 조건을 발표했다. 원문 수치를 확인한 요약이다.",
+            created_at=datetime(2099, 8, 29, 10, 1),
+        )
+    )
+    await db_session.commit()
+
+    try:
+        first = await client.get(
+            "/api/v1/market/news",
+            params={"market": "KRX", "kind": "disclosure", "limit": 1},
+        )
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert first_payload["items"][0]["title"] == important.title
+
+        second = await client.get(
+            "/api/v1/market/news",
+            params={
+                "market": "KRX",
+                "kind": "disclosure",
+                "limit": 1,
+                "cursor": first_payload["nextCursor"],
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["items"][0]["title"] == routine.title
+
+        global_response = await client.get(
+            "/api/v1/market/news",
+            params={"market": "KRX", "kind": "disclosure", "limit": 50},
+        )
+        global_titles = {
+            item["title"] for item in global_response.json()["items"]
+        }
+        assert important.title in global_titles
+        assert routine.title in global_titles
+        assert low_information.title not in global_titles
+        assert unlisted.title not in global_titles
+
+        global_news = await client.get(
+            "/api/v1/market/news",
+            params={"market": "KRX", "kind": "news", "limit": 2},
+        )
+        assert global_news.status_code == 200
+        assert [
+            item["title"] for item in global_news.json()["items"]
+        ] == [analyzed_news.title, title_only_news.title]
+
+        symbol_response = await _page(client, seed, kind="disclosure", limit=20)
+        symbol_titles = {
+            item["title"] for item in symbol_response.json()["items"]
+        }
+        assert low_information.title in symbol_titles
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            delete(NewsArticle).where(NewsArticle.url.like(f"%/{prefix}/%"))
+        )
+        await db_session.commit()

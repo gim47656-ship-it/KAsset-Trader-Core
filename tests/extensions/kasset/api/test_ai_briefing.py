@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.dialects import postgresql
@@ -18,7 +20,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
+from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
 from app.extensions.kasset.api.installation import install_android_compat_api
+from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.models.investment_reports import InvestmentReport
 from app.models.news import NewsArticle, NewsArticleRelatedSymbol
 from app.models.research_reports import ResearchReport
@@ -76,6 +80,12 @@ class _FakeResult:
         return self._rows[0] if self._rows else None
 
 
+    def scalar_one(self) -> Any:
+        if len(self._rows) != 1:
+            raise RuntimeError("expected exactly one fake row")
+        return self._rows[0]
+
+
 class _FakeSession:
     """Dispatches each ORM statement to canned rows keyed by entity name."""
 
@@ -96,6 +106,14 @@ class _FakeSession:
         self.statements[entity] = statement
         return _FakeResult(self._rows.get(entity, []))
 
+    async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any | None:
+        return (await self.execute(statement, *args, **kwargs)).first()
+
+    async def scalars(
+        self, statement: Any, *args: Any, **kwargs: Any
+    ) -> _FakeResult:
+        return (await self.execute(statement, *args, **kwargs)).scalars()
+
 
 def _client(
     session: _FakeSession | None = None, *, authenticated: bool = True
@@ -110,7 +128,7 @@ def _client(
     if authenticated:
 
         async def _session_override() -> object:
-            return object()
+            return SimpleNamespace(user=SimpleNamespace(id=42))
 
         app.dependency_overrides[get_mobile_session] = _session_override
     return TestClient(app)
@@ -253,12 +271,54 @@ def test_empty_stores_return_http_200_with_truthful_empty_state() -> None:
     assert body["news"] == {"status": "empty", "refreshedAt": None, "items": []}
     assert body["research"] == {"status": "empty", "refreshedAt": None, "items": []}
     assert body["briefing"]["status"] == "unavailable"
+    assert body["routineAlerts"] == []
     assert (
         body["briefing"]["unavailableReason"]
         == "저장된 AI 브리핑 제공자가 아직 연결되지 않았습니다."
     )
     assert body["briefing"]["id"] is None
     assert body["briefing"]["dataStatus"] == "unknown"
+
+
+
+def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_owner_ids: list[int] = []
+
+    async def load_alerts(
+        _db: Any, owner_user_id: int, *, now: datetime
+    ) -> list[DailyRoutineAlert]:
+        observed_owner_ids.append(owner_user_id)
+        return [
+            DailyRoutineAlert(
+                id="news:701",
+                kind="TRUMP_POLICY",
+                headline="Trump tariff policy changes",
+                summary=None,
+                source="Reuters",
+                occurred_at=now,
+            )
+        ]
+
+    monkeypatch.setattr(daily_routine_service, "get_alerts", load_alerts)
+    with _client(_FakeSession()) as client:
+        body = client.get("/api/v1/ai/briefing?market=us").json()
+
+    assert observed_owner_ids == [42]
+    assert body["status"] == "available"
+    assert body["routineAlerts"] == [
+        {
+            "id": "news:701",
+            "kind": "TRUMP_POLICY",
+            "headline": "Trump tariff policy changes",
+            "summary": None,
+            "symbol": None,
+            "source": "Reuters",
+            "url": None,
+            "occurredAt": body["routineAlerts"][0]["occurredAt"],
+        }
+    ]
 
 
 def test_query_failure_is_a_sanitized_5xx_not_an_empty_payload() -> None:

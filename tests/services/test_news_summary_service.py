@@ -117,6 +117,8 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
     assert call["schema"]["additionalProperties"] is False
     assert "2~4문장" in call["additional_instructions"]
     assert "투자 권유" in call["additional_instructions"]
+    assert "핵심 사건과 주체" in call["additional_instructions"]
+    assert "투자자 영향" in call["additional_instructions"]
 
 
 @pytest.mark.unit
@@ -194,6 +196,62 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
                     "회사는 신규 제품을 공개했으며 구체적인 매출 수치는 밝히지 않았다. "
                     "출시 일정도 추후 공개할 예정이다."
                 ),
+                raw_excerpt=None,
+            )
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generator_rejects_template_language_and_multi_sentence_title_fallback() -> None:
+    body_news = NewsSummaryInput(
+        title="삼성전자 공급 계약 체결",
+        source="Example Wire",
+        article_content=(
+            "삼성전자는 데이터센터 운영사와 장기 공급 계약을 체결했다. "
+            "계약 기간은 2026년 9월부터 2029년 8월까지다."
+        ),
+        raw_excerpt=None,
+    )
+    template_generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient(
+            [
+                {
+                    "summary": (
+                        "이 기사는 삼성전자의 공급 계약을 다룬다. "
+                        "계약 기간은 2026년 9월부터 2029년 8월까지다."
+                    ),
+                    "sentiment": "neutral",
+                    "confidence": 70,
+                }
+            ]
+        ),
+        model="gpt-5.6-luna",
+    )
+    with pytest.raises(ValueError, match="template language"):
+        await template_generator.summarize(body_news)
+
+    title_generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient(
+            [
+                {
+                    "summary": (
+                        "엔비디아가 분기 실적을 발표했다. "
+                        "투자자들은 결과에 주목하고 있다."
+                    ),
+                    "sentiment": "neutral",
+                    "confidence": 60,
+                }
+            ]
+        ),
+        model="gpt-5.6-luna",
+    )
+    with pytest.raises(ValueError, match="1 to 1 sentences"):
+        await title_generator.summarize(
+            NewsSummaryInput(
+                title="Nvidia Reports Quarterly Results",
+                source="Example Wire",
+                article_content=None,
                 raw_excerpt=None,
             )
         )
@@ -340,6 +398,10 @@ async def test_google_ingestion_invokes_summary_only_after_persistence(
     async def fake_collect(**kwargs):
         return collected
 
+    async def fake_enrich(collected, **kwargs):
+        events.append("enrich")
+        return collected
+
     async def fake_persist(db, **kwargs):
         events.append("persist")
         return FeedArticleUpsertCounts(inserted=1, updated=0, skipped=0)
@@ -348,6 +410,7 @@ async def test_google_ingestion_invokes_summary_only_after_persistence(
         events.append(f"summarize:{','.join(article_urls)}")
 
     monkeypatch.setattr(ingestion, "_collect_with_client", fake_collect)
+    monkeypatch.setattr(ingestion, "_enrich_with_client", fake_enrich)
     monkeypatch.setattr(ingestion, "_persist_collected", fake_persist)
     monkeypatch.setattr(ingestion, "_summarize_after_ingest", fake_summarize)
 
@@ -358,7 +421,7 @@ async def test_google_ingestion_invokes_summary_only_after_persistence(
     )
 
     assert result == (1, 0, 0)
-    assert events == ["persist", f"summarize:{item.url}"]
+    assert events == ["enrich", "persist", f"summarize:{item.url}"]
 
 
 class FakeSessionContext:

@@ -27,14 +27,19 @@ def _unique_url(prefix: str) -> str:
     return f"https://x/rob491-{prefix}-{uuid.uuid4()}"
 
 
-def _disclosure_item(url: str, title: str) -> DisclosureArticleInput:
+def _disclosure_item(
+    url: str,
+    title: str,
+    *,
+    stock_symbol: str | None = "005930",
+) -> DisclosureArticleInput:
     return DisclosureArticleInput(
         url=url,
         title=title,
         source="DART",
         feed_source="dart_disclosure",
         market="kr",
-        stock_symbol="005930",
+        stock_symbol=stock_symbol,
         stock_name="삼성전자",
         published_at=datetime(2026, 8, 29, 9, 0, tzinfo=UTC),
         keywords=["공시"],
@@ -102,6 +107,37 @@ async def test_upsert_disclosures_chunks_large_batch_and_preserves_counts(
     assert counting_session.select_calls == 5
     assert counting_session.insert_calls == 5
     assert counting_session.commit_calls == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_disclosure_upsert_fills_later_listed_symbol_without_overwrite(
+    db_session,
+) -> None:
+    url = _unique_url("dart-symbol-heal")
+    await symbol_news_store.upsert_disclosures(
+        db_session,
+        [_disclosure_item(url, "유상증자결정", stock_symbol=None)],
+    )
+
+    counts = await symbol_news_store.upsert_disclosures(
+        db_session,
+        [_disclosure_item(url, "유상증자결정", stock_symbol="005930")],
+    )
+    stored = await db_session.scalar(
+        select(NewsArticle).where(NewsArticle.url == url)
+    )
+
+    assert counts.updated == 1
+    assert stored is not None
+    assert stored.stock_symbol == "005930"
+    unchanged = await symbol_news_store.upsert_disclosures(
+        db_session,
+        [_disclosure_item(url, "유상증자결정", stock_symbol="000660")],
+    )
+    await db_session.refresh(stored)
+    assert unchanged.skipped == 1
+    assert stored.stock_symbol == "005930"
 
 
 @pytest.mark.integration

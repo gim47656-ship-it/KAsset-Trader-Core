@@ -857,7 +857,7 @@ async def _completed_index_snapshot() -> tuple[
     _SessionStates,
     MarketOverviewErrorCode | None,
 ]:
-    """시장 캘린더가 증명한 최신 완료 정규장으로 지수 행을 제한한다."""
+    """완료 정규장 cutoff를 home/detail 공통 지수 선택기에 전달한다."""
     moment = datetime.now(UTC)
     sessions, session_states = await _session_snapshot(moment=moment)
     kr_window, us_window = await asyncio.gather(
@@ -921,7 +921,7 @@ async def _completed_index_snapshot() -> tuple[
 
 async def _build_market_overview() -> MarketOverviewResponse:
     # 환율·BTC·시장지표는 지수의 완료 세션 확인과 동시에 조회한다. 지수 가격은
-    # 캘린더가 증명한 정규장 종료 시각을 얻은 뒤에만 일봉에서 고른다.
+    # 캘린더 cutoff와 공통 선택기가 허용한 target/직전 1개 세션 일봉만 쓴다.
     (
         index_snapshot_result,
         fx_result,

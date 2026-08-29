@@ -51,6 +51,7 @@ from app.extensions.kasset.api.stream.runtime import (
 )
 from app.extensions.kasset.api.stream.session import SlowConsumer, StreamSession
 from app.extensions.kasset.api.stream.topics import (
+    MAX_CLIENT_TOPICS,
     MAX_UPSTREAM_TOPICS,
     REJECT_BAD_SYMBOL,
     REJECT_TOO_MANY,
@@ -966,6 +967,16 @@ def test_client_topic_cap_rejects_the_overflow_only() -> None:
     assert ("quote:US:bad", REJECT_BAD_SYMBOL) in rejected
 
 
+def test_default_client_topic_cap_accepts_54_and_rejects_55th() -> None:
+    session = StreamSession(send=_never_returns)
+    topics = [f"quote:US:S{index:03d}" for index in range(55)]
+
+    accepted, rejected, _ = session.declare(topics)
+
+    assert len(accepted) == MAX_CLIENT_TOPICS == 54
+    assert rejected == ((topics[54], REJECT_TOO_MANY),)
+
+
 async def _never_returns(_message: str) -> None:
     await asyncio.Event().wait()
 
@@ -1402,7 +1413,7 @@ def test_stream_delivers_a_tick_as_a_rest_shaped_quote(
                 "type": contract.MESSAGE_READY,
                 "protocol": contract.STREAM_PROTOCOL_VERSION,
                 "upstream": "LIVE",
-                "maxTopics": 24,
+                "maxTopics": 54,
                 "pingIntervalSeconds": 30,
                 "pollIntervalSeconds": contract.POLL_FALLBACK_INTERVAL_SECONDS,
             }

@@ -24,7 +24,7 @@ from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_market_data
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_schemas import Quote
-from app.extensions.kasset.api.schemas import MarketSessionState
+from app.extensions.kasset.api.schemas import MAX_WATCHLIST_ITEMS, MarketSessionState
 from app.extensions.kasset.api.toss_market_data import (
     TOSS_QUOTE_SOURCE,
     TossQuotePoint,
@@ -47,7 +47,7 @@ from app.services.nxt_preflight import NxtTradability
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_SYMBOLS = 50
+MAX_BATCH_SYMBOLS = MAX_WATCHLIST_ITEMS
 CANDLE_QUOTE_SOURCE = "PAPER_CANDLES"
 
 _KRX_SYMBOL_RE = re.compile(r"^\d{6}$")

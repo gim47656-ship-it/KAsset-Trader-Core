@@ -4,7 +4,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +25,7 @@ from app.mcp_server.tooling import fundamentals_sources_indices as index_sources
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
     DATA_STATE_MARKET_CLOSED,
+    DATA_STATE_STALE,
 )
 from app.middleware.auth import AuthMiddleware
 from app.services.exchange_rate_service import (
@@ -34,6 +35,7 @@ from app.services.exchange_rate_service import (
 
 _KR_COMPLETED_END = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
 _US_COMPLETED_END = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+_US_STALE_END = datetime(2026, 8, 27, 20, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -443,9 +445,10 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
 
 
 @pytest.mark.asyncio
-async def test_us_completed_batch_does_not_fall_back_to_previous_session(
+async def test_us_completed_batch_uses_only_previous_xnys_session_for_blank_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # UTC 자정 라벨은 미국 동부 기준으로 각각 8/26, 8/27, 8/28 세션이다.
     frame = pd.DataFrame(
         {
             "Open": [25900.0, 26300.0, 26450.0],
@@ -454,10 +457,19 @@ async def test_us_completed_batch_does_not_fall_back_to_previous_session(
             "Close": [26000.0, 26541.35, float("nan")],
             "Volume": [1000.0, 1200.0, float("nan")],
         },
-        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28"]),
+        index=pd.to_datetime(
+            [
+                "2026-08-27T00:00:00Z",
+                "2026-08-28T00:00:00Z",
+                "2026-08-29T00:00:00Z",
+            ],
+        ),
     )
+    calls = 0
 
     def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
         return frame
 
     @contextmanager
@@ -476,11 +488,98 @@ async def test_us_completed_batch_does_not_fall_back_to_previous_session(
         completed_as_of=_US_COMPLETED_END,
     )
 
+    assert calls == 1
+    assert rows == [
+        {
+            "symbol": "NASDAQ",
+            "name": "NASDAQ Composite",
+            "current": 26541.35,
+            "previous_close": 26000.0,
+            "change": 541.35,
+            "change_pct": 2.08,
+            "open": 26300.0,
+            "high": 26700.0,
+            "low": 26200.0,
+            "volume": 1200,
+            "source": "yfinance",
+            "quote_asof": "2026-08-27T20:00:00+00:00",
+            "data_state": "stale",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_us_completed_batch_stays_unavailable_without_actual_completed_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "Open": [25900.0, 26300.0, 26450.0, 27000.0],
+            "High": [26200.0, 26700.0, 26500.0, 27100.0],
+            "Low": [25800.0, 26200.0, 26300.0, 26000.0],
+            "Close": [26000.0, float("nan"), float("nan"), 26100.0],
+            "Volume": [1000.0, float("nan"), float("nan"), 300.0],
+        },
+        index=pd.to_datetime(
+            ["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]
+        ),
+    )
+    calls = 0
+
+    def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        return frame
+
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(index_sources.yf, "download", download)
+    monkeypatch.setattr(
+        index_sources,
+        "yfinance_tracing_session",
+        traced_session,
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["NASDAQ"],
+        completed_as_of=_US_COMPLETED_END,
+    )
+
+    assert calls == 1
     assert rows[0]["symbol"] == "NASDAQ"
     assert rows[0]["current"] is None
     assert rows[0]["previous_close"] is None
     assert rows[0]["unavailable"] is True
     assert "quote_asof" not in rows[0]
+
+
+def test_us_completed_selector_rejects_previous_session_beyond_day_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {"close": [26000.0]},
+        index=pd.to_datetime(["2026-08-22"]),
+    )
+    monkeypatch.setattr(
+        index_sources,
+        "previous_trading_session",
+        lambda market, day: date(2026, 8, 22),
+    )
+
+    selected, selected_as_of, stale_fallback = (
+        index_sources._select_completed_us_session_rows(
+            frame,
+            completed_as_of=_US_COMPLETED_END,
+        )
+    )
+
+    assert selected.empty
+    assert selected_as_of is None
+    assert stale_fallback is False
+
+
 
 
 @pytest.mark.asyncio
@@ -504,9 +603,27 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
             "current": 26402.42,
             "change": -138.93,
             "change_pct": -0.52,
-            "quote_asof": _US_COMPLETED_END.isoformat(),
+            "quote_asof": _US_STALE_END.isoformat(),
             "source": "yfinance",
-            "data_state": DATA_STATE_MARKET_CLOSED,
+            "data_state": DATA_STATE_STALE,
+        },
+        "SPX": {
+            "symbol": "SPX",
+            "current": 6460.26,
+            "change": -41.6,
+            "change_pct": -0.64,
+            "quote_asof": _US_STALE_END.isoformat(),
+            "source": "yfinance",
+            "data_state": DATA_STATE_STALE,
+        },
+        "DJI": {
+            "symbol": "DJI",
+            "current": 45544.88,
+            "change": -92.02,
+            "change_pct": -0.2,
+            "quote_asof": _US_STALE_END.isoformat(),
+            "source": "yfinance",
+            "data_state": DATA_STATE_STALE,
         },
         **{row["symbol"]: row for row in _indicator_rows()},
     }
@@ -546,11 +663,13 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
                 live_row["quote_asof"] = "2026-08-28T18:59:00+09:00"
             return {"indices": [live_row], "history": []}
         assert completed_as_of_by_market == {market: expected_end}
+        previous_date = "2026-08-27" if market == "KRX" else "2026-08-26"
+        latest_date = "2026-08-28" if market == "KRX" else "2026-08-27"
         return {
             "indices": [completed_rows[symbol]],
             "history": [
                 {
-                    "date": "2026-08-27",
+                    "date": previous_date,
                     "open": 1,
                     "high": 2,
                     "low": 1,
@@ -558,7 +677,7 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
                     "volume": None,
                 },
                 {
-                    "date": "2026-08-28",
+                    "date": latest_date,
                     "open": 2,
                     "high": 3,
                     "low": 2,
@@ -572,23 +691,41 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
     monkeypatch.setattr(mod, "handle_get_market_index", completed_detail)
 
     overview = await mod._build_market_overview()
-    kospi_detail = await mod._build_market_index_detail("KOSPI", "1W")
-    nasdaq_detail = await mod._build_market_index_detail("NASDAQ", "1W")
+    details = [
+        await mod._build_market_index_detail(symbol, "1W")
+        for symbol in ("KOSPI", "SPX", "NASDAQ", "DJI")
+    ]
     overview_by_symbol = {item.symbol: item for item in overview.indices}
 
-    for detail in (kospi_detail, nasdaq_detail):
+    for detail in details:
         home = overview_by_symbol[detail.summary.symbol]
-        assert (home.price, home.change_amount, home.change_rate, home.as_of) == (
+        assert (
+            home.price,
+            home.change_amount,
+            home.change_rate,
+            home.as_of,
+            home.status,
+        ) == (
             detail.summary.price,
             detail.summary.change_amount,
             detail.summary.change_rate,
             detail.summary.as_of,
+            detail.summary.status,
         )
         assert len(detail.candles) == 2
-    assert kospi_detail.summary.price == "6788.88"
-    assert kospi_detail.summary.as_of == "2026-08-28T06:30:00Z"
-    assert nasdaq_detail.summary.price == "26402.42"
-    assert nasdaq_detail.summary.as_of == "2026-08-28T20:00:00Z"
+    prices = {detail.summary.symbol: detail.summary.price for detail in details}
+    assert prices == {
+        "KOSPI": "6788.88",
+        "SPX": "6460.26",
+        "NASDAQ": "26402.42",
+        "DJI": "45544.88",
+    }
+    assert details[0].summary.as_of == "2026-08-28T06:30:00Z"
+    assert all(
+        detail.summary.as_of == "2026-08-27T20:00:00Z"
+        and detail.summary.status == "stale"
+        for detail in details[1:]
+    )
 
 
 def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:

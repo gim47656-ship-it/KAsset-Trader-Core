@@ -30,6 +30,10 @@ from app.extensions.kasset.api.auth import (
 )
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
+from app.extensions.kasset.api.daily_routine_schemas import (
+    DailyRoutineResponse,
+    DailyRoutineUpdateRequest,
+)
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_adapter
 from app.extensions.kasset.api.orderbook_store import (
@@ -98,6 +102,7 @@ from app.extensions.kasset.api.toss_market_data import (
     toss_market_data,
 )
 from app.extensions.kasset.api.watchlist import watchlist_service
+from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
@@ -995,6 +1000,27 @@ async def update_ai_trading_state(
     return _ai_trading_state_response(snapshot)
 
 
+@router.get("/ai/daily-routine", response_model=DailyRoutineResponse)
+async def ai_daily_routine(
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DailyRoutineResponse:
+    return await daily_routine_service.get(db, session.user.id)
+
+
+@router.put("/ai/daily-routine", response_model=DailyRoutineResponse)
+async def update_ai_daily_routine(
+    request: DailyRoutineUpdateRequest,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DailyRoutineResponse:
+    return await daily_routine_service.update(
+        db,
+        session.user.id,
+        request.enabled_routines,
+    )
+
+
 @router.get("/ai/status", response_model=AiStatus)
 async def ai_status(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
@@ -1008,13 +1034,19 @@ async def ai_status(
 
 @router.get("/ai/briefing", response_model=AiBriefingResponse)
 async def ai_briefing(
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     market: str,
     symbol: Annotated[str | None, Query(max_length=40)] = None,
     limit: Annotated[int, Query(ge=MIN_LIMIT, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> AiBriefingResponse:
-    return await build_mobile_ai_briefing(db, market=market, symbol=symbol, limit=limit)
+    return await build_mobile_ai_briefing(
+        db,
+        owner_user_id=session.user.id,
+        market=market,
+        symbol=symbol,
+        limit=limit,
+    )
 
 
 def _require_trader(session: MobileSession) -> None:

@@ -9,7 +9,7 @@ import hmac
 import struct
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, desc, exists, func, or_, select
+from sqlalchemy import and_, case, desc, exists, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -25,15 +25,20 @@ from app.extensions.kasset.api.schemas import (
 from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.symbol_news_relevance import SymbolNewsRelevance
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
+from app.services.disclosures.quality import (
+    DART_HIGH_VALUE_TITLE_TERMS,
+    DART_LOW_INFORMATION_TITLE_TERMS,
+    title_matches_any,
+)
 
 DEFAULT_LIMIT = 20
 MIN_LIMIT = 1
 MAX_LIMIT = 50
 
-_CURSOR_VERSION = 1
-_CURSOR_CONTEXT = b"kasset-market-news-cursor:v1\0"
+_CURSOR_VERSION = 2
+_CURSOR_CONTEXT = b"kasset-market-news-cursor:v2\0"
 _CURSOR_SIGNATURE_BYTES = 16
-_CURSOR_STRUCT = struct.Struct("!BBqq")
+_CURSOR_STRUCT = struct.Struct("!BBBqq")
 _NAIVE_EPOCH = datetime(1970, 1, 1)
 _MAX_BIGINT = 2**63 - 1
 
@@ -57,11 +62,17 @@ def _datetime_to_microseconds(value: datetime) -> int:
     return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
 
 
-def _encode_cursor(published_at: datetime | None, article_id: int) -> str:
-    """게시시각과 행 식별자를 내부 필드명 없는 서명 토큰으로 인코딩한다."""
+def _encode_cursor(
+    published_at: datetime | None,
+    curation_rank: int,
+    article_id: int,
+) -> str:
+    """게시시각·큐레이션 순위·행 식별자를 서명 토큰으로 인코딩한다."""
 
     if article_id < 1 or article_id > _MAX_BIGINT:
         raise ValueError("article_id is outside signed bigint range")
+    if not 0 <= curation_rank <= 255:
+        raise ValueError("curation_rank is outside unsigned byte range")
     is_null = int(published_at is None)
     published_microseconds = (
         0 if published_at is None else _datetime_to_microseconds(published_at)
@@ -69,6 +80,7 @@ def _encode_cursor(published_at: datetime | None, article_id: int) -> str:
     payload = _CURSOR_STRUCT.pack(
         _CURSOR_VERSION,
         is_null,
+        curation_rank,
         published_microseconds,
         article_id,
     )
@@ -76,7 +88,7 @@ def _encode_cursor(published_at: datetime | None, article_id: int) -> str:
     return base64.urlsafe_b64encode(token).rstrip(b"=").decode("ascii")
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime | None, int]:
+def _decode_cursor(cursor: str) -> tuple[datetime | None, int, int]:
     """서명과 정규 인코딩을 검증하고 keyset 경계를 복원한다."""
 
     try:
@@ -94,9 +106,13 @@ def _decode_cursor(cursor: str) -> tuple[datetime | None, int]:
         if not hmac.compare_digest(signature, _cursor_signature(payload)):
             raise ValueError("cursor signature does not match")
 
-        version, is_null, published_microseconds, article_id = _CURSOR_STRUCT.unpack(
-            payload
-        )
+        (
+            version,
+            is_null,
+            curation_rank,
+            published_microseconds,
+            article_id,
+        ) = _CURSOR_STRUCT.unpack(payload)
         if version != _CURSOR_VERSION or is_null not in {0, 1}:
             raise ValueError("cursor version or null marker is invalid")
         if article_id < 1:
@@ -104,8 +120,12 @@ def _decode_cursor(cursor: str) -> tuple[datetime | None, int]:
         if is_null:
             if published_microseconds != 0:
                 raise ValueError("null cursor contains a timestamp")
-            return None, article_id
-        return _NAIVE_EPOCH + timedelta(microseconds=published_microseconds), article_id
+            return None, curation_rank, article_id
+        return (
+            _NAIVE_EPOCH + timedelta(microseconds=published_microseconds),
+            curation_rank,
+            article_id,
+        )
     except (
         UnicodeEncodeError,
         binascii.Error,
@@ -184,11 +204,12 @@ async def list_market_news(
     limit: int,
     cursor: str | None,
 ) -> MarketNewsResponse:
-    """필터와 `(게시시각, id)` keyset으로 뉴스·공시 한 페이지를 읽는다."""
+    """필터와 `(게시시각, 큐레이션 순위, id)` keyset으로 한 페이지를 읽는다."""
 
     normalized_market = _market_filter(market)
     normalized_symbol = _symbol_filter(symbol)
 
+    curation_rank = literal(0)
     statement = select(NewsArticle)
     if normalized_market is not None:
         statement = statement.where(NewsArticle.market == normalized_market)
@@ -212,6 +233,56 @@ async def list_market_news(
                 exists().where(*relevance_conditions),
             )
         )
+    else:
+        is_dart = NewsArticle.feed_source == "dart"
+        not_dart = or_(
+            NewsArticle.feed_source.is_(None),
+            NewsArticle.feed_source != "dart",
+        )
+        important_dart = title_matches_any(
+            NewsArticle.title,
+            DART_HIGH_VALUE_TITLE_TERMS,
+        )
+        low_information_dart = title_matches_any(
+            NewsArticle.title,
+            DART_LOW_INFORMATION_TITLE_TERMS,
+        )
+        statement = statement.where(
+            or_(
+                not_dart,
+                and_(
+                    is_dart,
+                    NewsArticle.stock_symbol.is_not(None),
+                    or_(
+                        ~low_information_dart,
+                        NewsArticle.summary.is_not(None),
+                    ),
+                ),
+            )
+        )
+        is_disclosure = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
+        is_ordinary_news = or_(
+            NewsArticle.feed_source.is_(None),
+            NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
+        )
+        has_analysis = exists().where(
+            NewsAnalysisResult.article_id == NewsArticle.id
+        )
+        curation_rank = case(
+            (and_(is_dart, important_dart), 0),
+            (and_(is_disclosure, NewsArticle.summary.is_not(None)), 0),
+            (and_(is_ordinary_news, has_analysis), 0),
+            (is_disclosure, 1),
+            (
+                and_(
+                    is_ordinary_news,
+                    NewsArticle.article_content.is_not(None),
+                ),
+                1,
+            ),
+            else_=2,
+        )
+
     if kind == "disclosure":
         statement = statement.where(
             NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
@@ -224,44 +295,77 @@ async def list_market_news(
             )
         )
 
+    day_bucket = func.date_trunc("day", NewsArticle.article_published_at)
     if cursor is not None:
-        cursor_published_at, cursor_id = _decode_cursor(cursor)
+        cursor_published_at, cursor_rank, cursor_id = _decode_cursor(cursor)
         if cursor_published_at is None:
             statement = statement.where(
                 and_(
                     NewsArticle.article_published_at.is_(None),
-                    NewsArticle.id < cursor_id,
+                    or_(
+                        curation_rank > cursor_rank,
+                        and_(
+                            curation_rank == cursor_rank,
+                            NewsArticle.id < cursor_id,
+                        ),
+                    ),
                 )
             )
         else:
+            cursor_day = cursor_published_at.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            same_day_tail = or_(
+                curation_rank > cursor_rank,
+                and_(
+                    curation_rank == cursor_rank,
+                    or_(
+                        NewsArticle.article_published_at < cursor_published_at,
+                        and_(
+                            NewsArticle.article_published_at
+                            == cursor_published_at,
+                            NewsArticle.id < cursor_id,
+                        ),
+                    ),
+                ),
+            )
             statement = statement.where(
                 or_(
-                    NewsArticle.article_published_at < cursor_published_at,
-                    and_(
-                        NewsArticle.article_published_at == cursor_published_at,
-                        NewsArticle.id < cursor_id,
-                    ),
+                    day_bucket < cursor_day,
+                    and_(day_bucket == cursor_day, same_day_tail),
                     NewsArticle.article_published_at.is_(None),
                 )
             )
 
-    statement = statement.order_by(
-        NewsArticle.article_published_at.desc().nulls_last(),
-        desc(NewsArticle.id),
-    ).limit(limit + 1)
-    rows = list((await db.execute(statement)).scalars().all())
+    statement = (
+        statement.add_columns(curation_rank.label("curation_rank"))
+        .order_by(
+            day_bucket.desc().nulls_last(),
+            curation_rank.asc(),
+            NewsArticle.article_published_at.desc().nulls_last(),
+            desc(NewsArticle.id),
+        )
+        .limit(limit + 1)
+    )
+    rows = list((await db.execute(statement)).all())
     page = rows[:limit]
     next_cursor = None
     if len(rows) > limit:
-        last = page[-1]
-        next_cursor = _encode_cursor(last.article_published_at, last.id)
-
+        last_article, last_rank = page[-1]
+        next_cursor = _encode_cursor(
+            last_article.article_published_at,
+            int(last_rank),
+            last_article.id,
+        )
 
     news_summaries = await _latest_news_summaries(
         db,
         [
             article.id
-            for article in page
+            for article, _rank in page
             if article.feed_source not in DISCLOSURE_FEED_SOURCES
         ],
     )
@@ -285,7 +389,7 @@ async def list_market_news(
                 symbol=article.stock_symbol,
                 stock_name=article.stock_name,
             )
-            for article in page
+            for article, _rank in page
         ],
         next_cursor=next_cursor,
     )

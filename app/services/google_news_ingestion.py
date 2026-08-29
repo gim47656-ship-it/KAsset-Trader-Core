@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import re
+import socket
 import uuid
-from collections.abc import Collection
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Protocol
+from urllib import robotparser
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
+from bs4 import BeautifulSoup, Comment
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import symbol_news_store
@@ -33,6 +40,23 @@ logger = logging.getLogger(__name__)
 
 REQUEST_INTERVAL_SECONDS = 1.0
 _HTTP_TIMEOUT_SECONDS = 15.0
+ARTICLE_FETCH_TIMEOUT_SECONDS = 8.0
+ARTICLE_ENRICHMENT_BATCH_SIZE = 20
+ARTICLE_ENRICHMENT_CONCURRENCY = 4
+ARTICLE_MAX_REDIRECTS = 3
+ARTICLE_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+ARTICLE_MAX_TEXT_CHARS = 12_000
+ARTICLE_ROBOTS_MAX_RESPONSE_BYTES = 256 * 1024
+ARTICLE_MIN_TEXT_CHARS = 160
+_ARTICLE_USER_AGENT = "KAsset-Trader-Core news-ingestion/1.0"
+_ARTICLE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_GOOGLE_NEWS_HOST = "news.google.com"
+_PAYWALL_RE = re.compile(
+    r"(?:subscribe|sign in|register)\s+to\s+continue|"
+    r"(?:유료|구독)\s*(?:회원|서비스).{0,20}(?:전용|가입|로그인)|"
+    r"기사\s*전문은\s*(?:구독|로그인)",
+    re.IGNORECASE,
+)
 _ZERO_COUNTS = FeedArticleUpsertCounts(inserted=0, updated=0, skipped=0)
 
 
@@ -54,6 +78,434 @@ class _CollectedFeeds:
 
 
 type ClientOrNone = GoogleNewsHttpClient | None
+
+class NewsArticleFetchError(RuntimeError):
+    """기사 원문을 안전 경계 안에서 확보하지 못했음을 나타낸다."""
+
+
+class NewsArticleBodyFetcher(Protocol):
+    async def fetch(self, url: str) -> str: ...
+
+
+type HostResolver = Callable[[str], Awaitable[Sequence[str]]]
+
+
+async def _resolve_host_addresses(host: str) -> Sequence[str]:
+    try:
+        results = await asyncio.to_thread(
+            socket.getaddrinfo,
+            host,
+            443,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise NewsArticleFetchError("article host DNS resolution failed") from exc
+    return tuple({str(result[4][0]) for result in results})
+
+
+def _validated_article_host(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise NewsArticleFetchError("invalid article URL") from exc
+    if parsed.scheme.lower() != "https":
+        raise NewsArticleFetchError("article URL scheme must be https")
+    if parsed.username is not None or parsed.password is not None:
+        raise NewsArticleFetchError("article URL credentials are not allowed")
+    if port not in (None, 443):
+        raise NewsArticleFetchError("article URL port is not allowed")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise NewsArticleFetchError("article URL host is missing")
+    return host
+
+
+async def _assert_public_article_target(url: str, resolver: HostResolver) -> str:
+    host = _validated_article_host(url)
+    if host == _GOOGLE_NEWS_HOST:
+        return host
+    try:
+        literal_address = ipaddress.ip_address(host)
+    except ValueError:
+        addresses = await resolver(host)
+        if not addresses:
+            raise NewsArticleFetchError("article host DNS returned no addresses")
+    else:
+        addresses = (str(literal_address),)
+    try:
+        if any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise NewsArticleFetchError("article host resolves to a non-public address")
+    except ValueError as exc:
+        raise NewsArticleFetchError("article host DNS returned an invalid address") from exc
+    return host
+
+
+def _is_google_owned_host(host: str) -> bool:
+    return (
+        host == _GOOGLE_NEWS_HOST
+        or host.endswith(".google.com")
+        or host.endswith(".googleusercontent.com")
+        or host.endswith(".gstatic.com")
+    )
+
+
+def _external_google_news_url(value: str, *, base_url: str) -> str | None:
+    candidate = urljoin(base_url, value.strip())
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if _is_google_owned_host(host):
+        query = parse_qs(parsed.query)
+        nested = next(iter(query.get("url", ()) or query.get("q", ())), None)
+        if nested is None:
+            return None
+        candidate = nested
+        try:
+            nested_host = (urlsplit(candidate).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return None
+        if _is_google_owned_host(nested_host):
+            return None
+    try:
+        if _validated_article_host(candidate) == _GOOGLE_NEWS_HOST:
+            return None
+    except NewsArticleFetchError:
+        return None
+    return candidate
+
+
+def _provider_url_from_google_html(body: str, *, base_url: str) -> str | None:
+    soup = BeautifulSoup(body, "lxml")
+    for selector, attribute in (
+        ('meta[property="og:url"]', "content"),
+        ('link[rel="canonical"]', "href"),
+        ("a[href]", "href"),
+    ):
+        for element in soup.select(selector):
+            value = element.get(attribute)
+            if not isinstance(value, str):
+                continue
+            candidate = _external_google_news_url(value, base_url=base_url)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _extract_article_text(body: str, *, max_chars: int = ARTICLE_MAX_TEXT_CHARS) -> str:
+    soup = BeautifulSoup(body, "lxml")
+    for element in soup(
+        [
+            "script",
+            "style",
+            "noscript",
+            "template",
+            "svg",
+            "nav",
+            "header",
+            "footer",
+            "aside",
+            "form",
+        ]
+    ):
+        element.decompose()
+    for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
+        comment.extract()
+
+    candidates: list[str] = []
+    for selector in (
+        "[itemprop='articleBody']",
+        "article",
+        "main",
+        ".article-body",
+        ".article-content",
+        ".story-body",
+        ".story-content",
+    ):
+        for element in soup.select(selector):
+            text = " ".join(element.get_text(" ", strip=True).split())
+            if text:
+                candidates.append(text)
+
+    paragraphs = [
+        " ".join(element.get_text(" ", strip=True).split())
+        for element in soup.find_all("p")
+    ]
+    paragraph_text = " ".join(
+        paragraph for paragraph in paragraphs if len(paragraph) >= 40
+    )
+    if paragraph_text:
+        candidates.append(paragraph_text)
+    for selector in (
+        'meta[name="description"]',
+        'meta[property="og:description"]',
+    ):
+        for element in soup.select(selector):
+            value = element.get("content")
+            if isinstance(value, str):
+                normalized = " ".join(value.split())
+                if normalized:
+                    candidates.append(normalized)
+    if "<" not in body:
+        plain_text = " ".join(body.split())
+        if plain_text:
+            candidates.append(plain_text)
+
+    text = max(candidates, key=len, default="")
+    if _PAYWALL_RE.search(text):
+        raise NewsArticleFetchError("article body is behind a paywall")
+    if len(text) < ARTICLE_MIN_TEXT_CHARS:
+        raise NewsArticleFetchError("article body is missing or too short")
+    return text[:max_chars].rstrip()
+
+
+async def _read_article_response(response: httpx.Response) -> bytes:
+    content_type = response.headers.get("content-type", "").lower()
+    if content_type and not (
+        content_type.startswith("text/html")
+        or content_type.startswith("application/xhtml+xml")
+        or content_type.startswith("text/plain")
+    ):
+        raise NewsArticleFetchError("article response is not HTML or text")
+    declared_length = response.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if int(declared_length) > ARTICLE_MAX_RESPONSE_BYTES:
+                raise NewsArticleFetchError("article response exceeds the size limit")
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    consumed = 0
+    async for chunk in response.aiter_bytes():
+        consumed += len(chunk)
+        if consumed > ARTICLE_MAX_RESPONSE_BYTES:
+            raise NewsArticleFetchError("article response exceeds the size limit")
+        chunks.append(chunk)
+    if not chunks:
+        raise NewsArticleFetchError("article response body is empty")
+    return b"".join(chunks)
+
+
+def _decode_article_body(response: httpx.Response, payload: bytes) -> str:
+    encoding = response.encoding or "utf-8"
+    try:
+        return payload.decode(encoding, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
+class GoogleNewsArticleFetcher:
+    """Google News 링크를 공개 HTTPS 원문까지만 따라가 제한 본문을 추출한다."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        resolver: HostResolver = _resolve_host_addresses,
+    ) -> None:
+        self._client = client
+        self._resolver = resolver
+        self._robots_cache: dict[str, robotparser.RobotFileParser | None] = {}
+
+    async def _assert_robots_allowed(self, url: str, host: str) -> None:
+        if host in self._robots_cache:
+            rules = self._robots_cache[host]
+        else:
+            parsed = urlsplit(url)
+            robots_url = f"https://{parsed.netloc}/robots.txt"
+            request = self._client.build_request(
+                "GET",
+                robots_url,
+                headers={
+                    "Accept": "text/plain",
+                    "User-Agent": _ARTICLE_USER_AGENT,
+                },
+            )
+            try:
+                response = await self._client.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                )
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                raise NewsArticleFetchError(
+                    f"robots fetch failed: {type(exc).__name__}"
+                ) from exc
+            try:
+                if response.status_code == 404:
+                    rules = None
+                elif response.status_code in _ARTICLE_REDIRECT_STATUSES:
+                    raise NewsArticleFetchError("robots redirect is not allowed")
+                elif not response.is_success:
+                    raise NewsArticleFetchError(
+                        f"robots fetch returned HTTP {response.status_code}"
+                    )
+                else:
+                    chunks: list[bytes] = []
+                    consumed = 0
+                    async for chunk in response.aiter_bytes():
+                        consumed += len(chunk)
+                        if consumed > ARTICLE_ROBOTS_MAX_RESPONSE_BYTES:
+                            raise NewsArticleFetchError(
+                                "robots response exceeds the size limit"
+                            )
+                        chunks.append(chunk)
+                    rules = robotparser.RobotFileParser()
+                    rules.set_url(robots_url)
+                    rules.parse(
+                        b"".join(chunks)
+                        .decode("utf-8", errors="replace")
+                        .splitlines()
+                    )
+            finally:
+                await response.aclose()
+            self._robots_cache[host] = rules
+        if rules is not None and not rules.can_fetch(_ARTICLE_USER_AGENT, url):
+            raise NewsArticleFetchError("article fetch is disallowed by robots.txt")
+
+    async def fetch(self, url: str) -> str:
+        current_url = url
+        for hop in range(ARTICLE_MAX_REDIRECTS + 1):
+            host = await _assert_public_article_target(current_url, self._resolver)
+            if host != _GOOGLE_NEWS_HOST:
+                await self._assert_robots_allowed(current_url, host)
+            request = self._client.build_request(
+                "GET",
+                current_url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+                    "User-Agent": _ARTICLE_USER_AGENT,
+                },
+            )
+            try:
+                response = await self._client.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                )
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                raise NewsArticleFetchError(
+                    f"article fetch failed: {type(exc).__name__}"
+                ) from exc
+            try:
+                if response.status_code in _ARTICLE_REDIRECT_STATUSES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise NewsArticleFetchError(
+                            "article redirect is missing Location"
+                        )
+                    if hop >= ARTICLE_MAX_REDIRECTS:
+                        raise NewsArticleFetchError("too many article redirects")
+                    current_url = urljoin(str(response.url), location)
+                    continue
+                if not response.is_success:
+                    raise NewsArticleFetchError(
+                        f"article fetch returned HTTP {response.status_code}"
+                    )
+                payload = await _read_article_response(response)
+                body = _decode_article_body(response, payload)
+            finally:
+                await response.aclose()
+
+            if host == _GOOGLE_NEWS_HOST:
+                provider_url = _provider_url_from_google_html(
+                    body,
+                    base_url=str(response.url),
+                )
+                if provider_url is None:
+                    raise NewsArticleFetchError(
+                        "Google News page has no public provider URL"
+                    )
+                if hop >= ARTICLE_MAX_REDIRECTS:
+                    raise NewsArticleFetchError("too many article redirects")
+                current_url = provider_url
+                continue
+            return _extract_article_text(body)
+        raise NewsArticleFetchError("too many article redirects")
+
+
+def _newest_article_items(
+    collected: _CollectedFeeds,
+    *,
+    limit: int,
+) -> list[FeedArticleInput]:
+    return sorted(
+        collected.articles_by_url.values(),
+        key=lambda item: (
+            item.published_at is not None,
+            item.published_at or datetime.min,
+            item.url,
+        ),
+        reverse=True,
+    )[:limit]
+
+
+def _safe_log_host(url: str) -> str:
+    try:
+        return urlsplit(url).hostname or "<missing>"
+    except ValueError:
+        return "<invalid>"
+
+
+async def _enrich_collected_articles(
+    collected: _CollectedFeeds,
+    fetcher: NewsArticleBodyFetcher,
+) -> _CollectedFeeds:
+    semaphore = asyncio.Semaphore(ARTICLE_ENRICHMENT_CONCURRENCY)
+
+    async def enrich(item: FeedArticleInput) -> tuple[str, str | None]:
+        async with semaphore:
+            try:
+                return item.url, await fetcher.fetch(item.url)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.info(
+                    "Google News 원문 확보 실패: host=%s error_type=%s",
+                    _safe_log_host(item.url),
+                    type(exc).__name__,
+                )
+                return item.url, None
+
+    candidates = _newest_article_items(
+        collected,
+        limit=ARTICLE_ENRICHMENT_BATCH_SIZE,
+    )
+    if not candidates:
+        return collected
+    fetched = dict(await asyncio.gather(*(enrich(item) for item in candidates)))
+    enriched_items = {
+        url: (
+            replace(item, article_content=fetched[url])
+            if fetched.get(url)
+            else item
+        )
+        for url, item in collected.articles_by_url.items()
+    }
+    return replace(collected, articles_by_url=enriched_items)
+
+
+async def _enrich_with_client(
+    collected: _CollectedFeeds,
+    *,
+    fetcher: NewsArticleBodyFetcher | None,
+    rss_client_was_injected: bool,
+) -> _CollectedFeeds:
+    if fetcher is not None:
+        return await _enrich_collected_articles(collected, fetcher)
+    if rss_client_was_injected:
+        return collected
+    async with httpx.AsyncClient(
+        timeout=ARTICLE_FETCH_TIMEOUT_SECONDS,
+        follow_redirects=False,
+    ) as client:
+        return await _enrich_collected_articles(
+            collected,
+            GoogleNewsArticleFetcher(client),
+        )
 
 
 def _utcnow() -> datetime:
@@ -274,6 +726,7 @@ async def ingest_google_news_rss(
     symbols: list[GoogleNewsSymbol],
     run_uuid: str | None = None,
     client: ClientOrNone = None,
+    article_fetcher: NewsArticleBodyFetcher | None = None,
     request_interval_seconds: float = REQUEST_INTERVAL_SECONDS,
     max_items_per_symbol: int = MAX_ITEMS_PER_SYMBOL,
     excluded_sources: Collection[str] = DEFAULT_EXCLUDED_SOURCES,
@@ -281,8 +734,9 @@ async def ingest_google_news_rss(
     """한 시장의 종목 피드를 직렬 수집하고 ``(신규, 갱신, 스킵)``을 반환한다.
 
     검색 종목은 확정 연관 종목이 아니라 관련도 판정 전 후보로만 저장한다.
-    HTTP·형식 오류는 종목 단위로 격리하며 성공 종목이 하나라도 있으면 회차는
-    ``partial``, 전부 실패하면 ``failed``로 닫는다.
+    최신 고유 기사 중 제한된 수만 공개 HTTPS 원문까지 따라가며, 원문 실패는
+    기사별로 격리한다. RSS HTTP·형식 오류는 종목 단위로 격리하며 성공 종목이
+    하나라도 있으면 회차는 ``partial``, 전부 실패하면 ``failed``로 닫는다.
     """
     config = market_config(market)
     if request_interval_seconds < 0:
@@ -300,6 +754,11 @@ async def ingest_google_news_rss(
             request_interval_seconds=request_interval_seconds,
             excluded_sources=excluded_sources,
             max_items_per_symbol=max_items_per_symbol,
+        )
+        collected = await _enrich_with_client(
+            collected,
+            fetcher=article_fetcher,
+            rss_client_was_injected=client is not None,
         )
         counts = await _persist_collected(
             db,

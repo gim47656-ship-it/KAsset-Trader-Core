@@ -38,6 +38,7 @@ class FeedArticleInput:
     source: str | None
     published_at: datetime | None
     summary: str | None = None
+    article_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,31 +119,39 @@ async def count_feed_article_changes(
     db: AsyncSession,
     items: list[FeedArticleInput],
 ) -> FeedArticleUpsertCounts:
-    """URL별 현재 제목·출처와 비교해 실제 기사 변경 건수를 계산한다."""
+    """URL별 현재 제목·출처와 새로 확보한 원문 유무를 비교한다."""
     deduplicated = {item.url: item for item in items}
     if not deduplicated:
         return FeedArticleUpsertCounts(inserted=0, updated=0, skipped=0)
 
     existing_rows = await db.execute(
-        select(NewsArticle.url, NewsArticle.title, NewsArticle.source).where(
-            NewsArticle.url.in_(deduplicated)
-        )
+        select(
+            NewsArticle.url,
+            NewsArticle.title,
+            NewsArticle.source,
+            NewsArticle.article_content.is_not(None).label("has_article_content"),
+        ).where(NewsArticle.url.in_(deduplicated))
     )
     existing_by_url = {
-        url: (title, source) for url, title, source in existing_rows.all()
+        url: (title, source, has_article_content)
+        for url, title, source, has_article_content in existing_rows.all()
     }
-    normalized_by_url = {
-        url: (item.title[:500], item.source) for url, item in deduplicated.items()
-    }
-    inserted = sum(url not in existing_by_url for url in normalized_by_url)
+    inserted = sum(url not in existing_by_url for url in deduplicated)
     updated = sum(
-        url in existing_by_url and existing_by_url[url] != normalized
-        for url, normalized in normalized_by_url.items()
+        url in existing_by_url
+        and (
+            existing_by_url[url][:2] != (item.title[:500], item.source)
+            or (
+                not existing_by_url[url][2]
+                and bool((item.article_content or "").strip())
+            )
+        )
+        for url, item in deduplicated.items()
     )
     return FeedArticleUpsertCounts(
         inserted=inserted,
         updated=updated,
-        skipped=len(normalized_by_url) - inserted - updated,
+        skipped=len(deduplicated) - inserted - updated,
     )
 
 
@@ -157,7 +166,8 @@ async def upsert_feed_articles(
 ) -> int:
     """URL 기준 기사 upsert와 후보 종목의 pending 관련도 링크를 함께 쓴다.
 
-    충돌 기사는 ID를 유지하고 제목·출처만 갱신한다. 반환값은 새로 만든
+    충돌 기사는 ID와 최초 RSS 발췌를 유지하고 제목·출처를 갱신한다. 새 원문은
+    기존 ``article_content``가 비어 있을 때만 채운다. 반환값은 새로 만든
     ``symbol_news_relevance`` pending 링크 수다.
     """
     if not items:
@@ -170,7 +180,7 @@ async def upsert_feed_articles(
             "title": item.title[:500],
             "source": item.source,
             "summary": item.summary,
-            "article_content": None,
+            "article_content": item.article_content,
             "market": market,
             "feed_source": feed_source,
             "article_published_at": _naive_utc(item.published_at),
@@ -191,9 +201,19 @@ async def upsert_feed_articles(
             set_={
                 "title": excluded.title,
                 "source": excluded.source,
+                "article_content": func.coalesce(
+                    NewsArticle.article_content,
+                    excluded.article_content,
+                ),
             },
-            where=NewsArticle.title.is_distinct_from(excluded.title)
-            | NewsArticle.source.is_distinct_from(excluded.source),
+            where=(
+                NewsArticle.title.is_distinct_from(excluded.title)
+                | NewsArticle.source.is_distinct_from(excluded.source)
+                | (
+                    NewsArticle.article_content.is_(None)
+                    & excluded.article_content.is_not(None)
+                )
+            ),
         )
     )
     urls = list(deduplicated)
@@ -432,9 +452,10 @@ async def upsert_disclosures(
 ) -> DisclosureUpsertCounts:
     """발행 법인이 특정된 공시를 URL 기준으로 멱등 저장한다.
 
-    충돌 행은 제목·법인명만 갱신한다. 원천 식별용 키워드는 최초 삽입값을
-    보존해 후속 분석이 추가한 키워드를 재수집으로 덮어쓰지 않는다. 같은
-    회차에 같은 URL이 반복되면 마지막 값을 한 번만 쓰고 나머지는 스킵한다.
+    충돌 행은 제목·법인명을 갱신하고 최초에 비었던 상장 종목코드만 채운다.
+    원천 식별용 키워드는 최초 삽입값을 보존해 후속 분석이 추가한 키워드를
+    재수집으로 덮어쓰지 않는다. 같은 회차에 같은 URL이 반복되면 마지막 값을
+    한 번만 쓰고 나머지는 스킵한다.
     """
     if not items:
         return DisclosureUpsertCounts(inserted=0, updated=0, skipped=0)
@@ -448,7 +469,7 @@ async def upsert_disclosures(
 
     now = _utcnow()
     article_values = []
-    normalized_by_url: dict[str, tuple[str, str | None]] = {}
+    normalized_by_url: dict[str, tuple[str, str | None, str | None]] = {}
     for item in deduplicated.values():
         title = item.title[:500]
         stock_name = item.stock_name[:100] if item.stock_name else None
@@ -473,25 +494,35 @@ async def upsert_disclosures(
                 "updated_at": now,
             }
         )
-        normalized_by_url[item.url] = (title, stock_name)
+        normalized_by_url[item.url] = (title, stock_name, stock_symbol)
 
     urls = list(normalized_by_url)
-    existing_by_url: dict[str, tuple[str, str | None]] = {}
+    existing_by_url: dict[str, tuple[str, str | None, str | None]] = {}
     for offset in range(0, len(urls), _DISCLOSURE_URL_QUERY_CHUNK_SIZE):
         url_chunk = urls[offset : offset + _DISCLOSURE_URL_QUERY_CHUNK_SIZE]
         existing_rows = await db.execute(
-            select(NewsArticle.url, NewsArticle.title, NewsArticle.stock_name).where(
-                NewsArticle.url.in_(url_chunk)
-            )
+            select(
+                NewsArticle.url,
+                NewsArticle.title,
+                NewsArticle.stock_name,
+                NewsArticle.stock_symbol,
+            ).where(NewsArticle.url.in_(url_chunk))
         )
         existing_by_url.update(
-            (url, (title, stock_name))
-            for url, title, stock_name in existing_rows.all()
+            (url, (title, stock_name, stock_symbol))
+            for url, title, stock_name, stock_symbol in existing_rows.all()
         )
 
     inserted = sum(url not in existing_by_url for url in urls)
     updated = sum(
-        url in existing_by_url and existing_by_url[url] != normalized
+        url in existing_by_url
+        and (
+            existing_by_url[url][:2] != normalized[:2]
+            or (
+                existing_by_url[url][2] is None
+                and normalized[2] is not None
+            )
+        )
         for url, normalized in normalized_by_url.items()
     )
     unchanged = len(urls) - inserted - updated
@@ -508,9 +539,19 @@ async def upsert_disclosures(
                 set_={
                     "title": excluded.title,
                     "stock_name": excluded.stock_name,
+                    "stock_symbol": func.coalesce(
+                        NewsArticle.stock_symbol,
+                        excluded.stock_symbol,
+                    ),
                 },
-                where=NewsArticle.title.is_distinct_from(excluded.title)
-                | NewsArticle.stock_name.is_distinct_from(excluded.stock_name),
+                where=(
+                    NewsArticle.title.is_distinct_from(excluded.title)
+                    | NewsArticle.stock_name.is_distinct_from(excluded.stock_name)
+                    | (
+                        NewsArticle.stock_symbol.is_(None)
+                        & excluded.stock_symbol.is_not(None)
+                    )
+                ),
             )
         )
     return DisclosureUpsertCounts(

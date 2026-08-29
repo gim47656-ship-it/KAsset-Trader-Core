@@ -8,6 +8,8 @@ Guardrails owned by this module:
   ``prompt``, ``raw_response`` and ``article_content`` never leave the DB.
 * Research stays citation-shaped: title/publisher/link plus the same excerpt
   cap the ingestion contract already enforces (``DETAIL_EXCERPT_MAX``).
+* Daily routine alerts are owner-scoped read-only evidence and never enter an
+  Action, recommendation, or order producer.
 * Briefings are projected from eligible ``InvestmentReport`` rows only, so the
   report ``portfolio_snapshot`` / ``market_snapshot`` payloads stay server-side.
 * A query failure is surfaced as a sanitized 5xx, never as an empty payload.
@@ -38,6 +40,7 @@ from app.extensions.kasset.api.ai_schemas import (
 )
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import iso_z
+from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.models.investment_reports import InvestmentReport
 from app.models.news import NewsAnalysisResult, NewsArticle, NewsArticleRelatedSymbol
 from app.models.research_reports import ResearchReport
@@ -408,23 +411,32 @@ def _briefing_section(report: InvestmentReport | None) -> AiBriefingSection:
 
 async def build_mobile_ai_briefing(
     db: AsyncSession,
+    owner_user_id: int,
     *,
     market: str,
     symbol: str | None = None,
     limit: int = DEFAULT_LIMIT,
+    now: datetime | None = None,
 ) -> AiBriefingResponse:
-    """Assemble the mobile AI hub payload from stored Core artifacts only.
+    """Assemble the owner-scoped mobile AI hub payload from stored artifacts.
 
     The ``symbol`` filter scopes news and research; a report-level briefing has
-    no stored symbol column, so it stays market-scoped.
+    no stored symbol column, so it stays market-scoped. Daily routine alerts
+    are additional read-only evidence and do not enter recommendation or order
+    producers.
     """
 
     market_value = normalize_market(market)
     symbol_value = normalize_symbol(symbol)
     limit_value = _normalize_limit(limit)
-    now = datetime.now(UTC)
+    instant = _as_utc(now) or datetime.now(UTC)
 
     try:
+        routine_alerts = await daily_routine_service.get_alerts(
+            db,
+            owner_user_id,
+            now=instant,
+        )
         news = await _build_news_section(
             db, market=market_value, symbol=symbol_value, limit=limit_value
         )
@@ -433,10 +445,10 @@ async def build_mobile_ai_briefing(
             market=market_value,
             symbol=symbol_value,
             limit=limit_value,
-            now=now,
+            now=instant,
         )
         briefing = _briefing_section(
-            await _load_eligible_briefing(db, market=market_value, now=now)
+            await _load_eligible_briefing(db, market=market_value, now=instant)
         )
     except SQLAlchemyError as exc:
         raise MobileApiError(
@@ -446,9 +458,14 @@ async def build_mobile_ai_briefing(
         ) from exc
 
     return AiBriefingResponse(
-        status="available" if (news.items or research.items) else "empty",
-        as_of=iso_z(now),
+        status=(
+            "available"
+            if (news.items or research.items or routine_alerts)
+            else "empty"
+        ),
+        as_of=iso_z(instant),
         news=news,
+        routine_alerts=routine_alerts,
         research=research,
         briefing=briefing,
     )

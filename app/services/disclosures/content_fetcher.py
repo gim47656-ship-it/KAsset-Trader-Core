@@ -60,6 +60,33 @@ _SEC_EXHIBIT_LABEL_RE = re.compile(
     r"(?:\bex(?:hibit)?\s*99[.\-]?[12]\b|\b99[.\-][12]\b|press\s+release|cfo\s+commentary)",
     re.IGNORECASE,
 )
+_CORRECTION_TEXT_MARKERS = (
+    "정정 전",
+    "정정전",
+    "정정 후",
+    "정정후",
+    "정정사유",
+    "정정 사유",
+    "정정사항",
+    "정정 사항",
+)
+_MATERIAL_TEXT_MARKERS = _CORRECTION_TEXT_MARKERS + (
+    "계약금액",
+    "계약기간",
+    "매출액",
+    "영업이익",
+    "당기순이익",
+    "발행금액",
+    "발행가액",
+    "증자",
+    "전환가액",
+    "합병비율",
+    "분할비율",
+    "변경 전",
+    "변경전",
+    "변경 후",
+    "변경후",
+)
 
 
 class DisclosureContentError(RuntimeError):
@@ -588,6 +615,19 @@ def _zip_member_count(payload: bytes) -> int:
     raise DisclosureContentError("OpenDART document ZIP is invalid")
 
 
+def _disclosure_text_score(text: str) -> int:
+    correction_hits = sum(
+        text.count(marker) for marker in _CORRECTION_TEXT_MARKERS
+    )
+    material_hits = sum(text.count(marker) for marker in _MATERIAL_TEXT_MARKERS)
+    numeric_rows = sum(
+        1
+        for line in text.splitlines()
+        if "|" in line and re.search(r"\d", line) is not None
+    )
+    return correction_hits * 100 + material_hits * 10 + numeric_rows
+
+
 def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
     if not payload.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
         raise DisclosureContentError(
@@ -618,25 +658,45 @@ def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
                 "OpenDART document ZIP exceeds the uncompressed size limit"
             )
 
-        selected = [info for info in infos if _safe_document_member(info)]
-        selected.sort(key=lambda info: (-info.file_size, info.filename))
-        parts: list[str] = []
-        consumed_chars = 0
-        for info in selected:
-            separator_chars = 2 if parts else 0
-            remaining = max_chars - consumed_chars - separator_chars
-            if remaining < MIN_TEXT_CHARS:
-                break
+        documents: list[tuple[int, int, str, str]] = []
+        for info in infos:
+            if not _safe_document_member(info):
+                continue
             member_payload = _read_document_member(archive, info)
             try:
                 member_text = extract_disclosure_text(
                     _decode_document_member(member_payload),
-                    max_chars=remaining,
+                    max_chars=max_chars,
+                    prioritize_material=True,
                 )
             except DisclosureContentError:
                 continue
-            parts.append(member_text)
-            consumed_chars += separator_chars + len(member_text)
+            documents.append(
+                (
+                    _disclosure_text_score(member_text),
+                    info.file_size,
+                    info.filename,
+                    member_text,
+                )
+            )
+
+    documents.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    parts: list[str] = []
+    consumed_chars = 0
+    seen: set[str] = set()
+    for _score, _size, _name, member_text in documents:
+        if member_text in seen:
+            continue
+        seen.add(member_text)
+        separator_chars = 2 if parts else 0
+        remaining = max_chars - consumed_chars - separator_chars
+        if remaining < MIN_TEXT_CHARS:
+            break
+        selected_text = member_text[:remaining].rstrip()
+        if len(selected_text) < MIN_TEXT_CHARS:
+            continue
+        parts.append(selected_text)
+        consumed_chars += separator_chars + len(selected_text)
 
     text = "\n\n".join(parts)
     if len(text) < MIN_TEXT_CHARS:
@@ -646,12 +706,78 @@ def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
     return text[:max_chars].rstrip()
 
 
+def _replace_tables_with_rows(soup: BeautifulSoup) -> None:
+    for table in soup.find_all("table"):
+        row_lines: list[str] = []
+        for row in table.find_all("tr"):
+            cells = [
+                " ".join(cell.get_text(" ", strip=True).split())
+                for cell in row.find_all(["th", "td"], recursive=False)
+            ]
+            cells = [cell for cell in cells if cell]
+            if cells:
+                row_lines.append(" | ".join(cells))
+        if not row_lines:
+            continue
+        replacement = soup.new_tag("div")
+        for row_line in row_lines:
+            line = soup.new_tag("p")
+            line.string = row_line
+            replacement.append(line)
+        table.replace_with(replacement)
+
+
+def _prioritized_disclosure_lines(lines: list[str]) -> list[str]:
+    unique_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        unique_lines.append(line)
+
+    correction_hits: list[int] = []
+    material_hits: list[int] = []
+    context: set[int] = set()
+    for index, line in enumerate(unique_lines):
+        if any(marker in line for marker in _CORRECTION_TEXT_MARKERS):
+            correction_hits.append(index)
+            context.update(
+                range(max(0, index - 1), min(len(unique_lines), index + 2))
+            )
+        if any(marker in line for marker in _MATERIAL_TEXT_MARKERS):
+            material_hits.append(index)
+            context.update(
+                range(max(0, index - 1), min(len(unique_lines), index + 2))
+            )
+    direct_hits = set(correction_hits) | set(material_hits)
+    priority = [
+        *dict.fromkeys(correction_hits),
+        *(
+            index
+            for index in dict.fromkeys(material_hits)
+            if index not in set(correction_hits)
+        ),
+        *(index for index in sorted(context) if index not in direct_hits),
+    ]
+    priority_set = set(priority)
+    return [
+        *(unique_lines[index] for index in priority),
+        *(
+            line
+            for index, line in enumerate(unique_lines)
+            if index not in priority_set
+        ),
+    ]
+
+
 def extract_disclosure_text(
     html_body: str,
     *,
     max_chars: int = MAX_TEXT_CHARS,
+    prioritize_material: bool = False,
 ) -> str:
-    """스크립트/스타일을 제거하고 공백을 정규화한 제한 길이 본문을 반환한다."""
+    """숨은 노이즈를 제거하고 표 행을 보존한 제한 길이 공시 본문을 반환한다."""
     if max_chars < MIN_TEXT_CHARS:
         raise ValueError(f"max_chars must be at least {MIN_TEXT_CHARS}")
 
@@ -682,7 +808,10 @@ def extract_disclosure_text(
     for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
         comment.extract()
 
+    _replace_tables_with_rows(soup)
     lines = [" ".join(value.split()) for value in soup.stripped_strings]
+    if prioritize_material:
+        lines = _prioritized_disclosure_lines(lines)
     text = "\n".join(value for value in lines if value).strip()
     if len(text) < MIN_TEXT_CHARS:
         raise DisclosureContentError("disclosure body text is missing or too short")
@@ -718,20 +847,30 @@ class DisclosureTextFetcher:
             try:
                 viewer_url = _dart_viewer_url(document)
             except DisclosureContentError:
-                rcept_no = _dart_receipt_number(document)
-                api_key = (settings.opendart_api_key or "").strip()
-                if not api_key:
-                    raise DisclosureContentError(
-                        "OPENDART_API_KEY is required for DART document fallback"
-                    ) from None
-                payload = await _fetch_opendart_document(
-                    self._client,
-                    api_key=api_key,
-                    rcept_no=rcept_no,
-                )
-                return _extract_opendart_document_text(
-                    payload,
-                    max_chars=self._max_text_chars,
+                viewer_url = None
+
+            rcept_no = _dart_receipt_number(document)
+            api_key = (settings.opendart_api_key or "").strip()
+            document_error: DisclosureContentError | None = None
+            if api_key:
+                try:
+                    payload = await _fetch_opendart_document(
+                        self._client,
+                        api_key=api_key,
+                        rcept_no=rcept_no,
+                    )
+                    return _extract_opendart_document_text(
+                        payload,
+                        max_chars=self._max_text_chars,
+                    )
+                except DisclosureContentError as exc:
+                    document_error = exc
+
+            if viewer_url is None:
+                if document_error is not None:
+                    raise document_error
+                raise DisclosureContentError(
+                    "OPENDART_API_KEY is required for DART document fallback"
                 )
             document = await _fetch_html(
                 self._client,
@@ -757,6 +896,7 @@ class DisclosureTextFetcher:
         primary_text = extract_disclosure_text(
             document.body,
             max_chars=self._max_text_chars,
+            prioritize_material=provider == "dart",
         )
         remaining = self._max_text_chars - len(primary_text) - 2
         if exhibit is None or remaining < MIN_TEXT_CHARS:

@@ -50,6 +50,12 @@ class _EmptyStoreDb:
     async def execute(self, *args: object, **kwargs: object) -> _EmptyResult:
         return _EmptyResult()
 
+    async def scalar(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def scalars(self, *args: object, **kwargs: object) -> _EmptyResult:
+        return _EmptyResult()
+
 
 async def _db_override() -> AsyncIterator[object]:
     yield _EmptyStoreDb()
@@ -103,6 +109,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/orders/{order_id}/amend": {"post"},
         "/api/v1/fills": {"get"},
         "/api/v1/risk/policy": {"get", "put"},
+        "/api/v1/ai/daily-routine": {"get", "put"},
         "/api/v1/ai/status": {"get"},
         "/api/v1/ai/briefing": {"get"},
         "/api/v1/ai/trading/state": {"get", "put"},
@@ -138,6 +145,7 @@ def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
             "refreshedAt": None,
             "items": [],
         },
+        "routineAlerts": [],
         "research": {
             "status": "empty",
             "refreshedAt": None,
@@ -161,7 +169,9 @@ def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
 def test_ai_briefing_mobile_auth_survives_upstream_middleware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authenticate = AsyncMock(return_value=object())
+    authenticate = AsyncMock(
+        return_value=SimpleNamespace(user=SimpleNamespace(id=101))
+    )
     monkeypatch.setattr(mobile_auth, "authenticate", authenticate)
 
     with _full_middleware_client() as client:

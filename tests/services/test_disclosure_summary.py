@@ -70,6 +70,7 @@ async def _insert_disclosure(
     url: str,
     title: str,
     published_at: datetime,
+    stock_symbol: str | None = "005930",
 ) -> None:
     await symbol_news_store.upsert_disclosures(
         db_session,
@@ -80,7 +81,7 @@ async def _insert_disclosure(
                 source="DART",
                 feed_source="dart",
                 market="kr",
-                stock_symbol="005930",
+                stock_symbol=stock_symbol,
                 stock_name="테스트상장사",
                 published_at=published_at,
             )
@@ -120,6 +121,8 @@ async def test_openai_generator_uses_strict_low_cost_summary_contract() -> None:
     }
     assert "목표주가" in call["additional_instructions"]
     assert "추측" in call["additional_instructions"]
+    assert "정정 전·후 값" in call["additional_instructions"]
+    assert "투자자 영향" in call["additional_instructions"]
 
 
 @pytest.mark.unit
@@ -195,6 +198,70 @@ async def test_openai_generator_rejects_number_absent_from_source() -> None:
         )
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_disclosure_generator_rejects_template_only_opening() -> None:
+    generator = OpenAiDisclosureSummaryGenerator(
+        FakeResponsesClient(
+            "본 공시는 공급 계약 체결에 관한 내용이다. "
+            "세부 내용은 공시 원문에 기재돼 있다."
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    with pytest.raises(ValueError, match="template language"):
+        await generator.summarize(
+            DisclosureSummaryInput(
+                title="단일판매ㆍ공급계약체결",
+                company="테스트상장사",
+                form="단일판매ㆍ공급계약체결",
+                body_excerpt=(
+                    "테스트상장사는 고객사와 공급 계약을 체결했다. "
+                    "계약 기간과 공급 품목을 원문에 기재했다."
+                ),
+            )
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_correction_summary_preserves_reason_and_before_after_values() -> None:
+    disclosure = DisclosureSummaryInput(
+        title="[기재정정] 단일판매ㆍ공급계약체결",
+        company="테스트상장사",
+        form="[기재정정] 단일판매ㆍ공급계약체결",
+        body_excerpt=(
+            "정정사유 | 계약 범위 확대\n"
+            "항목 | 정정 전 | 정정 후\n"
+            "계약금액 | 12,000,000,000원 | 18,000,000,000원"
+        ),
+    )
+    valid = OpenAiDisclosureSummaryGenerator(
+        FakeResponsesClient(
+            "테스트상장사는 계약금액을 정정했다. "
+            "계약 범위 확대로 12,000,000,000원에서 "
+            "18,000,000,000원으로 변경됐다."
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    result = await valid.summarize(disclosure)
+
+    assert "계약 범위 확대" in result
+    assert "12,000,000,000원" in result
+    assert "18,000,000,000원" in result
+
+    generic = OpenAiDisclosureSummaryGenerator(
+        FakeResponsesClient(
+            "테스트상장사가 계약 관련 내용을 공시했다. "
+            "세부 내용은 공시 원문에 기재돼 있다."
+        ),
+        model="gpt-5.6-luna",
+    )
+    with pytest.raises(ValueError, match="omits correction comparison"):
+        await generic.summarize(disclosure)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent(
@@ -248,6 +315,9 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
         "계약 이행 일정은 원문에 기재되어 있다고 밝혔다."
     )
     assert successful.is_analyzed is True
+    assert successful.article_content == (
+        "회사는 공급 계약 체결 사실과 이행 일정을 공시했다."
+    )
     assert failed is not None
     assert failed.summary is None
     assert failed.is_analyzed is False
@@ -279,6 +349,101 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
     )
     assert third.selected == 0
     assert len(generator.calls) == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fetched_disclosure_body_survives_summary_provider_failure(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex
+    url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829{suffix[:6]}"
+    await _insert_disclosure(
+        db_session,
+        url=url,
+        title="전환사채권발행결정",
+        published_at=datetime(2026, 8, 29, 12, 0),
+    )
+    body = (
+        "테스트상장사는 전환사채 발행을 결정했다. "
+        "발행금액과 전환가액은 공시 표에 기재했다."
+    )
+
+    class FailingGenerator:
+        async def summarize(self, disclosure: DisclosureSummaryInput) -> str:
+            raise RuntimeError("fake summary provider failure")
+
+    result = await summarize_pending_disclosures(
+        db_session,
+        batch_size=1,
+        article_urls=[url],
+        fetcher=FakeBodyFetcher({url: body}),
+        generator=FailingGenerator(),
+    )
+
+    assert result.failed == 1
+    stored = await db_session.scalar(select(NewsArticle).where(NewsArticle.url == url))
+    assert stored is not None
+    assert stored.article_content == body
+    assert stored.summary is None
+    assert stored.is_analyzed is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dart_batch_prioritizes_listed_material_disclosure(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex
+    important_url = (
+        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828{suffix[:6]}"
+    )
+    low_value_url = (
+        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829{suffix[6:12]}"
+    )
+    unlisted_url = (
+        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829{suffix[12:18]}"
+    )
+    await _insert_disclosure(
+        db_session,
+        url=important_url,
+        title="단일판매ㆍ공급계약체결",
+        published_at=datetime(2026, 8, 28, 9, 0),
+    )
+    await _insert_disclosure(
+        db_session,
+        url=low_value_url,
+        title="대규모기업집단현황공시[개별회사]",
+        published_at=datetime(2026, 8, 29, 11, 0),
+    )
+    await _insert_disclosure(
+        db_session,
+        url=unlisted_url,
+        title="유상증자결정",
+        published_at=datetime(2026, 8, 29, 12, 0),
+        stock_symbol=None,
+    )
+    fetcher = FakeBodyFetcher(
+        {
+            important_url: (
+                "테스트상장사는 고객사와 공급 계약을 체결했다. "
+                "계약 이행 기간과 공급 조건을 공시했다."
+            )
+        }
+    )
+    generator = FakeSummaryGenerator()
+
+    result = await summarize_pending_disclosures(
+        db_session,
+        batch_size=1,
+        article_urls=[low_value_url, unlisted_url, important_url],
+        fetcher=fetcher,
+        generator=generator,
+    )
+
+    assert result.selected == result.summarized == 1
+    assert fetcher.calls == [important_url]
+    assert [call.title for call in generator.calls] == ["단일판매ㆍ공급계약체결"]
 
 
 class FakeSessionContext:

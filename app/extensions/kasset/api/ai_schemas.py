@@ -1,13 +1,15 @@
 """Android wire contracts for the read-only AI hub briefing.
 
-Stored-data-only projection: no prompt, no raw LLM response, no article body and
-no report portfolio snapshot ever reaches these schemas.
+Stored-data-only projection: no prompt, raw LLM response, article body, or
+report portfolio snapshot reaches these schemas. Owner routine alerts are
+read-only evidence.
 """
 
 from typing import Literal
 
 from pydantic import Field
 
+from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
 from app.extensions.kasset.api.schemas import AndroidWireModel
 
 AiSectionStatus = Literal["available", "empty"]
@@ -81,5 +83,6 @@ class AiBriefingResponse(AndroidWireModel):
     status: AiSectionStatus
     as_of: str
     news: AiNewsSection
+    routine_alerts: list[DailyRoutineAlert] = Field(default_factory=list)
     research: AiResearchSection
     briefing: AiBriefingSection

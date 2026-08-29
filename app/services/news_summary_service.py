@@ -11,9 +11,10 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import case, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -30,6 +31,7 @@ MAX_SOURCE_BODY_CHARS = 8_000
 MIN_SOURCE_BODY_CHARS = 40
 MIN_SOURCE_BODY_WORDS = 6
 CANDIDATE_SCAN_MULTIPLIER = 10
+AUTO_SUMMARY_CANDIDATE_LIMIT = 200
 _SUMMARY_MAX_CHARS = 1_200
 
 _SUMMARY_SCHEMA: dict[str, object] = {
@@ -51,15 +53,19 @@ _SUMMARY_SCHEMA: dict[str, object] = {
 }
 _SUMMARY_INSTRUCTIONS = (
     "입력의 title, source, article_content 또는 raw_excerpt에 명시된 사실만 사용하라. "
-    "외국어 기사는 자연스러운 한국어로 번역해 2~4문장으로 요약하라. 원문의 숫자와 "
-    "단위를 그대로 보존하고 계산, 환산, 추측, 사실 보완을 하지 마라. 원문에 없는 "
-    "사실이나 수치, 투자 권유, 매수·매도 추천, 목표주가를 쓰지 마라. title이나 "
-    "raw_excerpt를 그대로 복제하지 말고 핵심 사실을 간결하게 재서술하라. sentiment는 "
-    "기사 서술의 정서만 positive, negative, neutral 중 하나로 분류하라."
+    "외국어 기사는 자연스러운 한국어로 번역해 2~4문장으로 요약하라. 첫 문장에는 "
+    "원문에 확인되는 핵심 사건과 주체를 쓰고, 수치·날짜·시장 반응 또는 투자자 영향은 "
+    "원문에 명시된 항목만 후속 문장에 포함하라. 원문의 숫자와 단위를 그대로 보존하고 "
+    "계산, 환산, 추측, 사실 보완을 하지 마라. 원문에 없는 배경, 전망, 인과관계, "
+    "투자 권유, 매수·매도 추천, 목표주가를 쓰지 마라. '이 기사는', '이번 소식은'처럼 "
+    "내용 없는 서두나 항목 나열을 쓰지 말고, title이나 raw_excerpt를 복제하지 말고 "
+    "핵심 사실을 구체적으로 재서술하라. sentiment는 기사 서술의 정서만 positive, "
+    "negative, neutral 중 하나로 분류하라."
 )
 _TITLE_ONLY_INSTRUCTIONS = (
-    "article_content와 raw_excerpt가 모두 없으면 title의 사실만 자연스러운 한국어 한 문장으로 "
-    "번역하라. 배경 설명이나 원인, 전망을 추가하지 마라."
+    "article_content와 raw_excerpt가 모두 없으면 title에 명시된 주체와 사건만 자연스러운 "
+    "한국어 한 문장으로 번역·재서술하라. 제목을 그대로 복사하지 말고 배경 설명, 원인, "
+    "수치, 영향 또는 전망을 추가하지 마라."
 )
 _NUMBER_RETRY_INSTRUCTIONS = (
     "직전 시도는 입력에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. 수치를 쓸 "
@@ -72,6 +78,10 @@ _NUMBER_RE = re.compile(r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*
 _INVESTMENT_ADVICE_RE = re.compile(
     r"(?:매수|매도|투자)(?:를|가|는)?\s*(?:권고|권유|추천|해야)|"
     r"목표\s*주가|목표가"
+)
+_TEMPLATE_LANGUAGE_RE = re.compile(
+    r"(?:이|본|해당)\s*(?:기사|뉴스)는|이번\s*소식은|"
+    r"투자자(?:들은?|에게)는?\s*(?:주목|유의|관심)"
 )
 _HANGUL_RE = re.compile(r"[가-힣]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
@@ -256,6 +266,19 @@ def _is_calendar_month_translation(
     month_name = _ENGLISH_MONTHS[month_number - 1]
     return re.search(rf"\b{month_name}\b", source_text, re.IGNORECASE) is not None
 
+def _comparison_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
+
+
+def _duplicates_title(sentence: str, title: str) -> bool:
+    sentence_key = _comparison_key(sentence)
+    title_key = _comparison_key(title)
+    if len(title_key) < 8:
+        return sentence_key == title_key
+    return SequenceMatcher(None, sentence_key, title_key).ratio() >= 0.94
+
+
+
 
 def _validated_summary(summary: object, news: NewsSummaryInput) -> str:
     if not isinstance(summary, str):
@@ -269,18 +292,22 @@ def _validated_summary(summary: object, news: NewsSummaryInput) -> str:
         if sentence.strip()
     ]
     minimum_sentences = 2 if news.body else 1
-    if len(sentences) < minimum_sentences or len(sentences) > 4:
+    maximum_sentences = 4 if news.body else 1
+    if not minimum_sentences <= len(sentences) <= maximum_sentences:
         raise ValueError(
-            f"news summary must contain {minimum_sentences} to 4 sentences"
+            "news summary must contain "
+            f"{minimum_sentences} to {maximum_sentences} sentences"
         )
     if _HANGUL_RE.search(normalized) is None:
         raise ValueError("news summary must be written in Korean")
     if _INVESTMENT_ADVICE_RE.search(normalized):
         raise ValueError("news summary contains investment advice")
+    if _TEMPLATE_LANGUAGE_RE.search(normalized):
+        raise ValueError("news summary contains template language")
     if normalized.casefold() in {
         _normalized_text(news.title).casefold(),
         _normalized_text(news.body).casefold(),
-    }:
+    } or any(_duplicates_title(sentence, news.title) for sentence in sentences):
         raise ValueError("news summary duplicates raw input")
 
     source_numbers = _number_set(news.source_text)
@@ -442,6 +469,11 @@ async def _candidate_ids(
             ~exists().where(NewsAnalysisResult.article_id == NewsArticle.id),
         )
         .order_by(
+            case(
+                (NewsArticle.article_content.is_not(None), 0),
+                (NewsArticle.summary.is_not(None), 1),
+                else_=2,
+            ),
             NewsArticle.article_published_at.desc().nullslast(),
             NewsArticle.id.desc(),
         )
@@ -642,7 +674,9 @@ async def summarize_ingested_news(
 ) -> NewsSummaryBatchResult:
     """한 수집 회차의 최신 일반 뉴스만 비용 상한 안에서 자동 요약한다."""
 
-    bounded_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_BATCH_SIZE]
+    bounded_urls = tuple(dict.fromkeys(article_urls))[
+        :AUTO_SUMMARY_CANDIDATE_LIMIT
+    ]
     return await summarize_pending_news(
         db,
         batch_size=AUTO_SUMMARY_BATCH_SIZE,
@@ -651,6 +685,7 @@ async def summarize_ingested_news(
 
 
 __all__ = [
+    "AUTO_SUMMARY_CANDIDATE_LIMIT",
     "AUTO_SUMMARY_BATCH_SIZE",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",

@@ -12,6 +12,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.extensions.kasset.api import krx_quotes
+from app.extensions.kasset.api.schemas import MAX_WATCHLIST_ITEMS
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.models.symbol_master import SymbolMaster
@@ -74,6 +76,17 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
             is_active=True,
         )
         for index in range(22)
+    ]
+    limit_instruments = [
+        Instrument(
+            exchange_id=exchanges[0].id,
+            symbol=f"L{index:02d}{suffix}",
+            name=f"한도 종목 {index:02d}",
+            type=InstrumentType.equity_kr,
+            base_currency="KRW",
+            is_active=True,
+        )
+        for index in range(51)
     ]
     inactive = Instrument(
         exchange_id=exchanges[0].id,
@@ -147,6 +160,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
     instruments = [
         primary,
         *search_instruments,
+        *limit_instruments,
         inactive,
         us_instrument,
         crypto_instrument,
@@ -165,6 +179,7 @@ async def watchlist_data(db_session: AsyncSession) -> AsyncIterator[dict[str, ob
             "users": users,
             "primary": primary,
             "search_instruments": search_instruments,
+            "limit_instruments": limit_instruments,
             "inactive": inactive,
             "us_instrument": us_instrument,
             "crypto_instrument": crypto_instrument,
@@ -213,6 +228,10 @@ async def watchlist_client(
         yield client, state
 
 
+def test_watchlist_and_quote_batch_caps_stay_aligned_at_50() -> None:
+    assert MAX_WATCHLIST_ITEMS == krx_quotes.MAX_BATCH_SYMBOLS == 50
+
+
 @pytest.mark.asyncio
 async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
     db_session: AsyncSession,
@@ -231,7 +250,7 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
 
     assert (await client.get("/api/v1/watchlist")).json() == {
         "items": [],
-        "maxItems": 20,
+        "maxItems": 50,
     }
 
     created = await client.post("/api/v1/watchlist", json=payload)
@@ -263,7 +282,7 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
     assert removed.content == b""
     assert (await client.get("/api/v1/watchlist")).json() == {
         "items": [],
-        "maxItems": 20,
+        "maxItems": 50,
     }
 
     reactivated = await client.post("/api/v1/watchlist", json=payload)
@@ -290,16 +309,16 @@ async def test_watchlist_crud_is_idempotent_and_reactivates_soft_deleted_item(
 
 
 @pytest.mark.asyncio
-async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempotent(
+async def test_watchlist_accepts_fiftieth_item_and_rejects_fifty_first(
     db_session: AsyncSession,
     watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
     watchlist_data: dict[str, object],
 ) -> None:
     client, _state = watchlist_client
     owner_user_id = watchlist_data["users"][0].id
-    instruments = watchlist_data["search_instruments"]
+    instruments = watchlist_data["limit_instruments"]
 
-    for instrument in instruments[:20]:
+    for instrument in instruments[:50]:
         response = await client.post(
             "/api/v1/watchlist",
             json={"symbol": instrument.symbol, "market": "KRX"},
@@ -308,8 +327,8 @@ async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempote
 
     listed = await client.get("/api/v1/watchlist")
     assert listed.status_code == 200
-    assert listed.json()["maxItems"] == 20
-    assert len(listed.json()["items"]) == 20
+    assert listed.json()["maxItems"] == 50
+    assert len(listed.json()["items"]) == 50
 
     duplicate = await client.post(
         "/api/v1/watchlist",
@@ -317,16 +336,16 @@ async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempote
     )
     assert duplicate.status_code == 200
 
-    twenty_first_symbol = instruments[20].symbol
+    fifty_first_symbol = instruments[50].symbol
     over_limit = await client.post(
         "/api/v1/watchlist",
-        json={"symbol": twenty_first_symbol, "market": "KRX"},
+        json={"symbol": fifty_first_symbol, "market": "KRX"},
     )
     assert over_limit.status_code == 409
     assert over_limit.json() == {
         "error": {
             "code": "WATCHLIST_LIMIT_REACHED",
-            "message": "관심종목은 최대 20개까지 등록할 수 있습니다.",
+            "message": "관심종목은 최대 50개까지 등록할 수 있습니다.",
         }
     }
     assert (
@@ -338,7 +357,7 @@ async def test_watchlist_enforces_twenty_item_limit_but_keeps_duplicate_idempote
                 UserWatchItem.is_active.is_(True),
             )
         )
-        == 20
+        == 50
     )
 
 
@@ -393,7 +412,7 @@ async def test_watchlist_is_isolated_by_authenticated_owner(
     state["user"] = users[1]
     assert (await client.get("/api/v1/watchlist")).json() == {
         "items": [],
-        "maxItems": 20,
+        "maxItems": 50,
     }
     owner_b_created = await client.post("/api/v1/watchlist", json=payload)
     assert owner_b_created.status_code == 201

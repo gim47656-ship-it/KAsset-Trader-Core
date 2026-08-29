@@ -20,10 +20,10 @@ TopicMarket = Literal["KRX", "US"]
 # - 구독 수는 채널×종목 조합 기준: `trade:us:AAPL` + `orderbook:us:AAPL` = 2건.
 MAX_UPSTREAM_TOPICS: Final[int] = 100
 
-# 클라이언트 1개가 잡을 수 있는 토픽 상한. 관심종목 상한 20개(`MAX_WATCHLIST_ITEMS`)
+# 클라이언트 1개가 잡을 수 있는 토픽 상한. 관심종목 상한 50개(`MAX_WATCHLIST_ITEMS`)
 # 전체 + 상세 시세 1 + 주문 호가 1 + 여유 2다. 한 연결이 상향 예산 100건을
 # 독점하지 못하게 하는 것이 목적이다.
-MAX_CLIENT_TOPICS: Final[int] = 24
+MAX_CLIENT_TOPICS: Final[int] = 54
 
 _KRX_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(r"^\d{6}$")
 # 미국 티커 표기는 종목 마스터 그대로(대문자). 소문자는 토스가

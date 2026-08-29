@@ -13,9 +13,16 @@ import httpx
 import pandas as pd
 import yfinance as yf
 
-from app.mcp_server.tooling.market_session import DATA_STATE_MARKET_CLOSED
+from app.mcp_server.tooling.market_session import (
+    DATA_STATE_MARKET_CLOSED,
+    DATA_STATE_STALE,
+)
 from app.monitoring import yfinance_tracing_session
 from app.services.external.btc_dominance import fetch_btc_dominance
+from app.services.market_events.session_calendar import (
+    previous_trading_session,
+    regular_session_bounds,
+)
 
 _INDEX_META: dict[str, dict[str, str]] = {
     "KOSPI": {"name": "코스피", "source": "naver", "naver_code": "KOSPI"},
@@ -59,6 +66,9 @@ NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{code}/price"
 
 _KST = ZoneInfo("Asia/Seoul")
 _US_EASTERN = ZoneInfo("America/New_York")
+# XNYS의 직전 1개 세션만 stale fallback으로 허용한다. 금요일→월요일 또는
+# 휴장일을 낀 경우도 포함하되 더 오래된 provider 행은 최신값으로 승격하지 않는다.
+_US_PREVIOUS_SESSION_MAX_CALENDAR_DAYS = 4
 
 
 def _parse_naver_num(value: Any) -> float | None:
@@ -426,7 +436,12 @@ def _batch_volume(value: Any) -> int | None:
 
 
 def _batch_session_date(value: object) -> datetime.date | None:
-    """yfinance 일봉 인덱스를 미국 거래일로 정규화한다."""
+    """yfinance 일봉 인덱스를 미국 거래일로 정규화한다.
+
+    tz-naive 인덱스는 yfinance의 거래소 현지 날짜 라벨이고, tz-aware 인덱스는
+    절대시각이므로 미국 동부 시간으로 바꾼 날짜가 세션 날짜다. 이 구분 없이
+    UTC 날짜만 자르면 금요일 봉이 토요일로 밀릴 수 있다.
+    """
     try:
         timestamp = pd.Timestamp(value)
     except (TypeError, ValueError):
@@ -438,6 +453,75 @@ def _batch_session_date(value: object) -> datetime.date | None:
     return timestamp.tz_convert(_US_EASTERN).date()
 
 
+def _select_completed_us_session_rows(
+    frame: pd.DataFrame,
+    *,
+    completed_as_of: datetime.datetime,
+) -> tuple[pd.DataFrame, datetime.datetime | None, bool]:
+    """완료 세션 또는 XNYS 직전 1개 세션의 봉을 보수적으로 고른다.
+
+    정확한 target ``Close``가 비었을 때만 XNYS가 증명한 직전 세션을 허용한다.
+    직전 세션도 4 calendar-day 안이어야 하며, 미래행이나 그보다 오래된 행은
+    사용하지 않는다. 반환 시각은 선택한 실제 세션 종료시각이고 마지막 bool은
+    target 대신 직전 세션을 사용했는지 나타낸다.
+    """
+    empty = (pd.DataFrame(), None, False)
+    if completed_as_of.tzinfo is None:
+        raise ValueError("completed_as_of must be timezone-aware")
+    if "close" not in frame.columns:
+        return empty
+
+    completed_date = completed_as_of.astimezone(_US_EASTERN).date()
+    valid = frame.loc[frame["close"].notna()]
+    dated_positions = [
+        (position, _batch_session_date(index_value))
+        for position, index_value in enumerate(valid.index)
+    ]
+    completed_positions = [
+        position
+        for position, session_date in dated_positions
+        if session_date == completed_date
+    ]
+
+    if completed_positions:
+        selected_date = completed_date
+        selected_position = completed_positions[-1]
+        selected_as_of = completed_as_of.astimezone(datetime.UTC)
+        stale_fallback = False
+    else:
+        selected_date = previous_trading_session("us", completed_date)
+        if (
+            selected_date is None
+            or (completed_date - selected_date).days
+            > _US_PREVIOUS_SESSION_MAX_CALENDAR_DAYS
+        ):
+            return empty
+        previous_positions = [
+            position
+            for position, session_date in dated_positions
+            if session_date == selected_date
+        ]
+        bounds = regular_session_bounds("us", selected_date)
+        if not previous_positions or bounds is None:
+            return empty
+        selected_position = previous_positions[-1]
+        selected_as_of = bounds[1].astimezone(datetime.UTC)
+        stale_fallback = True
+
+    prior_date = previous_trading_session("us", selected_date)
+    prior_positions = [
+        position
+        for position, session_date in dated_positions
+        if session_date == prior_date
+    ]
+    positions = (
+        [prior_positions[-1], selected_position]
+        if prior_positions
+        else [selected_position]
+    )
+    return valid.iloc[positions].copy(), selected_as_of, stale_fallback
+
+
 async def _fetch_indices_us_current_batch(
     symbols: list[str],
     *,
@@ -446,11 +530,10 @@ async def _fetch_indices_us_current_batch(
 ) -> list[dict[str, Any]]:
     """Fetch multiple US index rows through one daily download.
 
-    ``completed_as_of`` 대상 심볼은 그 정규장 날짜와 정확히 일치하는 확정
-    일봉만 고른다. 공급자가 해당 세션 행을 아직 비워 두면 직전 세션을 최신
-    값처럼 내리지 않고 unavailable로 둔다. 장중 형성 중인 미래 행은
-    ``current``로 쓰지 않는다. ``completed_symbols``를 생략하면 요청 심볼
-    전체가 대상이다.
+    완료 세션 대상은 공통 선택기로 target 확정 봉을 고른다. provider가 target
+    ``Close``를 비우면 XNYS가 증명한 직전 1개 세션만 stale로 허용하고 그 행의
+    실제 종료시각을 보존한다. 미래행과 더 오래된 행은 사용하지 않는다.
+    ``completed_symbols``를 생략하면 요청 심볼 전체가 대상이다.
     """
 
     normalized_symbols = [symbol.strip().upper() for symbol in symbols]
@@ -465,7 +548,11 @@ async def _fetch_indices_us_current_batch(
         return []
 
     loop = asyncio.get_running_loop()
-    yf_tickers = [yf_ticker for _symbol, _name, yf_ticker in definitions]
+    yf_tickers = list(
+        dict.fromkeys(
+            yf_ticker for _symbol, _name, yf_ticker in definitions
+        )
+    )
 
     def download() -> pd.DataFrame:
         raw_frame = yf.download(
@@ -493,42 +580,38 @@ async def _fetch_indices_us_current_batch(
         else None
     )
 
-    rows: list[dict[str, Any]] = []
-    for symbol, name, yf_ticker in definitions:
+    selected_by_symbol: dict[
+        str,
+        tuple[pd.DataFrame, datetime.datetime | None, bool],
+    ] = {}
+    for symbol, _name, yf_ticker in definitions:
         use_completed_session = completed_date is not None and (
             completed_symbol_set is None or symbol in completed_symbol_set
         )
         ticker_frame = _batch_ticker_frame(frame, yf_ticker)
-        latest_session_as_of: datetime.datetime | None = None
-        if "close" not in ticker_frame.columns:
-            valid = pd.DataFrame()
+        if use_completed_session:
+            assert completed_as_of is not None
+            selected_by_symbol[symbol] = _select_completed_us_session_rows(
+                ticker_frame,
+                completed_as_of=completed_as_of,
+            )
+        elif "close" in ticker_frame.columns:
+            selected_by_symbol[symbol] = (
+                ticker_frame.loc[ticker_frame["close"].notna()]
+                .sort_index()
+                .tail(2),
+                None,
+                False,
+            )
         else:
-            valid = ticker_frame.loc[ticker_frame["close"].notna()].sort_index()
-            if use_completed_session:
-                session_dates = [
-                    _batch_session_date(value) for value in valid.index
-                ]
-                completed_rows = valid.loc[
-                    [
-                        session_date is not None
-                        and session_date == completed_date
-                        for session_date in session_dates
-                    ]
-                ].tail(1)
-                previous_rows = valid.loc[
-                    [
-                        session_date is not None
-                        and session_date < completed_date
-                        for session_date in session_dates
-                    ]
-                ].tail(1)
-                if completed_rows.empty:
-                    valid = pd.DataFrame()
-                else:
-                    valid = pd.concat([previous_rows, completed_rows])
-                    latest_session_as_of = completed_as_of.astimezone(datetime.UTC)
-            else:
-                valid = valid.tail(2)
+            selected_by_symbol[symbol] = (pd.DataFrame(), None, False)
+
+    rows: list[dict[str, Any]] = []
+    for symbol, name, _yf_ticker in definitions:
+        use_completed_session = completed_date is not None and (
+            completed_symbol_set is None or symbol in completed_symbol_set
+        )
+        valid, selected_as_of, stale_fallback = selected_by_symbol[symbol]
         if valid.empty:
             rows.append(
                 {
@@ -573,12 +656,18 @@ async def _fetch_indices_us_current_batch(
                 "volume": _batch_volume(latest.get("volume")),
                 "source": "yfinance",
                 **(
-                    {"quote_asof": latest_session_as_of.isoformat()}
-                    if use_completed_session and latest_session_as_of is not None
+                    {"quote_asof": selected_as_of.isoformat()}
+                    if use_completed_session and selected_as_of is not None
                     else {}
                 ),
                 **(
-                    {"data_state": DATA_STATE_MARKET_CLOSED}
+                    {
+                        "data_state": (
+                            DATA_STATE_STALE
+                            if stale_fallback
+                            else DATA_STATE_MARKET_CLOSED
+                        )
+                    }
                     if use_completed_session
                     else {}
                 ),

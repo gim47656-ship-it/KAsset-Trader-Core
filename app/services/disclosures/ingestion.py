@@ -14,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import symbol_news_store
 from app.services.disclosures.dart_list import DartListError, fetch_disclosure_list
 from app.services.disclosures.feed_sources import DART_FEED_SOURCE
-from app.services.disclosures.summary_service import summarize_ingested_disclosures
+from app.services.disclosures.quality import (
+    is_high_value_dart_title,
+    is_low_information_dart_title,
+)
+from app.services.disclosures.summary_service import (
+    AUTO_SUMMARY_CANDIDATE_LIMIT,
+    summarize_ingested_disclosures,
+)
 from app.services.symbol_news_store import (
     DisclosureArticleInput,
     DisclosureUpsertCounts,
@@ -115,18 +122,35 @@ async def _summarize_after_ingest(
     db: AsyncSession,
     items: Sequence[DisclosureArticleInput],
 ) -> None:
+    eligible = [
+        item
+        for item in items
+        if item.stock_symbol is not None
+        and not is_low_information_dart_title(item.title)
+    ]
+    eligible.sort(
+        key=lambda item: (
+            is_high_value_dart_title(item.title),
+            item.published_at is not None,
+            item.published_at or datetime.min,
+            item.url,
+        ),
+        reverse=True,
+    )
+    candidate_urls = [
+        item.url for item in eligible[:AUTO_SUMMARY_CANDIDATE_LIMIT]
+    ]
     try:
-        result = await summarize_ingested_disclosures(
-            db,
-            [item.url for item in items],
-        )
+        result = await summarize_ingested_disclosures(db, candidate_urls)
     except Exception:
         await db.rollback()
         logger.exception("DART 공시 자동 요약 batch 실패")
         return
     logger.info(
-        "DART 공시 자동 요약: status=%s selected=%d summarized=%d failed=%d",
+        "DART 공시 자동 요약: status=%s candidates=%d selected=%d "
+        "summarized=%d failed=%d",
         result.status,
+        len(candidate_urls),
         result.selected,
         result.summarized,
         result.failed,

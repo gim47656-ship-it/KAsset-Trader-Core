@@ -9,23 +9,34 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
 from app.models.news import NewsArticle
-from app.services.disclosures.content_fetcher import DisclosureTextFetcher
+from app.services.disclosures.content_fetcher import (
+    MAX_TEXT_CHARS,
+    DisclosureTextFetcher,
+)
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
+from app.services.disclosures.quality import (
+    DART_HIGH_VALUE_TITLE_TERMS,
+    DART_LOW_INFORMATION_TITLE_TERMS,
+    title_matches_any,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 AUTO_SUMMARY_BATCH_SIZE = 20
+AUTO_SUMMARY_CANDIDATE_LIMIT = 200
+_MIN_BODY_CHARS = 40
 _HTTP_TIMEOUT_SECONDS = 20.0
 _SUMMARY_MAX_CHARS = 1_200
 _SEC_FORM_PREFIX = "sec_form:"
@@ -43,11 +54,15 @@ _SUMMARY_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
 }
 _SUMMARY_INSTRUCTIONS = (
-    "공시 원문에 명시된 사실만 사용해 한국어 2~4문장으로 요약하라. "
-    "매출, 영업이익 또는 순이익, 가이던스, 핵심 사건은 body_excerpt에 실제로 "
-    "있는 항목만 포함하라. 원문의 숫자와 단위를 그대로 보존하고 계산, 환산, 추측, "
-    "보완을 하지 마라. 투자 권유, 매수·매도 추천, 목표주가를 쓰지 마라. "
-    "제목이나 form을 본문 사실처럼 확대 해석하지 마라."
+    "공시 원문에 명시된 사실만 사용해 한국어 2~4문장으로 요약하라. 첫 문장에는 "
+    "공시 주체와 핵심 사건을 쓰고, 수치·날짜·상대방·기간·투자자 영향은 "
+    "body_excerpt에 명시된 항목만 포함하라. 표에서는 항목명과 값을 함께 읽어 "
+    "매출, 영업이익, 순이익, 계약금액, 발행조건 등 사건을 설명하는 핵심 행을 "
+    "노이즈보다 우선하라. 정정공시는 정정 사유와 정정 전·후 값, 달라진 숫자와 "
+    "단위를 원문에 있는 그대로 보존하라. 계산, 환산, 추측, 사실 보완을 하지 말고 "
+    "원문에 없는 시장 영향이나 전망을 만들지 마라. 투자 권유, 매수·매도 추천, "
+    "목표주가를 쓰지 마라. '본 공시는', '공시 내용에 따르면' 같은 상투적 서두, "
+    "제목 복제, form/표제 나열 대신 실제 사건과 변경 내용을 직접 서술하라."
 )
 _NUMBER_RETRY_INSTRUCTIONS = (
     "직전 시도는 원문에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. "
@@ -61,6 +76,11 @@ _INVESTMENT_ADVICE_RE = re.compile(
     r"(?:매수|매도|투자)(?:를|가|는)?\s*(?:권고|권유|추천|해야)|"
     r"목표\s*주가|목표가"
 )
+_TEMPLATE_LANGUAGE_RE = re.compile(
+    r"(?:본|해당|이번)\s*공시는|공시\s*내용에\s*따르면|"
+    r"투자자(?:들은?|에게)는?\s*(?:주목|유의|관심)"
+)
+_HANGUL_RE = re.compile(r"[가-힣]")
 _ENGLISH_MONTHS = (
     "january",
     "february",
@@ -149,8 +169,32 @@ def _is_calendar_month_translation(
     month_name = _ENGLISH_MONTHS[month_number - 1]
     return re.search(rf"\b{month_name}\b", source_text, re.IGNORECASE) is not None
 
+def _comparison_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
 
-def _validated_summary(summary: object, source_text: str) -> str:
+
+def _duplicates_title(sentence: str, title: str) -> bool:
+    sentence_key = _comparison_key(sentence)
+    title_key = _comparison_key(title)
+    if len(title_key) < 8:
+        return sentence_key == title_key
+    return SequenceMatcher(None, sentence_key, title_key).ratio() >= 0.94
+
+
+def _correction_comparison_required(body: str) -> bool:
+    body_key = re.sub(r"\s+", "", body)
+    return (
+        ("정정전" in body_key or "변경전" in body_key)
+        and ("정정후" in body_key or "변경후" in body_key)
+    )
+
+
+
+
+def _validated_summary(
+    summary: object,
+    disclosure: DisclosureSummaryInput,
+) -> str:
     if not isinstance(summary, str):
         raise ValueError("disclosure summary must be a string")
     normalized = " ".join(summary.split())
@@ -164,9 +208,25 @@ def _validated_summary(summary: object, source_text: str) -> str:
     ]
     if len(sentences) < 2 or len(sentences) > 4:
         raise ValueError("disclosure summary must contain 2 to 4 sentences")
+    if _HANGUL_RE.search(normalized) is None:
+        raise ValueError("disclosure summary must be written in Korean")
     if _INVESTMENT_ADVICE_RE.search(normalized):
         raise ValueError("disclosure summary contains investment advice")
+    if _TEMPLATE_LANGUAGE_RE.search(normalized):
+        raise ValueError("disclosure summary contains template language")
+    if any(_duplicates_title(sentence, disclosure.title) for sentence in sentences):
+        raise ValueError("disclosure summary duplicates title")
 
+    source_text = "\n".join(
+        value
+        for value in (
+            disclosure.title,
+            disclosure.company,
+            disclosure.form,
+            disclosure.body_excerpt,
+        )
+        if value
+    )
     source_numbers = _number_set(source_text)
     generated_numbers = _number_set(normalized)
     invented_numbers = {
@@ -180,6 +240,12 @@ def _validated_summary(summary: object, source_text: str) -> str:
     }
     if invented_numbers:
         raise ValueError("disclosure summary contains numbers absent from source")
+    if _correction_comparison_required(disclosure.body_excerpt):
+        if "정정" not in normalized and "변경" not in normalized:
+            raise ValueError("disclosure summary omits correction comparison")
+        body_numbers = _number_set(disclosure.body_excerpt)
+        if len(body_numbers) >= 2 and len(generated_numbers & body_numbers) < 2:
+            raise ValueError("disclosure summary omits correction values")
     return normalized
 
 
@@ -201,23 +267,13 @@ class OpenAiDisclosureSummaryGenerator:
             "body_excerpt": disclosure.body_excerpt,
         }
         response = await self._request(payload, retry=False)
-        source_text = "\n".join(
-            value
-            for value in (
-                disclosure.title,
-                disclosure.company,
-                disclosure.form,
-                disclosure.body_excerpt,
-            )
-            if value
-        )
         try:
-            return _validated_summary(response["summary"], source_text)
+            return _validated_summary(response["summary"], disclosure)
         except ValueError as exc:
             if str(exc) != "disclosure summary contains numbers absent from source":
                 raise
         retry_response = await self._request(payload, retry=True)
-        return _validated_summary(retry_response["summary"], source_text)
+        return _validated_summary(retry_response["summary"], disclosure)
 
     async def _request(
         self,
@@ -299,13 +355,35 @@ async def _candidate_ids(
 ) -> list[int]:
     if article_urls is not None and not article_urls:
         return []
+    is_dart = NewsArticle.feed_source == "dart"
+    important_title = title_matches_any(
+        NewsArticle.title,
+        DART_HIGH_VALUE_TITLE_TERMS,
+    )
+    low_information_title = title_matches_any(
+        NewsArticle.title,
+        DART_LOW_INFORMATION_TITLE_TERMS,
+    )
     stmt = (
         select(NewsArticle.id)
         .where(
             NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES),
             NewsArticle.summary.is_(None),
+            or_(
+                ~is_dart,
+                and_(
+                    NewsArticle.stock_symbol.is_not(None),
+                    ~low_information_title,
+                ),
+            ),
         )
         .order_by(
+            case(
+                (and_(is_dart, important_title), 0),
+                (~is_dart, 0),
+                else_=1,
+            ),
+            case((NewsArticle.article_content.is_not(None), 0), else_=1),
             NewsArticle.article_published_at.desc().nullslast(),
             NewsArticle.id.desc(),
         )
@@ -329,6 +407,13 @@ def _batch_status(
     if summarized > 0 or skipped_existing > 0:
         return "partial"
     return "failed"
+
+
+def _body_excerpt(value: str | None) -> str | None:
+    normalized = (value or "").strip()
+    if len(normalized) < _MIN_BODY_CHARS:
+        return None
+    return normalized[:MAX_TEXT_CHARS].rstrip()
 
 
 async def _run_batch(
@@ -372,7 +457,25 @@ async def _run_batch(
                 skipped_existing += 1
                 continue
 
-            body_excerpt = await fetcher.fetch(article.url)
+            body_excerpt = _body_excerpt(article.article_content)
+            if body_excerpt is None:
+                fetched_body = _body_excerpt(await fetcher.fetch(article.url))
+                if fetched_body is None:
+                    raise ValueError("disclosure body is missing or too short")
+                article.article_content = fetched_body
+                article.updated_at = _utcnow()
+                await db.commit()
+                article = await db.scalar(
+                    select(NewsArticle)
+                    .where(NewsArticle.id == article_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if article is None or article.summary is not None:
+                    skipped_existing += 1
+                    await db.rollback()
+                    continue
+                body_excerpt = _body_excerpt(article.article_content) or fetched_body
+
             summary = await generator.summarize(
                 DisclosureSummaryInput(
                     title=article.title,
@@ -465,7 +568,9 @@ async def summarize_ingested_disclosures(
     article_urls: Sequence[str],
 ) -> DisclosureSummaryBatchResult:
     """한 수집 회차의 최신 공시만 비용 상한 안에서 자동 요약한다."""
-    bounded_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_BATCH_SIZE]
+    bounded_urls = tuple(dict.fromkeys(article_urls))[
+        :AUTO_SUMMARY_CANDIDATE_LIMIT
+    ]
     return await summarize_pending_disclosures(
         db,
         batch_size=AUTO_SUMMARY_BATCH_SIZE,
@@ -474,6 +579,7 @@ async def summarize_ingested_disclosures(
 
 
 __all__ = [
+    "AUTO_SUMMARY_CANDIDATE_LIMIT",
     "AUTO_SUMMARY_BATCH_SIZE",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",
