@@ -284,9 +284,17 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
         title="신규시설 투자",
         published_at=datetime(2026, 8, 29, 9, 0),
     )
+    successful_body = (
+        "회사는 공급 계약 체결 사실과 계약 기간, 상대방, 이행 일정을 "
+        "원문 표에 구체적으로 공시했다."
+    )
+    retry_body = (
+        "회사는 신규시설 투자 사실과 투자 금액, 집행 기간, 자금 조달 계획을 "
+        "원문 표에 구체적으로 공시했다."
+    )
     fetcher = FakeBodyFetcher(
         {
-            successful_url: "회사는 공급 계약 체결 사실과 이행 일정을 공시했다.",
+            successful_url: successful_body,
             failed_url: RuntimeError("fake body fetch failure"),
         }
     )
@@ -315,14 +323,12 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
         "계약 이행 일정은 원문에 기재되어 있다고 밝혔다."
     )
     assert successful.is_analyzed is True
-    assert successful.article_content == (
-        "회사는 공급 계약 체결 사실과 이행 일정을 공시했다."
-    )
+    assert successful.article_content == successful_body
     assert failed is not None
     assert failed.summary is None
     assert failed.is_analyzed is False
 
-    fetcher.outcomes[failed_url] = "회사는 신규시설 투자 사실과 일정을 공시했다."
+    fetcher.outcomes[failed_url] = retry_body
     second = await summarize_pending_disclosures(
         db_session,
         batch_size=2,

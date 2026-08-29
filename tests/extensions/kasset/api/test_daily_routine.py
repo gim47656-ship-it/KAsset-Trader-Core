@@ -75,6 +75,9 @@ async def routine_data(db_session: AsyncSession) -> AsyncIterator[dict[str, obje
     ]
     db_session.add_all(instruments)
     await db_session.flush()
+    user_ids = [user.id for user in users]
+    instrument_ids = [instrument.id for instrument in instruments]
+    exchange_id = exchange.id
     db_session.add_all(
         UserWatchItem(
             user_id=users[0].id,
@@ -101,7 +104,7 @@ async def routine_data(db_session: AsyncSession) -> AsyncIterator[dict[str, obje
             await db_session.execute(
                 delete(NewsArticle).where(NewsArticle.id.in_(article_ids))
             )
-        user_ids = [user.id for user in users]
+        # Rollback expires ORM instances; use the scalar ids captured before commit.
         await db_session.execute(
             delete(KAssetDailyRoutineSetting).where(
                 KAssetDailyRoutineSetting.owner_user_id.in_(user_ids)
@@ -111,11 +114,9 @@ async def routine_data(db_session: AsyncSession) -> AsyncIterator[dict[str, obje
             delete(UserWatchItem).where(UserWatchItem.user_id.in_(user_ids))
         )
         await db_session.execute(
-            delete(Instrument).where(
-                Instrument.id.in_([instrument.id for instrument in instruments])
-            )
+            delete(Instrument).where(Instrument.id.in_(instrument_ids))
         )
-        await db_session.execute(delete(Exchange).where(Exchange.id == exchange.id))
+        await db_session.execute(delete(Exchange).where(Exchange.id == exchange_id))
         await db_session.execute(delete(User).where(User.id.in_(user_ids)))
         await db_session.commit()
 
