@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -240,3 +241,108 @@ async def test_single_us_index_keeps_individual_current_and_history_calls(
     history.assert_awaited_once_with("^GSPC", 5, "day")
     batch.assert_not_awaited()
     assert result["history"] == [{"date": "2026-08-28", "close": 6500.0}]
+
+
+@pytest.mark.asyncio
+async def test_single_index_completed_summary_keeps_existing_range_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_end = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+    completed = AsyncMock(
+        return_value=[
+            {
+                "symbol": "SPX",
+                "current": 6500.0,
+                "quote_asof": completed_end.isoformat(),
+                "data_state": "market_closed",
+            }
+        ]
+    )
+    live = AsyncMock(side_effect=AssertionError("live current must not be used"))
+    history_rows = [
+        {"date": "2026-08-27", "close": 6480.0},
+        {"date": "2026-08-28", "close": 6500.0},
+    ]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", completed)
+    monkeypatch.setattr(handler, "_fetch_index_us_current", live)
+    monkeypatch.setattr(handler, "_fetch_index_us_history", history)
+
+    result = await handler.handle_get_market_index(
+        symbol="SPX",
+        period="day",
+        count=5,
+        completed_as_of_by_market={"US": completed_end},
+    )
+
+    completed.assert_awaited_once_with(
+        ["SPX"],
+        completed_as_of=completed_end,
+        completed_symbols=("SPX",),
+    )
+    live.assert_not_awaited()
+    history.assert_awaited_once_with("^GSPC", 5, "day")
+    assert result["indices"][0]["current"] == 6500.0
+    assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_single_index_missing_completed_cutoff_degrades_only_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = AsyncMock(side_effect=AssertionError("live current must not be used"))
+    completed = AsyncMock(side_effect=AssertionError("no cutoff must not fetch current"))
+    history_rows = [{"date": "2026-08-28", "close": 6500.0}]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_index_us_current", live)
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", completed)
+    monkeypatch.setattr(handler, "_fetch_index_us_history", history)
+
+    result = await handler.handle_get_market_index(
+        symbol="SPX",
+        period="day",
+        count=5,
+        completed_as_of_by_market={},
+    )
+
+    live.assert_not_awaited()
+    completed.assert_not_awaited()
+    assert result["indices"][0]["unavailable"] is True
+    assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_single_kr_index_uses_completed_close_not_live_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_end = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
+    completed_row = {
+        "symbol": "KOSPI",
+        "current": 6788.88,
+        "quote_asof": completed_end.isoformat(),
+        "data_state": "market_closed",
+    }
+    completed = AsyncMock(return_value=completed_row)
+    live = AsyncMock(side_effect=AssertionError("live current must not be used"))
+    history_rows = [{"date": "2026-08-28", "close": 6788.88}]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_index_kr_completed", completed)
+    monkeypatch.setattr(handler, "_fetch_index_kr_current", live)
+    monkeypatch.setattr(handler, "_fetch_index_kr_history", history)
+
+    result = await handler.handle_get_market_index(
+        symbol="KOSPI",
+        period="day",
+        count=5,
+        completed_as_of_by_market={"KRX": completed_end},
+    )
+
+    completed.assert_awaited_once_with(
+        "KOSPI",
+        "코스피",
+        completed_as_of=completed_end,
+    )
+    live.assert_not_awaited()
+    history.assert_awaited_once_with("KOSPI", 5, "day")
+    assert result["indices"] == [completed_row]
+    assert result["history"] == history_rows

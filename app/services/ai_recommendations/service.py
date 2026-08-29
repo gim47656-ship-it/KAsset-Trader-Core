@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.models import AndroidPaperOrder
@@ -19,6 +19,7 @@ from app.models.ai_recommendations import (
     RecommendationStatusGroup,
     TerminalRecommendationDecision,
 )
+from app.models.symbol_master import SymbolMaster
 from app.services.ai_recommendations.repository import AIRecommendationRepository
 
 if TYPE_CHECKING:
@@ -138,6 +139,42 @@ class AIRecommendationService:
             row.id: by_id[row.paper_order_id]
             for row in recommendations
             if row.paper_order_id in by_id
+        }
+
+    async def load_symbol_names(
+        self,
+        recommendations: list[AIRecommendation],
+    ) -> dict[tuple[str, str], str]:
+        """이름이 비었거나 코드뿐인 기존 추천을 종목 마스터에서 한 번에 보강한다."""
+
+        keys = tuple(
+            dict.fromkeys(
+                (str(row.market), str(row.symbol))
+                for row in recommendations
+                if not (row.name or "").strip()
+                or (row.name or "").strip() == str(row.symbol).strip()
+            )
+        )
+        if not keys:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(
+                    SymbolMaster.market,
+                    SymbolMaster.symbol,
+                    SymbolMaster.name,
+                ).where(
+                    tuple_(
+                        SymbolMaster.market,
+                        SymbolMaster.symbol,
+                    ).in_(keys)
+                )
+            )
+        ).all()
+        return {
+            (market, symbol): name.strip()
+            for market, symbol, name in rows
+            if name and name.strip() and name.strip() != symbol
         }
 
     async def list_recommendations(

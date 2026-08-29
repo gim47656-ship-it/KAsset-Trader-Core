@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import html
+import io
 import re
 import warnings
+import zipfile
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Comment, XMLParsedAsHTMLWarning
 
+from app.core.config import settings
 from app.services.disclosures.sec_edgar import (
     SecEdgarError,
     SecRateLimiter,
@@ -22,12 +26,31 @@ MAX_REDIRECTS = 3
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_TEXT_CHARS = 16_000
 MIN_TEXT_CHARS = 40
+DART_DOCUMENT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+DART_DOCUMENT_MAX_MEMBERS = 64
+DART_DOCUMENT_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+DART_DOCUMENT_MAX_MEMBER_BYTES = 8 * 1024 * 1024
 
 _SEC_HOSTS = frozenset({"sec.gov", "www.sec.gov"})
 _DART_HOSTS = frozenset({"dart.fss.or.kr"})
 _DART_LANDING_PATH = "/dsaf001/main.do"
 _DART_VIEWER_PATH = "/report/viewer.do"
 _DART_USER_AGENT = "KAsset-Trader-Core disclosure-summary/1.0"
+_OPENDART_DOCUMENT_URL = "https://opendart.fss.or.kr/api/document.xml"
+_DART_DOCUMENT_EXTENSIONS = frozenset(
+    {".htm", ".html", ".txt", ".xhtml", ".xml"}
+)
+_OPENDART_ERROR_MESSAGES = {
+    "010": "unregistered API key",
+    "011": "unavailable API key",
+    "012": "API access is not allowed from this address",
+    "013": "no document is available",
+    "014": "document file is unavailable",
+    "020": "request limit exceeded",
+    "100": "invalid request parameters",
+    "800": "service maintenance",
+    "900": "undefined service error",
+}
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _DART_VIEWER_URL_RE = re.compile(
     r"(?P<url>(?:https://dart\.fss\.or\.kr)?/report/viewer\.do\?[^\"'<>\\\s]+)",
@@ -287,6 +310,342 @@ def _dart_viewer_url(landing: _FetchedHtml) -> str:
     return candidate
 
 
+def _dart_receipt_number(landing: _FetchedHtml) -> str:
+    values = parse_qs(
+        urlsplit(landing.url).query,
+        keep_blank_values=True,
+    ).get("rcpNo", ())
+    if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
+        raise DisclosureContentError(
+            "DART landing URL must contain one numeric rcpNo"
+        )
+    return values[0]
+
+
+async def _read_bounded_document_response(response: httpx.Response) -> bytes:
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > DART_DOCUMENT_MAX_RESPONSE_BYTES:
+            raise DisclosureContentError(
+                "OpenDART document response exceeds the size limit"
+            )
+
+    buffer = io.BytesIO()
+    consumed = 0
+    async for chunk in response.aiter_bytes():
+        consumed += len(chunk)
+        if consumed > DART_DOCUMENT_MAX_RESPONSE_BYTES:
+            raise DisclosureContentError(
+                "OpenDART document response exceeds the size limit"
+            )
+        buffer.write(chunk)
+    if consumed == 0:
+        raise DisclosureContentError("OpenDART document response body is empty")
+    return buffer.getvalue()
+
+
+def _opendart_api_error(payload: bytes) -> DisclosureContentError | None:
+    if payload.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return None
+    text = payload[:16_384].decode("utf-8", errors="replace")
+    status_match = re.search(
+        r"<status>\s*([0-9]{3})\s*</status>",
+        text,
+        re.IGNORECASE,
+    )
+    message_match = re.search(r"<message(?:\s[^>]*)?>", text, re.IGNORECASE)
+    if status_match is None and message_match is None:
+        return None
+    status = status_match.group(1) if status_match is not None else "unknown"
+    reason = _OPENDART_ERROR_MESSAGES.get(status, "service rejected the request")
+    return DisclosureContentError(
+        f"OpenDART document API error: {reason} (status {status})"
+    )
+
+
+async def _fetch_opendart_document(
+    client: httpx.AsyncClient,
+    *,
+    api_key: str,
+    rcept_no: str,
+) -> bytes:
+    request = client.build_request(
+        "GET",
+        _OPENDART_DOCUMENT_URL,
+        params={"crtfc_key": api_key, "rcept_no": rcept_no},
+        headers={
+            "Accept": "application/zip,application/xml;q=0.9",
+            "User-Agent": _DART_USER_AGENT,
+        },
+    )
+    try:
+        response = await client.send(
+            request,
+            stream=True,
+            follow_redirects=False,
+        )
+    except (httpx.TransportError, httpx.TimeoutException) as exc:
+        raise DisclosureContentError(
+            f"OpenDART document fetch failed: {type(exc).__name__}"
+        ) from None
+
+    try:
+        if response.status_code in _REDIRECT_STATUSES:
+            raise DisclosureContentError(
+                "OpenDART document API redirects are not allowed"
+            )
+        if not response.is_success:
+            raise DisclosureContentError(
+                f"OpenDART document fetch returned HTTP {response.status_code}"
+            )
+        payload = await _read_bounded_document_response(response)
+    finally:
+        await response.aclose()
+
+    api_error = _opendart_api_error(payload)
+    if api_error is not None:
+        raise api_error
+    return payload
+
+
+def _safe_document_member(info: zipfile.ZipInfo) -> bool:
+    normalized_name = info.filename.replace("\\", "/")
+    path = PurePosixPath(normalized_name)
+    if (
+        not normalized_name
+        or "\x00" in normalized_name
+        or normalized_name.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized_name) is not None
+        or ".." in path.parts
+    ):
+        raise DisclosureContentError(
+            "OpenDART document ZIP contains an unsafe member path"
+        )
+    if info.flag_bits & 0x1:
+        raise DisclosureContentError(
+            "OpenDART document ZIP contains an encrypted member"
+        )
+    return not info.is_dir() and path.suffix.lower() in _DART_DOCUMENT_EXTENSIONS
+
+
+def _read_document_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+) -> bytes:
+    if info.file_size > DART_DOCUMENT_MAX_MEMBER_BYTES:
+        raise DisclosureContentError(
+            "OpenDART document ZIP member exceeds the size limit"
+        )
+    chunks: list[bytes] = []
+    consumed = 0
+    try:
+        with archive.open(info, "r") as member:
+            while True:
+                chunk = member.read(
+                    min(
+                        64 * 1024,
+                        DART_DOCUMENT_MAX_MEMBER_BYTES + 1 - consumed,
+                    )
+                )
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                if consumed > DART_DOCUMENT_MAX_MEMBER_BYTES:
+                    raise DisclosureContentError(
+                        "OpenDART document ZIP member exceeds the size limit"
+                    )
+                chunks.append(chunk)
+    except DisclosureContentError:
+        raise
+    except (EOFError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise DisclosureContentError("OpenDART document ZIP is invalid") from exc
+    return b"".join(chunks)
+
+
+def _decode_document_member(payload: bytes) -> str:
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload.decode("utf-8-sig", errors="replace")
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16", errors="replace")
+
+    declaration = re.search(
+        br"(?:encoding|charset)\s*=\s*[\"']?\s*([A-Za-z0-9._-]+)",
+        payload[:1024],
+        re.IGNORECASE,
+    )
+    aliases = {
+        "utf-8": "utf-8",
+        "utf8": "utf-8",
+        "euc-kr": "euc-kr",
+        "euckr": "euc-kr",
+        "cp949": "cp949",
+        "ks_c_5601-1987": "cp949",
+    }
+    encodings: list[str] = []
+    if declaration is not None:
+        declared = declaration.group(1).decode("ascii").lower()
+        encoding = aliases.get(declared)
+        if encoding is not None:
+            encodings.append(encoding)
+    encodings.extend(
+        encoding
+        for encoding in ("utf-8", "cp949")
+        if encoding not in encodings
+    )
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _zip_member_count(payload: bytes) -> int:
+    signature = b"PK\x05\x06"
+    search_start = max(0, len(payload) - (65_535 + 22))
+    search_end = len(payload)
+    while search_end > search_start:
+        offset = payload.rfind(signature, search_start, search_end)
+        if offset < 0:
+            break
+        if offset + 22 <= len(payload):
+            comment_length = int.from_bytes(
+                payload[offset + 20 : offset + 22],
+                "little",
+            )
+            if offset + 22 + comment_length == len(payload):
+                disk_number = int.from_bytes(
+                    payload[offset + 4 : offset + 6],
+                    "little",
+                )
+                central_directory_disk = int.from_bytes(
+                    payload[offset + 6 : offset + 8],
+                    "little",
+                )
+                entries_on_disk = int.from_bytes(
+                    payload[offset + 8 : offset + 10],
+                    "little",
+                )
+                total_entries = int.from_bytes(
+                    payload[offset + 10 : offset + 12],
+                    "little",
+                )
+                central_directory_size = int.from_bytes(
+                    payload[offset + 12 : offset + 16],
+                    "little",
+                )
+                central_directory_offset = int.from_bytes(
+                    payload[offset + 16 : offset + 20],
+                    "little",
+                )
+                if total_entries > DART_DOCUMENT_MAX_MEMBERS:
+                    raise DisclosureContentError(
+                        "OpenDART document ZIP has too many members"
+                    )
+                if (
+                    disk_number != 0
+                    or central_directory_disk != 0
+                    or entries_on_disk != total_entries
+                    or central_directory_offset + central_directory_size != offset
+                ):
+                    raise DisclosureContentError(
+                        "OpenDART document ZIP is invalid"
+                    )
+
+                cursor = central_directory_offset
+                parsed_entries = 0
+                while cursor < offset:
+                    if (
+                        cursor + 46 > offset
+                        or payload[cursor : cursor + 4] != b"PK\x01\x02"
+                    ):
+                        raise DisclosureContentError(
+                            "OpenDART document ZIP is invalid"
+                        )
+                    variable_length = sum(
+                        int.from_bytes(
+                            payload[cursor + start : cursor + start + 2],
+                            "little",
+                        )
+                        for start in (28, 30, 32)
+                    )
+                    cursor += 46 + variable_length
+                    parsed_entries += 1
+                    if parsed_entries > DART_DOCUMENT_MAX_MEMBERS:
+                        raise DisclosureContentError(
+                            "OpenDART document ZIP has too many members"
+                        )
+                if cursor != offset or parsed_entries != total_entries:
+                    raise DisclosureContentError(
+                        "OpenDART document ZIP is invalid"
+                    )
+                return total_entries
+        search_end = offset
+    raise DisclosureContentError("OpenDART document ZIP is invalid")
+
+
+def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
+    if not payload.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        raise DisclosureContentError(
+            "OpenDART document response is not a ZIP archive"
+        )
+    declared_members = _zip_member_count(payload)
+    if declared_members > DART_DOCUMENT_MAX_MEMBERS:
+        raise DisclosureContentError(
+            "OpenDART document ZIP has too many members"
+        )
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+        infos = archive.infolist()
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise DisclosureContentError("OpenDART document ZIP is invalid") from exc
+
+    with archive:
+        if (
+            len(infos) != declared_members
+            or len(infos) > DART_DOCUMENT_MAX_MEMBERS
+        ):
+            raise DisclosureContentError(
+                "OpenDART document ZIP has too many members"
+            )
+        total_uncompressed = sum(info.file_size for info in infos)
+        if total_uncompressed > DART_DOCUMENT_MAX_UNCOMPRESSED_BYTES:
+            raise DisclosureContentError(
+                "OpenDART document ZIP exceeds the uncompressed size limit"
+            )
+
+        selected = [info for info in infos if _safe_document_member(info)]
+        selected.sort(key=lambda info: (-info.file_size, info.filename))
+        parts: list[str] = []
+        consumed_chars = 0
+        for info in selected:
+            separator_chars = 2 if parts else 0
+            remaining = max_chars - consumed_chars - separator_chars
+            if remaining < MIN_TEXT_CHARS:
+                break
+            member_payload = _read_document_member(archive, info)
+            try:
+                member_text = extract_disclosure_text(
+                    _decode_document_member(member_payload),
+                    max_chars=remaining,
+                )
+            except DisclosureContentError:
+                continue
+            parts.append(member_text)
+            consumed_chars += separator_chars + len(member_text)
+
+    text = "\n\n".join(parts)
+    if len(text) < MIN_TEXT_CHARS:
+        raise DisclosureContentError(
+            "OpenDART document ZIP has no usable disclosure text"
+        )
+    return text[:max_chars].rstrip()
+
+
 def extract_disclosure_text(
     html_body: str,
     *,
@@ -356,7 +715,24 @@ class DisclosureTextFetcher:
         )
         exhibit: _FetchedHtml | None = None
         if provider == "dart" and urlsplit(document.url).path == _DART_LANDING_PATH:
-            viewer_url = _dart_viewer_url(document)
+            try:
+                viewer_url = _dart_viewer_url(document)
+            except DisclosureContentError:
+                rcept_no = _dart_receipt_number(document)
+                api_key = (settings.opendart_api_key or "").strip()
+                if not api_key:
+                    raise DisclosureContentError(
+                        "OPENDART_API_KEY is required for DART document fallback"
+                    ) from None
+                payload = await _fetch_opendart_document(
+                    self._client,
+                    api_key=api_key,
+                    rcept_no=rcept_no,
+                )
+                return _extract_opendart_document_text(
+                    payload,
+                    max_chars=self._max_text_chars,
+                )
             document = await _fetch_html(
                 self._client,
                 viewer_url,

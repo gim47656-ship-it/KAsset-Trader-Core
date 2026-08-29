@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.models.news import NewsArticle
 from app.models.symbol_news_relevance import SymbolNewsRelevance
 from app.services import symbol_news_store
-from app.services.symbol_news_store import FeedArticleInput
+from app.services.symbol_news_store import DisclosureArticleInput, FeedArticleInput
 
 
 def _item(url: str, title: str, published: datetime | None = None) -> FeedArticleInput:
@@ -25,6 +25,83 @@ def _item(url: str, title: str, published: datetime | None = None) -> FeedArticl
 
 def _unique_url(prefix: str) -> str:
     return f"https://x/rob491-{prefix}-{uuid.uuid4()}"
+
+
+def _disclosure_item(url: str, title: str) -> DisclosureArticleInput:
+    return DisclosureArticleInput(
+        url=url,
+        title=title,
+        source="DART",
+        feed_source="dart_disclosure",
+        market="kr",
+        stock_symbol="005930",
+        stock_name="삼성전자",
+        published_at=datetime(2026, 8, 29, 9, 0, tzinfo=UTC),
+        keywords=["공시"],
+    )
+
+
+class _ExecuteCountingSession:
+    def __init__(self, session) -> None:
+        self._session = session
+        self.select_calls = 0
+        self.insert_calls = 0
+        self.commit_calls = 0
+
+    async def execute(self, statement, *args, **kwargs):
+        self.select_calls += int(statement.is_select)
+        self.insert_calls += int(statement.is_insert)
+        return await self._session.execute(statement, *args, **kwargs)
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_upsert_disclosures_chunks_large_batch_and_preserves_counts(
+    db_session,
+) -> None:
+    unchanged_url = _unique_url("dart-bulk-unchanged")
+    updated_url = _unique_url("dart-bulk-updated")
+    await symbol_news_store.upsert_disclosures(
+        db_session,
+        [
+            _disclosure_item(unchanged_url, "변경 없음"),
+            _disclosure_item(updated_url, "변경 전"),
+        ],
+    )
+
+    new_items = [
+        _disclosure_item(_unique_url(f"dart-bulk-{index}"), f"신규 공시 {index}")
+        for index in range(2_200)
+    ]
+    updated_item = _disclosure_item(updated_url, "변경 후")
+    counting_session = _ExecuteCountingSession(db_session)
+
+    counts = await symbol_news_store.upsert_disclosures(
+        counting_session,
+        [
+            _disclosure_item(unchanged_url, "변경 없음"),
+            updated_item,
+            *new_items,
+            updated_item,
+        ],
+    )
+    stored_updated = (
+        await db_session.execute(
+            select(NewsArticle).where(NewsArticle.url == updated_url)
+        )
+    ).scalar_one()
+
+    assert stored_updated.title == "변경 후"
+
+    assert counts.inserted == 2_200
+    assert counts.updated == 1
+    assert counts.skipped == 2  # unchanged 1 + duplicate URL 1
+    assert counting_session.select_calls == 5
+    assert counting_session.insert_calls == 5
+    assert counting_session.commit_calls == 0
 
 
 @pytest.mark.integration

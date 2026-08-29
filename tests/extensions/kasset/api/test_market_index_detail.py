@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -15,8 +16,14 @@ from app.extensions.kasset.api import market_overview as mod
 from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.schemas import MarketIndexRange
-from app.mcp_server.tooling.market_session import DATA_STATE_FRESH
+from app.mcp_server.tooling.market_session import (
+    DATA_STATE_FRESH,
+    DATA_STATE_MARKET_CLOSED,
+)
 from app.middleware.auth import AuthMiddleware
+
+_KR_COMPLETED_END = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
+_US_COMPLETED_END = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +35,17 @@ def clear_index_detail_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         return "REGULAR"
 
     monkeypatch.setattr(mod.krx_quotes, "resolve_market_session_state", session_state)
+
+    async def latest_completed(market: str, moment: datetime) -> object:
+        del moment
+        end = _US_COMPLETED_END if market == "us" else _KR_COMPLETED_END
+        return SimpleNamespace(end=end)
+
+    monkeypatch.setattr(
+        mod,
+        "get_latest_completed_regular_window_from_toss",
+        latest_completed,
+    )
 
 
 async def _session_override() -> object:
@@ -96,7 +114,12 @@ async def test_index_detail_maps_each_public_range(
 
     assert response.summary.symbol == "SPX"
     assert response.summary.range == range_
-    source.assert_awaited_once_with(symbol="SPX", period=period, count=count)
+    source.assert_awaited_once_with(
+        symbol="SPX",
+        period=period,
+        count=count,
+        completed_as_of_by_market={"US": _US_COMPLETED_END},
+    )
 
 
 @pytest.mark.asyncio
@@ -130,7 +153,12 @@ async def test_new_us_indices_are_whitelisted_for_every_public_range(
     assert response.summary.price == "6500.5"
     assert response.summary.status == "available"
     assert len(response.candles) == 1
-    source.assert_awaited_once_with(symbol=symbol, period=period, count=count)
+    source.assert_awaited_once_with(
+        symbol=symbol,
+        period=period,
+        count=count,
+        completed_as_of_by_market={"US": _US_COMPLETED_END},
+    )
 
 
 @pytest.mark.asyncio
@@ -234,7 +262,7 @@ def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
     assert "change_amount" not in response.text
 
 
-def test_index_detail_normalizes_kr_quote_timestamp_to_utc(
+def test_index_detail_uses_completed_kr_close_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = {
@@ -244,28 +272,33 @@ def test_index_detail_normalizes_kr_quote_timestamp_to_utc(
                 "current": 6788.88,
                 "change": -123.49,
                 "change_pct": -1.79,
-                "quote_asof": "2026-08-28T14:01:00+09:00",
-                "data_state": DATA_STATE_FRESH,
+                "quote_asof": _KR_COMPLETED_END.isoformat(),
+                "data_state": DATA_STATE_MARKET_CLOSED,
             }
         ],
         "history": [],
     }
-    monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
+    source = AsyncMock(return_value=result)
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
 
     with _client() as client:
         response = client.get("/api/v1/market/indices/KOSPI?range=1W")
 
     assert response.status_code == 200
-    # The Android client parses wire timestamps with a strict UTC parser, so the
-    # provider's +09:00 offset must never reach it.
-    assert response.json()["summary"]["asOf"] == "2026-08-28T05:01:00Z"
+    assert response.json()["summary"]["asOf"] == "2026-08-28T06:30:00Z"
+    source.assert_awaited_once_with(
+        symbol="KOSPI",
+        period="day",
+        count=5,
+        completed_as_of_by_market={"KRX": _KR_COMPLETED_END},
+    )
 
 
 def test_index_detail_keeps_kr_bars_that_carry_no_volume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The live Naver index price rows carry no traded volume, so dropping
-    # volume-less bars would leave the KR chart permanently empty.
+    # Naver index price rows carry no traded volume, so dropping volume-less
+    # bars would leave the KR chart permanently empty.
     result = {
         "indices": [
             {
@@ -341,7 +374,18 @@ async def test_index_detail_cache_is_keyed_single_flight_for_fifteen_seconds(
     calls: list[tuple[str, str, int]] = []
     monotonic_now = 1000.0
 
-    async def source(*, symbol: str, period: str, count: int) -> dict[str, Any]:
+    async def source(
+        *,
+        symbol: str,
+        period: str,
+        count: int,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
+        expected_market = "KRX" if symbol in {"KOSPI", "KOSDAQ"} else "US"
+        expected_end = (
+            _KR_COMPLETED_END if expected_market == "KRX" else _US_COMPLETED_END
+        )
+        assert completed_as_of_by_market == {expected_market: expected_end}
         calls.append((symbol, period, count))
         await asyncio.sleep(0)
         return _index_result(symbol)

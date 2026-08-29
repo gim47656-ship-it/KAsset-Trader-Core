@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
@@ -24,6 +24,38 @@ from app.models.user_settings import UserSetting
 
 _SETTING_KEY = "kasset.ai_trading"
 _MIN_AI_CONFIDENCE = Decimal("0.50")
+_DEFAULT_OPERATING_BUDGET = Decimal("10000000")
+
+
+@dataclass(frozen=True, slots=True)
+class _RiskPreset:
+    daily_target_rate_pct: Decimal
+    max_daily_loss_rate_pct: Decimal
+    max_symbol_allocation: Decimal
+    max_concurrent_holdings: int
+    max_buys_per_day: int
+    max_orders_per_day: int
+    same_symbol_reentry_limit: int
+
+
+_RISK_PRESETS = {
+    1: _RiskPreset(
+        Decimal("0.3"), Decimal("0.5"), Decimal("0.10"), 3, 1, 2, 1
+    ),
+    2: _RiskPreset(
+        Decimal("0.5"), Decimal("1.0"), Decimal("0.15"), 4, 2, 3, 1
+    ),
+    3: _RiskPreset(
+        Decimal("0.8"), Decimal("1.5"), Decimal("0.20"), 5, 3, 5, 1
+    ),
+    4: _RiskPreset(
+        Decimal("1.2"), Decimal("2.5"), Decimal("0.25"), 5, 5, 8, 1
+    ),
+    5: _RiskPreset(
+        Decimal("2.0"), Decimal("4.0"), Decimal("0.30"), 6, 8, 12, 2
+    ),
+}
+_DEFAULT_RISK_LEVEL = 2
 
 
 class OperatingMode(StrEnum):
@@ -33,27 +65,111 @@ class OperatingMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AITradingLimits:
-    operating_budget: Decimal = Decimal("10000000")
-    conservative_daily_goal: Decimal = Decimal("100000")
-    daily_max_loss: Decimal = Decimal("200000")
-    max_buys_per_day: int = 3
-    max_orders_per_day: int = 5
-    max_symbol_allocation: Decimal = Decimal("0.20")
-    max_concurrent_holdings: int = 5
-    same_symbol_reentry_limit: int = 1
+    risk_level: int = _DEFAULT_RISK_LEVEL
+    operating_budget: Decimal = _DEFAULT_OPERATING_BUDGET
+    daily_target_rate_pct: Decimal = _RISK_PRESETS[
+        _DEFAULT_RISK_LEVEL
+    ].daily_target_rate_pct
+    max_daily_loss_rate_pct: Decimal = _RISK_PRESETS[
+        _DEFAULT_RISK_LEVEL
+    ].max_daily_loss_rate_pct
+    max_buys_per_day: int = field(init=False)
+    max_orders_per_day: int = field(init=False)
+    max_symbol_allocation: Decimal = field(init=False)
+    max_concurrent_holdings: int = field(init=False)
+    same_symbol_reentry_limit: int = field(init=False)
     kill_switch: bool = False
     currency: Literal["KRW", "USD"] = "KRW"
 
+    def __init__(
+        self,
+        *,
+        risk_level: int = _DEFAULT_RISK_LEVEL,
+        operating_budget: Decimal = _DEFAULT_OPERATING_BUDGET,
+        daily_target_rate_pct: Decimal | None = None,
+        max_daily_loss_rate_pct: Decimal | None = None,
+        kill_switch: bool = False,
+        currency: Literal["KRW", "USD"] = "KRW",
+    ) -> None:
+        level = _risk_level(risk_level, "risk_level")
+        preset = _RISK_PRESETS[level]
+        normalized_currency = str(currency).upper()
+        if normalized_currency not in {"KRW", "USD"}:
+            raise ValueError("currency must be KRW or USD")
+        object.__setattr__(self, "risk_level", level)
+        object.__setattr__(
+            self,
+            "operating_budget",
+            _positive_decimal(operating_budget, "operating_budget"),
+        )
+        object.__setattr__(
+            self,
+            "daily_target_rate_pct",
+            preset.daily_target_rate_pct
+            if daily_target_rate_pct is None
+            else _percentage(
+                daily_target_rate_pct,
+                "daily_target_rate_pct",
+                minimum=Decimal("0"),
+                maximum=Decimal("10"),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_daily_loss_rate_pct",
+            preset.max_daily_loss_rate_pct
+            if max_daily_loss_rate_pct is None
+            else _percentage(
+                max_daily_loss_rate_pct,
+                "max_daily_loss_rate_pct",
+                minimum=Decimal("0"),
+                maximum=Decimal("20"),
+            ),
+        )
+        object.__setattr__(self, "max_buys_per_day", preset.max_buys_per_day)
+        object.__setattr__(self, "max_orders_per_day", preset.max_orders_per_day)
+        object.__setattr__(
+            self, "max_symbol_allocation", preset.max_symbol_allocation
+        )
+        object.__setattr__(
+            self, "max_concurrent_holdings", preset.max_concurrent_holdings
+        )
+        object.__setattr__(
+            self,
+            "same_symbol_reentry_limit",
+            preset.same_symbol_reentry_limit,
+        )
+        object.__setattr__(
+            self, "kill_switch", _strict_bool(kill_switch, "kill_switch")
+        )
+        object.__setattr__(self, "currency", normalized_currency)
+
+    @property
+    def daily_target_amount(self) -> Decimal:
+        return self.operating_budget * self.daily_target_rate_pct / Decimal("100")
+
+    @property
+    def max_daily_loss_amount(self) -> Decimal:
+        return (
+            self.operating_budget
+            * self.max_daily_loss_rate_pct
+            / Decimal("100")
+        )
+
+    @property
+    def max_symbol_allocation_pct(self) -> Decimal:
+        return self.max_symbol_allocation * Decimal("100")
+
+    @property
+    def min_ai_confidence(self) -> Decimal:
+        return _MIN_AI_CONFIDENCE
+
     def to_storage(self) -> dict[str, object]:
         return {
+            "risk_level": self.risk_level,
             "operating_budget": str(self.operating_budget),
-            "conservative_daily_goal": str(self.conservative_daily_goal),
-            "daily_max_loss": str(self.daily_max_loss),
-            "max_buys_per_day": self.max_buys_per_day,
-            "max_orders_per_day": self.max_orders_per_day,
-            "max_symbol_allocation": str(self.max_symbol_allocation),
-            "max_concurrent_holdings": self.max_concurrent_holdings,
-            "same_symbol_reentry_limit": self.same_symbol_reentry_limit,
+            "daily_target_rate_pct": str(self.daily_target_rate_pct),
+            "max_daily_loss_rate_pct": str(self.max_daily_loss_rate_pct),
             "kill_switch": self.kill_switch,
             "currency": self.currency,
         }
@@ -407,6 +523,8 @@ class AITradingPolicyService:
         base_risk_details = [
             str(getattr(reason, "message", reason)) for reason in base_risk_reasons
         ]
+        daily_loss_limit = limits.max_daily_loss_amount
+        daily_target_amount = limits.daily_target_amount
         budget_passed = (not is_buy) or (
             usage.budget_used + order_notional <= limits.operating_budget
             and current_invested + order_notional
@@ -436,8 +554,11 @@ class AITradingPolicyService:
         checks = [
             HardRiskCheck(
                 "DAILY_MAX_LOSS",
-                usage.realized_loss_today < limits.daily_max_loss,
-                f"realizedLossToday={usage.realized_loss_today}; limit={limits.daily_max_loss}",
+                usage.realized_loss_today < daily_loss_limit,
+                (
+                    f"realizedLossToday={usage.realized_loss_today}; "
+                    f"limit={daily_loss_limit}"
+                ),
             ),
             HardRiskCheck(
                 "BUDGET",
@@ -478,7 +599,7 @@ class AITradingPolicyService:
                 True,
                 (
                     f"realizedPnlToday={usage.realized_pnl_today}; "
-                    f"referenceGoal={limits.conservative_daily_goal}; "
+                    f"referenceGoal={daily_target_amount}; "
                     "목표수익은 참고값이며 주문 강제 조건이 아닙니다."
                 ),
             ),
@@ -582,44 +703,44 @@ def _decode_setting(value: object) -> tuple[OperatingMode, AITradingLimits]:
     raw = value.get("settings", {})
     if not isinstance(raw, dict):
         raise ValueError("stored AI trading limits must be an object")
-    defaults = AITradingLimits()
-    currency = str(raw.get("currency", defaults.currency)).upper()
+
+    budget = _positive_decimal(
+        raw.get("operating_budget", _DEFAULT_OPERATING_BUDGET),
+        "operating_budget",
+    )
+    currency = str(raw.get("currency", "KRW")).upper()
     if currency not in {"KRW", "USD"}:
         raise ValueError("stored AI trading currency is invalid")
+
+    if "risk_level" in raw:
+        risk_level = _risk_level(raw["risk_level"], "risk_level")
+    else:
+        risk_level = _nearest_risk_level(raw, budget)
+    preset = _RISK_PRESETS[risk_level]
+
+    target_rate = _stored_percentage(
+        raw,
+        canonical_key="daily_target_rate_pct",
+        legacy_amount_key="conservative_daily_goal",
+        budget=budget,
+        default=preset.daily_target_rate_pct,
+        maximum=Decimal("10"),
+    )
+    loss_rate = _stored_percentage(
+        raw,
+        canonical_key="max_daily_loss_rate_pct",
+        legacy_amount_key="daily_max_loss",
+        budget=budget,
+        default=preset.max_daily_loss_rate_pct,
+        maximum=Decimal("20"),
+    )
     limits = AITradingLimits(
-        operating_budget=_positive_decimal(
-            raw.get("operating_budget", defaults.operating_budget),
-            "operating_budget",
-        ),
-        conservative_daily_goal=_nonnegative_decimal(
-            raw.get("conservative_daily_goal", defaults.conservative_daily_goal),
-            "conservative_daily_goal",
-        ),
-        daily_max_loss=_nonnegative_decimal(
-            raw.get("daily_max_loss", defaults.daily_max_loss), "daily_max_loss"
-        ),
-        max_buys_per_day=_nonnegative_int(
-            raw.get("max_buys_per_day", defaults.max_buys_per_day),
-            "max_buys_per_day",
-        ),
-        max_orders_per_day=_nonnegative_int(
-            raw.get("max_orders_per_day", defaults.max_orders_per_day),
-            "max_orders_per_day",
-        ),
-        max_symbol_allocation=_ratio(
-            raw.get("max_symbol_allocation", defaults.max_symbol_allocation),
-            "max_symbol_allocation",
-        ),
-        max_concurrent_holdings=_nonnegative_int(
-            raw.get("max_concurrent_holdings", defaults.max_concurrent_holdings),
-            "max_concurrent_holdings",
-        ),
-        same_symbol_reentry_limit=_nonnegative_int(
-            raw.get("same_symbol_reentry_limit", defaults.same_symbol_reentry_limit),
-            "same_symbol_reentry_limit",
-        ),
+        risk_level=risk_level,
+        operating_budget=budget,
+        daily_target_rate_pct=target_rate,
+        max_daily_loss_rate_pct=loss_rate,
         kill_switch=_strict_bool(
-            raw.get("kill_switch", defaults.kill_switch), "kill_switch"
+            raw.get("kill_switch", False), "kill_switch"
         ),
         currency=currency,  # type: ignore[arg-type]
     )
@@ -653,18 +774,123 @@ def _positive_decimal(value: object, field: str) -> Decimal:
     return result
 
 
-def _nonnegative_decimal(value: object, field: str) -> Decimal:
-    result = _decimal_or_zero(value)
-    if result < 0:
-        raise ValueError(f"{field} must not be negative")
+def _risk_level(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    if value not in _RISK_PRESETS:
+        raise ValueError(f"{field} must be between 1 and 5")
+    return value
+
+
+def _percentage(
+    value: object,
+    field: str,
+    *,
+    minimum: Decimal,
+    maximum: Decimal,
+) -> Decimal:
+    result = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError(f"{field} must be finite")
+    if result < minimum or result > maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
     return result
 
 
-def _ratio(value: object, field: str) -> Decimal:
-    result = _positive_decimal(value, field)
-    if result > 1:
-        raise ValueError(f"{field} must not exceed one")
-    return result
+def _stored_percentage(
+    raw: dict[object, object],
+    *,
+    canonical_key: str,
+    legacy_amount_key: str,
+    budget: Decimal,
+    default: Decimal,
+    maximum: Decimal,
+) -> Decimal:
+    if canonical_key in raw:
+        return _percentage(
+            raw[canonical_key],
+            canonical_key,
+            minimum=Decimal("0"),
+            maximum=maximum,
+        )
+    if legacy_amount_key not in raw:
+        return default
+    amount = _percentage(
+        raw[legacy_amount_key],
+        legacy_amount_key,
+        minimum=Decimal("0"),
+        maximum=Decimal("Infinity"),
+    )
+    return min(maximum, amount * Decimal("100") / budget)
+
+
+def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
+    components: list[tuple[Decimal, str, Decimal]] = []
+    if "max_symbol_allocation" in raw:
+        allocation = _percentage(
+            raw["max_symbol_allocation"],
+            "max_symbol_allocation",
+            minimum=Decimal("0.0000001"),
+            maximum=Decimal("1"),
+        )
+        components.append(
+            (allocation, "max_symbol_allocation", Decimal("0.05"))
+        )
+    for key in (
+        "max_concurrent_holdings",
+        "max_buys_per_day",
+        "max_orders_per_day",
+        "same_symbol_reentry_limit",
+    ):
+        if key in raw:
+            components.append(
+                (Decimal(_nonnegative_int(raw[key], key)), key, Decimal("1"))
+            )
+
+    if not components:
+        if "conservative_daily_goal" in raw:
+            target_rate = (
+                _percentage(
+                    raw["conservative_daily_goal"],
+                    "conservative_daily_goal",
+                    minimum=Decimal("0"),
+                    maximum=Decimal("Infinity"),
+                )
+                * Decimal("100")
+                / budget
+            )
+            components.append(
+                (target_rate, "daily_target_rate_pct", Decimal("0.1"))
+            )
+        if "daily_max_loss" in raw:
+            loss_rate = (
+                _percentage(
+                    raw["daily_max_loss"],
+                    "daily_max_loss",
+                    minimum=Decimal("0"),
+                    maximum=Decimal("Infinity"),
+                )
+                * Decimal("100")
+                / budget
+            )
+            components.append(
+                (loss_rate, "max_daily_loss_rate_pct", Decimal("0.5"))
+            )
+
+    if not components:
+        return _DEFAULT_RISK_LEVEL
+
+    def score(level: int) -> Decimal:
+        preset = _RISK_PRESETS[level]
+        return sum(
+            (
+                abs(actual - Decimal(str(getattr(preset, field_name)))) / scale
+                for actual, field_name, scale in components
+            ),
+            start=Decimal("0"),
+        )
+
+    return min(_RISK_PRESETS, key=lambda level: (score(level), level))
 
 
 def _nonnegative_int(value: object, field: str) -> int:

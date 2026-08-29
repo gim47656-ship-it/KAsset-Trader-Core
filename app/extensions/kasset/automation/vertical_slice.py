@@ -38,6 +38,7 @@ from app.extensions.kasset.automation.strategies import STRATEGIES
 from app.models.ai_recommendations import AIRecommendation
 from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.news import NewsArticle
+from app.models.symbol_master import SymbolMaster
 from app.models.trading import User, UserRole
 from app.services.ai_recommendations.service import AIRecommendationService
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
@@ -279,13 +280,36 @@ class AIRecommendationVerticalSlice:
                     .limit(_CANDIDATE_LIMIT)
                 )
             ).all()
+            snapshot_symbols = tuple(
+                dict.fromkeys(
+                    str(row.symbol).strip().upper()
+                    for row in rows
+                    if str(row.symbol).strip()
+                )
+            )
+            snapshot_names = (
+                {
+                    symbol: name
+                    for symbol, name in (
+                        await self._db.execute(
+                            select(SymbolMaster.symbol, SymbolMaster.name).where(
+                                SymbolMaster.market == recommendation_market,
+                                SymbolMaster.symbol.in_(snapshot_symbols),
+                            )
+                        )
+                    ).all()
+                    if name and name.strip() and name.strip() != symbol
+                }
+                if snapshot_symbols
+                else {}
+            )
             for row in rows:
                 symbol = str(row.symbol).strip().upper()
                 if symbol and symbol not in ordered:
                     ordered[symbol] = TradingCandidate(
                         symbol=symbol,
                         market=recommendation_market,
-                        name=None,
+                        name=snapshot_names.get(symbol),
                         source=f"invest_screener_snapshots:{latest_date.isoformat()}",
                     )
                 if len(ordered) >= _CANDIDATE_LIMIT:

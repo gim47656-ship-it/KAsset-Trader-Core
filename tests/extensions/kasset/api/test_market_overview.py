@@ -318,6 +318,12 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert body["indicators"][1]["value"] == "4.68"
     assert body["indicators"][5]["key"] == "KR_BOND_10Y"
     assert body["indicators"][5]["value"] == "4.25"
+    indicator_values = {
+        item["key"]: item["value"] for item in body["indicators"]
+    }
+    assert indicator_values["US10Y"] == "4.68"
+    assert indicator_values["WTI"] == "82.69"
+    assert indicator_values["BTC"] == "109807000"
     assert body["indicators"][5]["previousClose"] is None
     assert body["indicators"][5]["changeAmount"] is None
     assert body["indicators"][5]["changeRate"] is None
@@ -389,10 +395,10 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
 ) -> None:
     frame = pd.DataFrame(
         {
-            "Open": [99.0, 101.0, 106.0],
-            "High": [102.0, 106.0, 107.0],
-            "Low": [98.0, 100.0, 89.0],
-            "Close": [100.0, 105.0, 90.0],
+            "Open": [26300.0, 26450.0, 27000.0],
+            "High": [26700.0, 26500.0, 27100.0],
+            "Low": [26200.0, 26300.0, 26000.0],
+            "Close": [26541.35, 26402.42, 26100.0],
             "Volume": [1000.0, 1200.0, 300.0],
         },
         index=pd.to_datetime(["2026-08-27", "2026-08-28", "2026-08-31"]),
@@ -413,21 +419,21 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
     )
 
     rows = await index_sources._fetch_indices_us_current_batch(
-        ["SPX"],
+        ["NASDAQ"],
         completed_as_of=_US_COMPLETED_END,
     )
 
     assert rows == [
         {
-            "symbol": "SPX",
-            "name": "S&P 500",
-            "current": 105.0,
-            "previous_close": 100.0,
-            "change": 5.0,
-            "change_pct": 5.0,
-            "open": 101.0,
-            "high": 106.0,
-            "low": 100.0,
+            "symbol": "NASDAQ",
+            "name": "NASDAQ Composite",
+            "current": 26402.42,
+            "previous_close": 26541.35,
+            "change": -138.93,
+            "change_pct": -0.52,
+            "open": 26450.0,
+            "high": 26500.0,
+            "low": 26300.0,
             "volume": 1200,
             "source": "yfinance",
             "quote_asof": "2026-08-28T20:00:00+00:00",
@@ -437,15 +443,15 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
 
 
 @pytest.mark.asyncio
-async def test_us_completed_batch_uses_latest_non_null_closed_row_with_its_own_asof(
+async def test_us_completed_batch_does_not_fall_back_to_previous_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = pd.DataFrame(
         {
-            "Open": [99.0, 101.0, 106.0],
-            "High": [102.0, 106.0, 107.0],
-            "Low": [98.0, 100.0, 89.0],
-            "Close": [100.0, 105.0, float("nan")],
+            "Open": [25900.0, 26300.0, 26450.0],
+            "High": [26200.0, 26700.0, 26500.0],
+            "Low": [25800.0, 26200.0, 26300.0],
+            "Close": [26000.0, 26541.35, float("nan")],
             "Volume": [1000.0, 1200.0, float("nan")],
         },
         index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28"]),
@@ -466,14 +472,123 @@ async def test_us_completed_batch_uses_latest_non_null_closed_row_with_its_own_a
     )
 
     rows = await index_sources._fetch_indices_us_current_batch(
-        ["SPX"],
+        ["NASDAQ"],
         completed_as_of=_US_COMPLETED_END,
     )
 
-    assert rows[0]["current"] == 105.0
-    assert rows[0]["previous_close"] == 100.0
-    assert rows[0]["quote_asof"] == "2026-08-27T20:00:00+00:00"
-    assert rows[0]["data_state"] == "market_closed"
+    assert rows[0]["symbol"] == "NASDAQ"
+    assert rows[0]["current"] is None
+    assert rows[0]["previous_close"] is None
+    assert rows[0]["unavailable"] is True
+    assert "quote_asof" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_weekend_overview_and_detail_share_latest_completed_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_successful_sources(monkeypatch)
+    _stub_sessions(monkeypatch, kr="CLOSED", us="CLOSED")
+    completed_rows = {
+        "KOSPI": {
+            "symbol": "KOSPI",
+            "current": 6788.88,
+            "change": -123.49,
+            "change_pct": -1.79,
+            "quote_asof": _KR_COMPLETED_END.isoformat(),
+            "source": "naver",
+            "data_state": DATA_STATE_MARKET_CLOSED,
+        },
+        "NASDAQ": {
+            "symbol": "NASDAQ",
+            "current": 26402.42,
+            "change": -138.93,
+            "change_pct": -0.52,
+            "quote_asof": _US_COMPLETED_END.isoformat(),
+            "source": "yfinance",
+            "data_state": DATA_STATE_MARKET_CLOSED,
+        },
+        **{row["symbol"]: row for row in _indicator_rows()},
+    }
+
+    async def completed_batch(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
+        assert completed_as_of_by_market == {
+            "KRX": _KR_COMPLETED_END,
+            "US": _US_COMPLETED_END,
+        }
+        return {
+            "indices": [
+                completed_rows[symbol]
+                for symbol in symbols
+                if symbol in completed_rows
+            ]
+        }
+
+    async def completed_detail(
+        *,
+        symbol: str,
+        period: str,
+        count: int,
+        completed_as_of_by_market: dict[str, datetime] | None = None,
+    ) -> dict[str, Any]:
+        assert (period, count) == ("day", 5)
+        market = "KRX" if symbol == "KOSPI" else "US"
+        expected_end = (
+            _KR_COMPLETED_END if market == "KRX" else _US_COMPLETED_END
+        )
+        if completed_as_of_by_market is None:
+            live_row = dict(completed_rows[symbol])
+            if symbol == "KOSPI":
+                live_row["quote_asof"] = "2026-08-28T18:59:00+09:00"
+            return {"indices": [live_row], "history": []}
+        assert completed_as_of_by_market == {market: expected_end}
+        return {
+            "indices": [completed_rows[symbol]],
+            "history": [
+                {
+                    "date": "2026-08-27",
+                    "open": 1,
+                    "high": 2,
+                    "low": 1,
+                    "close": 2,
+                    "volume": None,
+                },
+                {
+                    "date": "2026-08-28",
+                    "open": 2,
+                    "high": 3,
+                    "low": 2,
+                    "close": completed_rows[symbol]["current"],
+                    "volume": None,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(mod, "handle_get_market_index_current_batch", completed_batch)
+    monkeypatch.setattr(mod, "handle_get_market_index", completed_detail)
+
+    overview = await mod._build_market_overview()
+    kospi_detail = await mod._build_market_index_detail("KOSPI", "1W")
+    nasdaq_detail = await mod._build_market_index_detail("NASDAQ", "1W")
+    overview_by_symbol = {item.symbol: item for item in overview.indices}
+
+    for detail in (kospi_detail, nasdaq_detail):
+        home = overview_by_symbol[detail.summary.symbol]
+        assert (home.price, home.change_amount, home.change_rate, home.as_of) == (
+            detail.summary.price,
+            detail.summary.change_amount,
+            detail.summary.change_rate,
+            detail.summary.as_of,
+        )
+        assert len(detail.candles) == 2
+    assert kospi_detail.summary.price == "6788.88"
+    assert kospi_detail.summary.as_of == "2026-08-28T06:30:00Z"
+    assert nasdaq_detail.summary.price == "26402.42"
+    assert nasdaq_detail.summary.as_of == "2026-08-28T20:00:00Z"
 
 
 def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:

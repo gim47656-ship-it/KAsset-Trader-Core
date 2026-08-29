@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
-from app.models.news import NewsArticle
+from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.models.symbol_news_relevance import SymbolNewsRelevance
 
 
@@ -70,6 +70,32 @@ def _article(
     )
 
 
+def _analysis(
+    article_id: int,
+    *,
+    summary: str,
+    created_at: datetime,
+) -> NewsAnalysisResult:
+    return NewsAnalysisResult(
+        article_id=article_id,
+        model_name="test-news-summary",
+        sentiment=Sentiment.NEUTRAL,
+        sentiment_score=None,
+        summary=summary,
+        key_points=[],
+        topics=None,
+        price_impact=None,
+        price_impact_score=None,
+        confidence=90,
+        analysis_quality="high",
+        prompt="test prompt",
+        raw_response="{}",
+        processing_time_ms=1,
+        created_at=created_at,
+        updated_at=None,
+    )
+
+
 @pytest_asyncio.fixture
 async def market_news_client(
     db_session: AsyncSession,
@@ -105,6 +131,7 @@ async def market_news_client(
             feed_source="dart",
             published_at=published_at,
             source="DART",
+            summary="검증된 공시 요약",
         ),
         _article(
             prefix=prefix,
@@ -158,6 +185,21 @@ async def market_news_client(
     ]
     db_session.add_all(rows)
     await db_session.flush()
+    same_news = next(row for row in rows if row.title == "동시각 뉴스")
+    db_session.add_all(
+        [
+            _analysis(
+                same_news.id,
+                summary="오래된 한국어 AI 요약이다. 이전 분석 결과다.",
+                created_at=datetime(2026, 8, 29, 2, 1),
+            ),
+            _analysis(
+                same_news.id,
+                summary="최신 한국어 AI 요약이다. 영속 분석 결과를 사용한다.",
+                created_at=datetime(2026, 8, 29, 2, 2),
+            ),
+        ]
+    )
     link_time = datetime(2026, 8, 29, 2, 0)
     db_session.add_all(
         [
@@ -259,6 +301,25 @@ async def test_kind_filters_split_actual_rows_and_never_expose_feed_source(
             "news",
             "disclosure",
         }
+
+
+@pytest.mark.asyncio
+async def test_summary_uses_latest_bulk_analysis_for_news_and_verified_article_for_disclosure(
+    market_news_client: tuple[httpx.AsyncClient, _NewsSeed],
+) -> None:
+    client, seed = market_news_client
+
+    response = await _page(client, seed)
+
+    assert response.status_code == 200
+    by_title = {item["title"]: item for item in response.json()["items"]}
+    assert by_title["동시각 뉴스"]["summary"] == (
+        "최신 한국어 AI 요약이다. 영속 분석 결과를 사용한다."
+    )
+    assert by_title["동시각 뉴스"]["summary"] != "뉴스 요약"
+    assert by_title["이전 뉴스"]["summary"] is None
+    assert by_title["후보 뉴스"]["summary"] is None
+    assert by_title["동시각 공시"]["summary"] == "검증된 공시 요약"
 
 
 @pytest.mark.asyncio

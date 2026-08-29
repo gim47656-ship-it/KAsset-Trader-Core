@@ -120,6 +120,7 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         snapshot=SimpleNamespace(limits=object(), usage=object()),
     )
 
+    assert captured["name"] == "삼성전자"
     ranking = captured["ranking"]
     assert isinstance(ranking, dict)
     assert ranking["total"] == 100

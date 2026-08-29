@@ -9,7 +9,7 @@ import hmac
 import struct
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, desc, exists, or_, select
+from sqlalchemy import and_, desc, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -22,7 +22,7 @@ from app.extensions.kasset.api.schemas import (
     MarketNewsItem,
     MarketNewsResponse,
 )
-from app.models.news import NewsArticle
+from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.symbol_news_relevance import SymbolNewsRelevance
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 
@@ -144,6 +144,37 @@ def _published_at_wire(value: datetime | None) -> str | None:
     return iso_z(_naive_kst(value).replace(tzinfo=KST))
 
 
+async def _latest_news_summaries(
+    db: AsyncSession,
+    article_ids: list[int],
+) -> dict[int, str]:
+    """일반 뉴스의 최신 영속 분석 요약만 한 번에 읽는다."""
+
+    if not article_ids:
+        return {}
+    ranked = (
+        select(
+            NewsAnalysisResult.article_id.label("article_id"),
+            NewsAnalysisResult.summary.label("summary"),
+            func.row_number()
+            .over(
+                partition_by=NewsAnalysisResult.article_id,
+                order_by=[
+                    NewsAnalysisResult.created_at.desc(),
+                    NewsAnalysisResult.id.desc(),
+                ],
+            )
+            .label("analysis_rank"),
+        )
+        .where(NewsAnalysisResult.article_id.in_(article_ids))
+        .subquery()
+    )
+    statement = select(ranked.c.article_id, ranked.c.summary).where(
+        ranked.c.analysis_rank == 1
+    )
+    return dict((await db.execute(statement)).all())
+
+
 async def list_market_news(
     db: AsyncSession,
     *,
@@ -225,6 +256,15 @@ async def list_market_news(
         last = page[-1]
         next_cursor = _encode_cursor(last.article_published_at, last.id)
 
+
+    news_summaries = await _latest_news_summaries(
+        db,
+        [
+            article.id
+            for article in page
+            if article.feed_source not in DISCLOSURE_FEED_SOURCES
+        ],
+    )
     return MarketNewsResponse(
         items=[
             MarketNewsItem(
@@ -234,7 +274,11 @@ async def list_market_news(
                     else "news"
                 ),
                 title=article.title,
-                summary=article.summary,
+                summary=(
+                    article.summary
+                    if article.feed_source in DISCLOSURE_FEED_SOURCES
+                    else news_summaries.get(article.id)
+                ),
                 source=article.source,
                 url=article.url,
                 published_at=_published_at_wire(article.article_published_at),

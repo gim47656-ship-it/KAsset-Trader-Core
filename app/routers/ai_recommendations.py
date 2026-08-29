@@ -171,11 +171,13 @@ async def list_recommendations(
         limit=limit,
     )
     paper_orders = await service.load_paper_orders(recommendations)
+    symbol_names = await service.load_symbol_names(recommendations)
     return RecommendationListResponse(
         recommendations=[
             build_recommendation_response(
                 row,
                 paper_order=paper_orders.get(row.id),
+                resolved_name=symbol_names.get((row.market, row.symbol)),
             )
             for row in recommendations
         ]
@@ -211,9 +213,11 @@ async def get_recommendation(
             message="추천을 찾을 수 없습니다.",
         )
     paper_orders = await service.load_paper_orders([row])
+    symbol_names = await service.load_symbol_names([row])
     return build_recommendation_response(
         row,
         paper_order=paper_orders.get(row.id),
+        resolved_name=symbol_names.get((row.market, row.symbol)),
     )
 
 
@@ -301,9 +305,11 @@ async def decide_recommendation(
             recommendation_id,
         )
     paper_orders = await service.load_paper_orders([row])
+    symbol_names = await service.load_symbol_names([row])
     return build_recommendation_response(
         row,
         paper_order=paper_orders.get(row.id),
+        resolved_name=symbol_names.get((row.market, row.symbol)),
     )
 
 

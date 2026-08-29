@@ -84,6 +84,7 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
     persisted = await producer.produce(
         symbol="aapl",
         market="us",
+        name="Apple Inc.",
         strategy_results=_strategy_quorum(),
         external_evidence=_external(),
         suggested_quantity="2",
@@ -100,11 +101,52 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
     assert draft.reference_price == Decimal("100")  # type: ignore[attr-defined]
     assert draft.source == "kasset-automation"  # type: ignore[attr-defined]
     assert len(draft.evidence) == 5  # type: ignore[attr-defined]
+    assert draft.name == "Apple Inc."  # type: ignore[attr-defined]
+    assert draft.headline == "Apple Inc. 매수 검토 의견"  # type: ignore[attr-defined]
+    assert draft.rationale == (  # type: ignore[attr-defined]
+        "전략 투표 결과는 모멘텀=매수, 평균회귀=관망, 돌파=매수, 변동성추세=매수입니다.",
+        "외부 분석 의견은 매수이며 신뢰도는 0.75입니다.",
+    )
+    assert "Deterministic strategy votes" not in " ".join(  # type: ignore[attr-defined]
+        draft.rationale
+    )
     assert {
         item["strategy"]
         for item in draft.evidence  # type: ignore[attr-defined]
         if item["kind"] == "strategy"
     } == {strategy.value for strategy in StrategyName}
+    detail = next(
+        item
+        for item in draft.evidence  # type: ignore[attr-defined]
+        if item["kind"] == "ai_vertical_slice"
+    )
+    assert detail["strategyVotes"] == [
+        {
+            "strategy": "MOMENTUM",
+            "vote": "BUY",
+            "weight": "0.250000",
+            "score": "0.200000",
+        },
+        {
+            "strategy": "MEAN_REVERSION",
+            "vote": "HOLD",
+            "weight": "0.250000",
+            "score": "0.000000",
+        },
+        {
+            "strategy": "BREAKOUT",
+            "vote": "BUY",
+            "weight": "0.250000",
+            "score": "0.200000",
+        },
+        {
+            "strategy": "VOLATILITY_TREND",
+            "vote": "BUY",
+            "weight": "0.250000",
+            "score": "0.200000",
+        },
+    ]
+    assert detail["aiRationale"] == ["Deterministic upstream indicators agree."]
 
 
 @pytest.mark.asyncio

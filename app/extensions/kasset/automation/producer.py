@@ -25,6 +25,31 @@ _CONFIDENCE_TEXT = {
     "high": Decimal("0.75"),
 }
 
+_STRATEGY_LABELS = {
+    StrategyName.MOMENTUM: "모멘텀",
+    StrategyName.MEAN_REVERSION: "평균회귀",
+    StrategyName.BREAKOUT: "돌파",
+    StrategyName.VOLATILITY_TREND: "변동성추세",
+}
+_ACTION_LABELS = {
+    Action.BUY: "매수",
+    Action.SELL: "매도",
+    Action.HOLD: "관망",
+}
+
+
+def _korean_vote_rationale(
+    valid_results: Mapping[StrategyName, StrategyResult],
+) -> str:
+    if not valid_results:
+        return "유효한 전략 투표가 없습니다."
+    votes = ", ".join(
+        f"{_STRATEGY_LABELS[name]}={_ACTION_LABELS[valid_results[name].action]}"
+        for name in StrategyName
+        if name in valid_results
+    )
+    return f"전략 투표 결과는 {votes}입니다."
+
 
 def _decimal_confidence(value: object) -> Decimal:
     if isinstance(value, str) and value.strip().lower() in _CONFIDENCE_TEXT:
@@ -273,6 +298,9 @@ class RecommendationProducer:
         if normalized_market not in {"KRX", "US"}:
             raise ValueError("market must be KRX or US")
         typed_market = cast(Any, normalized_market)
+        normalized_name = name.strip()[:200] if name and name.strip() else None
+        if normalized_name == normalized_symbol:
+            normalized_name = None
 
         external = (
             external_evidence
@@ -378,12 +406,13 @@ class RecommendationProducer:
             )
             rejected_reasons.append(f"hard risk blocked: {blocked_reason}")
 
-        vote_summary = ", ".join(
-            f"{name.value}={valid_results[name].action.value}"
-            for name in sorted(valid_results, key=lambda item: item.value)
-        )
-        rationale = [f"Deterministic strategy votes: {vote_summary or 'none'}."]
-        rationale.extend(external.rationale)
+        rationale = [
+            _korean_vote_rationale(valid_results),
+            (
+                f"외부 분석 의견은 {_ACTION_LABELS[external.action]}이며 "
+                f"신뢰도는 {external.confidence}입니다."
+            ),
+        ]
         vote_by_strategy = {str(vote["strategy"]): vote for vote in ensemble.votes}
         evidence: list[Mapping[str, object]] = []
         for result in valid_results.values():
@@ -460,8 +489,11 @@ class RecommendationProducer:
             action=candidate,
             market=typed_market,
             symbol=normalized_symbol,
-            name=name.strip()[:200] if name and name.strip() else None,
-            headline=f"{normalized_symbol} {candidate.value} dynamic ensemble",
+            name=normalized_name,
+            headline=(
+                f"{normalized_name or normalized_symbol} "
+                f"{_ACTION_LABELS[candidate]} 검토 의견"
+            ),
             rationale=tuple(rationale),
             risks=tuple(rejected_reasons),
             evidence=tuple(evidence),

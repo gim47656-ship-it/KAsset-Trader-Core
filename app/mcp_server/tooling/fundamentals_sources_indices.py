@@ -438,17 +438,6 @@ def _batch_session_date(value: object) -> datetime.date | None:
     return timestamp.tz_convert(_US_EASTERN).date()
 
 
-def _batch_session_close(value: object) -> datetime.datetime | None:
-    session_date = _batch_session_date(value)
-    if session_date is None:
-        return None
-    return datetime.datetime.combine(
-        session_date,
-        datetime.time(hour=16),
-        tzinfo=_US_EASTERN,
-    ).astimezone(datetime.UTC)
-
-
 async def _fetch_indices_us_current_batch(
     symbols: list[str],
     *,
@@ -457,10 +446,11 @@ async def _fetch_indices_us_current_batch(
 ) -> list[dict[str, Any]]:
     """Fetch multiple US index rows through one daily download.
 
-    ``completed_as_of`` 대상 심볼은 그 정규장 날짜 이하의 최신 확정 일봉만 고른다.
-    공급자가 당일 일봉을 아직 비워 두면 직전 non-null 일봉과 그 실제 종료시각을
-    반환한다. 장중 형성 중인 미래 행은 ``current``로 쓰지 않는다.
-    ``completed_symbols``를 생략하면 요청 심볼 전체가 대상이다.
+    ``completed_as_of`` 대상 심볼은 그 정규장 날짜와 정확히 일치하는 확정
+    일봉만 고른다. 공급자가 해당 세션 행을 아직 비워 두면 직전 세션을 최신
+    값처럼 내리지 않고 unavailable로 둔다. 장중 형성 중인 미래 행은
+    ``current``로 쓰지 않는다. ``completed_symbols``를 생략하면 요청 심볼
+    전체가 대상이다.
     """
 
     normalized_symbols = [symbol.strip().upper() for symbol in symbols]
@@ -509,23 +499,36 @@ async def _fetch_indices_us_current_batch(
             completed_symbol_set is None or symbol in completed_symbol_set
         )
         ticker_frame = _batch_ticker_frame(frame, yf_ticker)
-        latest_session_close: datetime.datetime | None = None
+        latest_session_as_of: datetime.datetime | None = None
         if "close" not in ticker_frame.columns:
             valid = pd.DataFrame()
         else:
             valid = ticker_frame.loc[ticker_frame["close"].notna()].sort_index()
             if use_completed_session:
-                valid = valid.loc[
-                    [
-                        session_date is not None and session_date <= completed_date
-                        for session_date in (
-                            _batch_session_date(value) for value in valid.index
-                        )
-                    ]
+                session_dates = [
+                    _batch_session_date(value) for value in valid.index
                 ]
-                if not valid.empty:
-                    latest_session_close = _batch_session_close(valid.index[-1])
-            valid = valid.tail(2)
+                completed_rows = valid.loc[
+                    [
+                        session_date is not None
+                        and session_date == completed_date
+                        for session_date in session_dates
+                    ]
+                ].tail(1)
+                previous_rows = valid.loc[
+                    [
+                        session_date is not None
+                        and session_date < completed_date
+                        for session_date in session_dates
+                    ]
+                ].tail(1)
+                if completed_rows.empty:
+                    valid = pd.DataFrame()
+                else:
+                    valid = pd.concat([previous_rows, completed_rows])
+                    latest_session_as_of = completed_as_of.astimezone(datetime.UTC)
+            else:
+                valid = valid.tail(2)
         if valid.empty:
             rows.append(
                 {
@@ -570,8 +573,8 @@ async def _fetch_indices_us_current_batch(
                 "volume": _batch_volume(latest.get("volume")),
                 "source": "yfinance",
                 **(
-                    {"quote_asof": latest_session_close.isoformat()}
-                    if use_completed_session and latest_session_close is not None
+                    {"quote_asof": latest_session_as_of.isoformat()}
+                    if use_completed_session and latest_session_as_of is not None
                     else {}
                 ),
                 **(

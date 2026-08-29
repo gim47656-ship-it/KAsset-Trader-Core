@@ -16,6 +16,7 @@ from app.models.ai_recommendations import (
     AIRecommendation,
     RecommendationDecision,
 )
+from app.models.symbol_master import SymbolMaster
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 
 if TYPE_CHECKING:
@@ -102,12 +103,25 @@ class MarketEventPipeline:
         if recommendation_market is None:
             return {**result, "skipped": "unsupported_recommendation_market"}
 
+        display_name = await self._session.scalar(
+            select(SymbolMaster.name).where(
+                SymbolMaster.market == recommendation_market,
+                func.upper(SymbolMaster.symbol) == symbol.strip().upper(),
+            )
+        )
         recommendation = AIRecommendation(
             owner_user_id=owner_user_id,
             action=action,
             decision=RecommendationDecision.PENDING,
             market=recommendation_market,
             symbol=symbol,
+            name=(
+                display_name.strip()
+                if display_name
+                and display_name.strip()
+                and display_name.strip() != symbol
+                else None
+            ),
             currency="KRW" if recommendation_market == "KRX" else "USD",
             rationale=list(verdict.rationale_tags),
             risks=[str(verdict.risk)],

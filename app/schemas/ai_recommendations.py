@@ -26,6 +26,55 @@ from app.models.ai_recommendations import (
 DecimalText = Annotated[str, Field(pattern=r"^-?[0-9]+(?:\.[0-9]+)?$")]
 _DECIMAL_TEXT = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?$")
 
+_STRATEGY_LABELS = {
+    "MOMENTUM": "모멘텀",
+    "MEAN_REVERSION": "평균회귀",
+    "BREAKOUT": "돌파",
+    "VOLATILITY_TREND": "변동성추세",
+}
+_ACTION_LABELS = {
+    "BUY": "매수",
+    "SELL": "매도",
+    "HOLD": "관망",
+}
+_LEGACY_VOTE_PREFIX = "Deterministic strategy votes:"
+
+
+def _localized_strategy_votes(detail: dict[str, Any]) -> str | None:
+    raw_votes = detail.get("strategyVotes")
+    if not isinstance(raw_votes, list):
+        return None
+    labels: list[str] = []
+    for raw_vote in raw_votes:
+        if not isinstance(raw_vote, dict):
+            continue
+        strategy_key = str(raw_vote.get("strategy") or "").strip().upper()
+        action_key = str(raw_vote.get("vote") or "").strip().upper()
+        strategy = _STRATEGY_LABELS.get(strategy_key)
+        action = _ACTION_LABELS.get(action_key)
+        if strategy is not None and action is not None:
+            labels.append(f"{strategy}={action}")
+    if not labels:
+        return None
+    return f"전략 투표 결과는 {', '.join(labels)}입니다."
+
+
+def _localized_rationale(
+    rationale: list[object],
+    detail: dict[str, Any],
+) -> list[str]:
+    vote_summary = _localized_strategy_votes(detail)
+    localized: list[str] = []
+    for raw_item in rationale:
+        item = str(raw_item).strip()
+        if not item:
+            continue
+        if item.startswith(_LEGACY_VOTE_PREFIX) and vote_summary is not None:
+            localized.append(vote_summary)
+        else:
+            localized.append(item)
+    return localized
+
 
 def _validate_decimal_text(value: object) -> str | None:
     if value is None:
@@ -229,36 +278,72 @@ class RecommendationDecisionRequest(BaseModel):
     decision: TerminalRecommendationDecision
 
 
-class AITradingSettings(BaseModel):
+class _AITradingSettingsFields(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    risk_level: int = Field(ge=1, le=5, strict=True, alias="riskLevel")
     operating_budget: Decimal = Field(gt=0, alias="operatingBudget")
-    conservative_daily_goal: Decimal = Field(ge=0, alias="conservativeDailyGoal")
-    daily_max_loss: Decimal = Field(ge=0, alias="dailyMaxLoss")
-    max_buys_per_day: int = Field(ge=0, le=100, alias="maxBuysPerDay")
-    max_orders_per_day: int = Field(ge=0, le=200, alias="maxOrdersPerDay")
-    max_symbol_allocation: Decimal = Field(gt=0, le=1, alias="maxSymbolAllocation")
-    max_concurrent_holdings: int = Field(ge=0, le=100, alias="maxConcurrentHoldings")
-    same_symbol_reentry_limit: int = Field(ge=0, le=100, alias="sameSymbolReentryLimit")
+    daily_target_rate_pct: Decimal = Field(
+        ge=0, le=10, alias="dailyTargetRatePct"
+    )
+    max_daily_loss_rate_pct: Decimal = Field(
+        ge=0, le=20, alias="maxDailyLossRatePct"
+    )
     kill_switch: bool = Field(alias="killSwitch")
     currency: Literal["KRW", "USD"]
 
     @field_serializer(
         "operating_budget",
-        "conservative_daily_goal",
-        "daily_max_loss",
-        "max_symbol_allocation",
+        "daily_target_rate_pct",
+        "max_daily_loss_rate_pct",
         when_used="json",
     )
     def serialize_decimal(self, value: Decimal) -> str:
         return format(value, "f")
 
 
+class AITradingSettingsUpdate(_AITradingSettingsFields):
+    max_daily_loss_rate_pct: Decimal = Field(
+        ge=Decimal("0.1"), le=20, alias="maxDailyLossRatePct"
+    )
+
+
+class AITradingDerivedLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    daily_target_amount: Decimal = Field(ge=0, alias="dailyTargetAmount")
+    max_daily_loss_amount: Decimal = Field(ge=0, alias="maxDailyLossAmount")
+    max_symbol_allocation_pct: Decimal = Field(
+        gt=0, le=100, alias="maxSymbolAllocationPct"
+    )
+    max_concurrent_holdings: int = Field(ge=0, alias="maxConcurrentHoldings")
+    max_buys_per_day: int = Field(ge=0, alias="maxBuysPerDay")
+    max_orders_per_day: int = Field(ge=0, alias="maxOrdersPerDay")
+    same_symbol_reentry_limit: int = Field(
+        ge=0, alias="sameSymbolReentryLimit"
+    )
+    min_ai_confidence: Decimal = Field(ge=0, le=1, alias="minAiConfidence")
+
+    @field_serializer(
+        "daily_target_amount",
+        "max_daily_loss_amount",
+        "max_symbol_allocation_pct",
+        "min_ai_confidence",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class AITradingSettings(_AITradingSettingsFields):
+    derived_limits: AITradingDerivedLimits = Field(alias="derivedLimits")
+
+
 class AITradingStateUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["APPROVAL", "AUTO_PAPER"]
-    settings: AITradingSettings
+    settings: AITradingSettingsUpdate
 
 
 class AITradingUsageResponse(BaseModel):
@@ -314,6 +399,7 @@ def build_recommendation_response(
     row: Any,
     *,
     paper_order: Any | None = None,
+    resolved_name: str | None = None,
 ) -> RecommendationResponse:
     """Project one persistence row plus its optional PAPER execution."""
 
@@ -353,6 +439,12 @@ def build_recommendation_response(
                 }
             )
             hard_risk_value["checks"] = checks
+    stored_name = str(getattr(row, "name", None) or "").strip()
+    display_name = (
+        resolved_name
+        if not stored_name or stored_name == str(row.symbol).strip()
+        else stored_name
+    )
     payload: dict[str, object] = {
         "id": row.id,
         "action": row.action,
@@ -360,10 +452,10 @@ def build_recommendation_response(
         "status": status_value,
         "market": row.market,
         "symbol": row.symbol,
-        "name": row.name,
+        "name": display_name,
         "currency": row.currency,
         "headline": row.headline,
-        "rationale": list(row.rationale),
+        "rationale": _localized_rationale(list(row.rationale), detail),
         "risks": list(row.risks),
         "evidence": evidence,
         "confidence": row.confidence,
@@ -412,7 +504,9 @@ def build_recommendation_response(
 
 
 __all__ = [
+    "AITradingDerivedLimits",
     "AITradingSettings",
+    "AITradingSettingsUpdate",
     "AITradingStateResponse",
     "AITradingStateUpdate",
     "AITradingUsageResponse",

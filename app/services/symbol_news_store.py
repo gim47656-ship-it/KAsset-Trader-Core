@@ -27,6 +27,9 @@ KR_FEED_SOURCE = "naver_item_news"
 FINNHUB_COMPANY_FEED_SOURCE = "finnhub_company_news"  # us
 FINNHUB_GENERAL_FEED_SOURCE = "finnhub_general_news"  # crypto (심볼 키 아님)
 
+_DISCLOSURE_URL_QUERY_CHUNK_SIZE = 500
+_DISCLOSURE_UPSERT_CHUNK_SIZE = 500
+
 
 @dataclass(frozen=True)
 class FeedArticleInput:
@@ -469,14 +472,19 @@ async def upsert_disclosures(
         normalized_by_url[item.url] = (title, stock_name)
 
     urls = list(normalized_by_url)
-    existing_rows = await db.execute(
-        select(NewsArticle.url, NewsArticle.title, NewsArticle.stock_name).where(
-            NewsArticle.url.in_(urls)
+    existing_by_url: dict[str, tuple[str, str | None]] = {}
+    for offset in range(0, len(urls), _DISCLOSURE_URL_QUERY_CHUNK_SIZE):
+        url_chunk = urls[offset : offset + _DISCLOSURE_URL_QUERY_CHUNK_SIZE]
+        existing_rows = await db.execute(
+            select(NewsArticle.url, NewsArticle.title, NewsArticle.stock_name).where(
+                NewsArticle.url.in_(url_chunk)
+            )
         )
-    )
-    existing_by_url = {
-        url: (title, stock_name) for url, title, stock_name in existing_rows.all()
-    }
+        existing_by_url.update(
+            (url, (title, stock_name))
+            for url, title, stock_name in existing_rows.all()
+        )
+
     inserted = sum(url not in existing_by_url for url in urls)
     updated = sum(
         url in existing_by_url and existing_by_url[url] != normalized
@@ -484,19 +492,23 @@ async def upsert_disclosures(
     )
     unchanged = len(urls) - inserted - updated
 
-    insert_stmt = pg_insert(NewsArticle).values(article_values)
-    excluded = insert_stmt.excluded
-    await db.execute(
-        insert_stmt.on_conflict_do_update(
-            index_elements=[NewsArticle.url],
-            set_={
-                "title": excluded.title,
-                "stock_name": excluded.stock_name,
-            },
-            where=NewsArticle.title.is_distinct_from(excluded.title)
-            | NewsArticle.stock_name.is_distinct_from(excluded.stock_name),
+    for offset in range(0, len(article_values), _DISCLOSURE_UPSERT_CHUNK_SIZE):
+        article_chunk = article_values[
+            offset : offset + _DISCLOSURE_UPSERT_CHUNK_SIZE
+        ]
+        insert_stmt = pg_insert(NewsArticle).values(article_chunk)
+        excluded = insert_stmt.excluded
+        await db.execute(
+            insert_stmt.on_conflict_do_update(
+                index_elements=[NewsArticle.url],
+                set_={
+                    "title": excluded.title,
+                    "stock_name": excluded.stock_name,
+                },
+                where=NewsArticle.title.is_distinct_from(excluded.title)
+                | NewsArticle.stock_name.is_distinct_from(excluded.stock_name),
+            )
         )
-    )
     return DisclosureUpsertCounts(
         inserted=inserted,
         updated=updated,

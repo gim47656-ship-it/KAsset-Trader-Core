@@ -120,7 +120,16 @@ async def handle_get_market_index(
     symbol: str | None = None,
     period: str = "day",
     count: int = 20,
+    *,
+    completed_as_of_by_market: Mapping[str, datetime] | None = None,
 ) -> dict[str, Any]:
+    """지수 현재 요약과 범위 이력을 조회한다.
+
+    기본 호출은 기존 현재가 의미를 유지한다. 완료 시각 사전을 넘기면 요약만
+    해당 시장의 완료 정규장 일봉으로 만들고, 범위 이력은 기존 계약대로 조회한다.
+    사전에 대상 시장이 없으면 진행 중 봉으로 대체하지 않고 요약을 unavailable로
+    둔다.
+    """
     period = (period or "day").strip().lower()
     if period not in ("day", "week", "month"):
         raise ValueError("period must be 'day', 'week', or 'month'")
@@ -135,30 +144,74 @@ async def handle_get_market_index(
                 f"Unknown index symbol '{sym}'. Supported: {', '.join(sorted(_INDEX_META))}"
             )
 
+        def unavailable_current() -> dict[str, Any]:
+            return {
+                "symbol": sym,
+                "name": meta["name"],
+                "source": meta["source"],
+                "unavailable": True,
+            }
+
         try:
             if meta["source"] == "naver":
+                async def load_kr_current() -> dict[str, Any]:
+                    if completed_as_of_by_market is None:
+                        return await _fetch_index_kr_current(
+                            meta["naver_code"], meta["name"]
+                        )
+                    completed_as_of = completed_as_of_by_market.get("KRX")
+                    if completed_as_of is None:
+                        return unavailable_current()
+                    return await _fetch_index_kr_completed(
+                        meta["naver_code"],
+                        meta["name"],
+                        completed_as_of=completed_as_of,
+                    )
+
                 current_data, history = await asyncio.gather(
-                    _fetch_index_kr_current(meta["naver_code"], meta["name"]),
-                    _fetch_index_kr_history(meta["naver_code"], capped_count, period),
+                    load_kr_current(),
+                    _fetch_index_kr_history(
+                        meta["naver_code"], capped_count, period
+                    ),
                 )
-                return {
-                    "indices": [_tag_kr_index_data_state(current_data)],
-                    "history": history,
-                }
+                if completed_as_of_by_market is None:
+                    current_data = _tag_kr_index_data_state(current_data)
+                return {"indices": [current_data], "history": history}
             if meta["source"] == "coingecko":
                 current_data = await _fetch_index_crypto_current(
                     meta["cg_metric"], meta["name"], sym
                 )
                 return {"indices": [current_data], "history": []}
+
+            async def load_us_current() -> dict[str, Any]:
+                if completed_as_of_by_market is None:
+                    return await _fetch_index_us_current(
+                        meta["yf_ticker"], meta["name"], sym
+                    )
+                completed_as_of = completed_as_of_by_market.get("US")
+                if completed_as_of is None:
+                    return unavailable_current()
+                rows = await _fetch_indices_us_current_batch(
+                    [sym],
+                    completed_as_of=completed_as_of,
+                    completed_symbols=(sym,),
+                )
+                return rows[0] if rows else unavailable_current()
+
             current_data, history = await asyncio.gather(
-                _fetch_index_us_current(meta["yf_ticker"], meta["name"], sym),
+                load_us_current(),
                 _fetch_index_us_history(meta["yf_ticker"], capped_count, period),
             )
             return {"indices": [current_data], "history": history}
         except Exception as exc:
             return _error_payload(source=meta["source"], message=str(exc), symbol=sym)
 
-    return await handle_get_market_index_current_batch(_DEFAULT_INDICES)
+    if completed_as_of_by_market is None:
+        return await handle_get_market_index_current_batch(_DEFAULT_INDICES)
+    return await handle_get_market_index_current_batch(
+        _DEFAULT_INDICES,
+        completed_as_of_by_market=completed_as_of_by_market,
+    )
 
 
 async def handle_get_market_index_current_batch(

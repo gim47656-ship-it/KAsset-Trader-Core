@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 import httpx
 import pytest
 
+from app.core.config import settings
 from app.services.disclosures.content_fetcher import (
+    DART_DOCUMENT_MAX_RESPONSE_BYTES,
     DisclosureContentError,
     DisclosureTextFetcher,
     extract_disclosure_text,
@@ -18,6 +23,17 @@ class FakeRateLimiter:
 
     async def acquire(self) -> None:
         self.acquire_count += 1
+
+
+def _document_zip(
+    body: bytes,
+    *,
+    name: str = "20260828001916.xml",
+) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, body)
+    return buffer.getvalue()
 
 
 @pytest.mark.unit
@@ -188,8 +204,11 @@ def test_extract_disclosure_text_drops_inline_xbrl_hidden_header() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_dart_landing_resolves_viewer_and_extracts_actual_body() -> None:
+async def test_dart_landing_resolves_viewer_and_extracts_actual_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(settings, "opendart_api_key", "")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         calls.append((str(request.url), request.headers.get("referer")))
@@ -234,3 +253,217 @@ def test_extract_disclosure_text_rejects_empty_shell() -> None:
         extract_disclosure_text(
             "<html><style>body{}</style><script>alert(1)</script><body>공시</body></html>"
         )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dart_landing_without_viewer_uses_opendart_document_zip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = "test-opendart-secret"
+    monkeypatch.setattr(settings, "opendart_api_key", api_key)
+    landing_url = (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
+    )
+    document = (
+        '<?xml version="1.0" encoding="EUC-KR"?>'
+        "<DOCUMENT><TITLE>주요사항보고서</TITLE>"
+        "<P>회사는 대규모 한국어 공급 계약을 체결했다고 공시했습니다.</P>"
+        "<P>계약 금액과 이행 기간은 공시 원문에 기재되어 있습니다.</P></DOCUMENT>"
+    ).encode("cp949")
+    calls: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.host, request.url.path))
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(
+                200,
+                text="<html><body>DART landing without viewer metadata</body></html>",
+                request=request,
+            )
+        assert request.method == "GET"
+        assert request.url.host == "opendart.fss.or.kr"
+        assert request.url.path == "/api/document.xml"
+        assert request.url.params["crtfc_key"] == api_key
+        assert request.url.params["rcept_no"] == "20260828001916"
+        return httpx.Response(
+            200,
+            content=_document_zip(document),
+            headers={"Content-Type": "application/zip"},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        text = await DisclosureTextFetcher(client, max_text_chars=80).fetch(
+            landing_url
+        )
+
+    assert "대규모 한국어 공급 계약" in text
+    assert "계약 금액과 이행 기간" in text
+    assert len(text) <= 80
+    assert calls == [
+        ("dart.fss.or.kr", "/dsaf001/main.do"),
+        ("opendart.fss.or.kr", "/api/document.xml"),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dart_document_fallback_maps_api_error_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = "secret-must-not-appear"
+    receipt_no = "20260828001916"
+    monkeypatch.setattr(settings, "opendart_api_key", api_key)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(200, text="<html>no viewer</html>", request=request)
+        return httpx.Response(
+            200,
+            content=(
+                "<result><status>013</status>"
+                f"<message>no data {api_key} {request.url}</message></result>"
+            ).encode(),
+            headers={"Content-Type": "application/xml"},
+            request=request,
+        )
+
+    landing_url = (
+        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DisclosureContentError, match=r"status 013") as exc_info:
+            await DisclosureTextFetcher(client).fetch(landing_url)
+
+    error = str(exc_info.value)
+    assert api_key not in error
+    assert receipt_no not in error
+    assert "crtfc_key" not in error
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_content", "response_headers", "error_match"),
+    [
+        (
+            b"PK\x03\x04not-a-valid-zip",
+            {},
+            "ZIP is invalid",
+        ),
+        (
+            b"small body",
+            {"Content-Length": str(DART_DOCUMENT_MAX_RESPONSE_BYTES + 1)},
+            "response exceeds the size limit",
+        ),
+    ],
+)
+async def test_dart_document_fallback_rejects_invalid_or_oversized_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response_content: bytes,
+    response_headers: dict[str, str],
+    error_match: str,
+) -> None:
+    monkeypatch.setattr(settings, "opendart_api_key", "test-key")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(200, text="<html>no viewer</html>", request=request)
+        return httpx.Response(
+            200,
+            content=response_content,
+            headers=response_headers,
+            request=request,
+        )
+
+    landing_url = (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DisclosureContentError, match=error_match):
+            await DisclosureTextFetcher(client).fetch(landing_url)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dart_document_fallback_rejects_unsafe_zip_member_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "opendart_api_key", "test-key")
+    unsafe_zip = _document_zip(
+        b"<html><body>unsafe archive member must not be read</body></html>",
+        name="../escape.xml",
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(200, text="<html>no viewer</html>", request=request)
+        return httpx.Response(200, content=unsafe_zip, request=request)
+
+    landing_url = (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DisclosureContentError, match="unsafe member path"):
+            await DisclosureTextFetcher(client).fetch(landing_url)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("receipt_query", "api_key", "error_match"),
+    [
+        ("rcpNo=20260828001916", "", "OPENDART_API_KEY is required"),
+        ("rcpNo=not-numeric", "test-key", "one numeric rcpNo"),
+        ("other=value", "test-key", "one numeric rcpNo"),
+    ],
+)
+async def test_dart_document_fallback_requires_key_and_numeric_receipt_number(
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_query: str,
+    api_key: str,
+    error_match: str,
+) -> None:
+    monkeypatch.setattr(settings, "opendart_api_key", api_key)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, text="<html>no viewer</html>", request=request)
+
+    landing_url = f"https://dart.fss.or.kr/dsaf001/main.do?{receipt_query}"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DisclosureContentError, match=error_match):
+            await DisclosureTextFetcher(client).fetch(landing_url)
+
+    assert calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dart_document_fallback_does_not_follow_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "opendart_api_key", "test-key")
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if request.url.host == "dart.fss.or.kr":
+            return httpx.Response(200, text="<html>no viewer</html>", request=request)
+        return httpx.Response(
+            302,
+            headers={"Location": "https://evil.test/stolen"},
+            request=request,
+        )
+
+    landing_url = (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DisclosureContentError, match="redirects are not allowed"):
+            await DisclosureTextFetcher(client).fetch(landing_url)
+
+    assert calls == ["dart.fss.or.kr", "opendart.fss.or.kr"]

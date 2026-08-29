@@ -1072,14 +1072,24 @@ async def _build_market_index_detail(
     symbol: str,
     range_: MarketIndexRange,
 ) -> MarketIndexDetailResponse:
-    _, session_states = await _session_snapshot()
+    moment = datetime.now(UTC)
+    _, session_states = await _session_snapshot(moment=moment)
     period, count = _INDEX_RANGE_CONFIG[range_]
+    market = _INDEX_DEFINITIONS_BY_SYMBOL[symbol][1]
+    completed_window = await get_latest_completed_regular_window_from_toss(
+        "kr" if market == "KRX" else "us",
+        moment,
+    )
+    completed_as_of_by_market = (
+        {market: completed_window.end} if completed_window is not None else {}
+    )
     try:
         result: object = await _bounded(
             handle_get_market_index(
                 symbol=symbol,
                 period=period,
                 count=count,
+                completed_as_of_by_market=completed_as_of_by_market,
             )
         )
     except Exception:
@@ -1100,7 +1110,7 @@ async def get_market_index_detail(
     symbol: str,
     range_: MarketIndexRange,
 ) -> MarketIndexDetailResponse:
-    """Return one sanitized, keyed 60-second index detail snapshot."""
+    """Return one sanitized, keyed 15-second index detail snapshot."""
 
     normalized_symbol = symbol.strip().upper()
     if normalized_symbol not in _INDEX_DEFINITIONS_BY_SYMBOL:

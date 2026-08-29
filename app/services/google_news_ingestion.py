@@ -23,6 +23,7 @@ from app.services.google_news_rss import (
     fetch_google_news_rss,
     market_config,
 )
+from app.services.news_summary_service import summarize_ingested_news
 from app.services.symbol_news_store import (
     FeedArticleInput,
     FeedArticleUpsertCounts,
@@ -164,6 +165,25 @@ def _error_message(errors: tuple[str, ...]) -> str | None:
     if not errors:
         return None
     return "; ".join(errors)[:2000]
+
+
+async def _summarize_after_ingest(
+    db: AsyncSession,
+    article_urls: Collection[str],
+) -> None:
+    try:
+        result = await summarize_ingested_news(db, tuple(article_urls))
+    except Exception:
+        await db.rollback()
+        logger.exception("Google News RSS 자동 요약 batch 실패")
+        return
+    logger.info(
+        "Google News RSS 자동 요약: status=%s selected=%d summarized=%d failed=%d",
+        result.status,
+        result.selected,
+        result.summarized,
+        result.failed,
+    )
 
 
 async def _record_failed_run(
@@ -312,4 +332,6 @@ async def ingest_google_news_rss(
             current_run_uuid,
         )
         raise
+    if collected.articles_by_url:
+        await _summarize_after_ingest(db, collected.articles_by_url)
     return counts.inserted, counts.updated, counts.skipped

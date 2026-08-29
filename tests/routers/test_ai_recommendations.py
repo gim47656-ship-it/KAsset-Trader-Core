@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal, get_db
 from app.middleware.auth import AuthMiddleware
 from app.models.ai_recommendations import AIRecommendation
+from app.models.symbol_master import SymbolMaster
 from app.models.trading import User, UserRole
 from app.routers.ai_recommendations import _service, router
 from app.routers.dependencies import get_authenticated_user
@@ -238,6 +240,88 @@ async def test_get_preserves_nullable_fields_and_empty_snapshots(
     assert item["rationale"] == []
     assert item["risks"] == []
     assert item["evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_existing_row_get_enriches_name_and_localizes_legacy_vote_rationale(
+    db_session: AsyncSession,
+) -> None:
+    symbol = f"T{uuid4().hex[:10].upper()}"
+    master = SymbolMaster(
+        market="KRX",
+        symbol=symbol,
+        name="테스트 실제 종목명",
+        name_en=None,
+        security_type="COMMON_STOCK",
+        is_active=True,
+        updated_at=_NOW,
+    )
+    row = _recommendation("legacy-display")
+    row.symbol = symbol
+    row.name = symbol
+    row.rationale = [
+        (
+            "Deterministic strategy votes: momentum=BUY, mean_reversion=HOLD, "
+            "breakout=SELL, volatility_trend=HOLD."
+        )
+    ]
+    row.evidence = [
+        {
+            "title": "AI vertical slice",
+            "source": "kasset-automation",
+            "kind": "ai_vertical_slice",
+            "strategyVotes": [
+                {
+                    "strategy": "MOMENTUM",
+                    "vote": "BUY",
+                    "weight": "0.250000",
+                    "score": "0.200000",
+                },
+                {
+                    "strategy": "MEAN_REVERSION",
+                    "vote": "HOLD",
+                    "weight": "0.250000",
+                    "score": "0.000000",
+                },
+                {
+                    "strategy": "BREAKOUT",
+                    "vote": "SELL",
+                    "weight": "0.250000",
+                    "score": "-0.200000",
+                },
+                {
+                    "strategy": "VOLATILITY_TREND",
+                    "vote": "HOLD",
+                    "weight": "0.250000",
+                    "score": "0.000000",
+                },
+            ],
+        }
+    ]
+    db_session.add_all([master, row])
+    await db_session.commit()
+    try:
+        response = await _request(
+            _app(db_session),
+            "GET",
+            "/api/v1/ai/recommendations/legacy-display",
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["name"] == "테스트 실제 종목명"
+        assert payload["rationale"] == [
+            "전략 투표 결과는 모멘텀=매수, 평균회귀=관망, 돌파=매도, 변동성추세=관망입니다."
+        ]
+        assert payload["strategyVotes"] == row.evidence[0]["strategyVotes"]
+    finally:
+        await db_session.execute(
+            delete(SymbolMaster).where(
+                SymbolMaster.market == "KRX",
+                SymbolMaster.symbol == symbol,
+            )
+        )
+        await db_session.commit()
 
 
 @pytest.mark.asyncio
