@@ -52,6 +52,7 @@ class KRSymbolUniverse(Base):
     )
     krx_trading_suspended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     nxt_trading_suspended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    std_pdno: Mapped[str | None] = mapped_column(String(32), nullable=True)
     isin: Mapped[str | None] = mapped_column(String(20), nullable=True)
     toss_master_updated_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True

@@ -19,6 +19,7 @@ from .constants import DOMESTIC_BALANCE_TR as BALANCE_TR
 from .constants import DOMESTIC_BALANCE_URL as BALANCE_URL
 from .constants import DOMESTIC_ORDER_URL as KOREA_ORDER_URL
 from .constants import INTEGRATED_MARGIN_TR, INTEGRATED_MARGIN_URL
+from .corporate_actions import CorporateActionsClient
 from .domestic_orders import DomesticOrderClient
 from .market_data import (
     MarketDataClient,
@@ -115,6 +116,7 @@ class KISClient(BaseKISClient):
         parent: KISClientProtocol = cast(KISClientProtocol, cast(object, self))
         self._market_data: MarketDataClient = MarketDataClient(parent)
         self._account: AccountClient = AccountClient(parent)
+        self._corporate_actions: CorporateActionsClient = CorporateActionsClient(parent)
         self._domestic_orders: DomesticOrderClient = DomesticOrderClient(parent)
         self._overseas_orders: OverseasOrderClient = OverseasOrderClient(parent)
 
@@ -181,6 +183,76 @@ class KISClient(BaseKISClient):
         self, code: str, market: str = "J"
     ) -> dict[str, Any]:
         return await self._market_data.fetch_fundamental_info(code, market)
+
+    async def search_stock_info(
+        self,
+        pdno: str,
+        *,
+        prdt_type_cd: str = "300",
+    ) -> list[dict[str, Any]]:
+        return await self._corporate_actions.search_stock_info(
+            pdno,
+            prdt_type_cd=prdt_type_cd,
+        )
+
+    async def ksdinfo_rev_split(
+        self,
+        sht_cd: str,
+        from_date: datetime.date | str,
+        to_date: datetime.date | str,
+        *,
+        market_gb: str = "0",
+    ) -> list[dict[str, Any]]:
+        return await self._corporate_actions.ksdinfo_rev_split(
+            sht_cd,
+            from_date,
+            to_date,
+            market_gb=market_gb,
+        )
+
+    async def ksdinfo_paidin_capin(
+        self,
+        sht_cd: str,
+        from_date: datetime.date | str,
+        to_date: datetime.date | str,
+        *,
+        gb1: str = "2",
+    ) -> list[dict[str, Any]]:
+        return await self._corporate_actions.ksdinfo_paidin_capin(
+            sht_cd,
+            from_date,
+            to_date,
+            gb1=gb1,
+        )
+
+    async def ksdinfo_bonus_issue(
+        self,
+        sht_cd: str,
+        from_date: datetime.date | str,
+        to_date: datetime.date | str,
+    ) -> list[dict[str, Any]]:
+        return await self._corporate_actions.ksdinfo_bonus_issue(
+            sht_cd,
+            from_date,
+            to_date,
+        )
+
+    async def ksdinfo_dividend(
+        self,
+        sht_cd: str,
+        from_date: datetime.date | str,
+        to_date: datetime.date | str,
+        *,
+        gb1: str = "0",
+        high_gb: str = "",
+    ) -> list[dict[str, Any]]:
+        return await self._corporate_actions.ksdinfo_dividend(
+            sht_cd,
+            from_date,
+            to_date,
+            gb1=gb1,
+            high_gb=high_gb,
+        )
 
     async def inquire_daily_itemchartprice(
         self,

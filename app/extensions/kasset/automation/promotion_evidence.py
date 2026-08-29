@@ -51,7 +51,6 @@ from app.schemas.research_backtest import (
 )
 from app.services.daily_candles.readiness import (
     REQUIRED_BENCHMARK_BARS,
-    REQUIRED_HISTORY_BARS,
     DailyCandlesReadiness,
     DailyCandlesReadinessService,
     MarketReadiness,
@@ -98,7 +97,6 @@ class _Storage:
     universe_table: str
     candle_table: str
     name_expression: str
-    benchmark_symbol: str
     candidate_market: str
 
 
@@ -107,14 +105,12 @@ _STORAGE: dict[str, _Storage] = {
         universe_table="kr_symbol_universe",
         candle_table="kr_candles_1d",
         name_expression="u.name",
-        benchmark_symbol="KOSPI",
         candidate_market="KR",
     ),
     "us": _Storage(
         universe_table="us_symbol_universe",
         candle_table="us_candles_1d",
         name_expression="COALESCE(NULLIF(u.name_kr, ''), NULLIF(u.name_en, ''))",
-        benchmark_symbol="SPY",
         candidate_market="US",
     ),
 }
@@ -124,26 +120,53 @@ def _universe_query(storage: _Storage):
     return text(
         f"""
         SELECT
-            u.symbol,
+            m.symbol,
+            m.rank AS member_rank,
+            m.member_kind,
+            m.market_cap,
+            cohort.cohort_id,
+            cohort.selection_method AS cohort_method,
+            cohort.selection_date AS cohort_selection_date,
+            cohort.effective_date AS cohort_effective_date,
+            cohort.evidence_scope AS cohort_evidence_scope,
             {storage.name_expression} AS name,
             u.is_active,
             u.listing_status,
             u.list_date,
             u.delist_date,
-            COUNT(DISTINCT c.time) FILTER (WHERE c.time <= :as_of) AS bar_count,
-            STRING_AGG(DISTINCT c.source, ',' ORDER BY c.source) FILTER (
-                WHERE c.time <= :as_of
-            ) AS sources
-        FROM public.{storage.universe_table} AS u
-        LEFT JOIN public.{storage.candle_table} AS c ON c.symbol = u.symbol
+            COUNT(DISTINCT candles.time) FILTER (
+                WHERE candles.time <= :as_of
+            ) AS bar_count,
+            STRING_AGG(
+                DISTINCT candles.source, ',' ORDER BY candles.source
+            ) FILTER (WHERE candles.time <= :as_of) AS sources
+        FROM public.kasset_research_cohort_members AS m
+        JOIN public.kasset_research_cohorts AS cohort
+          ON cohort.cohort_id = m.cohort_id
+        LEFT JOIN public.{storage.universe_table} AS u ON u.symbol = m.symbol
+        LEFT JOIN public.{storage.candle_table} AS candles
+          ON candles.symbol = m.symbol
+        WHERE m.cohort_id = :cohort_id
+          AND m.member_kind IN ('active', 'forced')
         GROUP BY
-            u.symbol,
+            m.symbol,
+            m.rank,
+            m.member_kind,
+            m.market_cap,
+            cohort.cohort_id,
+            cohort.selection_method,
+            cohort.selection_date,
+            cohort.effective_date,
+            cohort.evidence_scope,
             {storage.name_expression},
             u.is_active,
             u.listing_status,
             u.list_date,
             u.delist_date
-        ORDER BY u.symbol
+        ORDER BY
+            m.rank,
+            CASE m.member_kind WHEN 'active' THEN 0 ELSE 1 END,
+            m.symbol
         """
     )
 
@@ -188,11 +211,15 @@ async def load_portfolio_evidence_source(
     db: AsyncSession,
     *,
     as_of: datetime | None = None,
+    cohort_ids: Mapping[str, str] | None = None,
 ) -> PortfolioEvidenceSource:
-    """Read readiness, a bounded deterministic universe, bars, and benchmarks."""
+    """Read readiness and exact rank-bounded cohort members, bars, and benchmarks."""
 
     measured_at = _aware_utc(as_of or datetime.now(UTC))
-    readiness = await DailyCandlesReadinessService(db).measure(as_of=measured_at)
+    readiness = await DailyCandlesReadinessService(db).measure(
+        as_of=measured_at,
+        cohort_ids=cast(Any, cohort_ids),
+    )
     _require_readiness(readiness)
 
     candidates: list[CandidateMetadata] = []
@@ -202,12 +229,21 @@ async def load_portfolio_evidence_source(
 
     for market_name in ("kr", "us"):
         storage = _STORAGE[market_name]
+        market_readiness = readiness.for_market(cast(Any, market_name))
+        cohort = market_readiness.cohort
+        if cohort is None:
+            raise PromotionEvidenceBuildError(f"{market_name}:cohort_not_found")
         universe_result = await db.execute(
-            _universe_query(storage), {"as_of": measured_at}
+            _universe_query(storage),
+            {"cohort_id": cohort.cohort_id, "as_of": measured_at},
         )
         universe_rows = tuple(
             cast(Sequence[Mapping[str, object]], universe_result.mappings().all())
         )
+        if len(universe_rows) != market_readiness.total_symbol_count:
+            raise PromotionEvidenceBuildError(
+                f"{market_name}:cohort_member_query_mismatch"
+            )
         selected = _select_universe_rows(universe_rows)
         if not selected:
             raise PromotionEvidenceBuildError(f"{market_name}:selected_universe_empty")
@@ -228,6 +264,10 @@ async def load_portfolio_evidence_source(
         source_by_symbol: dict[str, set[str]] = {symbol: set() for symbol in symbols}
         for row in candle_rows:
             symbol = str(row["symbol"]).strip().upper()
+            if symbol not in grouped:
+                raise PromotionEvidenceBuildError(
+                    f"{market_name}:{symbol}:non_cohort_candle"
+                )
             grouped[symbol].append(_price_bar(row))
             source = str(row.get("source") or "").strip()
             if source:
@@ -257,6 +297,18 @@ async def load_portfolio_evidence_source(
                 {
                     "market": storage.candidate_market,
                     "symbol": symbol,
+                    "cohortId": str(row["cohort_id"]),
+                    "cohortMethod": str(row["cohort_method"]),
+                    "cohortSelectionDate": _date_text(
+                        cast(date, row["cohort_selection_date"])
+                    ),
+                    "cohortEffectiveDate": _date_text(
+                        cast(date, row["cohort_effective_date"])
+                    ),
+                    "cohortEvidenceScope": str(row["cohort_evidence_scope"]),
+                    "memberRank": int(row["member_rank"]),
+                    "memberKind": str(row["member_kind"]),
+                    "marketCap": str(row["market_cap"]),
                     "isActive": bool(row.get("is_active")),
                     "listingStatus": str(row.get("listing_status") or "") or None,
                     "listDate": _date_text(cast(date | None, row.get("list_date"))),
@@ -270,7 +322,7 @@ async def load_portfolio_evidence_source(
         benchmark_result = await db.execute(
             _benchmark_query(storage),
             {
-                "symbol": storage.benchmark_symbol,
+                "symbol": market_readiness.benchmark.symbol,
                 "as_of": measured_at,
                 "history_bars": BACKTEST_HISTORY_BARS,
             },
@@ -280,7 +332,7 @@ async def load_portfolio_evidence_source(
         )
         benchmark_rows.reverse()
         benchmark_bars = tuple(_price_bar(row) for row in benchmark_rows)
-        if len(benchmark_bars) < 2:
+        if len(benchmark_bars) < REQUIRED_BENCHMARK_BARS:
             raise PromotionEvidenceBuildError(
                 f"{market_name}:benchmark_window_insufficient"
             )
@@ -293,6 +345,7 @@ async def load_portfolio_evidence_source(
         raise PromotionEvidenceBuildError("daily_candles_missing")
     period_start = min(all_timestamps)
     period_end = max(all_timestamps)
+    _require_readiness(readiness, period_start=period_start.date())
     content_hash = _dataset_content_hash(
         candidates=tuple(candidates),
         bars_by_candidate=bars_by_candidate,
@@ -316,11 +369,16 @@ async def build_and_store_portfolio_evidence(
     db: AsyncSession,
     *,
     as_of: datetime | None = None,
+    cohort_ids: Mapping[str, str] | None = None,
 ) -> PromotionEvidenceBuildResult:
     """Run deterministic engines and persist experiment -> run -> candidate."""
 
     artifact = current_strategy_artifact()
-    source = await load_portfolio_evidence_source(db, as_of=as_of)
+    source = await load_portfolio_evidence_source(
+        db,
+        as_of=as_of,
+        cohort_ids=cohort_ids,
+    )
     config = PortfolioBacktestConfig(
         strategy_key=artifact.strategy_key,
         strategy_version=artifact.strategy_version,
@@ -569,6 +627,7 @@ def build_promotion_raw_payload(
             },
             "datasetContentHash": source.dataset_content_hash,
             "requiredHistoryBars": source.readiness.required_history_bars,
+            "cohorts": {market: item["cohort"] for market, item in markets.items()},
             "universeCounts": {
                 market: item["totalSymbolCount"] for market, item in markets.items()
             },
@@ -585,7 +644,9 @@ def build_promotion_raw_payload(
             "selectedUniverse": [dict(item) for item in source.selected_universe],
         },
         "readiness": {
+            "dailyHistoryReady": source.readiness.daily_history_ready,
             "promotionReady": source.readiness.promotion_ready,
+            "dailyHistoryBlockers": list(source.readiness.daily_history_blockers),
             "blockers": list(source.readiness.blockers),
             "reasons": list(source.readiness.reasons),
             "markets": markets,
@@ -683,23 +744,52 @@ def build_promotion_raw_payload(
     }
 
 
-def _require_readiness(readiness: DailyCandlesReadiness) -> None:
+def _require_readiness(
+    readiness: DailyCandlesReadiness,
+    *,
+    period_start: date | None = None,
+) -> None:
     if not readiness.promotion_ready:
         detail = ",".join(readiness.blockers) or "readiness_not_ready"
         raise PromotionEvidenceBuildError(detail)
+    if not readiness.daily_history_ready:
+        raise PromotionEvidenceBuildError("daily_history_not_ready")
     if readiness.eligible_symbol_count <= 0:
         raise PromotionEvidenceBuildError("eligible_symbols_zero")
     for market in readiness.markets:
-        if market.eligible_symbol_count <= 0:
-            raise PromotionEvidenceBuildError(f"{market.market}:eligible_symbols_zero")
+        cohort = market.cohort
+        if cohort is None:
+            raise PromotionEvidenceBuildError(f"{market.market}:cohort_not_found")
+        if cohort.method != "latest_market_cap":
+            raise PromotionEvidenceBuildError(f"{market.market}:cohort_method_invalid")
+        if cohort.evidence_scope != "historical_pit":
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_not_historical_pit"
+            )
+        if (
+            market.evaluated_window_start is None
+            or market.evaluated_window_start < cohort.effective_date
+        ):
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_window_predates_effective_date"
+            )
+        if period_start is not None and period_start < cohort.effective_date:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_window_predates_effective_date"
+            )
+        if (
+            market.total_symbol_count <= 0
+            or market.eligible_symbol_count != market.total_symbol_count
+        ):
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_members_not_ready"
+            )
         if market.fallback_only:
             raise PromotionEvidenceBuildError(f"{market.market}:fallback_only")
         if not market.point_in_time_available:
             raise PromotionEvidenceBuildError(
                 f"{market.market}:point_in_time_unavailable"
             )
-        if not market.includes_delisted:
-            raise PromotionEvidenceBuildError(f"{market.market}:delisted_not_included")
         if market.benchmark.status != "available":
             raise PromotionEvidenceBuildError(f"{market.market}:benchmark_unavailable")
         if not market.benchmark.sources:
@@ -715,34 +805,25 @@ def _require_readiness(readiness: DailyCandlesReadiness) -> None:
 def _select_universe_rows(
     rows: Sequence[Mapping[str, object]],
 ) -> tuple[Mapping[str, object], ...]:
-    active = [
-        row
-        for row in rows
-        if bool(row.get("is_active"))
-        and int(row.get("bar_count") or 0) >= REQUIRED_HISTORY_BARS
+    cohort_members = [
+        row for row in rows if str(row.get("member_kind") or "") in {"active", "forced"}
     ]
-    delisted = [
-        row
-        for row in rows
-        if not bool(row.get("is_active"))
-        and int(row.get("bar_count") or 0) > 0
-        and (
-            row.get("delist_date") is not None
-            or str(row.get("listing_status") or "").strip().casefold()
-            in {"delisted", "상장폐지"}
-        )
-    ]
-    selected = active[:BACKTEST_CANDIDATES_PER_MARKET]
-    if delisted:
-        selected = active[: BACKTEST_CANDIDATES_PER_MARKET - 1] + [delisted[0]]
-    return tuple(selected)
+    ordered = sorted(
+        cohort_members,
+        key=lambda row: (
+            int(row.get("member_rank") or 0),
+            0 if row.get("member_kind") == "active" else 1,
+            str(row.get("symbol") or ""),
+        ),
+    )
+    return tuple(ordered[:BACKTEST_CANDIDATES_PER_MARKET])
 
 
 def _engine_universe_evidence(source: PortfolioEvidenceSource):
     from app.extensions.kasset.automation.portfolio_backtest import UniverseEvidence
 
     return UniverseEvidence(
-        source="daily_candles_readiness",
+        source="durable_research_cohort",
         point_in_time_membership=all(
             item.point_in_time_available for item in source.readiness.markets
         ),
@@ -751,7 +832,7 @@ def _engine_universe_evidence(source: PortfolioEvidenceSource):
         ),
         as_of=source.as_of,
         notes=(
-            "DB universe list_date/delist_date and inactive candle coverage verified",
+            "Immutable cohort membership, member rank, and effective date verified",
         ),
     )
 
@@ -918,17 +999,45 @@ def _is_hash(value: object) -> bool:
 
 def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
     benchmark_sources = list(item.benchmark.sources)
+    cohort = item.cohort
+    cohort_payload: dict[str, object] | None = None
+    if cohort is not None:
+        cohort_payload = {
+            "cohortId": cohort.cohort_id,
+            "method": cohort.method,
+            "selectionAsOf": _timestamp(cohort.selection_as_of),
+            "selectionDate": cohort.selection_date.isoformat(),
+            "effectiveDate": cohort.effective_date.isoformat(),
+            "requestedSize": cohort.requested_size,
+            "activeMemberCount": cohort.active_member_count,
+            "valuationSnapshotDate": cohort.valuation_snapshot_date.isoformat(),
+            "valuationSnapshotSource": cohort.valuation_snapshot_source,
+            "evidenceScope": cohort.evidence_scope,
+        }
     return {
+        "cohort": cohort_payload,
+        "evaluatedWindowStart": _date_text(item.evaluated_window_start),
+        "evaluatedWindowEnd": _date_text(item.evaluated_window_end),
         "totalSymbolCount": item.total_symbol_count,
+        "cohortActiveMemberCount": item.cohort_active_member_count,
+        "forcedMemberCount": item.forced_member_count,
+        "benchmarkMemberCount": item.benchmark_member_count,
         "activeSymbolCount": item.active_symbol_count,
         "inactiveSymbolCount": item.inactive_symbol_count,
         "symbolsWithAtLeast252Bars": item.symbols_with_at_least_252_bars,
         "eligibleSymbolCount": item.eligible_symbol_count,
+        "corporateActionStatus": item.corporate_action_status,
+        "corporateActionCoveredSymbolCount": (
+            item.corporate_action_covered_symbol_count
+        ),
+        "adjustmentCoveredSymbolCount": item.adjustment_covered_symbol_count,
         "pointInTimeAvailable": item.point_in_time_available,
         "includesDelisted": item.includes_delisted,
         "delistedSymbolCount": item.delisted_symbol_count,
         "delistedWithCandlesCount": item.delisted_with_candles_count,
         "fallbackOnly": item.fallback_only,
+        "dailyHistoryReady": item.daily_history_ready,
+        "promotionReady": item.promotion_ready,
         "benchmark": {
             "symbol": item.benchmark.symbol,
             "source": item.benchmark.source,
@@ -943,6 +1052,7 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
                 benchmark_sources and set(benchmark_sources) <= _FALLBACK_SOURCES
             ),
         },
+        "dailyHistoryBlockers": list(item.daily_history_blockers),
         "blockers": list(item.blockers),
         "reasons": list(item.reasons),
     }
@@ -1064,6 +1174,9 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     data = _required_mapping(payload.get("data"), "data")
     eligible = _required_mapping(data.get("eligible252Counts"), "eligible252Counts")
     selected = _required_mapping(data.get("selectedCounts"), "selectedCounts")
+    cohorts = _required_mapping(data.get("cohorts"), "cohorts")
+    period = _required_mapping(data.get("period"), "period")
+    period_start = _required_timestamp(period, "startAt").date()
     if any(_required_int(eligible, market) <= 0 for market in ("kr", "us")):
         raise PromotionEvidenceBuildError("eligible_symbols_zero")
     if any(_required_int(selected, market) <= 0 for market in ("kr", "us")):
@@ -1081,6 +1194,21 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         cast(Mapping[str, object], item) for item in selected_universe
     )
     for market in ("kr", "us"):
+        cohort = _required_mapping(cohorts.get(market), f"cohort.{market}")
+        cohort_id = cohort.get("cohortId")
+        selection_date = _required_date(cohort, "selectionDate")
+        effective_date = _required_date(cohort, "effectiveDate")
+        if (
+            not isinstance(cohort_id, str)
+            or not cohort_id.strip()
+            or cohort.get("method") != "latest_market_cap"
+            or cohort.get("evidenceScope") != "historical_pit"
+        ):
+            raise PromotionEvidenceBuildError(f"{market}:cohort_identity_invalid")
+        if period_start < effective_date:
+            raise PromotionEvidenceBuildError(
+                f"{market}:cohort_window_predates_effective_date"
+            )
         market_rows = tuple(
             item
             for item in selected_rows
@@ -1090,16 +1218,27 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
             raise PromotionEvidenceBuildError(
                 f"{market}:selected_universe_count_mismatch"
             )
-        if not any(
-            row.get("isActive") is False
-            and (
-                row.get("delistDate") is not None
-                or str(row.get("listingStatus", "")).strip().casefold()
-                in {"delisted", "상장폐지"}
-            )
+        if any(
+            row.get("cohortId") != cohort_id
+            or row.get("cohortMethod") != "latest_market_cap"
+            or row.get("cohortSelectionDate") != selection_date.isoformat()
+            or row.get("cohortEffectiveDate") != effective_date.isoformat()
+            or row.get("cohortEvidenceScope") != "historical_pit"
+            or row.get("memberKind") not in {"active", "forced"}
+            or _required_int(row, "memberRank") <= 0
             for row in market_rows
         ):
-            raise PromotionEvidenceBuildError(f"{market}:delisted_evidence_missing")
+            raise PromotionEvidenceBuildError(
+                f"{market}:selected_cohort_identity_invalid"
+            )
+        member_keys = {
+            (str(row["memberKind"]), _required_int(row, "memberRank"))
+            for row in market_rows
+        }
+        if len(member_keys) != len(market_rows):
+            raise PromotionEvidenceBuildError(
+                f"{market}:selected_member_rank_duplicate"
+            )
         source_values = tuple(
             source
             for row in market_rows
@@ -1122,8 +1261,15 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
             )
 
     readiness = _required_mapping(payload.get("readiness"), "readiness")
-    if readiness.get("promotionReady") is not True:
+    if (
+        readiness.get("dailyHistoryReady") is not True
+        or readiness.get("promotionReady") is not True
+    ):
         raise PromotionEvidenceBuildError("readiness_not_ready")
+    if _required_sequence(
+        readiness.get("dailyHistoryBlockers"), "readiness.dailyHistoryBlockers"
+    ):
+        raise PromotionEvidenceBuildError("daily_history_blocked")
     if _required_sequence(readiness.get("blockers"), "readiness.blockers"):
         raise PromotionEvidenceBuildError("readiness_blocked")
     validation = _required_mapping(payload.get("validation"), "validation")
@@ -1131,7 +1277,6 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         "eligibleNonzero": True,
         "fallbackOnly": False,
         "pointInTimeProven": True,
-        "delistedIncluded": True,
         "benchmarkProven": True,
     }
     if any(
@@ -1362,6 +1507,16 @@ def _required_decimal(value: Mapping[str, object], field: str) -> Decimal:
     if not parsed.is_finite():
         raise PromotionEvidenceBuildError(f"{field}_invalid")
     return parsed
+
+
+def _required_date(value: Mapping[str, object], field: str) -> date:
+    raw = value.get(field)
+    if not isinstance(raw, str) or not raw.strip():
+        raise PromotionEvidenceBuildError(f"{field}_invalid")
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise PromotionEvidenceBuildError(f"{field}_invalid") from exc
 
 
 def _required_timestamp(value: Mapping[str, object], field: str) -> datetime:

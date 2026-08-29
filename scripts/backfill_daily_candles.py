@@ -1,15 +1,18 @@
-"""Initial backfill CLI for the daily candle store.
+"""KR/US/crypto 일봉 저장소의 운영자용 초기·재개 백필 CLI.
 
-Use after applying the daily candle migrations and before enabling the
-cron jobs, to populate the tables with horizon_bars of history for a
-specific symbol set.
+명시한 심볼은 기존 fail-fast 동작을 유지한다. ``--all``은 DB에서 현재 백필
+가능한 보통주만 읽고 심볼 단위로 커밋하며, 한 심볼 실패가 다음 심볼을 막지 않는다.
 
 Examples:
     uv run python scripts/backfill_daily_candles.py \
         --market us --symbols AAPL,MSFT,NVDA --horizon-bars 500
 
     uv run python scripts/backfill_daily_candles.py \
-        --market kr --symbols 005930,000660 --horizon-bars 400
+        --market kr --all --resume-after 005930 --limit 500 \
+        --include-benchmark --horizon-bars 400
+
+    uv run python scripts/backfill_daily_candles.py \
+        --market us --top-market-cap 100 --horizon-bars 500
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from app.services.daily_candles.crypto_identity import upbit_daily_candle_partit
 from app.services.daily_candles.repository import MarketKey
 from app.services.daily_candles.sync_service import (
     SyncTarget,
+    _backfill_us_partition,
     _build_default_service,
 )
 
@@ -39,23 +43,54 @@ _MARKET_DEFAULTS = {
 }
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("양의 정수여야 합니다")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--market", choices=list(_MARKET_DEFAULTS), required=True)
-    parser.add_argument(
+    targets = parser.add_mutually_exclusive_group(required=True)
+    targets.add_argument(
         "--symbols",
-        required=True,
-        help="comma-separated symbols (DB-canonical form, e.g. BRK.B not BRK-B)",
+        help="쉼표로 구분한 DB 정규 심볼(예: BRK-B가 아닌 BRK.B)",
     )
-    parser.add_argument("--horizon-bars", type=int, default=None)
+    targets.add_argument(
+        "--all",
+        action="store_true",
+        help="DB에서 현재 활성 보통주 백필 대상을 조회",
+    )
+    targets.add_argument(
+        "--top-market-cap",
+        type=_positive_int,
+        metavar="N",
+        help="최신 시총 파티션에서 적격 보통주 상위 N개를 조회",
+    )
+    parser.add_argument("--horizon-bars", type=_positive_int, default=None)
     parser.add_argument(
         "--partition",
         default=None,
         help=(
-            "exchange (US) / venue (KR) / canonical crypto partition. "
-            "Defaults: NASD / KRX / symbol-derived upbit_krw or upbit_usdt."
+            "US 거래소 / KR 거래소 / 암호화폐 정규 파티션. "
+            "기본값: NASD / KRX / 심볼에서 계산한 upbit_krw 또는 upbit_usdt. "
+            "--all/--top-market-cap에서는 사용할 수 없습니다."
         ),
     )
+    parser.add_argument(
+        "--resume-after",
+        default=None,
+        help="--all 결정 순서에서 이 심볼 다음부터 재개",
+    )
+    parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        help="--all에서 재개 필터 적용 후 처리할 최대 후보 수",
+    )
+    parser.add_argument("--include-benchmark", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -65,30 +100,41 @@ def _partition_for_symbol(
 ) -> str:
     if market != MarketKey.CRYPTO:
         if not requested_partition:
-            raise ValueError("Non-crypto backfill requires a partition")
+            raise ValueError("암호화폐 외 백필에는 파티션이 필요합니다")
+        if market == MarketKey.US:
+            partition = _backfill_us_partition(requested_partition)
+            if partition is None:
+                raise ValueError(
+                    f"지원하지 않는 미국 백필 파티션: {requested_partition!r}"
+                )
+            return partition
         return requested_partition
 
     canonical = upbit_daily_candle_partition(symbol)
     if requested_partition is not None and requested_partition != canonical:
         raise ValueError(
-            "Crypto --partition must match the symbol-derived canonical partition: "
+            "암호화폐 --partition은 심볼에서 계산한 정규 파티션과 일치해야 합니다: "
             f"symbol={symbol!r}, partition={requested_partition!r}, "
             f"expected={canonical!r}"
         )
     return canonical
 
 
-async def _amain(args: argparse.Namespace) -> int:
-    market_key, default_bars, default_partition = _MARKET_DEFAULTS[args.market]
-    horizon = args.horizon_bars if args.horizon_bars is not None else default_bars
-    requested_partition = args.partition or default_partition
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    targets = [
+def _explicit_targets(
+    *,
+    market: MarketKey,
+    symbols_csv: str,
+    requested_partition: str | None,
+) -> list[SyncTarget]:
+    symbols = [symbol.strip() for symbol in symbols_csv.split(",") if symbol.strip()]
+    if not symbols:
+        raise ValueError("--symbols에는 심볼이 하나 이상 있어야 합니다")
+    return [
         SyncTarget(
-            market=market_key,
+            market=market,
             symbol=symbol,
             partition=_partition_for_symbol(
-                market=market_key,
+                market=market,
                 symbol=symbol,
                 requested_partition=requested_partition,
             ),
@@ -96,22 +142,160 @@ async def _amain(args: argparse.Namespace) -> int:
         for symbol in symbols
     ]
 
+
+def _benchmark_target(market: MarketKey) -> SyncTarget:
+    if market == MarketKey.KR:
+        return SyncTarget(market=market, symbol="KOSPI", partition="KRX")
+    if market == MarketKey.US:
+        return SyncTarget(market=market, symbol="SPY", partition="NASD")
+    raise ValueError("--include-benchmark는 kr과 us에서만 지원합니다")
+
+
+def _log_summary(
+    *, targets_total: int, succeeded: int, fallback: int, failed_symbols: list[str]
+) -> None:
+    logger.info(
+        "백필 요약 targets_total=%d succeeded=%d failed=%d "
+        "fallback=%d failed_symbols=%s",
+        targets_total,
+        succeeded,
+        len(failed_symbols),
+        fallback,
+        failed_symbols,
+    )
+
+
+async def _amain(args: argparse.Namespace) -> int:
+    market_key, default_bars, default_partition = _MARKET_DEFAULTS[args.market]
+    horizon = args.horizon_bars if args.horizon_bars is not None else default_bars
+
+    bulk_mode = args.all or args.top_market_cap is not None
+    if bulk_mode:
+        target_mode = "--all" if args.all else "--top-market-cap"
+        if args.market == "crypto":
+            raise ValueError(f"{target_mode}은 kr과 us에서만 지원합니다")
+        if args.partition is not None:
+            raise ValueError(f"--partition은 {target_mode}과 함께 사용할 수 없습니다")
+        if args.top_market_cap is not None and (
+            args.resume_after is not None or args.limit is not None
+        ):
+            raise ValueError(
+                "--resume-after/--limit은 --top-market-cap과 함께 사용할 수 없습니다"
+            )
+        explicit_targets: list[SyncTarget] = []
+    else:
+        if args.resume_after is not None or args.limit is not None:
+            raise ValueError("--resume-after/--limit에는 --all이 필요합니다")
+        requested_partition = args.partition or default_partition
+        explicit_targets = _explicit_targets(
+            market=market_key,
+            symbols_csv=args.symbols,
+            requested_partition=requested_partition,
+        )
+
+    benchmark = _benchmark_target(market_key) if args.include_benchmark else None
     svc = await _build_default_service()
     try:
+        if args.all:
+            targets = await svc.resolve_backfill_targets(
+                market=args.market,
+                resume_after=args.resume_after,
+                limit=args.limit,
+            )
+        elif args.top_market_cap is not None:
+            targets = await svc.resolve_top_market_cap_targets(
+                market=args.market,
+                count=args.top_market_cap,
+            )
+        else:
+            targets = explicit_targets
+        if benchmark is not None and benchmark not in targets:
+            targets.append(benchmark)
+
+        if args.dry_run:
+            for target in targets:
+                logger.info("DRY RUN - 동기화 예정 %s", target)
+            _log_summary(
+                targets_total=len(targets),
+                succeeded=0,
+                fallback=0,
+                failed_symbols=[],
+            )
+            return 0
+
+        succeeded = 0
+        fallback = 0
+        failed_symbols: list[str] = []
         for target in targets:
-            if args.dry_run:
-                logger.info("DRY RUN - would sync %s", target)
+            try:
+                if benchmark is not None and target == benchmark:
+                    result = await svc.sync_benchmark(
+                        market=market_key,
+                        horizon_bars=horizon,
+                    )
+                else:
+                    result = await svc.sync_one(
+                        target=target,
+                        horizon_bars=horizon,
+                    )
+            except Exception as exc:
+                failed_symbols.append(target.symbol)
+                logger.exception(
+                    "백필 실패 symbol=%s partition=%s error=%s",
+                    target.symbol,
+                    target.partition,
+                    exc,
+                )
+                await svc.rollback()
+                if not bulk_mode:
+                    _log_summary(
+                        targets_total=len(targets),
+                        succeeded=succeeded,
+                        fallback=fallback,
+                        failed_symbols=failed_symbols,
+                    )
+                    raise
                 continue
-            result = await svc.sync_one(target=target, horizon_bars=horizon)
+
+            if bool(getattr(result, "fallback_used", False)):
+                fallback += 1
+            skipped_reason = getattr(result, "skipped_reason", None)
+            if skipped_reason:
+                failed_symbols.append(target.symbol)
+                logger.error(
+                    "백필 결과 없음 symbol=%s partition=%s reason=%s",
+                    target.symbol,
+                    target.partition,
+                    skipped_reason,
+                )
+                if not bulk_mode:
+                    _log_summary(
+                        targets_total=len(targets),
+                        succeeded=succeeded,
+                        fallback=fallback,
+                        failed_symbols=failed_symbols,
+                    )
+                    raise RuntimeError(f"{target.symbol} 백필 실패: {skipped_reason}")
+                continue
+
+            succeeded += 1
             logger.info(
-                "backfill done symbol=%s upserted=%d fallback=%s",
+                "백필 완료 symbol=%s partition=%s upserted=%d fallback=%s",
                 target.symbol,
+                target.partition,
                 result.rows_upserted,
                 result.fallback_used,
             )
+
+        _log_summary(
+            targets_total=len(targets),
+            succeeded=succeeded,
+            fallback=fallback,
+            failed_symbols=failed_symbols,
+        )
+        return 1 if failed_symbols else 0
     finally:
         await svc.close()
-    return 0
 
 
 def main() -> int:

@@ -46,6 +46,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     readiness = commands.add_parser("readiness", help="DB 일봉 readiness를 조회합니다.")
     readiness.add_argument("--as-of", type=_aware_datetime)
+    readiness.add_argument("--kr-cohort-id")
+    readiness.add_argument("--us-cohort-id")
 
     backtest = commands.add_parser(
         "backtest-build",
@@ -86,15 +88,34 @@ async def run(args: argparse.Namespace) -> int:
     try:
         async with AsyncSessionLocal() as db:
             if args.command == "readiness":
+                cohort_ids = {
+                    market: cohort_id
+                    for market, cohort_id in (
+                        ("kr", args.kr_cohort_id),
+                        ("us", args.us_cohort_id),
+                    )
+                    if cohort_id is not None
+                }
                 report = await DailyCandlesReadinessService(db).measure(
-                    as_of=args.as_of
+                    as_of=args.as_of,
+                    cohort_ids=cohort_ids,
                 )
                 _print(
                     {
                         "명령": "readiness",
+                        "cohortIds": {
+                            item.market: (
+                                item.cohort.cohort_id
+                                if item.cohort is not None
+                                else None
+                            )
+                            for item in report.markets
+                        },
+                        "dailyHistoryReady": report.daily_history_ready,
                         "promotionReady": report.promotion_ready,
                         "eligibleSymbolCount": report.eligible_symbol_count,
-                        "blockers": list(report.blockers),
+                        "dailyHistoryBlockers": list(report.daily_history_blockers),
+                        "promotionBlockers": list(report.blockers),
                         "reasons": list(report.reasons),
                         "evidence": asdict(report),
                     }

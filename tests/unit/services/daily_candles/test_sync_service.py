@@ -111,6 +111,91 @@ class TestSyncOneSymbol:
         repo.session.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_us_kis_exception_falls_back_to_yahoo(self):
+        from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
+
+        repo = MagicMock()
+        repo.upsert_rows = AsyncMock(return_value=1)
+        repo.session = MagicMock()
+        repo.session.commit = AsyncMock()
+        repo.session.rollback = AsyncMock()
+        yahoo_fetcher = AsyncMock(
+            return_value=[
+                YahooFallbackRow(
+                    time_utc=datetime(2024, 5, 1, tzinfo=UTC),
+                    symbol="AAPL",
+                    open=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.5,
+                    adj_close=98.25,
+                    volume=1000.0,
+                    value=100500.0,
+                )
+            ]
+        )
+        svc = DailyCandleSyncService(
+            repository=repo,
+            kis_kr_fetcher=AsyncMock(),
+            kis_us_fetcher=AsyncMock(side_effect=TimeoutError("kis down")),
+            yahoo_us_fetcher=yahoo_fetcher,
+            upbit_crypto_fetcher=AsyncMock(),
+        )
+
+        result = await svc.sync_one(
+            target=SyncTarget(
+                market=MarketKey.US,
+                symbol="AAPL",
+                partition="NASD",
+            ),
+            horizon_bars=400,
+        )
+
+        yahoo_fetcher.assert_awaited_once_with(symbol="AAPL", n=400)
+        written = repo.upsert_rows.await_args.kwargs["rows"]
+        assert written[0].source == "yahoo_fallback"
+        assert written[0].adj_close == pytest.approx(98.25)
+        assert result.fallback_used is True
+        repo.session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_us_malformed_success_does_not_fall_back(self):
+        repo = MagicMock()
+        repo.upsert_rows = AsyncMock()
+        repo.session = MagicMock()
+        yahoo_fetcher = AsyncMock()
+        svc = DailyCandleSyncService(
+            repository=repo,
+            kis_kr_fetcher=AsyncMock(),
+            kis_us_fetcher=AsyncMock(
+                return_value=pd.DataFrame(
+                    {
+                        "date": ["2024-05-01"],
+                        "open": [100.0],
+                        "high": [101.0],
+                        "low": [99.0],
+                        "volume": [1000],
+                    }
+                )
+            ),
+            yahoo_us_fetcher=yahoo_fetcher,
+            upbit_crypto_fetcher=AsyncMock(),
+        )
+
+        with pytest.raises(ValueError, match="close가 없습니다"):
+            await svc.sync_one(
+                target=SyncTarget(
+                    market=MarketKey.US,
+                    symbol="AAPL",
+                    partition="NASD",
+                ),
+                horizon_bars=400,
+            )
+
+        yahoo_fetcher.assert_not_awaited()
+        repo.upsert_rows.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_kr_commit_failure_triggers_rollback(self):
         repo = MagicMock()
         repo.latest_time_utc = AsyncMock(return_value=None)
@@ -175,6 +260,158 @@ async def test_crypto_universe_uses_canonical_upbit_partition() -> None:
             partition="upbit_krw",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_backfill_kr_targets_are_only_eligible_common_shares() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        return_value=[
+            SimpleNamespace(symbol="005930", exchange="KOSPI"),
+            SimpleNamespace(symbol="000660", exchange="KOSPI"),
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc.resolve_backfill_targets(
+        market="kr",
+        resume_after="000660",
+        limit=1,
+    )
+
+    assert targets == [
+        SyncTarget(market=MarketKey.KR, symbol="005930", partition="KRX")
+    ]
+    sql = str(repo.session.execute.await_args.args[0])
+    assert "is_common_share IS TRUE" in sql
+    assert "security_type = 'STOCK'" in sql
+    assert "COALESCE(krx_trading_suspended, FALSE) = FALSE" in sql
+    assert "nxt_trading_suspended" not in sql
+    assert "delist_date IS NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_backfill_us_targets_map_partition_then_resume_and_limit() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        return_value=[
+            SimpleNamespace(symbol="BBB", exchange="NYSE"),
+            SimpleNamespace(symbol="AAA", exchange="NASDAQ"),
+            SimpleNamespace(symbol="ZZZ", exchange="AMEX"),
+            SimpleNamespace(symbol="BAD", exchange="OTC"),
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc.resolve_backfill_targets(
+        market="us",
+        resume_after="AAA",
+        limit=1,
+    )
+
+    assert targets == [SyncTarget(market=MarketKey.US, symbol="BBB", partition="NYSE")]
+    sql = str(repo.session.execute.await_args.args[0])
+    assert "is_common_stock IS TRUE" in sql
+    assert "is_active IS TRUE" in sql
+
+
+@pytest.mark.asyncio
+async def test_top_market_cap_kr_uses_latest_positive_eligible_partition() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        return_value=[
+            SimpleNamespace(symbol="005930", exchange="KRX"),
+            SimpleNamespace(symbol="000660", exchange="KRX"),
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc.resolve_top_market_cap_targets(market="kr", count=2)
+
+    assert targets == [
+        SyncTarget(market=MarketKey.KR, symbol="005930", partition="KRX"),
+        SyncTarget(market=MarketKey.KR, symbol="000660", partition="KRX"),
+    ]
+    query = str(repo.session.execute.await_args.args[0])
+    assert "MAX(snapshot_date)" in query
+    assert "valuation.market_cap > 0" in query
+    assert "universe.security_type = 'STOCK'" in query
+    assert "universe.is_common_share IS TRUE" in query
+    assert "ORDER BY market_cap DESC, symbol ASC" in query
+    assert repo.session.execute.await_args.args[1] == {
+        "market": "kr",
+        "count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_top_market_cap_us_maps_only_supported_exchanges() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        return_value=[
+            SimpleNamespace(symbol="MSFT", exchange="NASDAQ"),
+            SimpleNamespace(symbol="IBM", exchange="NYQ"),
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc.resolve_top_market_cap_targets(market="us", count=2)
+
+    assert targets == [
+        SyncTarget(market=MarketKey.US, symbol="MSFT", partition="NASD"),
+        SyncTarget(market=MarketKey.US, symbol="IBM", partition="NYSE"),
+    ]
+    query = str(repo.session.execute.await_args.args[0])
+    assert "universe.is_common_stock IS TRUE" in query
+    assert "universe.exchange" in query
+    assert "ORDER BY market_cap DESC, symbol ASC" in query
+
+
+@pytest.mark.asyncio
+async def test_top_market_cap_fails_closed_when_latest_partition_is_short() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        return_value=[SimpleNamespace(symbol="005930", exchange="KRX")]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="requested=2 received=1"):
+        await svc.resolve_top_market_cap_targets(market="kr", count=2)
 
 
 @pytest.mark.asyncio
@@ -317,6 +554,143 @@ async def test_service_close_awaits_callbacks():
 
 
 @pytest.mark.asyncio
+async def test_kr_benchmark_prefers_kis_index_and_preserves_provenance() -> None:
+    repo = MagicMock()
+    repo.upsert_rows = AsyncMock(return_value=2)
+    repo.session = MagicMock()
+    repo.session.commit = AsyncMock()
+    repo.session.rollback = AsyncMock()
+    kis_index_fetcher = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "date": ["2024-05-01", "2024-05-02"],
+                "open": [2600.0, 2610.0],
+                "high": [2610.0, 2620.0],
+                "low": [2590.0, 2600.0],
+                "close": [2605.0, 2615.0],
+                "volume": [1.0, 2.0],
+                "value": [2605.0, 5230.0],
+            }
+        )
+    )
+    naver_fetcher = AsyncMock()
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+        kis_kr_benchmark_fetcher=kis_index_fetcher,
+        naver_kr_benchmark_fetcher=naver_fetcher,
+    )
+
+    result = await svc.sync_benchmark(market=MarketKey.KR, horizon_bars=2)
+
+    kis_index_fetcher.assert_awaited_once_with(symbol="KOSPI", n=2)
+    naver_fetcher.assert_not_awaited()
+    written = repo.upsert_rows.await_args.kwargs["rows"]
+    assert [row.source for row in written] == ["kis_index", "kis_index"]
+    assert result.fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_kr_benchmark_persists_naver_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = MagicMock()
+    repo.upsert_rows = AsyncMock(return_value=2)
+    repo.session = MagicMock()
+    repo.session.commit = AsyncMock()
+    repo.session.rollback = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.daily_candles.sync_service.drop_forming_daily_rows",
+        lambda frame, market: frame.iloc[:-1],
+    )
+    kis_index_fetcher = AsyncMock(side_effect=TimeoutError("KIS maintenance"))
+    naver_fetcher = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "date": ["2024-05-01", "2024-05-02", "2024-05-03"],
+                "open": [2600.0, 2610.0, 2620.0],
+                "high": [2610.0, 2620.0, 2630.0],
+                "low": [2590.0, 2600.0, 2610.0],
+                "close": [2605.0, 2615.0, 2625.0],
+                "volume": [1.0, 2.0, 3.0],
+                "value": [2605.0, 5230.0, 7875.0],
+            }
+        )
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+        kis_kr_benchmark_fetcher=kis_index_fetcher,
+        naver_kr_benchmark_fetcher=naver_fetcher,
+    )
+
+    result = await svc.sync_benchmark(market=MarketKey.KR, horizon_bars=2)
+
+    kis_index_fetcher.assert_awaited_once_with(symbol="KOSPI", n=2)
+    naver_fetcher.assert_awaited_once_with(symbol="KOSPI", n=2)
+    written = repo.upsert_rows.await_args.kwargs["rows"]
+    assert [row.symbol for row in written] == ["KOSPI", "KOSPI"]
+    assert [row.source for row in written] == ["naver", "naver"]
+    assert [row.close for row in written] == [2605.0, 2615.0]
+    assert result.target == SyncTarget(
+        market=MarketKey.KR,
+        symbol="KOSPI",
+        partition="KRX",
+    )
+    assert result.fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_us_benchmark_uses_spy_nasd_kis_partition() -> None:
+    repo = MagicMock()
+    repo.upsert_rows = AsyncMock(return_value=1)
+    repo.session = MagicMock()
+    repo.session.commit = AsyncMock()
+    repo.session.rollback = AsyncMock()
+    kis_us_fetcher = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "date": ["2024-05-01"],
+                "open": [500.0],
+                "high": [501.0],
+                "low": [499.0],
+                "close": [500.5],
+                "volume": [1000],
+            }
+        )
+    )
+    yahoo_fetcher = AsyncMock()
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=kis_us_fetcher,
+        yahoo_us_fetcher=yahoo_fetcher,
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    result = await svc.sync_benchmark(market=MarketKey.US, horizon_bars=1)
+
+    kis_us_fetcher.assert_awaited_once_with(
+        symbol="SPY",
+        exchange_code="NASD",
+        n=2,
+    )
+    yahoo_fetcher.assert_not_awaited()
+    assert repo.upsert_rows.await_args.kwargs["update_adj_close"] is False
+    assert result.target == SyncTarget(
+        market=MarketKey.US,
+        symbol="SPY",
+        partition="NASD",
+    )
+
+
+@pytest.mark.asyncio
 async def test_kr_empty_kis_falls_back_to_toss_daily():
     from app.services.daily_candles.repository import MarketKey
     from app.services.daily_candles.sync_service import (
@@ -379,7 +753,7 @@ async def test_us_empty_kis_and_yahoo_falls_back_to_toss_daily():
     class Repo:
         session = AsyncMock()
 
-        async def upsert_rows(self, *, market, rows):
+        async def upsert_rows(self, *, market, rows, update_adj_close=True):
             upserted_rows.extend(rows)
             return len(rows)
 

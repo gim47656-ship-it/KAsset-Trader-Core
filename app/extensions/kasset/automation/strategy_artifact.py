@@ -35,7 +35,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
 from app.services.research_canonical_hash import canonical_sha256
 
 STRATEGY_ARTIFACT_SCHEMA_VERSION = "kasset.strategy-artifact.v1"
-PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v2"
+PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v3"
 BACKTEST_CANDIDATES_PER_MARKET = 6
 BACKTEST_HISTORY_BARS = 400
 
@@ -126,7 +126,7 @@ def effective_strategy_config() -> dict[str, object]:
             "evidenceUniverseSelection": {
                 "candidatesPerMarket": BACKTEST_CANDIDATES_PER_MARKET,
                 "historyBarsPerSymbol": BACKTEST_HISTORY_BARS,
-                "selection": "active_eligible_then_one_delisted",
+                "selection": "cohort_member_rank",
             },
             "walkForward": walk_forward,
             "positionSizer": DEFAULT_POSITION_SIZING_CONFIG,

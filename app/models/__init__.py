@@ -60,6 +60,15 @@ from .investment_snapshots import (
     InvestmentSnapshotRun,
 )
 from .investor_flow_snapshot import InvestorFlowSnapshot
+from .kasset_research_cohorts import (
+    KAssetResearchCohort,
+    KAssetResearchCohortMember,
+)
+from .kr_lifecycle_actions import (
+    KAssetCorporateActionFetchCoverage,
+    KRCorporateActionEvidence,
+    KRStockLifecycleObservation,
+)
 from .kr_stock_warnings import KRStockWarning
 from .kr_symbol_universe import KRSymbolUniverse
 from .manual_holdings import (
@@ -256,9 +265,14 @@ __all__ = [
     "InvestKrFundamentalsSnapshot",
     "InvestScreenerSnapshot",
     "InvestMomentumEventSnapshot",
+    "KAssetCorporateActionFetchCoverage",
+    "KAssetResearchCohort",
+    "KAssetResearchCohortMember",
     "InvestThemeEventSnapshot",
     "InvestThemeEventSnapshotStock",
     "KRStockWarning",
+    "KRCorporateActionEvidence",
+    "KRStockLifecycleObservation",
     "KRSymbolUniverse",
     "UpbitSymbolUniverse",
     "USSymbolUniverse",

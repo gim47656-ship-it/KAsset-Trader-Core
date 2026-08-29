@@ -18,17 +18,25 @@ class TestFetchUsDailyYahooFallback:
                 "high": [101.0, 102.0, 103.0],
                 "low": [99.0, 100.0, 101.0],
                 "close": [100.5, 101.5, 102.5],
-                "adj_close": [99.0, 100.0, 101.0],
+                "adj_close": [99.0, 100.0, float("nan")],
                 "volume": [1000, 1100, 1200],
             }
         )
+        fetcher = AsyncMock(return_value=sample)
         with patch(
             "app.services.brokers.yahoo.client.fetch_ohlcv",
-            new=AsyncMock(return_value=sample),
+            new=fetcher,
         ):
             rows = await fetch_us_daily_yahoo_fallback(symbol="ILLIQUIDETF", n=3)
+        fetcher.assert_awaited_once_with(
+            ticker="ILLIQUIDETF",
+            days=4,
+            period="day",
+            use_cache=False,
+        )
         assert len(rows) == 3
         assert rows[0].adj_close == pytest.approx(99.0)
+        assert rows[-1].adj_close is None
         assert all(r.symbol == "ILLIQUIDETF" for r in rows)
 
     @pytest.mark.asyncio

@@ -32,9 +32,15 @@ class YahooFallbackRow:
 async def fetch_us_daily_yahoo_fallback(
     *, symbol: str, n: int
 ) -> list[YahooFallbackRow]:
-    frame = await yahoo_service.fetch_ohlcv(ticker=symbol, days=n, period="day")
+    frame = await yahoo_service.fetch_ohlcv(
+        ticker=symbol,
+        days=n + 1,
+        period="day",
+        use_cache=False,
+    )
     if frame.empty or "close" not in frame.columns:
         return []
+    frame = frame.tail(n)
 
     has_adj = "adj_close" in frame.columns
     out: list[YahooFallbackRow] = []
@@ -59,7 +65,7 @@ async def fetch_us_daily_yahoo_fallback(
                 close=close,
                 adj_close=(
                     float(record["adj_close"])
-                    if has_adj and record.get("adj_close") is not None
+                    if has_adj and pd.notna(record.get("adj_close"))
                     else None
                 ),
                 volume=volume,

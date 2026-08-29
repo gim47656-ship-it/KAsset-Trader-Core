@@ -18,12 +18,17 @@ from app.monitoring import build_yfinance_tracing_session, close_yfinance_sessio
 logger = logging.getLogger(__name__)
 
 
+def _column_name(value: object) -> str:
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def _flatten_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """('open','NVDA') → open  처럼 1단 컬럼으로 변환"""
+    """yfinance 단일 티커 응답을 ``adj_close``를 포함한 1단 컬럼으로 변환한다."""
+
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0].lower() for c in df.columns]  # level-0 만 취함
+        df.columns = [_column_name(column[0]) for column in df.columns]
     else:
-        df.columns = [c.lower() for c in df.columns]
+        df.columns = [_column_name(column) for column in df.columns]
     return df
 
 
@@ -111,6 +116,7 @@ async def fetch_ohlcv(
     end_date: datetime | None = None,
     *,
     prepost: bool = False,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     normalized_period = str(period or "").strip().lower()
 
@@ -118,7 +124,8 @@ async def fetch_ohlcv(
     # cache is built from regular-session-only data (_filter_closed_buckets_nyse),
     # so mixing in extended-hours candles would silently corrupt it.
     if (
-        not prepost
+        use_cache
+        and not prepost
         and normalized_period in {"day", "week", "month"}
         and settings.yahoo_ohlcv_cache_enabled
     ):
@@ -201,9 +208,13 @@ async def _fetch_ohlcv_raw(
                     **extra_kwargs,
                 )
             df = _flatten_cols(df).reset_index(names="date")
+            selected_columns = ["date", "open", "high", "low", "close"]
+            if "adj_close" in df.columns:
+                selected_columns.append("adj_close")
+            selected_columns.append("volume")
             df = (
                 df.assign(date=lambda d: pd.to_datetime(d["date"]).dt.date)
-                .loc[:, ["date", "open", "high", "low", "close", "volume"]]
+                .loc[:, selected_columns]
                 .tail(days)
                 .reset_index(drop=True)
             )

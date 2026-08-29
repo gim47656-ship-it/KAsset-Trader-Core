@@ -50,6 +50,49 @@ class TestYahooService:
 
     @pytest.mark.asyncio
     @patch("app.services.brokers.yahoo.client.yf.download")
+    async def test_fetch_ohlcv_preserves_real_multiindex_adj_close(
+        self, mock_download, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.services.brokers.yahoo.client.build_yfinance_tracing_session",
+            lambda: object(),
+        )
+        monkeypatch.setattr(
+            "app.services.brokers.yahoo.client.settings.yahoo_ohlcv_cache_enabled",
+            False,
+            raising=False,
+        )
+        columns = pd.MultiIndex.from_tuples(
+            [
+                ("Adj Close", "AAPL"),
+                ("Close", "AAPL"),
+                ("High", "AAPL"),
+                ("Low", "AAPL"),
+                ("Open", "AAPL"),
+                ("Volume", "AAPL"),
+            ],
+            names=["Price", "Ticker"],
+        )
+        mock_download.return_value = pd.DataFrame(
+            [
+                [98.25, 100.0, 101.0, 99.0, 99.5, 1000],
+                [99.75, 102.0, 103.0, 100.0, 101.0, 1200],
+            ],
+            index=pd.DatetimeIndex(
+                ["2024-05-01", "2024-05-02"],
+                name="Date",
+            ),
+            columns=columns,
+        )
+
+        from app.services.brokers.yahoo.client import fetch_ohlcv
+
+        result = await fetch_ohlcv("AAPL", days=2, use_cache=False)
+
+        assert result["adj_close"].tolist() == [98.25, 99.75]
+
+    @pytest.mark.asyncio
+    @patch("app.services.brokers.yahoo.client.yf.download")
     async def test_fetch_ohlcv_period_1h_uses_60m_interval(
         self, mock_download, monkeypatch
     ):
