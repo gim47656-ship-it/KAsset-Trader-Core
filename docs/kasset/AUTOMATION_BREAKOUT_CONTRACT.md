@@ -53,27 +53,48 @@ BUY 수량은 다음 상한의 최솟값이다.
 
 손절가 없음·역전, ATR 없음/비정상, stale/future 가격, 비정상 가격/수량, 예산 없음은 수량 0과 구조화 사유를 반환한다. AI 출력은 수량·손절가를 입력하거나 덮어쓸 수 없다. SELL은 실제 PAPER 보유수량까지만 허용한다.
 
-### Position Manager
+### Position Manager와 position cycle
 
-owner/account/symbol별 상태는 `entry_price`, `initial_atr`, `initial_stop`, `current_stop`, `highest_close`, `partial_exit_completed`, `entry_at`, `last_evaluated_at`, `strategy_version`을 저장한다. 기본 config는 초기 손절 3 ATR, +3 ATR에서 50% SELL, 잔여분 최고 종가 - 3 ATR trailing, 최대 보유/무수익 time stop이다.
+owner/account/market/symbol별 활성 상태는 실제 `PaperPosition.id`와 immutable `position_cycle_id`에 결합한다. 신규 BUY 체결 시 체결가·추천 ATR/stop·entry order·strategy identity/fingerprint로 새 cycle을 만들고, 재시작 시 PAPER 보유량과 reconcile한다. 수량 0이 되면 상태를 삭제하지 않고 `closed_at`으로 닫아 감사 이력을 보존한다.
 
-매 cycle에서 보유종목을 신규 후보보다 먼저 평가한다. 결과는 recommendation만 생성하며 Broker/PAPER facade를 직접 호출하지 않는다. APPROVAL은 PENDING, AUTO_PAPER는 기존 승인/claim 계약을 따르고 두 모드 모두 Hard Risk와 주문 직전 preview/Kill Switch 재검사를 거친다. `(owner, position, exit kind, signal bar)` idempotency evidence/state로 같은 청산 신호 중복 생성을 막는다.
+동일 종목 재진입은 과거 `highest_close`, trailing stop, partial-exit 상태를 재사용하지 않는다. 부분 매도는 잔여 수량과 stop 상태를 유지하고 전량 청산은 같은 cycle의 미처리 청산 신호를 무효화한다. 청산 idempotency key에는 cycle이 포함된다. 결과는 recommendation만 생성하며 Broker/PAPER facade를 직접 호출하지 않는다.
 
 백테스트의 stop gap은 stop 가격 체결로 소급하지 않는다. 다음 거래 가능 봉 시가와 설정된 보수적 slippage를 적용한다.
 
-### Portfolio Backtest와 Promotion
+### Portfolio Backtest, readiness와 Promotion
 
 백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
 
-전략 상태는 `DRAFT`, `BACKTESTED`, `PAPER_APPROVED`, `PAPER_SUSPENDED`, `RETIRED`다. 백테스트 기준 통과가 확인된 version만 `PAPER_APPROVED`로 승격할 수 있고 AUTO_PAPER 실행은 승인 상태가 아니면 fail-closed한다.
+승격 evidence는 새 백테스트 체계를 만들지 않고 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry를 사용한다. DB 일봉에서 종목 수, 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate-action 상태, point-in-time·상장폐지 포함 가능 여부, KOSPI/SPY benchmark 범위를 계산한다. evidence가 부족하거나 fallback benchmark뿐이면 승격을 fail-closed한다.
+
+전략 상태는 `DRAFT`, `BACKTESTED`, `PAPER_APPROVED`, `PAPER_SUSPENDED`, `RETIRED`다. 운영자는 persisted candidate ID와 사유만 넘길 수 있고 raw metrics를 CLI로 주입할 수 없다. 승인·추천 생성·AUTO_PAPER submit 직전의 strategy artifact fingerprint가 모두 같아야 하며, Ranker/Regime/Ensemble/Sizer/Manager/Backtest/비용 설정과 schema evidence version 변경은 새 backtest/promotion을 요구한다. Git SHA는 source lineage로 별도 저장하고 문서·UI·테스트 변경은 artifact fingerprint에서 제외한다.
+
+### Claim lease와 submit 복구
+
+추천 claim은 `CLAIMED|SUCCEEDED|FAILED` 상태와 opaque token, claimed/lease 시각, attempt count를 사용한다. 만료된 `CLAIMED`만 새 token으로 회수할 수 있고 이전 worker의 token은 완료 상태를 쓸 수 없다. 주문 identity는 기존 `ai-rec:{recommendation_id}`를 재사용하며 account별 correlation ID가 유일하다.
+
+submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 않고 `CLAIMED` lease를 남긴다. 재실행은 owner-scoped client ID 조회로 기존 PAPER 주문을 먼저 reconcile하고, 같은 owner·예상 client ID의 주문만 `SUCCEEDED`로 확정한다. 결정적 preview/submit 거절만 `FAILED`다. 별도 `PREVIEWED`, `SUBMITTING`, `UNKNOWN`, `RECONCILING` persisted 상태와 heartbeat 열은 같은 복구 사실을 중복 표현하므로 추가하지 않는다.
+
+### 운영 CLI
+
+운영 진입점은 `python scripts/kasset_paper_ops.py` 하나다.
+
+1. `readiness [--as-of ISO-8601]`로 일봉·benchmark·PIT readiness를 확인한다.
+2. `backtest-build [--as-of ISO-8601]`로 DB 일봉을 사용한 diagnostics/walk-forward를 실행하고 기존 registry에 저장한다.
+3. `promotion-status`로 현재 승격과 artifact fingerprint를 확인한다.
+4. `promotion-draft|promotion-approve --candidate-id ID --reason TEXT`는 persisted candidate만 받는다.
+5. `promotion-suspend|promotion-retire --strategy-key KEY --version VERSION --reason TEXT`로 운영 상태를 닫는다.
+
+운영 DB migration, backfill, scheduler 활성화, 실제 주문은 이 CLI가 자동 실행하지 않는다. 현재 데이터가 252봉/PIT/benchmark 조건을 충족하지 못하면 `PAPER_APPROVED`를 만들지 않는다.
 
 ## AI 공급자 역할
 
-- 후보 factor, 수량, stop, exit는 AI를 호출하지 않는다.
+- 후보 factor, 수량, stop, exit와 deterministic backtest/promotion metrics는 AI를 호출하지 않는다.
 - 추천의 설명·검토만 AI provider를 사용한다.
 - 복잡한 후보/거래 검토는 MCP 직결을 우선하고 direct OpenAI-compatible API, OpenRouter 순으로 availability fallback한다.
 - 뉴스·공시 요약은 direct API 담당으로 두고 OpenRouter fallback을 사용한다. OpenRouter fallback 모델은 공식 slug `z-ai/glm-5.3-flash`다.
-- provider의 4xx/refusal/schema/safety 오류는 다음 provider로 숨기지 않고 fail-closed한다.
+- provider 429는 availability failure로 다음 configured provider에 넘긴다. 나머지 4xx·refusal·schema·safety 오류는 fail-closed한다.
+- 최종 선택되어 `AIRecommendation`으로 저장된 건은 provider/tier/exact model ID, normalized input hash, 허용된 validated response, confidence, 선택 사유를 `ai_shadow` evidence로 남긴다. raw prompt·secret·provider envelope는 저장하지 않는다. 통계 범위는 `persisted final selections only`이며 선택되지 않은 후보를 저장했다고 간주하지 않는다.
 
 ## 참고 출처와 라이선스
 
