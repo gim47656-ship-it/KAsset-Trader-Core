@@ -267,6 +267,20 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # KAsset Android and AI review tables are later than this
             # reconstructed boundary and already present in current metadata.
             await connection.execute(text("DROP TABLE review.ai_recommendations"))
+            # Current KAsset automation tables are also post-boundary. Drop them
+            # before the Android order tables they reference, then let the
+            # 20260829/20260830 migration chain recreate the exact shapes.
+            await connection.execute(
+                text("DROP TABLE review.kasset_strategy_promotions")
+            )
+            for table in (
+                "kasset_paper_position_states",
+                "kasset_ai_daily_routine_settings",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
+            await connection.execute(
+                text("DROP INDEX IF EXISTS paper.uq_paper_trades_account_correlation")
+            )
             for table in (
                 "kasset_android_paper_orders",
                 "kasset_android_paper_accounts",

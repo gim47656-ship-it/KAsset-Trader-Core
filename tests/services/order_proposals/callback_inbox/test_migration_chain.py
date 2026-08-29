@@ -98,6 +98,9 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "review.telegram_callback_inbox",
     "review.screener_pick_log",
     "review.ai_recommendations",
+    "review.kasset_strategy_promotions",
+    "kasset_paper_position_states",
+    "kasset_ai_daily_routine_settings",
     "kasset_android_paper_orders",
     "kasset_android_paper_accounts",
     "kasset_android_runtime_state",
@@ -137,6 +140,11 @@ async def scratch_database() -> AsyncIterator[str]:
                 await connection.run_sync(Base.metadata.create_all)
                 for table in _POST_PARENT_TABLES:
                     await connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                await connection.execute(
+                    text(
+                        "DROP INDEX IF EXISTS paper.uq_paper_trades_account_correlation"
+                    )
+                )
                 # The KAsset multi-user migration adds these case-insensitive
                 # unique indexes; current metadata already materializes them,
                 # so drop both and let the migration add them back.
