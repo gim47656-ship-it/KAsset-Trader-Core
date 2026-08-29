@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -34,7 +35,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
 from app.services.research_canonical_hash import canonical_sha256
 
 STRATEGY_ARTIFACT_SCHEMA_VERSION = "kasset.strategy-artifact.v1"
-PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v1"
+PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v2"
 BACKTEST_CANDIDATES_PER_MARKET = 6
 BACKTEST_HISTORY_BARS = 400
 
@@ -54,6 +55,7 @@ STRATEGY_CODE_PATHS: tuple[str, ...] = (
 
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_BUILD_VCS_REF_PATH = Path("/app/.build-vcs-ref")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +166,7 @@ def load_current_strategy_artifact(
     *,
     repo_root: Path | None = None,
 ) -> StrategyArtifactManifest:
-    """Read the checked-out strategy code and stamp its actual Git commit."""
+    """Read strategy code and stamp its deployed source commit lineage."""
 
     root = (repo_root or Path(__file__).resolve().parents[4]).resolve()
     code_files = tuple(_code_file(root, relative) for relative in STRATEGY_CODE_PATHS)
@@ -208,6 +210,18 @@ def _code_file(root: Path, relative: str) -> StrategyCodeFile:
 
 
 def _source_commit(root: Path) -> str:
+    env_commit = _normalize_source_commit(os.getenv("GITHUB_SHA"))
+    if env_commit is not None:
+        return env_commit
+
+    try:
+        build_ref = _BUILD_VCS_REF_PATH.read_text(encoding="utf-8")
+    except OSError:
+        build_ref = None
+    build_commit = _normalize_source_commit(build_ref)
+    if build_commit is not None:
+        return build_commit
+
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "--verify", "HEAD"],
@@ -219,10 +233,17 @@ def _source_commit(root: Path) -> str:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("current source commit is unavailable") from exc
-    commit = completed.stdout.strip().lower()
-    if not _SOURCE_COMMIT_RE.fullmatch(commit):
+    commit = _normalize_source_commit(completed.stdout)
+    if commit is None:
         raise ValueError("current source commit is not a full Git object id")
     return commit
+
+
+def _normalize_source_commit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    commit = value.strip().lower()
+    return commit if _SOURCE_COMMIT_RE.fullmatch(commit) else None
 
 
 def _canonical_config_value(value: Any) -> Any:

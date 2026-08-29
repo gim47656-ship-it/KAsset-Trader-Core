@@ -5,10 +5,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.extensions.kasset.automation import (
+    strategy_artifact as strategy_artifact_module,
+)
 from app.extensions.kasset.automation import (
     strategy_promotion_service as promotion_service,
 )
@@ -18,6 +21,7 @@ from app.extensions.kasset.automation.strategy_artifact import (
     StrategyArtifactManifest,
     StrategyCodeFile,
     fingerprint_strategy_artifact,
+    load_current_strategy_artifact,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
     IllegalPromotionTransition,
@@ -531,6 +535,38 @@ def test_artifact_fingerprint_tracks_strategy_code_and_config_not_commit_or_ops(
         not path.startswith(("docs/", "tests/", "frontend/", "alembic/", "scripts/"))
         for path in STRATEGY_CODE_PATHS
     )
+
+
+def test_artifact_loads_deployment_lineage_without_git_or_git_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for relative in STRATEGY_CODE_PATHS:
+        code_path = tmp_path / relative
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text(f"# {relative}\n", encoding="utf-8")
+
+    build_ref_path = tmp_path / ".build-vcs-ref"
+    build_ref_path.write_text(f"  {'B' * 40}\n", encoding="utf-8")
+    missing_git = Mock(side_effect=FileNotFoundError("git"))
+    monkeypatch.setattr(
+        strategy_artifact_module,
+        "_BUILD_VCS_REF_PATH",
+        build_ref_path,
+    )
+    monkeypatch.setattr(strategy_artifact_module.subprocess, "run", missing_git)
+    monkeypatch.setenv("GITHUB_SHA", " \t ")
+
+    build_ref_artifact = load_current_strategy_artifact(repo_root=tmp_path)
+
+    monkeypatch.setenv("GITHUB_SHA", "A" * 40)
+    github_artifact = load_current_strategy_artifact(repo_root=tmp_path)
+
+    assert not (tmp_path / ".git").exists()
+    assert build_ref_artifact.source_commit == "b" * 40
+    assert github_artifact.source_commit == "a" * 40
+    assert build_ref_artifact.fingerprint == github_artifact.fingerprint
+    missing_git.assert_not_called()
 
 
 def test_promotion_trust_migration_is_linear_and_has_no_fake_backfill() -> None:

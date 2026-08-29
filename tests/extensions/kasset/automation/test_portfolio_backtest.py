@@ -438,6 +438,35 @@ def _thresholds() -> dict[str, object]:
     }
 
 
+def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
+    bars = _bars(count=330)
+    candidate = _candidate()
+    universe = UniverseEvidence(
+        source="daily_candles_readiness",
+        point_in_time_membership=True,
+        includes_delisted=True,
+        as_of=bars[-1].timestamp,
+    )
+    diagnostics = run_portfolio_diagnostics(
+        (candidate,),
+        {candidate.key: bars},
+        config=_config(),
+        benchmark_bars_by_market={"US": _benchmark(bars)},
+        universe_evidence=universe,
+    )
+    walk = run_walk_forward(
+        (candidate,),
+        {candidate.key: bars},
+        config=_config(),
+        walk_forward=WalkForwardConfig(train_bars=260, test_bars=20, step_bars=20),
+        benchmark_bars_by_market={"US": _benchmark(bars)},
+        universe_evidence=universe,
+    )
+
+    with pytest.raises(PromotionEvidenceBuildError, match="benchmark_market_mismatch"):
+        derive_promotion_metrics(diagnostics, walk, _readiness())
+
+
 def _stored_evidence_payload() -> tuple[dict[str, object], object]:
     bars = _bars(count=330)
     kr_bars = _bars(count=330, scale=Decimal("10"))
@@ -547,6 +576,7 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
         (("validation", "delistedIncluded"), False),
         (("validation", "benchmarkProven"), False),
         (("benchmarks", "us", "status"), "unavailable"),
+        (("portfolioDiagnostics", "baseline", "benchmarkMarkets"), ["KR"]),
         (("benchmarks", "us", "fallbackOnly"), True),
         (("strategy", "sourceCommit"), "not-a-commit"),
         (("data", "selectedUniverse"), []),
@@ -566,4 +596,15 @@ def test_stored_evidence_fails_closed_when_required_proof_is_missing(
     target[path[-1]] = value
 
     with pytest.raises(PromotionEvidenceBuildError):
+        derive_metrics_from_stored_payload(tampered)
+
+
+def test_stored_evidence_fails_closed_when_benchmark_window_is_short() -> None:
+    raw, _metrics = _stored_evidence_payload()
+    tampered = copy.deepcopy(raw)
+    baseline = tampered["portfolioDiagnostics"]["baseline"]  # type: ignore[index]
+    first_window = baseline["benchmarkWindows"][0]  # type: ignore[index]
+    first_window["startAt"] = baseline["recordEndAt"]  # type: ignore[index]
+
+    with pytest.raises(PromotionEvidenceBuildError, match="benchmark_window_mismatch"):
         derive_metrics_from_stored_payload(tampered)

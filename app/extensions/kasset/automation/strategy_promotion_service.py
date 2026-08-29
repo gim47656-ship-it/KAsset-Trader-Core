@@ -345,7 +345,6 @@ class StrategyPromotionService:
         thresholds: PromotionThresholds = DEFAULT_PROMOTION_THRESHOLDS,
     ) -> StrategyPromotion:
         reason = _operator_reason(operator_reason)
-        trust = await self._candidate_trust(candidate_id)
         row = await self._db.scalar(
             select(KAssetStrategyPromotion)
             .where(KAssetStrategyPromotion.promotion_candidate_id == candidate_id)
@@ -353,6 +352,7 @@ class StrategyPromotionService:
         )
         if row is None:
             raise ValueError("promotion draft for candidate is not registered")
+        trust = await self._candidate_trust(candidate_id)
         current = _promotion_from_row(row)
         _verify_promotion_trust(current, trust)
         if current.state == PromotionState.DRAFT:

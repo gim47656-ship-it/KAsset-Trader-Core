@@ -458,6 +458,7 @@ def derive_promotion_metrics(
 
     _require_readiness(readiness)
     baseline = diagnostics.baseline
+    _require_benchmark_window_coverage(baseline, readiness)
     if baseline.excess_return is None:
         raise PromotionEvidenceBuildError("benchmark_excess_return_missing")
     folds = walk_forward.folds
@@ -485,6 +486,28 @@ def derive_promotion_metrics(
         deterministic=True,
         backtest_hashes=hashes,
     )
+
+
+def _require_benchmark_window_coverage(
+    result: PortfolioBacktestResult,
+    readiness: DailyCandlesReadiness,
+) -> None:
+    if not result.equity_curve:
+        raise PromotionEvidenceBuildError("backtest_equity_curve_missing")
+    expected_markets = {item.market.upper() for item in readiness.markets}
+    actual_markets = tuple(item.market for item in result.benchmark_by_market)
+    if (
+        len(actual_markets) != len(set(actual_markets))
+        or set(actual_markets) != expected_markets
+    ):
+        raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+    record_start = result.equity_curve[0].timestamp
+    record_end = result.equity_curve[-1].timestamp
+    if any(
+        item.start_at > record_start or item.end_at < record_end
+        for item in result.benchmark_by_market
+    ):
+        raise PromotionEvidenceBuildError("benchmark_window_mismatch")
 
 
 def build_promotion_raw_payload(
@@ -947,6 +970,24 @@ def _backtest_summary(result: PortfolioBacktestResult) -> dict[str, object]:
         "slippageCost": str(result.slippage_cost),
         "openPositionCount": len(result.open_positions),
         "benchmarkMarkets": [item.market for item in result.benchmark_by_market],
+        "recordStartAt": (
+            _timestamp(result.equity_curve[0].timestamp)
+            if result.equity_curve
+            else None
+        ),
+        "recordEndAt": (
+            _timestamp(result.equity_curve[-1].timestamp)
+            if result.equity_curve
+            else None
+        ),
+        "benchmarkWindows": [
+            {
+                "market": item.market,
+                "startAt": _timestamp(item.start_at),
+                "endAt": _timestamp(item.end_at),
+            }
+            for item in result.benchmark_by_market
+        ],
         "evidence": [_backtest_evidence(item) for item in result.evidence],
         "determinismHash": result.determinism_hash,
     }
@@ -1128,6 +1169,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         or baseline.get("strategyVersion") != strategy["version"]
     ):
         raise PromotionEvidenceBuildError("baseline_strategy_identity_mismatch")
+    _require_stored_benchmark_window_coverage(baseline, selected)
     cost_slippage = _required_mapping(diagnostics.get("costSlippage"), "costSlippage")
     for market in ("KR", "US"):
         cost = _required_mapping(cost_slippage.get(market), f"costSlippage.{market}")
@@ -1225,6 +1267,53 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     return metrics
 
 
+def _require_stored_benchmark_window_coverage(
+    baseline: Mapping[str, object],
+    selected: Mapping[str, object],
+) -> None:
+    expected_markets = {
+        market.upper() for market in ("kr", "us") if _required_int(selected, market) > 0
+    }
+    raw_markets = _required_sequence(
+        baseline.get("benchmarkMarkets"), "baseline.benchmarkMarkets"
+    )
+    if any(not isinstance(market, str) or not market.strip() for market in raw_markets):
+        raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+    actual_markets = tuple(cast(str, market).strip().upper() for market in raw_markets)
+    if (
+        len(actual_markets) != len(set(actual_markets))
+        or set(actual_markets) != expected_markets
+    ):
+        raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+
+    record_start = _required_timestamp(baseline, "recordStartAt")
+    record_end = _required_timestamp(baseline, "recordEndAt")
+    if record_start > record_end:
+        raise PromotionEvidenceBuildError("benchmark_window_mismatch")
+    raw_windows = _required_sequence(
+        baseline.get("benchmarkWindows"), "baseline.benchmarkWindows"
+    )
+    windows: dict[str, tuple[datetime, datetime]] = {}
+    for raw_window in raw_windows:
+        window = _required_mapping(raw_window, "baseline.benchmarkWindows.item")
+        market_value = window.get("market")
+        if not isinstance(market_value, str) or not market_value.strip():
+            raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+        market = market_value.strip().upper()
+        if market in windows:
+            raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+        window_start = _required_timestamp(window, "startAt")
+        window_end = _required_timestamp(window, "endAt")
+        windows[market] = (window_start, window_end)
+    if set(windows) != expected_markets:
+        raise PromotionEvidenceBuildError("benchmark_market_mismatch")
+    if any(
+        window_start > record_start or window_end < record_end
+        for window_start, window_end in windows.values()
+    ):
+        raise PromotionEvidenceBuildError("benchmark_window_mismatch")
+
+
 def _stored_fold_passed(result: Mapping[str, object]) -> bool:
     return bool(
         _required_int(result, "tradeCount") > 0
@@ -1270,6 +1359,18 @@ def _required_decimal(value: Mapping[str, object], field: str) -> Decimal:
     if not parsed.is_finite():
         raise PromotionEvidenceBuildError(f"{field}_invalid")
     return parsed
+
+
+def _required_timestamp(value: Mapping[str, object], field: str) -> datetime:
+    raw = value.get(field)
+    if not isinstance(raw, str) or not raw.strip():
+        raise PromotionEvidenceBuildError(f"{field}_invalid")
+    normalized = raw.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise PromotionEvidenceBuildError(f"{field}_invalid") from exc
+    return _aware_utc(parsed)
 
 
 def _aware_utc(value: datetime) -> datetime:
