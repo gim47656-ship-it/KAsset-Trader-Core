@@ -16,7 +16,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - **Promotion fail-closed**: 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry만 신뢰한다. CLI로 raw metrics를 주입할 수 없고 candidate ID와 운영자 사유만 받는다. evidence 부족·fallback-only benchmark·선택 시장/평가 window 불일치·fingerprint 불일치는 승격/주문을 막는다.
 - **현재 데이터 readiness 미충족**: 마지막 read-only 운영 감사에서 KR은 100종목×60봉, US는 0종목이며 252봉 충족 종목은 0이었다. 기준을 낮추거나 가짜 backtest로 승인하지 않았다.
 - **Position lifecycle 완료**: 신규 BUY 체결가·추천 ATR/stop으로 fresh cycle을 만들고 `paper_position_id`, market, opened/closed 시각, strategy identity/fingerprint를 보존한다. 전량 청산은 soft-close하고 같은 종목 재진입은 과거 trailing/partial 상태를 재사용하지 않는다.
-- **Claim 복구 완료**: `CLAIMED|SUCCEEDED|FAILED`와 token/lease/attempt count를 사용한다. 만료 claim만 회수하고 stale worker 완료 쓰기를 거부한다. `ai-rec:{recommendation_id}`로 기존 주문을 먼저 조회하며, 불명확 submit은 즉시 재전송하지 않고 3회 attempt 초과 poison claim은 `FAILED`로 종결한다.
+- **Claim 복구 완료**: `CLAIMED|SUCCEEDED|FAILED`와 token/lease/attempt count를 사용한다. 만료 claim만 회수하고 stale worker 완료 쓰기를 거부한다. `ai-rec:{recommendation_id}`로 기존 주문을 먼저 조회하며, 불명확 submit은 즉시 재전송하지 않는다. 3회 attempt 초과 시 같은 client order가 있으면 `SUCCEEDED`로 결합하고 없을 때만 `FAILED`로 종결한다.
 - **AI shadow 완료**: 최종 선택되어 저장된 recommendation에 exact provider/tier/model ID, normalized input hash, validated response, confidence, 선택 사유를 secret-free evidence로 남긴다. 통계 범위는 `persisted final selections only`다.
 - **429 보강 완료**: direct/MCP provider의 429는 availability fallback으로 처리하고 나머지 4xx·refusal·schema·safety 오류는 fail-closed한다.
 - **CI gate 완료**: 4개 고정 shard가 모든 non-live test 파일을 정확히 한 번 포함한다. `Test` workflow는 `workflow_dispatch`와 PostgreSQL 15에서 ROB-849 경계를 재구성한 뒤 후속 전체 migration을 downgrade/upgrade하는 전용 job을 가진다.
@@ -37,7 +37,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - 배포 이미지의 source lineage는 유효 `GITHUB_SHA` → `/app/.build-vcs-ref` → 개발환경 `git rev-parse` 순으로 읽는다. 배포 이미지에 `git`/`.git`이 없어도 artifact를 만들며 lineage는 fingerprint에 섞지 않는다.
 - promotion evidence schema를 v2로 올리고 baseline benchmark 시장 집합과 평가 시작/종료 window가 선택 시장·포트폴리오 기록 구간 전체를 덮지 않으면 승격을 차단한다.
 - position exit 추천도 entry와 동일한 strategy key/version/artifact fingerprint를 보존한다. 한 번도 기록되지 않던 `entry_order_id` 컬럼/FK는 미배포 migration과 모델에서 제거했다.
-- promotion 운영자 경로의 row lock 순서를 통일하고 PAPER claim 재시도를 3회로 제한했다.
+- promotion 운영자 경로의 row lock 순서를 promotion row → research chain으로 통일했다. PAPER claim은 3회로 제한하되 attempt 소진 직전 기존 `ai-rec:{recommendation_id}` 주문을 다시 결합한다.
 
 검증:
 
@@ -50,7 +50,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - `alembic heads`: `20260830_kasset_claim_lease (head)` 단일 head.
 - Android `:app:testDebugUnitTest`: `BUILD SUCCESSFUL`.
 - 실제 PostgreSQL 15에서 ROB-849 경계 재구성 → 이전 revision downgrade → current head upgrade → 재다운그레이드 → 재업그레이드와 단일 head 확인이 통과했다. 과거 TimescaleDB 연속 집계 migration은 이 KAsset 전용 회귀 job의 검증 범위가 아니며 수정하지 않았다.
-- 최종 reviewer finding 보강 범위(Promotion artifact/benchmark, position exit identity, claim cap, 실제 PostgreSQL migration round-trip): **70 passed**.
+- 최종 reviewer finding 보강 범위(Promotion artifact/baseline·fold benchmark, position exit identity, claim cap/reconciliation, 실제 PostgreSQL migration round-trip): **70 passed + 재검수 보강 40 passed**.
 
 주요 커밋:
 
@@ -67,6 +67,8 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - `bb42b91a` deployment lineage·benchmark window promotion trust
 - `bbb045b8` position exit strategy provenance·dead entry-order 제거
 - `5a8adf26` PAPER claim attempt 상한
+- `38e405b3` walk-forward fold benchmark coverage·promotion lock order
+- `fab97a9b` attempt 소진 전 기존 PAPER 주문 reconciliation
 
 ## 다음 세션이 바로 할 일
 1. 아침에 S24+에서 기존 APPROVAL/AUTO_PAPER 화면과 설정 저장을 확인한다. Core 운영 미배포 상태의 422는 구 계약 차단이며 앱 오류 처리 확인용이다.
