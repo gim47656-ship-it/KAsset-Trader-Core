@@ -417,12 +417,19 @@ async def _automatic_forced_reasons(
         ),
     )
     reasons_by_symbol: dict[str, set[str]] = {}
+    invalid_rows: list[str] = []
     for row in (await db.execute(statement)).all():
         try:
             symbol = _normalize_symbol(market, row.symbol)
         except ValueError:
+            invalid_rows.append(f"{row.symbol!r} ({row.reason})")
             continue
         reasons_by_symbol.setdefault(symbol, set()).add(str(row.reason))
+    if invalid_rows:
+        raise KAssetResearchCohortError(
+            f"Automatic forced symbols are invalid for {market.upper()}: "
+            + ", ".join(sorted(invalid_rows))
+        )
     return reasons_by_symbol
 
 
@@ -542,11 +549,15 @@ async def _forced_rows(
             )
         )
 
-    missing_explicit = [symbol for symbol in normalized_explicit if symbol not in found]
-    if missing_explicit:
+    missing_forced = [symbol for symbol in symbols if symbol not in found]
+    if missing_forced:
+        details = ", ".join(
+            f"{symbol} ({'/'.join(sorted(reasons_by_symbol[symbol]))})"
+            for symbol in missing_forced
+        )
         raise KAssetResearchCohortError(
-            f"Explicit forced symbols are unknown, inactive, or outside the "
-            f"{market.upper()} market: {', '.join(missing_explicit)}"
+            f"Forced symbols are unknown, inactive, or outside the supported "
+            f"{market.upper()} market: {details}"
         )
     return resolved
 

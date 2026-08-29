@@ -195,6 +195,21 @@ async def test_automatic_forced_reasons_merge_all_market_scoped_sources() -> Non
 
 
 @pytest.mark.asyncio
+async def test_invalid_automatic_forced_symbol_fails_closed() -> None:
+    db = _StatementDB([SimpleNamespace(symbol="", reason="positive_manual_holding")])
+
+    with pytest.raises(
+        service.KAssetResearchCohortError,
+        match=r"Automatic forced symbols are invalid for US: '' "
+        r"\(positive_manual_holding\)",
+    ):
+        await service._automatic_forced_reasons(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            market="us",
+        )
+
+
+@pytest.mark.asyncio
 async def test_forced_rows_keep_known_active_leveraged_etfs_with_null_caps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -240,25 +255,43 @@ async def test_forced_rows_keep_known_active_leveraged_etfs_with_null_caps(
 
 
 @pytest.mark.asyncio
-async def test_unknown_explicit_force_fails_closed(
+@pytest.mark.parametrize(
+    ("automatic", "explicit", "expected"),
+    [
+        (
+            {"SOXL": {"active_watchlist", "positive_paper_position"}},
+            (),
+            r"SOXL \(active_watchlist/positive_paper_position\)",
+        ),
+        (
+            {},
+            ("UNKNOWN",),
+            r"UNKNOWN \(explicit_force\)",
+        ),
+    ],
+)
+async def test_unresolved_forced_symbol_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
+    automatic: dict[str, set[str]],
+    explicit: tuple[str, ...],
+    expected: str,
 ) -> None:
-    async def no_automatic(*args: Any, **kwargs: Any) -> dict[str, set[str]]:
-        return {}
+    async def reasons(*args: Any, **kwargs: Any) -> dict[str, set[str]]:
+        return automatic
 
-    monkeypatch.setattr(service, "_automatic_forced_reasons", no_automatic)
+    monkeypatch.setattr(service, "_automatic_forced_reasons", reasons)
     db = _StatementDB([])
 
     with pytest.raises(
         service.KAssetResearchCohortError,
-        match="unknown, inactive, or outside the US market: UNKNOWN",
+        match=expected,
     ):
         await service._forced_rows(  # noqa: SLF001
             db,  # type: ignore[arg-type]
             market="us",
             source="yahoo",
             snapshot_date=date(2026, 8, 29),
-            explicit_symbols=("UNKNOWN",),
+            explicit_symbols=explicit,
         )
 
 
