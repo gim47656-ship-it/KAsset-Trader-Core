@@ -743,7 +743,7 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
         await asyncio.Event().wait()
         raise AssertionError(symbols)
 
-    monkeypatch.setattr(mod, "SOURCE_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(mod, "INDEX_SOURCE_TIMEOUT_SECONDS", 0.001)
     _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", slow_indices)
     monkeypatch.setattr(
@@ -774,6 +774,63 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
 
 
 @pytest.mark.asyncio
+async def test_overview_keeps_krx_rows_when_us_batch_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def split_indices(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+    ) -> dict[str, Any]:
+        assert completed_as_of_by_market == {
+            "KRX": _KR_COMPLETED_END,
+            "US": _US_COMPLETED_END,
+        }
+        if symbols == mod._OVERVIEW_KRX_SYMBOLS:
+            return {
+                "indices": [
+                    {
+                        "symbol": symbol,
+                        "current": "2500",
+                        "change": "-10",
+                        "change_pct": "-0.4",
+                        "quote_asof": _KR_COMPLETED_END.isoformat(),
+                        "data_state": "market_closed",
+                    }
+                    for symbol in symbols
+                ]
+            }
+        assert symbols == mod._OVERVIEW_US_BATCH_SYMBOLS
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(mod, "INDEX_SOURCE_TIMEOUT_SECONDS", 0.001)
+    _stub_sessions(monkeypatch)
+    monkeypatch.setattr(mod, "handle_get_market_index_current_batch", split_indices)
+    monkeypatch.setattr(
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+    )
+    monkeypatch.setattr(
+        mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
+    )
+    monkeypatch.setattr(
+        mod, "_toss_indicator_points", AsyncMock(return_value=_toss_points())
+    )
+
+    response = await mod._build_market_overview()
+
+    krx = [item for item in response.indices if item.market == "KRX"]
+    us = [item for item in response.indices if item.market == "US"]
+    assert all(item.price == "2500" and item.status == "stale" for item in krx)
+    assert all(item.status == "unavailable" for item in us)
+    assert {
+        (error.symbol, error.code)
+        for error in response.errors
+        if error.scope == "indices"
+    } == {(item.symbol, "TIMEOUT") for item in us}
+
+
+@pytest.mark.asyncio
 async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -786,15 +843,22 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
         completed_as_of_by_market: dict[str, datetime],
     ) -> dict[str, Any]:
         nonlocal calls
-        # 지수와 US 배치 지표가 한 번의 호출로 함께 요청된다(왕복 증가 없음).
-        assert symbols == mod._OVERVIEW_BATCH_SYMBOLS
+        assert symbols in {
+            mod._OVERVIEW_KRX_SYMBOLS,
+            mod._OVERVIEW_US_BATCH_SYMBOLS,
+        }
         assert completed_as_of_by_market == {
             "KRX": _KR_COMPLETED_END,
             "US": _US_COMPLETED_END,
         }
         calls += 1
         await asyncio.sleep(0)
-        return _index_payload()
+        payload = _index_payload()
+        return {
+            "indices": [
+                row for row in payload["indices"] if row.get("symbol") in symbols
+            ]
+        }
 
     _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", indices)
@@ -810,18 +874,18 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     monkeypatch.setattr(mod.time, "monotonic", lambda: monotonic_now)
 
     first_batch = await asyncio.gather(*(mod.get_market_overview() for _ in range(5)))
-    assert calls == 1
+    assert calls == 2
     assert all(item is first_batch[0] for item in first_batch)
 
     monotonic_now = 1014.9
     assert await mod.get_market_overview() is first_batch[0]
-    assert calls == 1
+    assert calls == 2
 
     monotonic_now = 1015.1
     refreshed_batch = await asyncio.gather(
         *(mod.get_market_overview() for _ in range(5))
     )
-    assert calls == 2
+    assert calls == 4
     assert all(item is refreshed_batch[0] for item in refreshed_batch)
     assert refreshed_batch[0] is not first_batch[0]
 

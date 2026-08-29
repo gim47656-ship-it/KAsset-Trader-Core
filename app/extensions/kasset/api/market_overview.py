@@ -58,6 +58,7 @@ from app.services.exchange_rate_service import (
 # 때는 앱 폴링 주기와 겹쳐 최악 약 2분까지 오래된 값이 보였다.
 OVERVIEW_CACHE_TTL_SECONDS = 15.0
 SOURCE_TIMEOUT_SECONDS = 6.0
+INDEX_SOURCE_TIMEOUT_SECONDS = 10.0
 INDEX_DECIMAL_PLACES = 2
 FX_DECIMAL_PLACES = 2
 CHANGE_RATE_DECIMAL_PLACES = 2
@@ -127,14 +128,19 @@ _INDICATOR_DEFINITIONS: tuple[
     ("GOLD", "금", "COMMODITY", "USD", "us_batch"),
     ("BTC", "비트코인", "CRYPTO", "KRW", "upbit"),
 )
-# yfinance 지표는 지수와 같은 배치(yf.download 1회)에 합류한다. 왕복이 늘지 않는다.
-_OVERVIEW_BATCH_SYMBOLS: tuple[str, ...] = tuple(
-    symbol for symbol, _name, _market, _currency in _INDEX_DEFINITIONS
+# KRX HTTP와 yfinance 배치를 서로 독립적으로 제한한다. 한 공급자가 느리다고 이미
+# 끝난 다른 시장 값까지 버리면 홈의 모든 지수가 동시에 unavailable이 된다.
+_OVERVIEW_KRX_SYMBOLS: tuple[str, ...] = tuple(
+    symbol for symbol, _name, market, _currency in _INDEX_DEFINITIONS if market == "KRX"
+)
+_OVERVIEW_US_BATCH_SYMBOLS: tuple[str, ...] = tuple(
+    symbol for symbol, _name, market, _currency in _INDEX_DEFINITIONS if market == "US"
 ) + tuple(
     key
     for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
     if provider == "us_batch"
 )
+_OVERVIEW_BATCH_SYMBOLS = _OVERVIEW_KRX_SYMBOLS + _OVERVIEW_US_BATCH_SYMBOLS
 # 토스 지표는 한 번의 배치 호출(최대 200심볼)로 함께 조회한다.
 _TOSS_INDICATOR_SYMBOLS: tuple[str, ...] = tuple(
     key
@@ -521,11 +527,19 @@ def _index_items(
                     session_state=session_state,
                 )
             )
+            raw_row = rows_by_symbol.get(symbol)
+            row_error_code = (
+                raw_row.get("error_code") if isinstance(raw_row, dict) else None
+            )
             errors.append(
                 MarketOverviewError(
                     scope="indices",
                     symbol=symbol,
-                    code=group_error_code or "UNAVAILABLE",
+                    code=(
+                        row_error_code
+                        if row_error_code in {"TIMEOUT", "UNAVAILABLE"}
+                        else group_error_code or "UNAVAILABLE"
+                    ),
                 )
             )
             continue
@@ -688,11 +702,19 @@ def _indicator_items(
                     status="unavailable",
                 )
             )
+            raw_row = rows_by_symbol.get(key)
+            row_error_code = (
+                raw_row.get("error_code") if isinstance(raw_row, dict) else None
+            )
             errors.append(
                 MarketOverviewError(
                     scope="indicators",
                     symbol=key,
-                    code=group_error_codes[provider] or "UNAVAILABLE",
+                    code=(
+                        row_error_code
+                        if row_error_code in {"TIMEOUT", "UNAVAILABLE"}
+                        else group_error_codes[provider] or "UNAVAILABLE"
+                    ),
                 )
             )
             continue
@@ -847,18 +869,54 @@ async def _completed_index_snapshot() -> tuple[
         for market, window in (("KRX", kr_window), ("US", us_window))
         if window is not None
     }
-    try:
-        result = await _bounded(
+
+    async def load_group(symbols: tuple[str, ...]) -> object:
+        return await asyncio.wait_for(
             handle_get_market_index_current_batch(
-                _OVERVIEW_BATCH_SYMBOLS,
+                symbols,
                 completed_as_of_by_market=completed_as_of_by_market,
-            )
+            ),
+            timeout=INDEX_SOURCE_TIMEOUT_SECONDS,
         )
-    except TimeoutError:
-        return None, sessions, session_states, "TIMEOUT"
-    except Exception:
-        return None, sessions, session_states, "UNAVAILABLE"
-    return result, sessions, session_states, None
+
+    group_results = await asyncio.gather(
+        load_group(_OVERVIEW_KRX_SYMBOLS),
+        load_group(_OVERVIEW_US_BATCH_SYMBOLS),
+        return_exceptions=True,
+    )
+    merged_rows: list[dict[str, Any]] = []
+    for symbols, result in zip(
+        (_OVERVIEW_KRX_SYMBOLS, _OVERVIEW_US_BATCH_SYMBOLS),
+        group_results,
+        strict=True,
+    ):
+        if isinstance(result, BaseException):
+            error_code: MarketOverviewErrorCode = (
+                "TIMEOUT" if isinstance(result, TimeoutError) else "UNAVAILABLE"
+            )
+            merged_rows.extend(
+                {
+                    "symbol": symbol,
+                    "unavailable": True,
+                    "error_code": error_code,
+                }
+                for symbol in symbols
+            )
+            continue
+        rows_by_symbol = _index_rows_by_symbol(result)
+        merged_rows.extend(
+            rows_by_symbol.get(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "unavailable": True,
+                    "error_code": "UNAVAILABLE",
+                },
+            )
+            for symbol in symbols
+        )
+
+    return {"indices": merged_rows}, sessions, session_states, None
 
 
 async def _build_market_overview() -> MarketOverviewResponse:
