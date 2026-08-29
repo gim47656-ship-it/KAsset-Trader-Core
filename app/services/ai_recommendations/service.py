@@ -267,12 +267,24 @@ class AIRecommendationService:
             await self._session.rollback()
             return None
         if row.paper_execution_attempt_count >= self.PAPER_EXECUTION_MAX_ATTEMPTS:
-            row.paper_execution_status = RecommendationExecutionStatus.FAILED
+            order = await self._session.scalar(
+                select(AndroidPaperOrder).where(
+                    AndroidPaperOrder.owner_user_id == owner_user_id,
+                    AndroidPaperOrder.client_order_id == f"ai-rec:{row.id}",
+                )
+            )
+            row.paper_execution_status = (
+                RecommendationExecutionStatus.SUCCEEDED
+                if order is not None
+                else RecommendationExecutionStatus.FAILED
+            )
             row.paper_execution_token = None
             row.paper_execution_lease_expires_at = None
             row.paper_execution_completed_at = claimed_at
-            row.paper_order_id = None
-            row.paper_execution_error = "paper_execution_attempt_limit_exceeded"
+            row.paper_order_id = order.id if order is not None else None
+            row.paper_execution_error = (
+                None if order is not None else "paper_execution_attempt_limit_exceeded"
+            )
             row.updated_at = claimed_at
             await self._session.commit()
             return None

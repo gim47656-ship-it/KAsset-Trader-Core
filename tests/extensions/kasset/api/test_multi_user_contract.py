@@ -668,6 +668,52 @@ async def test_paper_execution_claim_lease_fences_stale_and_foreign_workers(
     assert exhausted.paper_execution_lease_expires_at is None
     assert exhausted.paper_execution_error == "paper_execution_attempt_limit_exceeded"
 
+    reconciled_id = f"claim-reconciled-{owner_b_id}-{uuid4().hex}"
+    reconciled = _recommendation(
+        owner_b_id,
+        reconciled_id,
+        decision="APPROVED",
+        decided_at=_NOW - timedelta(minutes=1),
+    )
+    reconciled_order = AndroidPaperOrder(
+        id=f"paper-order-reconciled-{uuid4().hex}",
+        owner_user_id=owner_b_id,
+        client_order_id=f"ai-rec:{reconciled_id}",
+        paper_account_id=account_ids[1],
+        broker_order_id=f"paper-broker-{uuid4().hex}",
+        market="KRX",
+        symbol="005930",
+        currency="KRW",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        status="FILLED",
+        filled_quantity=Decimal("1"),
+        average_fill_price=Decimal("70000"),
+    )
+    db_session.add_all([reconciled, reconciled_order])
+    await db_session.commit()
+    for attempt in range(1, service.PAPER_EXECUTION_MAX_ATTEMPTS + 1):
+        claimed = await service.claim_for_paper_execution(
+            owner_b_id,
+            _NOW + service.PAPER_EXECUTION_LEASE * (attempt - 1),
+            recommendation_id=reconciled_id,
+        )
+        assert claimed is not None
+        assert claimed.paper_execution_attempt_count == attempt
+    assert (
+        await service.claim_for_paper_execution(
+            owner_b_id,
+            _NOW + service.PAPER_EXECUTION_LEASE * service.PAPER_EXECUTION_MAX_ATTEMPTS,
+            recommendation_id=reconciled_id,
+        )
+        is None
+    )
+    await db_session.refresh(reconciled)
+    assert reconciled.paper_execution_status == "SUCCEEDED"
+    assert reconciled.paper_order_id == reconciled_order.id
+    assert reconciled.paper_execution_error is None
+
 
 def _http_request(path: str) -> Request:
     return Request(
