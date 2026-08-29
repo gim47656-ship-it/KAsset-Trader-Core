@@ -95,10 +95,13 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v45: KAsset automation promotion trust, position-cycle audit, and
 # AI-recommendation claim-lease ORM shapes. Production migrations remain
 # separate; this forces persistent test databases to rebuild the combined shape.
+# v46: KAsset research cohort/lifecycle/action ORM tables plus
+# kr_symbol_universe.std_pdno are now part of the persistent test schema;
+# listing_status is widened and forced/benchmark market caps become nullable.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 45
+SCHEMA_BOOTSTRAP_VERSION = 46
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"
@@ -672,6 +675,15 @@ _PAPER_EVALUATION_TRIGGER_DDL: tuple[str, ...] = (
 _DDL_STATEMENTS: tuple[str, ...] = (
     *_PAPER_COHORT_TRIGGER_DDL,
     *_PAPER_EVALUATION_TRIGGER_DDL,
+    # The unshipped v45 shape required forced market caps. Persistent test DBs
+    # must receive the same nullable forced/benchmark contract as production.
+    "ALTER TABLE public.kasset_research_cohort_members "
+    "DROP CONSTRAINT IF EXISTS ck_kasset_research_member_market_cap",
+    "ALTER TABLE public.kasset_research_cohort_members "
+    "ADD CONSTRAINT ck_kasset_research_member_market_cap CHECK ("
+    "(member_kind = 'active' AND market_cap > 0) OR "
+    "(member_kind IN ('forced', 'benchmark') "
+    "AND (market_cap IS NULL OR market_cap > 0)))",
     # ---- raw-SQL daily candle tables (logical schema only) ----
     # Production Alembic migrations turn these into Timescale hypertables.
     # Pytest runs on plain PostgreSQL, so mirror the table contract without
@@ -1806,7 +1818,7 @@ _ROB_534_SYMBOL_UNIVERSE_COLUMNS: tuple[
         (
             ("security_type", "VARCHAR(20)"),
             ("is_common_share", "BOOLEAN"),
-            ("listing_status", "VARCHAR(20)"),
+            ("listing_status", "VARCHAR(64)"),
             ("list_date", "DATE"),
             ("delist_date", "DATE"),
             ("shares_outstanding", "NUMERIC(30, 0)"),
@@ -1814,6 +1826,7 @@ _ROB_534_SYMBOL_UNIVERSE_COLUMNS: tuple[
             ("krx_trading_suspended", "BOOLEAN"),
             ("nxt_trading_suspended", "BOOLEAN"),
             ("isin", "VARCHAR(20)"),
+            ("std_pdno", "VARCHAR(32)"),
             ("toss_master_updated_at", "TIMESTAMP WITH TIME ZONE"),
         ),
     ),
@@ -1852,6 +1865,26 @@ async def _maybe_add_column(conn, table: str, column: str, ddl_type: str) -> Non
     if has:
         return
     await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
+async def _maybe_widen_varchar(
+    conn, table: str, column: str, minimum_length: int
+) -> None:
+    current_length = await conn.scalar(
+        text(
+            "SELECT character_maximum_length FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t AND column_name = :c"
+        ),
+        {"t": table, "c": column},
+    )
+    if current_length is None or int(current_length) >= minimum_length:
+        return
+    await conn.execute(
+        text(
+            f"ALTER TABLE {_quote_ident(table)} "
+            f"ALTER COLUMN {_quote_ident(column)} TYPE VARCHAR({minimum_length})"
+        )
+    )
 
 
 async def _maybe_add_unique_constraint(
@@ -2144,6 +2177,7 @@ async def apply_test_schema(conn) -> None:
     for table, cols in _ROB_534_SYMBOL_UNIVERSE_COLUMNS:
         for col_name, col_type in cols:
             await _maybe_add_column(conn, table, col_name, col_type)
+    await _maybe_widen_varchar(conn, "kr_symbol_universe", "listing_status", 64)
 
     # --- conditional CHECK refreshers (drop+recreate depending on catalogue) ---
 

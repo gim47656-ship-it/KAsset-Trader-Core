@@ -7,6 +7,7 @@ from app.models.kr_lifecycle_actions import (
     KRCorporateActionEvidence,
     KRStockLifecycleObservation,
 )
+from app.models.kr_symbol_universe import KRSymbolUniverse
 
 
 def _constraint_names(model: type[object], kind: type[object]) -> set[str | None]:
@@ -52,6 +53,8 @@ def test_lifecycle_model_preserves_identity_raw_evidence_and_observation_time() 
         "ck_kr_lifecycle_obs_tr_nonblank",
         "ck_kr_lifecycle_obs_date_order",
     } <= _constraint_names(KRStockLifecycleObservation, CheckConstraint)
+    assert columns.listing_status.type.length == 64
+    assert KRSymbolUniverse.__table__.c.listing_status.type.length == 64
 
 
 def test_action_model_has_window_and_provider_identity_guards() -> None:

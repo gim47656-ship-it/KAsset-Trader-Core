@@ -21,6 +21,13 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.alter_column(
+        "kr_symbol_universe",
+        "listing_status",
+        existing_type=sa.String(length=20),
+        type_=sa.String(length=64),
+        existing_nullable=True,
+    )
     op.add_column(
         "kr_symbol_universe",
         sa.Column("std_pdno", sa.String(length=32), nullable=True),
@@ -358,8 +365,9 @@ def upgrade() -> None:
             name="ck_kasset_research_member_kind",
         ),
         sa.CheckConstraint(
-            "(member_kind = 'benchmark' AND market_cap IS NULL) OR "
-            "(member_kind IN ('active', 'forced') AND market_cap > 0)",
+            "(member_kind = 'active' AND market_cap > 0) OR "
+            "(member_kind IN ('forced', 'benchmark') "
+            "AND (market_cap IS NULL OR market_cap > 0))",
             name="ck_kasset_research_member_market_cap",
         ),
         sa.ForeignKeyConstraint(
@@ -420,3 +428,10 @@ def downgrade() -> None:
     )
     op.drop_table("kr_stock_lifecycle_observations")
     op.drop_column("kr_symbol_universe", "std_pdno")
+    op.alter_column(
+        "kr_symbol_universe",
+        "listing_status",
+        existing_type=sa.String(length=64),
+        type_=sa.String(length=20),
+        existing_nullable=True,
+    )

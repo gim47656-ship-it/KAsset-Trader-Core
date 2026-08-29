@@ -23,6 +23,7 @@ import pandas as pd
 from app.services.daily_candles.converters import frame_to_rows
 from app.services.daily_candles.crypto_identity import upbit_daily_candle_partition
 from app.services.daily_candles.read_service import drop_forming_daily_rows
+from app.services.daily_candles.readiness import REQUIRED_HISTORY_BARS
 from app.services.daily_candles.repository import (
     DailyCandleRow,
     DailyCandlesRepository,
@@ -156,6 +157,58 @@ class DailyCandleSyncService:
         if target.market == MarketKey.US:
             return await self._sync_us(target, horizon_bars)
         return await self._sync_crypto(target, horizon_bars)
+
+    async def sync_us_adjusted_close(
+        self, *, target: SyncTarget, horizon_bars: int
+    ) -> int:
+        """Require and persist a complete Yahoo adjusted-close backfill slice."""
+        if target.market != MarketKey.US:
+            raise ValueError("Yahoo adjusted-close 보강은 US 대상만 지원합니다")
+        if target.partition not in _VALID_US_PARTITIONS:
+            raise ValueError(f"지원하지 않는 미국 일봉 파티션: {target.partition!r}")
+        if horizon_bars <= 0:
+            raise ValueError("horizon_bars는 양수여야 합니다")
+
+        yahoo_rows = await self._yahoo_us(symbol=target.symbol, n=horizon_bars)
+        selected = yahoo_rows[-horizon_bars:]
+        required_bars = min(horizon_bars, REQUIRED_HISTORY_BARS)
+        required_slice = selected[-required_bars:]
+        required_times = {row.time_utc for row in required_slice}
+        if (
+            len(required_slice) != required_bars
+            or len(required_times) != required_bars
+            or any(row.adj_close is None for row in required_slice)
+        ):
+            raise RuntimeError(
+                "Yahoo adjusted-close 보강이 완전하지 않습니다: "
+                f"symbol={target.symbol} requested={horizon_bars} "
+                f"required={required_bars} received={len(selected)} "
+                f"adjusted="
+                f"{sum(row.adj_close is not None for row in required_slice)}"
+            )
+
+        unique_valid = {
+            row.time_utc: row for row in selected if row.adj_close is not None
+        }
+        rows = [
+            DailyCandleRow(
+                time_utc=row.time_utc,
+                symbol=target.symbol,
+                partition=target.partition,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                adj_close=row.adj_close,
+                volume=row.volume,
+                value=row.value,
+                source="yahoo_fallback",
+            )
+            for _time, row in sorted(unique_valid.items())
+        ]
+        upserted = await self._repository.upsert_us_adjusted_close(rows=rows)
+        await self._commit_or_rollback()
+        return upserted
 
     async def rollback(self) -> None:
         """다음 심볼을 시작하기 전에 실패한 심볼의 트랜잭션을 폐기한다."""
@@ -560,6 +613,100 @@ class DailyCandleSyncService:
             targets = targets[resume_index + 1 :]
         if limit is not None:
             targets = targets[:limit]
+        return targets
+
+    async def resolve_cohort_backfill_targets(
+        self,
+        *,
+        market: str,
+        cohort_id: str,
+    ) -> list[SyncTarget]:
+        """Resolve the exact active+forced membership of one research cohort."""
+
+        from sqlalchemy import text
+
+        if market not in {MarketKey.KR.value, MarketKey.US.value}:
+            raise ValueError("--cohort-id는 kr과 us에서만 지원합니다")
+        normalized_id = str(cohort_id).strip()
+        if not normalized_id:
+            raise ValueError("--cohort-id는 비어 있을 수 없습니다")
+
+        session = self._repository.session
+        cohort_result = await session.execute(
+            text(
+                """
+                SELECT market
+                FROM public.kasset_research_cohorts
+                WHERE cohort_id = :cohort_id
+                """
+            ),
+            {"cohort_id": normalized_id},
+        )
+        cohort_rows = list(cohort_result)
+        if not cohort_rows:
+            raise ValueError(f"코호트를 찾을 수 없습니다: {normalized_id!r}")
+        cohort_market = str(cohort_rows[0].market).strip().lower()
+        if cohort_market != market:
+            raise ValueError(
+                "코호트 market이 CLI market과 일치하지 않습니다: "
+                f"cohort_id={normalized_id!r} cohort_market={cohort_market!r} "
+                f"requested_market={market!r}"
+            )
+
+        universe_table = (
+            "public.kr_symbol_universe"
+            if market == MarketKey.KR.value
+            else "public.us_symbol_universe"
+        )
+        member_result = await session.execute(
+            text(
+                f"""
+                SELECT member.symbol, member.rank, member.member_kind,
+                       universe.exchange
+                FROM public.kasset_research_cohort_members AS member
+                LEFT JOIN {universe_table} AS universe
+                  ON universe.symbol = member.symbol
+                WHERE member.cohort_id = :cohort_id
+                  AND member.member_kind IN ('active', 'forced')
+                ORDER BY member.rank, member.symbol
+                """
+            ),
+            {"cohort_id": normalized_id},
+        )
+        market_key = MarketKey(market)
+        targets: list[SyncTarget] = []
+        for row in member_result:
+            symbol = str(row.symbol).strip().upper()
+            if not symbol:
+                raise RuntimeError(
+                    f"코호트에 빈 심볼이 있습니다: cohort_id={normalized_id!r}"
+                )
+            if market_key == MarketKey.KR:
+                if row.exchange is None:
+                    raise RuntimeError(
+                        "코호트 심볼을 KR universe에서 찾을 수 없습니다: "
+                        f"cohort_id={normalized_id!r} symbol={symbol!r}"
+                    )
+                partition = "KRX"
+            else:
+                partition = _backfill_us_partition(row.exchange)
+                if partition is None:
+                    raise RuntimeError(
+                        "코호트 심볼의 US universe exchange가 유효하지 않습니다: "
+                        f"cohort_id={normalized_id!r} symbol={symbol!r} "
+                        f"exchange={row.exchange!r}"
+                    )
+            targets.append(
+                SyncTarget(
+                    market=market_key,
+                    symbol=symbol,
+                    partition=partition,
+                )
+            )
+        if not targets:
+            raise RuntimeError(
+                f"코호트에 active/forced 멤버가 없습니다: {normalized_id!r}"
+            )
         return targets
 
     async def resolve_top_market_cap_targets(

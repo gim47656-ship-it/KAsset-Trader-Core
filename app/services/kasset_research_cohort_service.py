@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,10 @@ from app.models.kasset_research_cohorts import (
     KAssetResearchCohortMember,
 )
 from app.models.kr_symbol_universe import KRSymbolUniverse
+from app.models.manual_holdings import BrokerAccount, ManualHolding, MarketType
 from app.models.market_valuation_snapshot import MarketValuationSnapshot
+from app.models.paper_trading import PaperPosition
+from app.models.trading import Instrument, InstrumentType, UserWatchItem
 from app.models.us_symbol_universe import USSymbolUniverse
 
 Market = Literal["kr", "us"]
@@ -40,6 +43,14 @@ class KAssetResearchCohortError(RuntimeError):
 class EligibleValuation:
     symbol: str
     market_cap: Decimal
+    eligibility_facts: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ForcedValuation:
+    symbol: str
+    market_cap: Decimal | None
+    reasons: tuple[str, ...]
     eligibility_facts: dict[str, Any]
 
 
@@ -120,7 +131,7 @@ def assemble_cohort_members(
     market: Market,
     eligible: list[EligibleValuation],
     requested_size: int,
-    forced_symbols: tuple[str, ...],
+    forced: list[ForcedValuation],
 ) -> tuple[CohortMember, ...]:
     if requested_size < 1:
         raise ValueError("requested_size must be >= 1")
@@ -130,6 +141,14 @@ def assemble_cohort_members(
         )
     if len({row.symbol for row in eligible}) != len(eligible):
         raise KAssetResearchCohortError("Eligible cohort symbols must be unique")
+    if len({row.symbol for row in forced}) != len(forced):
+        raise KAssetResearchCohortError("Forced cohort symbols must be unique")
+    if any(row.market_cap is not None and row.market_cap <= 0 for row in forced):
+        raise KAssetResearchCohortError(
+            "Forced cohort market_cap must be positive or null"
+        )
+    if any(not row.reasons for row in forced):
+        raise KAssetResearchCohortError("Forced cohort rows must include reasons")
     eligible = sorted(
         eligible,
         key=lambda row: (-row.market_cap, row.symbol),
@@ -139,46 +158,63 @@ def assemble_cohort_members(
             f"Only {len(eligible)} eligible positive market-cap rows are available; "
             f"requested_size={requested_size}"
         )
-    normalized_forced = tuple(
-        dict.fromkeys(_normalize_symbol(market, symbol) for symbol in forced_symbols)
-    )
-    rank_by_symbol = {row.symbol: rank for rank, row in enumerate(eligible, start=1)}
-    row_by_symbol = {row.symbol: row for row in eligible}
-    missing_forced = [
-        symbol for symbol in normalized_forced if symbol not in row_by_symbol
-    ]
-    if missing_forced:
-        raise KAssetResearchCohortError(
-            "Forced symbols lack an eligible positive valuation row: "
-            + ", ".join(missing_forced)
-        )
 
     core = eligible[:requested_size]
     core_symbols = {row.symbol for row in core}
-    members: list[CohortMember] = [
-        CohortMember(
-            symbol=row.symbol,
-            rank=rank,
-            member_kind="active",
-            market_cap=row.market_cap,
-            eligibility_facts=dict(row.eligibility_facts),
+    members: list[CohortMember] = []
+    for rank, row in enumerate(core, start=1):
+        facts = dict(row.eligibility_facts)
+        facts.update(
+            {
+                "promotion_sample": True,
+                "data_continuity_only": False,
+            }
         )
-        for rank, row in enumerate(core, start=1)
-    ]
-    members.extend(
-        CohortMember(
-            symbol=symbol,
-            rank=rank_by_symbol[symbol],
-            member_kind="forced",
-            market_cap=row_by_symbol[symbol].market_cap,
-            eligibility_facts=dict(row_by_symbol[symbol].eligibility_facts),
+        members.append(
+            CohortMember(
+                symbol=row.symbol,
+                rank=rank,
+                member_kind="active",
+                market_cap=row.market_cap,
+                eligibility_facts=facts,
+            )
         )
-        for symbol in normalized_forced
-        if symbol not in core_symbols
+
+    benchmark = _BENCHMARKS[market]
+    forced_extras = sorted(
+        (
+            row
+            for row in forced
+            if row.symbol not in core_symbols and row.symbol != benchmark
+        ),
+        key=lambda row: (
+            row.market_cap is None,
+            -(row.market_cap or Decimal(0)),
+            row.symbol,
+        ),
     )
+    for offset, row in enumerate(forced_extras, start=1):
+        facts = dict(row.eligibility_facts)
+        facts.update(
+            {
+                "forced_reasons": sorted(set(row.reasons)),
+                "promotion_sample": False,
+                "data_continuity_only": True,
+            }
+        )
+        members.append(
+            CohortMember(
+                symbol=row.symbol,
+                rank=requested_size + offset,
+                member_kind="forced",
+                market_cap=row.market_cap,
+                eligibility_facts=facts,
+            )
+        )
+
     members.append(
         CohortMember(
-            symbol=_BENCHMARKS[market],
+            symbol=benchmark,
             rank=1,
             member_kind="benchmark",
             market_cap=None,
@@ -225,6 +261,11 @@ async def _latest_snapshot_date(
                 snapshot.market_cap > 0,
                 USSymbolUniverse.is_active.is_(True),
                 USSymbolUniverse.is_common_stock.is_(True),
+                USSymbolUniverse.security_type == "STOCK",
+                or_(
+                    USSymbolUniverse.leverage_factor.is_(None),
+                    USSymbolUniverse.leverage_factor == 1,
+                ),
                 USSymbolUniverse.exchange.in_(_SUPPORTED_US_EXCHANGES),
             )
         )
@@ -291,6 +332,8 @@ async def _eligible_rows(
             snapshot.market_cap,
             USSymbolUniverse.is_active,
             USSymbolUniverse.is_common_stock,
+            USSymbolUniverse.security_type,
+            USSymbolUniverse.leverage_factor,
             USSymbolUniverse.exchange,
         )
         .join(USSymbolUniverse, USSymbolUniverse.symbol == snapshot.symbol)
@@ -301,6 +344,11 @@ async def _eligible_rows(
             snapshot.market_cap > 0,
             USSymbolUniverse.is_active.is_(True),
             USSymbolUniverse.is_common_stock.is_(True),
+            USSymbolUniverse.security_type == "STOCK",
+            or_(
+                USSymbolUniverse.leverage_factor.is_(None),
+                USSymbolUniverse.leverage_factor == 1,
+            ),
             USSymbolUniverse.exchange.in_(_SUPPORTED_US_EXCHANGES),
         )
         .order_by(snapshot.market_cap.desc(), snapshot.symbol)
@@ -313,12 +361,194 @@ async def _eligible_rows(
             eligibility_facts={
                 "is_active": row.is_active,
                 "is_common_stock": row.is_common_stock,
+                "security_type": row.security_type,
+                "leverage_factor": (
+                    str(row.leverage_factor)
+                    if row.leverage_factor is not None
+                    else None
+                ),
                 "exchange": row.exchange,
                 "supported_exchange": row.exchange in _SUPPORTED_US_EXCHANGES,
             },
         )
         for row in rows
     ]
+
+
+async def _automatic_forced_reasons(
+    db: AsyncSession,
+    *,
+    market: Market,
+) -> dict[str, set[str]]:
+    instrument_type = (
+        InstrumentType.equity_kr if market == "kr" else InstrumentType.equity_us
+    )
+    holding_market = MarketType.KR if market == "kr" else MarketType.US
+    statement = union_all(
+        select(
+            Instrument.symbol.label("symbol"),
+            literal("active_watchlist").label("reason"),
+        )
+        .join(UserWatchItem, UserWatchItem.instrument_id == Instrument.id)
+        .where(
+            UserWatchItem.is_active.is_(True),
+            Instrument.is_active.is_(True),
+            Instrument.type == instrument_type,
+        ),
+        select(
+            ManualHolding.ticker.label("symbol"),
+            literal("positive_manual_holding").label("reason"),
+        )
+        .join(
+            BrokerAccount,
+            BrokerAccount.id == ManualHolding.broker_account_id,
+        )
+        .where(
+            BrokerAccount.is_active.is_(True),
+            ManualHolding.market_type == holding_market,
+            ManualHolding.quantity > 0,
+        ),
+        select(
+            PaperPosition.symbol.label("symbol"),
+            literal("positive_paper_position").label("reason"),
+        ).where(
+            PaperPosition.instrument_type == instrument_type,
+            PaperPosition.quantity > 0,
+        ),
+    )
+    reasons_by_symbol: dict[str, set[str]] = {}
+    for row in (await db.execute(statement)).all():
+        try:
+            symbol = _normalize_symbol(market, row.symbol)
+        except ValueError:
+            continue
+        reasons_by_symbol.setdefault(symbol, set()).add(str(row.reason))
+    return reasons_by_symbol
+
+
+async def _forced_rows(
+    db: AsyncSession,
+    *,
+    market: Market,
+    source: str,
+    snapshot_date: date,
+    explicit_symbols: tuple[str, ...],
+) -> list[ForcedValuation]:
+    reasons_by_symbol = await _automatic_forced_reasons(db, market=market)
+    normalized_explicit = tuple(
+        dict.fromkeys(_normalize_symbol(market, symbol) for symbol in explicit_symbols)
+    )
+    for symbol in normalized_explicit:
+        reasons_by_symbol.setdefault(symbol, set()).add("explicit_force")
+    if not reasons_by_symbol:
+        return []
+
+    snapshot = MarketValuationSnapshot
+    snapshot_join = and_(
+        snapshot.symbol
+        == (KRSymbolUniverse.symbol if market == "kr" else USSymbolUniverse.symbol),
+        snapshot.market == market,
+        snapshot.source == source,
+        snapshot.snapshot_date == snapshot_date,
+    )
+    symbols = tuple(sorted(reasons_by_symbol))
+    if market == "kr":
+        statement = (
+            select(
+                KRSymbolUniverse.symbol,
+                KRSymbolUniverse.is_active,
+                KRSymbolUniverse.security_type,
+                KRSymbolUniverse.is_common_share,
+                KRSymbolUniverse.leverage_factor,
+                KRSymbolUniverse.krx_trading_suspended,
+                KRSymbolUniverse.exchange,
+                snapshot.market_cap,
+            )
+            .outerjoin(snapshot, snapshot_join)
+            .where(
+                KRSymbolUniverse.symbol.in_(symbols),
+                KRSymbolUniverse.is_active.is_(True),
+            )
+            .order_by(KRSymbolUniverse.symbol)
+        )
+    else:
+        statement = (
+            select(
+                USSymbolUniverse.symbol,
+                USSymbolUniverse.is_active,
+                USSymbolUniverse.is_common_stock,
+                USSymbolUniverse.security_type,
+                USSymbolUniverse.leverage_factor,
+                USSymbolUniverse.exchange,
+                snapshot.market_cap,
+            )
+            .outerjoin(snapshot, snapshot_join)
+            .where(
+                USSymbolUniverse.symbol.in_(symbols),
+                USSymbolUniverse.is_active.is_(True),
+                USSymbolUniverse.exchange.in_(_SUPPORTED_US_EXCHANGES),
+            )
+            .order_by(USSymbolUniverse.symbol)
+        )
+
+    resolved: list[ForcedValuation] = []
+    found: set[str] = set()
+    for row in (await db.execute(statement)).all():
+        found.add(row.symbol)
+        market_cap = (
+            row.market_cap
+            if row.market_cap is not None and row.market_cap > 0
+            else None
+        )
+        if market == "kr":
+            facts = {
+                "is_active": row.is_active,
+                "security_type": row.security_type,
+                "is_common_share": row.is_common_share,
+                "leverage_factor": (
+                    str(row.leverage_factor)
+                    if row.leverage_factor is not None
+                    else None
+                ),
+                "krx_trading_suspended": row.krx_trading_suspended,
+                "exchange": row.exchange,
+            }
+        else:
+            facts = {
+                "is_active": row.is_active,
+                "is_common_stock": row.is_common_stock,
+                "security_type": row.security_type,
+                "leverage_factor": (
+                    str(row.leverage_factor)
+                    if row.leverage_factor is not None
+                    else None
+                ),
+                "exchange": row.exchange,
+                "supported_exchange": row.exchange in _SUPPORTED_US_EXCHANGES,
+            }
+        facts.update(
+            {
+                "universe_eligibility_applied": False,
+                "promotion_sample": False,
+                "data_continuity_only": True,
+            }
+        )
+        resolved.append(
+            ForcedValuation(
+                symbol=row.symbol,
+                market_cap=market_cap,
+                reasons=tuple(sorted(reasons_by_symbol[row.symbol])),
+                eligibility_facts=facts,
+            )
+        )
+
+    missing_explicit = [symbol for symbol in normalized_explicit if symbol not in found]
+    if missing_explicit:
+        raise KAssetResearchCohortError(
+            f"Explicit forced symbols are unknown, inactive, or outside the "
+            f"{market.upper()} market: {', '.join(missing_explicit)}"
+        )
+    return resolved
 
 
 def _cohort_id(
@@ -406,11 +636,18 @@ async def build_kasset_research_cohort(
         source=source,
         snapshot_date=snapshot_date,
     )
+    forced = await _forced_rows(
+        db,
+        market=normalized_market,
+        source=source,
+        snapshot_date=snapshot_date,
+        explicit_symbols=forced_symbols,
+    )
     members = assemble_cohort_members(
         market=normalized_market,
         eligible=eligible,
         requested_size=requested_size,
-        forced_symbols=forced_symbols,
+        forced=forced,
     )
     cohort_id = _cohort_id(
         market=normalized_market,

@@ -11,7 +11,7 @@ import pytest
 from scripts import sync_kr_lifecycle_actions as cli
 
 
-def test_parse_args_is_dry_run_first_and_bounded() -> None:
+def test_parse_args_is_dry_run_first_and_explicit_symbols_are_unlimited() -> None:
     args = cli.parse_args(
         [
             "--symbol",
@@ -24,10 +24,42 @@ def test_parse_args_is_dry_run_first_and_bounded() -> None:
     )
 
     assert args.commit is False
-    assert args.limit == 20
+    assert args.limit is None
     assert args.symbol == ["005930"]
     assert args.from_date == date(2026, 1, 1)
     assert args.to_date == date(2026, 2, 28)
+
+
+def test_parse_args_limits_only_the_implicit_universe_by_default() -> None:
+    args = cli.parse_args(
+        [
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-02-28",
+        ]
+    )
+
+    assert args.symbol == []
+    assert args.limit == 20
+
+
+def test_parse_args_does_not_truncate_more_than_twenty_explicit_symbols() -> None:
+    symbols = [f"{index:06d}" for index in range(1, 26)]
+    symbol_args = [item for symbol in symbols for item in ("--symbol", symbol)]
+
+    args = cli.parse_args(
+        [
+            *symbol_args,
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        ]
+    )
+
+    assert args.symbol == symbols
+    assert args.limit is None
 
 
 class _SelectionContext:

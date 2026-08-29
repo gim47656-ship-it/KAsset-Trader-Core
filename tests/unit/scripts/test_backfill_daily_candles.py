@@ -22,6 +22,7 @@ def test_cli_argument_parser_accepts_required_args():
     assert ns.all is False
     assert ns.include_benchmark is False
     assert ns.top_market_cap is None
+    assert ns.cohort_id is None
 
 
 def test_cli_argument_parser_requires_exactly_one_target_mode() -> None:
@@ -67,6 +68,17 @@ def test_cli_argument_parser_accepts_top_market_cap() -> None:
     assert ns.top_market_cap == 100
     assert ns.symbols is None
     assert ns.all is False
+
+
+def test_cli_argument_parser_accepts_cohort_id() -> None:
+    from scripts.backfill_daily_candles import _build_parser
+
+    ns = _build_parser().parse_args(["--market", "us", "--cohort-id", "us-2026-08-30"])
+
+    assert ns.cohort_id == "us-2026-08-30"
+    assert ns.symbols is None
+    assert ns.all is False
+    assert ns.top_market_cap is None
 
 
 def test_cli_dry_run_flag():
@@ -202,6 +214,7 @@ async def test_all_mode_continues_failures_rolls_back_and_returns_nonzero(
             side_effect=[fallback_success, RuntimeError("provider down"), success]
         ),
         sync_benchmark=AsyncMock(),
+        sync_us_adjusted_close=AsyncMock(return_value=1),
         rollback=AsyncMock(),
         close=AsyncMock(),
     )
@@ -301,6 +314,7 @@ async def test_top_market_cap_uses_distinct_deterministic_resolver(
         resolve_top_market_cap_targets=AsyncMock(return_value=targets),
         sync_one=AsyncMock(side_effect=[RuntimeError("provider down"), success]),
         sync_benchmark=AsyncMock(),
+        sync_us_adjusted_close=AsyncMock(return_value=1),
         rollback=AsyncMock(),
         close=AsyncMock(),
     )
@@ -317,6 +331,75 @@ async def test_top_market_cap_uses_distinct_deterministic_resolver(
     assert [
         call.kwargs["target"] for call in service.sync_one.await_args_list
     ] == targets
+    service.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cohort_mode_resolves_exact_cohort_and_requires_us_adjustment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.backfill_daily_candles as cli
+
+    target = SyncTarget(market=MarketKey.US, symbol="SOXL", partition="AMEX")
+    success = SimpleNamespace(
+        rows_upserted=400,
+        fallback_used=False,
+        skipped_reason=None,
+    )
+    service = SimpleNamespace(
+        resolve_cohort_backfill_targets=AsyncMock(return_value=[target]),
+        sync_one=AsyncMock(return_value=success),
+        sync_us_adjusted_close=AsyncMock(return_value=400),
+        sync_benchmark=AsyncMock(),
+        rollback=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(cli, "_build_default_service", AsyncMock(return_value=service))
+    args = cli._build_parser().parse_args(
+        ["--market", "us", "--cohort-id", "us-2026-08-30"]
+    )
+
+    assert await cli._amain(args) == 0
+
+    service.resolve_cohort_backfill_targets.assert_awaited_once_with(
+        market="us",
+        cohort_id="us-2026-08-30",
+    )
+    service.sync_one.assert_awaited_once_with(target=target, horizon_bars=400)
+    service.sync_us_adjusted_close.assert_awaited_once_with(
+        target=target,
+        horizon_bars=400,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cohort_mode_returns_nonzero_when_yahoo_adjustment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.backfill_daily_candles as cli
+
+    target = SyncTarget(market=MarketKey.US, symbol="TQQQ", partition="NASD")
+    success = SimpleNamespace(
+        rows_upserted=400,
+        fallback_used=False,
+        skipped_reason=None,
+    )
+    service = SimpleNamespace(
+        resolve_cohort_backfill_targets=AsyncMock(return_value=[target]),
+        sync_one=AsyncMock(return_value=success),
+        sync_us_adjusted_close=AsyncMock(
+            side_effect=RuntimeError("Yahoo adjusted-close partial")
+        ),
+        sync_benchmark=AsyncMock(),
+        rollback=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(cli, "_build_default_service", AsyncMock(return_value=service))
+    args = cli._build_parser().parse_args(
+        ["--market", "us", "--cohort-id", "us-2026-08-30"]
+    )
+
+    assert await cli._amain(args) == 1
     service.rollback.assert_awaited_once()
 
 

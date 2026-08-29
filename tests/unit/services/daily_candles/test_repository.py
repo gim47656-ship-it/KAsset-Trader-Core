@@ -1,4 +1,6 @@
+from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -81,6 +83,42 @@ class TestUpsertRows:
 
         assert result == 0
         session.execute.assert_not_awaited()
+
+
+class TestUpsertUsAdjustedClose:
+    @pytest.mark.asyncio
+    async def test_conflict_updates_only_adj_close_and_is_idempotent(self):
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
+        repo = DailyCandlesRepository(session=session)
+        yahoo_row = replace(
+            _row(
+                "SOXL",
+                "AMEX",
+                datetime(2026, 8, 28, tzinfo=UTC),
+                32.5,
+                source="yahoo_fallback",
+            ),
+            adj_close=31.75,
+        )
+
+        result = await repo.upsert_us_adjusted_close(rows=[yahoo_row])
+
+        assert result == 1
+        sql_statement, payload = session.execute.await_args.args
+        sql = str(sql_statement)
+        conflict_sql = sql.split("DO UPDATE", maxsplit=1)[1]
+        assert "SET adj_close = EXCLUDED.adj_close" in conflict_sql
+        assert "SET open" not in conflict_sql
+        assert "high =" not in conflict_sql
+        assert "low =" not in conflict_sql
+        assert "volume =" not in conflict_sql
+        assert "value =" not in conflict_sql
+        assert "source =" not in conflict_sql
+        assert "IS DISTINCT FROM EXCLUDED.adj_close" in conflict_sql
+        assert payload[0]["exchange"] == "AMEX"
+        assert payload[0]["adj_close"] == pytest.approx(31.75)
+        assert payload[0]["source"] == "yahoo_fallback"
 
 
 class TestUpsertCryptoRowsIdentityDedupe:

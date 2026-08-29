@@ -123,6 +123,25 @@ def test_lifecycle_preserves_std_pdno_without_guessing_isin_or_status() -> None:
     assert evidence["delist_date"] is None
 
 
+def test_direct_provider_delist_date_is_promoted_with_64_char_status() -> None:
+    status = "D" * 64
+    evidence = service.build_lifecycle_evidence(
+        symbol="005930",
+        row={
+            "pdno": "005930",
+            "listing_status": status,
+            "lstg_abol_dt": "20260829",
+        },
+        observed_at=_OBSERVED_AT,
+        fetch_run_id=_RUN_ID,
+    )
+
+    metadata = service._merged_lifecycle_metadata([evidence])
+
+    assert metadata["listing_status"] == status
+    assert metadata["delist_date"] == date(2026, 8, 29)
+
+
 def test_exact_provider_fields_are_preserved_and_dates_are_only_direct() -> None:
     provider_row = {
         "sht_cd": "005930",
@@ -231,51 +250,6 @@ def test_zero_event_success_and_failure_are_distinct_coverage_evidence() -> None
     assert failure["status"] == "failed"
     assert failure["error_class"] == "RuntimeError"
     assert failure["idempotency_key"] != success["idempotency_key"]
-
-
-class _CoverageResult:
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
-
-    def all(self) -> list[tuple[object, ...]]:
-        return self._rows
-
-
-class _CoverageDB:
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self.rows = rows
-
-    async def execute(self, statement: object) -> _CoverageResult:
-        return _CoverageResult(self.rows)
-
-
-@pytest.mark.asyncio
-async def test_clear_requires_success_coverage_for_every_endpoint_and_month() -> None:
-    windows = service.monthly_windows(date(2026, 1, 31), date(2026, 2, 1))
-    complete_rows = [
-        (
-            spec.endpoint,
-            spec.tr_id,
-            spec.evidence_kind,
-            window.from_date,
-            window.to_date,
-        )
-        for spec in service._ACTION_SPECS
-        for window in windows
-    ]
-
-    assert await service.has_complete_corporate_action_coverage(
-        _CoverageDB(complete_rows),  # type: ignore[arg-type]
-        symbol="005930",
-        from_date=date(2026, 1, 31),
-        to_date=date(2026, 2, 1),
-    )
-    assert not await service.has_complete_corporate_action_coverage(
-        _CoverageDB(complete_rows[:-1]),  # type: ignore[arg-type]
-        symbol="005930",
-        from_date=date(2026, 1, 31),
-        to_date=date(2026, 2, 1),
-    )
 
 
 @pytest.mark.asyncio

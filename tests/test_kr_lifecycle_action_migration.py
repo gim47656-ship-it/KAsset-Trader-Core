@@ -48,6 +48,12 @@ def test_migration_is_chained_bounded_and_downgrades_every_added_table() -> None
         "kasset_research_cohorts",
         "kasset_research_cohort_members",
     ]
+    widened = [
+        kwargs["type_"].length
+        for name, args, kwargs in recorder.calls
+        if name == "alter_column" and args == ("kr_symbol_universe", "listing_status")
+    ]
+    assert widened == [64]
 
     recorder.calls.clear()
     migration.downgrade()
@@ -63,3 +69,9 @@ def test_migration_is_chained_bounded_and_downgrades_every_added_table() -> None
         name == "drop_column" and args == ("kr_symbol_universe", "std_pdno")
         for name, args, _ in recorder.calls
     )
+    narrowed = [
+        kwargs["type_"].length
+        for name, args, kwargs in recorder.calls
+        if name == "alter_column" and args == ("kr_symbol_universe", "listing_status")
+    ]
+    assert narrowed == [20]

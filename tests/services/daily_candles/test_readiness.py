@@ -294,6 +294,77 @@ async def test_exact_100_member_denominator_ignores_master_rows_outside_cohort(
 
 
 @pytest.mark.asyncio
+async def test_forced_missing_history_does_not_block_core_readiness_or_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member("AAPL", sessions=sessions),
+            _member(
+                "SOXL",
+                sessions=sessions,
+                rank=2,
+                member_kind="forced",
+                bar_count=0,
+                observed_expected=0,
+                invalid_adjustment=1,
+            ),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.total_symbol_count == 1
+    assert market.cohort_active_member_count == 1
+    assert market.forced_member_count == 1
+    assert market.symbols_with_at_least_252_bars == 1
+    assert market.eligible_symbol_count == 1
+    assert market.stale_bar_count == 0
+    assert market.missing_expected_trading_day_count == 0
+    assert market.adjustment_covered_symbol_count == 1
+    assert market.corporate_action_status == "clear"
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is True
+    assert result.promotion_ready is True
+
+
+@pytest.mark.asyncio
+async def test_forced_missing_kr_action_coverage_does_not_block_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="kr",
+        members=[
+            _member("005930", sessions=sessions),
+            _member(
+                "069500",
+                sessions=sessions,
+                rank=2,
+                member_kind="forced",
+                bar_count=0,
+                observed_expected=0,
+                invalid_adjustment=1,
+            ),
+        ],
+        coverage=_coverage_rows(["005930"], sessions),
+        sessions=sessions,
+    )
+
+    market = result.for_market("kr")
+    assert market.total_symbol_count == 1
+    assert market.forced_member_count == 1
+    assert market.corporate_action_covered_symbol_count == 1
+    assert market.corporate_action_status == "clear"
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is True
+
+
+@pytest.mark.asyncio
 async def test_benchmark_is_resolved_from_the_cohort_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

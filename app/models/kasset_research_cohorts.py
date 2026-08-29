@@ -102,8 +102,9 @@ class KAssetResearchCohortMember(Base):
             name=conv("ck_kasset_research_member_kind"),
         ),
         CheckConstraint(
-            "(member_kind = 'benchmark' AND market_cap IS NULL) OR "
-            "(member_kind IN ('active', 'forced') AND market_cap > 0)",
+            "(member_kind = 'active' AND market_cap > 0) OR "
+            "(member_kind IN ('forced', 'benchmark') "
+            "AND (market_cap IS NULL OR market_cap > 0))",
             name=conv("ck_kasset_research_member_market_cap"),
         ),
         UniqueConstraint(

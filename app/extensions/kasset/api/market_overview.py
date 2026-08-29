@@ -91,7 +91,7 @@ _INDEX_RANGE_CONFIG: dict[MarketIndexRange, tuple[str, int]] = {
     "1W": ("day", 5),
     "1M": ("day", 20),
     "3M": ("day", 60),
-    "6M": ("week", 26),
+    "6M": ("day", 126),
 }
 _FX_DEFINITIONS = (
     ("USDKRW", "USD/KRW"),

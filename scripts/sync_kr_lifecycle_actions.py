@@ -52,8 +52,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=20,
-        help="Maximum symbols after deterministic ordering (default: 20).",
+        default=None,
+        help=(
+            "Maximum symbols after deterministic ordering. The implicit active "
+            "universe defaults to 20; explicit --symbol values are unlimited."
+        ),
     )
     parser.add_argument(
         "--resume-after",
@@ -66,10 +69,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Persist evidence and direct lifecycle metadata; default is dry-run.",
     )
     args = parser.parse_args(argv)
-    if args.limit < 1:
+    if args.limit is not None and args.limit < 1:
         parser.error("--limit must be >= 1")
     if args.from_date > args.to_date:
         parser.error("--from-date must be on or before --to-date")
+    if args.limit is None and not args.symbol:
+        args.limit = 20
     return args
 
 

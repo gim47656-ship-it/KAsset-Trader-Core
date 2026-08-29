@@ -41,7 +41,7 @@ class KRSymbolUniverse(Base):
     )
     security_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_common_share: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    listing_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    listing_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     shares_outstanding: Mapped[Decimal | None] = mapped_column(

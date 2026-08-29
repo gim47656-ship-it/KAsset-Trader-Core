@@ -36,8 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Eligible positive-valuation symbol to add without displacing the "
-            "top-ranked core. Repeatable."
+            "Known active in-market symbol to force as a data-continuity extra. "
+            "Active watchlist, manual holding, and PAPER position symbols are "
+            "merged automatically. Repeatable."
         ),
     )
     parser.add_argument(

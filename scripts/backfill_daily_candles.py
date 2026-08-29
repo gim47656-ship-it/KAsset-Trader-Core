@@ -69,6 +69,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="최신 시총 파티션에서 적격 보통주 상위 N개를 조회",
     )
+    targets.add_argument(
+        "--cohort-id",
+        help="연구 코호트의 active+forced 멤버를 rank/symbol 순서로 조회",
+    )
     parser.add_argument("--horizon-bars", type=_positive_int, default=None)
     parser.add_argument(
         "--partition",
@@ -76,7 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "US 거래소 / KR 거래소 / 암호화폐 정규 파티션. "
             "기본값: NASD / KRX / 심볼에서 계산한 upbit_krw 또는 upbit_usdt. "
-            "--all/--top-market-cap에서는 사용할 수 없습니다."
+            "--all/--top-market-cap/--cohort-id에서는 사용할 수 없습니다."
         ),
     )
     parser.add_argument(
@@ -169,18 +173,24 @@ async def _amain(args: argparse.Namespace) -> int:
     market_key, default_bars, default_partition = _MARKET_DEFAULTS[args.market]
     horizon = args.horizon_bars if args.horizon_bars is not None else default_bars
 
-    bulk_mode = args.all or args.top_market_cap is not None
+    bulk_mode = (
+        args.all or args.top_market_cap is not None or args.cohort_id is not None
+    )
     if bulk_mode:
-        target_mode = "--all" if args.all else "--top-market-cap"
+        target_mode = (
+            "--all"
+            if args.all
+            else "--top-market-cap"
+            if args.top_market_cap is not None
+            else "--cohort-id"
+        )
         if args.market == "crypto":
             raise ValueError(f"{target_mode}은 kr과 us에서만 지원합니다")
         if args.partition is not None:
             raise ValueError(f"--partition은 {target_mode}과 함께 사용할 수 없습니다")
-        if args.top_market_cap is not None and (
-            args.resume_after is not None or args.limit is not None
-        ):
+        if not args.all and (args.resume_after is not None or args.limit is not None):
             raise ValueError(
-                "--resume-after/--limit은 --top-market-cap과 함께 사용할 수 없습니다"
+                f"--resume-after/--limit은 {target_mode}과 함께 사용할 수 없습니다"
             )
         explicit_targets: list[SyncTarget] = []
     else:
@@ -206,6 +216,11 @@ async def _amain(args: argparse.Namespace) -> int:
             targets = await svc.resolve_top_market_cap_targets(
                 market=args.market,
                 count=args.top_market_cap,
+            )
+        elif args.cohort_id is not None:
+            targets = await svc.resolve_cohort_backfill_targets(
+                market=args.market,
+                cohort_id=args.cohort_id,
             )
         else:
             targets = explicit_targets
@@ -235,6 +250,14 @@ async def _amain(args: argparse.Namespace) -> int:
                     )
                 else:
                     result = await svc.sync_one(
+                        target=target,
+                        horizon_bars=horizon,
+                    )
+                if (
+                    market_key == MarketKey.US
+                    and getattr(result, "skipped_reason", None) is None
+                ):
+                    await svc.sync_us_adjusted_close(
                         target=target,
                         horizon_bars=horizon,
                     )

@@ -672,7 +672,8 @@ def test_promotion_universe_query_is_cohort_scoped_and_rank_ordered() -> None:
 
     assert "FROM public.kasset_research_cohort_members AS m" in sql
     assert "WHERE m.cohort_id = :cohort_id" in sql
-    assert "m.member_kind IN ('active', 'forced')" in sql
+    assert "m.member_kind = 'active'" in sql
+    assert "m.member_kind IN ('active', 'forced')" not in sql
     assert "m.rank" in sql
     assert "ORDER BY u.symbol" not in sql
 
@@ -696,6 +697,14 @@ def test_cohort_selection_uses_exact_member_rank_without_delisted_injection() ->
             "listing_status": "delisted",
         }
     )
+    rows.append(
+        {
+            "symbol": "FORCED",
+            "member_rank": 1,
+            "member_kind": "forced",
+            "is_active": True,
+        }
+    )
 
     selected = _select_universe_rows(rows)
 
@@ -708,18 +717,18 @@ def test_cohort_selection_uses_exact_member_rank_without_delisted_injection() ->
         "RANK6",
     ]
     assert all(row["symbol"] != "DELISTED" for row in selected)
+    assert all(row["symbol"] != "FORCED" for row in selected)
 
 
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
-        ("cohortId", "different-cohort"),
         ("cohortMethod", "different-method"),
         ("memberRank", 2),
         ("cohortEffectiveDate", "2024-02-01"),
     ],
 )
-def test_dataset_hash_binds_cohort_identity_rank_and_effective_date(
+def test_dataset_hash_binds_active_core_rank_and_effective_date(
     field: str,
     replacement: object,
 ) -> None:
@@ -753,6 +762,39 @@ def test_dataset_hash_binds_cohort_identity_rank_and_effective_date(
     )
 
     assert modified != original
+
+
+def test_dataset_hash_ignores_enclosing_cohort_id_for_same_active_core() -> None:
+    candidate = _candidate()
+    bars = _bars(count=2)
+    selected = {
+        "market": "US",
+        "symbol": candidate.symbol,
+        "cohortId": "cohort-before-watchlist-change",
+        "cohortMethod": "latest_market_cap",
+        "cohortSelectionDate": "2024-01-02",
+        "cohortEffectiveDate": "2024-01-03",
+        "cohortEvidenceScope": "historical_pit",
+        "memberRank": 1,
+        "memberKind": "active",
+    }
+    before = _dataset_content_hash(
+        candidates=(candidate,),
+        bars_by_candidate={candidate.key: bars},
+        benchmarks={"US": _benchmark(bars)},
+        selected_universe=(selected,),
+    )
+    changed_cohort = dict(selected)
+    changed_cohort["cohortId"] = "cohort-after-watchlist-change"
+
+    after = _dataset_content_hash(
+        candidates=(candidate,),
+        bars_by_candidate={candidate.key: bars},
+        benchmarks={"US": _benchmark(bars)},
+        selected_universe=(changed_cohort,),
+    )
+
+    assert after == before
 
 
 def test_require_readiness_rejects_current_forward_historical_use() -> None:

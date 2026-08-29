@@ -25,7 +25,6 @@ from app.mcp_server.tooling import fundamentals_sources_indices as index_sources
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
     DATA_STATE_MARKET_CLOSED,
-    DATA_STATE_STALE,
 )
 from app.middleware.auth import AuthMiddleware
 from app.services.exchange_rate_service import (
@@ -35,7 +34,7 @@ from app.services.exchange_rate_service import (
 
 _KR_COMPLETED_END = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
 _US_COMPLETED_END = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
-_US_STALE_END = datetime(2026, 8, 27, 20, 0, tzinfo=UTC)
+_WEEKEND_MOMENT = datetime(2026, 8, 29, 23, 29, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -443,32 +442,44 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
 
 
 @pytest.mark.asyncio
-async def test_us_completed_batch_uses_only_previous_xnys_session_for_blank_target(
+async def test_us_completed_batch_recovers_verified_friday_metadata_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # UTC 자정 라벨은 미국 동부 기준으로 각각 8/26, 8/27, 8/28 세션이다.
+    # 운영 재현: 목요일은 +0.72%지만 금요일 일봉은 Close만 NaN이다.
     frame = pd.DataFrame(
         {
-            "Open": [25900.0, 26300.0, 26450.0],
-            "High": [26200.0, 26700.0, 26500.0],
-            "Low": [25800.0, 26200.0, 26300.0],
-            "Close": [26000.0, 26541.35, float("nan")],
-            "Volume": [1000.0, 1200.0, float("nan")],
+            "Open": [7670.0, 7700.0, 7735.17],
+            "High": [7700.0, 7740.0, 7771.48],
+            "Low": [7650.0, 7680.0, 7700.91],
+            "Close": [7675.70, 7730.99, float("nan")],
+            "Volume": [2500.0, 2600.0, 2589484000.0],
         },
-        index=pd.to_datetime(
-            [
-                "2026-08-27T00:00:00Z",
-                "2026-08-28T00:00:00Z",
-                "2026-08-29T00:00:00Z",
-            ],
-        ),
+        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28"]),
     )
-    calls = 0
 
     def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
-        nonlocal calls
-        calls += 1
         return frame
+
+    class Ticker:
+        def history(self, **kwargs: Any) -> pd.DataFrame:
+            assert kwargs == {
+                "period": "5d",
+                "interval": "1d",
+                "auto_adjust": False,
+                "keepna": True,
+                "repair": False,
+            }
+            return frame
+
+        def get_history_metadata(self, *, repair: bool) -> dict[str, Any]:
+            assert repair is False
+            return {
+                "regularMarketPrice": 7711.76,
+                "previousClose": 7730.99,
+                "currentTradingPeriod": {
+                    "regular": {"end": _US_COMPLETED_END},
+                },
+            }
 
     @contextmanager
     def traced_session() -> Iterator[object]:
@@ -476,62 +487,89 @@ async def test_us_completed_batch_uses_only_previous_xnys_session_for_blank_targ
 
     monkeypatch.setattr(index_sources.yf, "download", download)
     monkeypatch.setattr(
+        index_sources.yf,
+        "Ticker",
+        lambda _ticker, session: Ticker(),
+    )
+    monkeypatch.setattr(
         index_sources,
         "yfinance_tracing_session",
         traced_session,
     )
 
     rows = await index_sources._fetch_indices_us_current_batch(
-        ["NASDAQ"],
+        ["SPX"],
         completed_as_of=_US_COMPLETED_END,
     )
 
-    assert calls == 1
     assert rows == [
         {
-            "symbol": "NASDAQ",
-            "name": "NASDAQ Composite",
-            "current": 26541.35,
-            "previous_close": 26000.0,
-            "change": 541.35,
-            "change_pct": 2.08,
-            "open": 26300.0,
-            "high": 26700.0,
-            "low": 26200.0,
-            "volume": 1200,
-            "source": "yfinance",
-            "quote_asof": "2026-08-27T20:00:00+00:00",
-            "data_state": "stale",
+            "symbol": "SPX",
+            "name": "S&P 500",
+            "current": 7711.76,
+            "previous_close": 7730.99,
+            "change": -19.23,
+            "change_pct": -0.25,
+            "open": 7735.17,
+            "high": 7771.48,
+            "low": 7700.91,
+            "volume": 2589484000,
+            "source": "yfinance_history_metadata",
+            "quote_asof": "2026-08-28T20:00:00+00:00",
+            "data_state": "market_closed",
+            "close_evidence": "regular_market_price_at_completed_session_end",
         }
     ]
 
 
+@pytest.mark.parametrize(
+    ("metadata_previous", "regular_end"),
+    [
+        (7700.0, _US_COMPLETED_END),
+        (7730.99, datetime(2026, 8, 27, 20, tzinfo=UTC)),
+    ],
+)
 @pytest.mark.asyncio
-async def test_us_completed_batch_stays_unavailable_without_actual_completed_session(
+async def test_us_completed_batch_does_not_promote_thursday_on_metadata_mismatch(
     monkeypatch: pytest.MonkeyPatch,
+    metadata_previous: float,
+    regular_end: datetime,
 ) -> None:
     frame = pd.DataFrame(
         {
-            "Open": [25900.0, 26300.0, 26450.0, 27000.0],
-            "High": [26200.0, 26700.0, 26500.0, 27100.0],
-            "Low": [25800.0, 26200.0, 26300.0, 26000.0],
-            "Close": [26000.0, float("nan"), float("nan"), 26100.0],
-            "Volume": [1000.0, float("nan"), float("nan"), 300.0],
+            "Open": [7670.0, 7700.0, 7735.17],
+            "High": [7700.0, 7740.0, 7771.48],
+            "Low": [7650.0, 7680.0, 7700.91],
+            "Close": [7675.70, 7730.99, float("nan")],
+            "Volume": [2500.0, 2600.0, 2589484000.0],
         },
-        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]),
+        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28"]),
     )
-    calls = 0
 
-    def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
-        nonlocal calls
-        calls += 1
-        return frame
+    class Ticker:
+        def history(self, **_kwargs: Any) -> pd.DataFrame:
+            return frame
+
+        def get_history_metadata(self, *, repair: bool) -> dict[str, Any]:
+            assert repair is False
+            return {
+                "regularMarketPrice": 7711.76,
+                "previousClose": metadata_previous,
+                "currentTradingPeriod": {
+                    "regular": {"end": regular_end},
+                },
+            }
 
     @contextmanager
     def traced_session() -> Iterator[object]:
         yield object()
 
-    monkeypatch.setattr(index_sources.yf, "download", download)
+    monkeypatch.setattr(index_sources.yf, "download", lambda *_args, **_kwargs: frame)
+    monkeypatch.setattr(
+        index_sources.yf,
+        "Ticker",
+        lambda _ticker, session: Ticker(),
+    )
     monkeypatch.setattr(
         index_sources,
         "yfinance_tracing_session",
@@ -539,49 +577,66 @@ async def test_us_completed_batch_stays_unavailable_without_actual_completed_ses
     )
 
     rows = await index_sources._fetch_indices_us_current_batch(
-        ["NASDAQ"],
+        ["SPX"],
         completed_as_of=_US_COMPLETED_END,
     )
 
-    assert calls == 1
-    assert rows[0]["symbol"] == "NASDAQ"
+    assert rows[0]["symbol"] == "SPX"
     assert rows[0]["current"] is None
     assert rows[0]["previous_close"] is None
+    assert rows[0]["change"] is None
+    assert rows[0]["change_pct"] is None
     assert rows[0]["unavailable"] is True
     assert "quote_asof" not in rows[0]
+    assert "data_state" not in rows[0]
 
 
-def test_us_completed_selector_rejects_previous_session_beyond_day_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_yfinance_daily_timezone_label_remains_its_displayed_session_date() -> None:
+    assert index_sources._batch_session_date(
+        pd.Timestamp("2026-08-28T00:00:00Z")
+    ) == date(2026, 8, 28)
+
+
+def test_us_completed_selector_requires_the_exact_previous_session() -> None:
     frame = pd.DataFrame(
-        {"close": [26000.0]},
-        index=pd.to_datetime(["2026-08-22"]),
-    )
-    monkeypatch.setattr(
-        index_sources,
-        "previous_trading_session",
-        lambda market, day: date(2026, 8, 22),
+        {"close": [7680.50]},
+        index=pd.to_datetime(["2026-08-28"]),
     )
 
-    selected, selected_as_of, stale_fallback = (
-        index_sources._select_completed_us_session_rows(
-            frame,
-            completed_as_of=_US_COMPLETED_END,
-        )
+    selected, selected_as_of = index_sources._select_completed_us_session_rows(
+        frame,
+        completed_as_of=_US_COMPLETED_END,
     )
 
     assert selected.empty
     assert selected_as_of is None
-    assert stale_fallback is False
 
 
 @pytest.mark.asyncio
-async def test_weekend_overview_and_detail_share_latest_completed_bar(
+async def test_fixed_weekend_overview_and_detail_share_friday_completed_bar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is None:
+                return _WEEKEND_MOMENT.replace(tzinfo=None)
+            return _WEEKEND_MOMENT.astimezone(tz)  # type: ignore[arg-type]
+
     _stub_successful_sources(monkeypatch)
     _stub_sessions(monkeypatch, kr="CLOSED", us="CLOSED")
+    monkeypatch.setattr(mod, "datetime", FrozenDateTime)
+
+    async def latest_completed(market: str, moment: datetime) -> object:
+        assert moment == _WEEKEND_MOMENT
+        end = _US_COMPLETED_END if market == "us" else _KR_COMPLETED_END
+        return SimpleNamespace(end=end)
+
+    monkeypatch.setattr(
+        mod,
+        "get_latest_completed_regular_window_from_toss",
+        latest_completed,
+    )
     completed_rows = {
         "KOSPI": {
             "symbol": "KOSPI",
@@ -597,27 +652,27 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
             "current": 26402.42,
             "change": -138.93,
             "change_pct": -0.52,
-            "quote_asof": _US_STALE_END.isoformat(),
+            "quote_asof": _US_COMPLETED_END.isoformat(),
             "source": "yfinance",
-            "data_state": DATA_STATE_STALE,
+            "data_state": DATA_STATE_MARKET_CLOSED,
         },
         "SPX": {
             "symbol": "SPX",
-            "current": 6460.26,
-            "change": -41.6,
-            "change_pct": -0.64,
-            "quote_asof": _US_STALE_END.isoformat(),
+            "current": 7680.50,
+            "change": -50.49,
+            "change_pct": -0.65,
+            "quote_asof": _US_COMPLETED_END.isoformat(),
             "source": "yfinance",
-            "data_state": DATA_STATE_STALE,
+            "data_state": DATA_STATE_MARKET_CLOSED,
         },
         "DJI": {
             "symbol": "DJI",
             "current": 45544.88,
             "change": -92.02,
             "change_pct": -0.2,
-            "quote_asof": _US_STALE_END.isoformat(),
+            "quote_asof": _US_COMPLETED_END.isoformat(),
             "source": "yfinance",
-            "data_state": DATA_STATE_STALE,
+            "data_state": DATA_STATE_MARKET_CLOSED,
         },
         **{row["symbol"]: row for row in _indicator_rows()},
     }
@@ -647,19 +702,12 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
         assert (period, count) == ("day", 5)
         market = "KRX" if symbol == "KOSPI" else "US"
         expected_end = _KR_COMPLETED_END if market == "KRX" else _US_COMPLETED_END
-        if completed_as_of_by_market is None:
-            live_row = dict(completed_rows[symbol])
-            if symbol == "KOSPI":
-                live_row["quote_asof"] = "2026-08-28T18:59:00+09:00"
-            return {"indices": [live_row], "history": []}
         assert completed_as_of_by_market == {market: expected_end}
-        previous_date = "2026-08-27" if market == "KRX" else "2026-08-26"
-        latest_date = "2026-08-28" if market == "KRX" else "2026-08-27"
         return {
             "indices": [completed_rows[symbol]],
             "history": [
                 {
-                    "date": previous_date,
+                    "date": "2026-08-27",
                     "open": 1,
                     "high": 2,
                     "low": 1,
@@ -667,7 +715,7 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
                     "volume": None,
                 },
                 {
-                    "date": latest_date,
+                    "date": "2026-08-28",
                     "open": 2,
                     "high": 3,
                     "low": 2,
@@ -703,17 +751,22 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
             detail.summary.status,
         )
         assert len(detail.candles) == 2
+        assert detail.candles[-1].time == "2026-08-28T00:00:00Z"
+        assert detail.candles[-1].close == detail.summary.price
+
     prices = {detail.summary.symbol: detail.summary.price for detail in details}
     assert prices == {
         "KOSPI": "6788.88",
-        "SPX": "6460.26",
+        "SPX": "7680.5",
         "NASDAQ": "26402.42",
         "DJI": "45544.88",
     }
     assert details[0].summary.as_of == "2026-08-28T06:30:00Z"
     assert all(
-        detail.summary.as_of == "2026-08-27T20:00:00Z"
+        detail.summary.as_of == "2026-08-28T20:00:00Z"
         and detail.summary.status == "stale"
+        and detail.summary.change_rate is not None
+        and Decimal(detail.summary.change_rate) < 0
         for detail in details[1:]
     )
 

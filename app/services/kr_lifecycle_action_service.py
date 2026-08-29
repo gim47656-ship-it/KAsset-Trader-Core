@@ -565,44 +565,6 @@ async def upsert_fetch_coverage(
     return len(result.scalars().all())
 
 
-async def has_complete_corporate_action_coverage(
-    db: AsyncSession,
-    *,
-    symbol: str,
-    from_date: date,
-    to_date: date,
-) -> bool:
-    normalized_symbol = normalize_kr_symbol(symbol)
-    windows = monthly_windows(from_date, to_date)
-    required = {
-        (
-            spec.endpoint,
-            spec.tr_id,
-            spec.evidence_kind,
-            window.from_date,
-            window.to_date,
-        )
-        for spec in _ACTION_SPECS
-        for window in windows
-    }
-    result = await db.execute(
-        select(
-            KAssetCorporateActionFetchCoverage.provider_endpoint,
-            KAssetCorporateActionFetchCoverage.provider_tr_id,
-            KAssetCorporateActionFetchCoverage.action_kind,
-            KAssetCorporateActionFetchCoverage.requested_from_date,
-            KAssetCorporateActionFetchCoverage.requested_to_date,
-        ).where(
-            KAssetCorporateActionFetchCoverage.symbol == normalized_symbol,
-            KAssetCorporateActionFetchCoverage.source == _SOURCE,
-            KAssetCorporateActionFetchCoverage.provider == _PROVIDER,
-            KAssetCorporateActionFetchCoverage.status == "success",
-        )
-    )
-    observed = {tuple(row) for row in result.all()}
-    return required <= observed
-
-
 async def _persist_lifecycle(
     session_factory: SessionFactory,
     *,
@@ -626,6 +588,10 @@ async def _persist_lifecycle(
                     f"Known symbol disappeared from kr_symbol_universe: {symbol}"
                 )
             inserted = await upsert_lifecycle_evidence(db, evidence_rows)
+            # These fields are promoted only from the persisted provider response
+            # above. In particular, a direct delist_date is intended to make the
+            # symbol immediately ineligible for active-universe readers; absence
+            # of that field never infers a delisting.
             for field_name, value in metadata.items():
                 setattr(universe, field_name, value)
             return inserted

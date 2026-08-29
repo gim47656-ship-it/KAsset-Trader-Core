@@ -36,6 +36,7 @@ _KR_INDEX_LAGGING_REASON = "kr_index_fresh_clock_payload_lagging"
 # measurement of the real intraday lag distribution.
 _KR_INDEX_QUOTE_LAG_STALE_SECONDS = 120
 _KR_INDEX_QUOTE_LAG_REASON = "kr_index_quote_lagging"
+_MAX_INDEX_HISTORY_COUNT = 126
 
 
 def _parse_quote_asof(value: Any) -> datetime | None:
@@ -125,17 +126,16 @@ async def handle_get_market_index(
 ) -> dict[str, Any]:
     """지수 현재 요약과 범위 이력을 조회한다.
 
-    기본 호출은 기존 현재가 의미를 유지한다. 완료 시각 사전을 넘기면 요약은
-    해당 시장의 완료 정규장 cutoff를 공통 선택기에 전달한다. US provider가
-    target 봉을 비운 경우에만 XNYS 직전 1개 세션을 실제 시각의 stale 값으로
-    허용한다. 범위 이력은 기존 계약대로 조회하며, cutoff가 없으면 진행 중 봉으로
-    대체하지 않고 요약을 unavailable로 둔다.
+    기본 호출은 기존 현재가 의미를 유지한다. 완료 시각 사전을 넘기면 요약과
+    이력이 동일한 완료 정규장 cutoff를 사용한다. target 봉이나 직전 세션 봉을
+    증명하지 못하면 현재값과 이력을 unavailable로 두며, 진행 중·미래·더 오래된
+    봉으로 대체하지 않는다.
     """
     period = (period or "day").strip().lower()
     if period not in ("day", "week", "month"):
         raise ValueError("period must be 'day', 'week', or 'month'")
 
-    capped_count = min(max(count, 1), 100)
+    capped_count = min(max(count, 1), _MAX_INDEX_HISTORY_COUNT)
 
     if symbol:
         sym = symbol.strip().upper()
@@ -170,9 +170,24 @@ async def handle_get_market_index(
                         completed_as_of=completed_as_of,
                     )
 
+                async def load_kr_history() -> list[dict[str, Any]]:
+                    if completed_as_of_by_market is None:
+                        return await _fetch_index_kr_history(
+                            meta["naver_code"], capped_count, period
+                        )
+                    completed_as_of = completed_as_of_by_market.get("KRX")
+                    if completed_as_of is None:
+                        return []
+                    return await _fetch_index_kr_history(
+                        meta["naver_code"],
+                        capped_count,
+                        period,
+                        completed_as_of=completed_as_of,
+                    )
+
                 current_data, history = await asyncio.gather(
                     load_kr_current(),
-                    _fetch_index_kr_history(meta["naver_code"], capped_count, period),
+                    load_kr_history(),
                 )
                 if completed_as_of_by_market is None:
                     current_data = _tag_kr_index_data_state(current_data)
@@ -198,9 +213,24 @@ async def handle_get_market_index(
                 )
                 return rows[0] if rows else unavailable_current()
 
+            async def load_us_history() -> list[dict[str, Any]]:
+                if completed_as_of_by_market is None:
+                    return await _fetch_index_us_history(
+                        meta["yf_ticker"], capped_count, period
+                    )
+                completed_as_of = completed_as_of_by_market.get("US")
+                if completed_as_of is None:
+                    return []
+                return await _fetch_index_us_history(
+                    meta["yf_ticker"],
+                    capped_count,
+                    period,
+                    completed_as_of=completed_as_of,
+                )
+
             current_data, history = await asyncio.gather(
                 load_us_current(),
-                _fetch_index_us_history(meta["yf_ticker"], capped_count, period),
+                load_us_history(),
             )
             return {"indices": [current_data], "history": history}
         except Exception as exc:
@@ -222,9 +252,9 @@ async def handle_get_market_index_current_batch(
     """다중 심볼 지수 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
 
     기본 호출은 기존 현재가 의미를 유지한다. ``completed_as_of_by_market``를
-    넘기는 home/detail 호출은 같은 provider 선택기를 쓰며, target 봉 또는
-    XNYS 직전 1개 세션의 명시적 stale 봉만 허용한다. 해당 세션을 증명할
-    캘린더 시각이 없으면 값을 만들지 않는다.
+    넘기는 home/detail 호출은 같은 provider 선택기를 쓰며, target 완료봉과 그
+    직전 세션을 모두 증명하거나 검증된 metadata 종가를 복구한 경우만 허용한다.
+    캘린더 cutoff가 없거나 근거가 맞지 않으면 값을 만들지 않는다.
     """
     normalized = [str(symbol).strip().upper() for symbol in symbols]
     unsupported = sorted(

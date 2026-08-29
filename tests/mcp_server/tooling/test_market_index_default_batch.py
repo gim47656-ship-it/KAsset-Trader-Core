@@ -73,6 +73,7 @@ async def test_us_index_batch_download_computes_rows_and_isolates_missing_symbol
     assert download_calls[0]["tickers"] == ["^GSPC", "^IXIC"]
     assert download_calls[0]["period"] == "5d"
     assert download_calls[0]["interval"] == "1d"
+    assert download_calls[0]["ignore_tz"] is True
     spx, nasdaq = rows
     assert spx == {
         "symbol": "SPX",
@@ -281,13 +282,76 @@ async def test_single_index_completed_summary_keeps_existing_range_history(
         completed_symbols=("SPX",),
     )
     live.assert_not_awaited()
-    history.assert_awaited_once_with("^GSPC", 5, "day")
+    history.assert_awaited_once_with(
+        "^GSPC",
+        5,
+        "day",
+        completed_as_of=completed_end,
+    )
     assert result["indices"][0]["current"] == 6500.0
     assert result["history"] == history_rows
 
 
 @pytest.mark.asyncio
-async def test_single_index_missing_completed_cutoff_degrades_only_summary(
+async def test_completed_us_history_recovers_friday_close_and_excludes_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_end = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+    frame = pd.DataFrame(
+        {
+            "Open": [7670.0, 7700.0, 7735.17, 7800.0],
+            "High": [7700.0, 7740.0, 7771.48, 7900.0],
+            "Low": [7650.0, 7680.0, 7700.91, 7750.0],
+            "Close": [7675.70, 7730.99, float("nan"), 7850.0],
+            "Volume": [2500.0, 2600.0, 2589484000.0, 100.0],
+        },
+        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]),
+    )
+
+    class Ticker:
+        def history(self, **_kwargs: Any) -> pd.DataFrame:
+            return frame.iloc[:3]
+
+        def get_history_metadata(self, *, repair: bool) -> dict[str, Any]:
+            assert repair is False
+            return {
+                "regularMarketPrice": 7711.76,
+                "previousClose": 7730.99,
+                "currentTradingPeriod": {
+                    "regular": {"end": completed_end},
+                },
+            }
+
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(sources.yf, "download", lambda *_args, **_kwargs: frame)
+    monkeypatch.setattr(
+        sources.yf,
+        "Ticker",
+        lambda _ticker, session: Ticker(),
+    )
+    monkeypatch.setattr(sources, "yfinance_tracing_session", traced_session)
+
+    history = await sources._fetch_index_us_history(
+        "^GSPC",
+        5,
+        "day",
+        completed_as_of=completed_end,
+    )
+
+    assert [row["date"] for row in history] == [
+        "2026-08-26",
+        "2026-08-27",
+        "2026-08-28",
+    ]
+    assert history[-1]["close"] == 7711.76
+    assert history[-2]["close"] == 7730.99
+
+
+@pytest.mark.asyncio
+async def test_single_index_missing_completed_cutoff_degrades_summary_and_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live = AsyncMock(side_effect=AssertionError("live current must not be used"))
@@ -310,7 +374,8 @@ async def test_single_index_missing_completed_cutoff_degrades_only_summary(
     live.assert_not_awaited()
     completed.assert_not_awaited()
     assert result["indices"][0]["unavailable"] is True
-    assert result["history"] == history_rows
+    history.assert_not_awaited()
+    assert result["history"] == []
 
 
 @pytest.mark.asyncio
@@ -345,6 +410,11 @@ async def test_single_kr_index_uses_completed_close_not_live_quote(
         completed_as_of=completed_end,
     )
     live.assert_not_awaited()
-    history.assert_awaited_once_with("KOSPI", 5, "day")
+    history.assert_awaited_once_with(
+        "KOSPI",
+        5,
+        "day",
+        completed_as_of=completed_end,
+    )
     assert result["indices"] == [completed_row]
     assert result["history"] == history_rows

@@ -200,6 +200,54 @@ class DailyCandlesRepository:
         )
         return max(int(result.rowcount or 0), 0)
 
+    async def upsert_us_adjusted_close(self, *, rows: list[DailyCandleRow]) -> int:
+        """Insert Yahoo rows or update only ``adj_close`` on existing US rows.
+
+        The conflict path deliberately preserves KIS OHLCV, value, and source.
+        Yahoo OHLCV is used only when the candle does not exist yet.
+        """
+        if not rows:
+            return 0
+        if any(row.adj_close is None for row in rows):
+            raise ValueError("US adjusted-close 보강 행에는 adj_close가 필요합니다")
+
+        payload = [
+            {
+                "time": row.time_utc,
+                "symbol": row.symbol,
+                "exchange": row.partition,
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "adj_close": row.adj_close,
+                "volume": row.volume,
+                "value": row.value,
+                "source": row.source,
+            }
+            for row in rows
+        ]
+        sql = text(
+            """
+            INSERT INTO public.us_candles_1d (
+                time, symbol, exchange, open, high, low, close,
+                adj_close, volume, value, source
+            ) VALUES (
+                :time, :symbol, :exchange, :open, :high, :low, :close,
+                :adj_close, :volume, :value, :source
+            )
+            ON CONFLICT (time, symbol, exchange) DO UPDATE
+            SET adj_close = EXCLUDED.adj_close
+            WHERE public.us_candles_1d.adj_close
+                  IS DISTINCT FROM EXCLUDED.adj_close
+            """
+        )
+        result = cast(
+            "_RowcountResult",
+            cast(object, await self._session.execute(sql, payload)),
+        )
+        return max(int(result.rowcount or 0), 0)
+
     async def resolve_crypto_instrument_ids(
         self, *, symbols: list[str], partition: str
     ) -> dict[str, int]:

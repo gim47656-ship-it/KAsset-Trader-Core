@@ -147,7 +147,7 @@ def _universe_query(storage: _Storage):
         LEFT JOIN public.{storage.candle_table} AS candles
           ON candles.symbol = m.symbol
         WHERE m.cohort_id = :cohort_id
-          AND m.member_kind IN ('active', 'forced')
+          AND m.member_kind = 'active'
         GROUP BY
             m.symbol,
             m.rank,
@@ -213,7 +213,7 @@ async def load_portfolio_evidence_source(
     as_of: datetime | None = None,
     cohort_ids: Mapping[str, str] | None = None,
 ) -> PortfolioEvidenceSource:
-    """Read readiness and exact rank-bounded cohort members, bars, and benchmarks."""
+    """Read readiness denominator and exact rank-bounded active-core evidence."""
 
     measured_at = _aware_utc(as_of or datetime.now(UTC))
     readiness = await DailyCandlesReadinessService(db).measure(
@@ -240,9 +240,9 @@ async def load_portfolio_evidence_source(
         universe_rows = tuple(
             cast(Sequence[Mapping[str, object]], universe_result.mappings().all())
         )
-        if len(universe_rows) != market_readiness.total_symbol_count:
+        if len(universe_rows) != cohort.active_member_count:
             raise PromotionEvidenceBuildError(
-                f"{market_name}:cohort_member_query_mismatch"
+                f"{market_name}:active_core_query_mismatch"
             )
         selected = _select_universe_rows(universe_rows)
         if not selected:
@@ -805,14 +805,11 @@ def _require_readiness(
 def _select_universe_rows(
     rows: Sequence[Mapping[str, object]],
 ) -> tuple[Mapping[str, object], ...]:
-    cohort_members = [
-        row for row in rows if str(row.get("member_kind") or "") in {"active", "forced"}
-    ]
+    active_core = [row for row in rows if str(row.get("member_kind") or "") == "active"]
     ordered = sorted(
-        cohort_members,
+        active_core,
         key=lambda row: (
             int(row.get("member_rank") or 0),
-            0 if row.get("member_kind") == "active" else 1,
             str(row.get("symbol") or ""),
         ),
     )
@@ -935,9 +932,14 @@ def _dataset_content_hash(
     benchmarks: Mapping[str, Sequence[PriceBar]],
     selected_universe: Sequence[Mapping[str, object]],
 ) -> str:
+    # The enclosing cohort ID also covers forced readiness-only members. Keep it
+    # in stored evidence, but exclude it from the active-core sample fingerprint.
     return canonical_sha256(
         {
-            "selectedUniverse": tuple(dict(item) for item in selected_universe),
+            "selectedUniverse": tuple(
+                {key: value for key, value in item.items() if key != "cohortId"}
+                for item in selected_universe
+            ),
             "candidates": tuple(
                 {
                     "market": item.market,

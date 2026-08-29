@@ -192,7 +192,7 @@ def _cohort_query(market: MarketName):
           AND selection_method = 'latest_market_cap'
           AND selection_as_of <= :as_of
           AND created_at <= :as_of
-          AND (:cohort_id IS NULL OR cohort_id = :cohort_id)
+          AND (CAST(:cohort_id AS text) IS NULL OR cohort_id = CAST(:cohort_id AS text))
         ORDER BY selection_as_of DESC, selection_date DESC,
                  effective_date DESC, cohort_id DESC
         LIMIT 1
@@ -547,21 +547,22 @@ def _evaluate_market(
 ) -> MarketReadiness:
     window_start = expected_sessions[0] if expected_sessions else None
     window_end = expected_sessions[-1] if expected_sessions else None
-    total = len(rows)
-    cohort_active = sum(1 for row in rows if row.get("member_kind") == "active")
+    core_rows = [row for row in rows if row.get("member_kind") == "active"]
+    total = len(core_rows)
+    cohort_active = total
     forced = sum(1 for row in rows if row.get("member_kind") == "forced")
-    active_rows = [row for row in rows if bool(row.get("is_active"))]
-    inactive_rows = [row for row in rows if not bool(row.get("is_active"))]
+    active_rows = [row for row in core_rows if bool(row.get("is_active"))]
+    inactive_rows = [row for row in core_rows if not bool(row.get("is_active"))]
     active = len(active_rows)
     inactive = len(inactive_rows)
 
-    exactly_251 = sum(1 for row in rows if _int(row, "bar_count") == 251)
+    exactly_251 = sum(1 for row in core_rows if _int(row, "bar_count") == 251)
     at_least_252 = sum(
-        1 for row in rows if _int(row, "bar_count") >= REQUIRED_HISTORY_BARS
+        1 for row in core_rows if _int(row, "bar_count") >= REQUIRED_HISTORY_BARS
     )
-    future = sum(_int(row, "future_bar_count") for row in rows)
-    duplicates = sum(_int(row, "duplicate_timestamp_count") for row in rows)
-    ohlc = sum(_int(row, "ohlc_anomaly_count") for row in rows)
+    future = sum(_int(row, "future_bar_count") for row in core_rows)
+    duplicates = sum(_int(row, "duplicate_timestamp_count") for row in core_rows)
+    ohlc = sum(_int(row, "ohlc_anomaly_count") for row in core_rows)
 
     calendar_status: CalendarStatus = (
         "available" if expected_sessions else "unavailable"
@@ -571,7 +572,7 @@ def _evaluate_market(
     missing: int | None = 0 if expected_sessions else None
     eligible = 0
     adjustment_covered = 0
-    for row in rows:
+    for row in core_rows:
         latest = cast(datetime | None, row.get("latest_bar_at"))
         row_stale = bool(
             latest_expected is not None
@@ -605,7 +606,7 @@ def _evaluate_market(
         ):
             eligible += 1
 
-    list_date_covered = sum(1 for row in rows if row.get("list_date") is not None)
+    list_date_covered = sum(1 for row in core_rows if row.get("list_date") is not None)
     delist_date_covered_inactive = sum(
         1 for row in inactive_rows if row.get("delist_date") is not None
     )
@@ -638,17 +639,17 @@ def _evaluate_market(
         )
     )
 
-    candle_rows = sum(_int(row, "candle_row_count") for row in rows)
+    candle_rows = sum(_int(row, "candle_row_count") for row in core_rows)
     fallback_only = bool(
         candle_rows > 0
         and all(
             bool(row.get("fallback_only"))
-            for row in rows
+            for row in core_rows
             if _int(row, "candle_row_count") > 0
         )
     )
 
-    symbols = [str(row.get("symbol") or "").strip().upper() for row in rows]
+    symbols = [str(row.get("symbol") or "").strip().upper() for row in core_rows]
     kr_covered = (
         _kr_covered_symbols(
             coverage_rows,

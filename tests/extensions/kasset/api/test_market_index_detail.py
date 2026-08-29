@@ -98,7 +98,7 @@ def _index_result(symbol: str = "SPX") -> dict[str, Any]:
         ("1W", "day", 5),
         ("1M", "day", 20),
         ("3M", "day", 60),
-        ("6M", "week", 26),
+        ("6M", "day", 126),
     ],
 )
 async def test_index_detail_maps_each_public_range(
@@ -130,7 +130,7 @@ async def test_index_detail_maps_each_public_range(
         ("1W", "day", 5),
         ("1M", "day", 20),
         ("3M", "day", 60),
-        ("6M", "week", 26),
+        ("6M", "day", 126),
     ],
 )
 async def test_new_us_indices_are_whitelisted_for_every_public_range(

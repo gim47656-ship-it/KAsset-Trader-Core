@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -196,6 +196,157 @@ class TestSyncOneSymbol:
         repo.upsert_rows.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("defect", ["missing_adj_close", "duplicate_date"])
+    async def test_us_adjusted_close_backfill_rejects_required_slice_defects(
+        self, defect: str
+    ):
+        from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
+
+        repo = MagicMock()
+        repo.upsert_us_adjusted_close = AsyncMock()
+        repo.session = MagicMock()
+        repo.session.commit = AsyncMock()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        yahoo_rows = [
+            YahooFallbackRow(
+                time_utc=start
+                + timedelta(
+                    days=298 if defect == "duplicate_date" and index == 299 else index
+                ),
+                symbol="AAPL",
+                open=100.0 + index,
+                high=101.0 + index,
+                low=99.0 + index,
+                close=100.5 + index,
+                adj_close=(
+                    None
+                    if defect == "missing_adj_close" and index == 299
+                    else 98.25 + index
+                ),
+                volume=1000.0,
+                value=(100.5 + index) * 1000.0,
+            )
+            for index in range(300)
+        ]
+        yahoo_fetcher = AsyncMock(return_value=yahoo_rows)
+        svc = DailyCandleSyncService(
+            repository=repo,
+            kis_kr_fetcher=AsyncMock(),
+            kis_us_fetcher=AsyncMock(),
+            yahoo_us_fetcher=yahoo_fetcher,
+            upbit_crypto_fetcher=AsyncMock(),
+        )
+
+        with pytest.raises(RuntimeError, match="완전하지 않습니다"):
+            await svc.sync_us_adjusted_close(
+                target=SyncTarget(
+                    market=MarketKey.US,
+                    symbol="AAPL",
+                    partition="NASD",
+                ),
+                horizon_bars=400,
+            )
+
+        yahoo_fetcher.assert_awaited_once_with(symbol="AAPL", n=400)
+        repo.upsert_us_adjusted_close.assert_not_awaited()
+        repo.session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_us_adjusted_close_backfill_rejects_fewer_than_readiness_bars(
+        self,
+    ):
+        from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
+
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        yahoo_rows = [
+            YahooFallbackRow(
+                time_utc=start + timedelta(days=index),
+                symbol="SNDK",
+                open=50.0,
+                high=51.0,
+                low=49.0,
+                close=50.5,
+                adj_close=50.25,
+                volume=1000.0,
+                value=50500.0,
+            )
+            for index in range(251)
+        ]
+        repo = MagicMock()
+        repo.upsert_us_adjusted_close = AsyncMock()
+        repo.session = MagicMock()
+        svc = DailyCandleSyncService(
+            repository=repo,
+            kis_kr_fetcher=AsyncMock(),
+            kis_us_fetcher=AsyncMock(),
+            yahoo_us_fetcher=AsyncMock(return_value=yahoo_rows),
+            upbit_crypto_fetcher=AsyncMock(),
+        )
+
+        with pytest.raises(RuntimeError, match="required=252 received=251"):
+            await svc.sync_us_adjusted_close(
+                target=SyncTarget(
+                    market=MarketKey.US,
+                    symbol="SNDK",
+                    partition="NASD",
+                ),
+                horizon_bars=400,
+            )
+
+        repo.upsert_us_adjusted_close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_us_adjusted_close_backfill_accepts_300_of_400_bars(self):
+        from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
+
+        repo = MagicMock()
+        repo.upsert_us_adjusted_close = AsyncMock(return_value=299)
+        repo.session = MagicMock()
+        repo.session.commit = AsyncMock()
+        repo.session.rollback = AsyncMock()
+        kis_us_fetcher = AsyncMock()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        yahoo_rows = [
+            YahooFallbackRow(
+                time_utc=start + timedelta(days=index),
+                symbol="SNDK",
+                open=30.0 + index,
+                high=31.0 + index,
+                low=29.0 + index,
+                close=30.5 + index,
+                adj_close=None if index == 0 else 29.5 + index,
+                volume=1000.0,
+                value=(30.5 + index) * 1000.0,
+            )
+            for index in range(300)
+        ]
+        svc = DailyCandleSyncService(
+            repository=repo,
+            kis_kr_fetcher=AsyncMock(),
+            kis_us_fetcher=kis_us_fetcher,
+            yahoo_us_fetcher=AsyncMock(return_value=yahoo_rows),
+            upbit_crypto_fetcher=AsyncMock(),
+        )
+        target = SyncTarget(
+            market=MarketKey.US,
+            symbol="SNDK",
+            partition="NASD",
+        )
+
+        assert await svc.sync_us_adjusted_close(target=target, horizon_bars=400) == 299
+
+        kis_us_fetcher.assert_not_awaited()
+        written = repo.upsert_us_adjusted_close.await_args.kwargs["rows"]
+        assert len(written) == 299
+        assert written[0].time_utc == start + timedelta(days=1)
+        assert written[-1].time_utc == start + timedelta(days=299)
+        assert all(row.adj_close is not None for row in written)
+        assert all(row.partition == "NASD" for row in written)
+        assert all(row.source == "yahoo_fallback" for row in written)
+        repo.session.commit.assert_awaited_once()
+        repo.session.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_kr_commit_failure_triggers_rollback(self):
         repo = MagicMock()
         repo.latest_time_utc = AsyncMock(return_value=None)
@@ -327,6 +478,85 @@ async def test_backfill_us_targets_map_partition_then_resume_and_limit() -> None
     sql = str(repo.session.execute.await_args.args[0])
     assert "is_common_stock IS TRUE" in sql
     assert "is_active IS TRUE" in sql
+
+
+@pytest.mark.asyncio
+async def test_cohort_backfill_targets_use_exact_members_and_universe_exchange() -> (
+    None
+):
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(market="us")],
+            [
+                SimpleNamespace(
+                    symbol="AAPL",
+                    rank=1,
+                    member_kind="active",
+                    exchange="NASDAQ",
+                ),
+                SimpleNamespace(
+                    symbol="SOXL",
+                    rank=1,
+                    member_kind="forced",
+                    exchange="AMEX",
+                ),
+                SimpleNamespace(
+                    symbol="TQQQ",
+                    rank=2,
+                    member_kind="forced",
+                    exchange="NASD",
+                ),
+            ],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc.resolve_cohort_backfill_targets(
+        market="us",
+        cohort_id="us-2026-08-30",
+    )
+
+    assert targets == [
+        SyncTarget(market=MarketKey.US, symbol="AAPL", partition="NASD"),
+        SyncTarget(market=MarketKey.US, symbol="SOXL", partition="AMEX"),
+        SyncTarget(market=MarketKey.US, symbol="TQQQ", partition="NASD"),
+    ]
+    member_query = str(repo.session.execute.await_args_list[1].args[0])
+    assert "member.member_kind IN ('active', 'forced')" in member_query
+    assert "ORDER BY member.rank, member.symbol" in member_query
+    assert "is_common_stock" not in member_query
+    assert "is_etf" not in member_query
+    assert "is_leveraged" not in member_query
+
+
+@pytest.mark.asyncio
+async def test_cohort_backfill_rejects_market_mismatch_before_members() -> None:
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(return_value=[SimpleNamespace(market="kr")])
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    with pytest.raises(ValueError, match="일치하지 않습니다"):
+        await svc.resolve_cohort_backfill_targets(
+            market="us",
+            cohort_id="kr-2026-08-30",
+        )
+
+    repo.session.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
