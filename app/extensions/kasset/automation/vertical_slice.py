@@ -48,6 +48,9 @@ from app.extensions.kasset.automation.regime import (
     assess_market_regime,
 )
 from app.extensions.kasset.automation.strategies import STRATEGIES
+from app.extensions.kasset.automation.strategy_artifact import (
+    current_strategy_artifact,
+)
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PAPER_STRATEGY_KEY,
     DEFAULT_PAPER_STRATEGY_VERSION,
@@ -98,6 +101,7 @@ class EvaluatedCandidate:
     factor_ranking: CandidateRankResult | None = None
     regime: RegimeAssessment | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class ReviewedCandidate:
     evaluated: EvaluatedCandidate
@@ -115,9 +119,7 @@ async def _load_live_kr_candidates(
         TvScreenerKrFundamentalsProvider,
     )
 
-    rows = await TvScreenerKrFundamentalsProvider(timeout=30).fetch_rows(
-        limit=limit
-    )
+    rows = await TvScreenerKrFundamentalsProvider(timeout=30).fetch_rows(limit=limit)
     ordered = sorted(
         rows,
         key=lambda row: (
@@ -139,8 +141,7 @@ async def _load_live_kr_candidates(
                 market="KRX",
                 name=name if name and name != symbol else None,
                 source="tvscreener_kr",
-                turnover=(row.price or Decimal("0"))
-                * (row.volume or Decimal("0")),
+                turnover=(row.price or Decimal("0")) * (row.volume or Decimal("0")),
                 volume=row.volume,
             )
         )
@@ -255,12 +256,8 @@ class AIRecommendationVerticalSlice:
                 if candidate.market == "KRX"
             ]
         )
-        bars_by_candidate = await self._load_candidate_bars(
-            recommendation_candidates
-        )
-        metadata = tuple(
-            _candidate_metadata(candidate) for candidate in candidates
-        )
+        bars_by_candidate = await self._load_candidate_bars(recommendation_candidates)
+        metadata = tuple(_candidate_metadata(candidate) for candidate in candidates)
         ranking = self._ranker.rank(
             metadata,
             bars_by_candidate,
@@ -270,9 +267,7 @@ class AIRecommendationVerticalSlice:
         ranks_for_review = ranking.for_strategy_review(
             self._ranker_config.strategy_review_limit
         )
-        candidate_by_key = {
-            candidate.ranker_key: candidate for candidate in candidates
-        }
+        candidate_by_key = {candidate.ranker_key: candidate for candidate in candidates}
         selected_candidates = [
             candidate_by_key[result.key]
             for result in ranks_for_review
@@ -350,8 +345,7 @@ class AIRecommendationVerticalSlice:
             "ownerUserId": owner_user_id,
             "candidateCount": len(recommendation_candidates),
             "candidateTargetMet": (
-                len(ranking.ranked)
-                >= self._ranker_config.minimum_candidate_target
+                len(ranking.ranked) >= self._ranker_config.minimum_candidate_target
             ),
             "strategyEvaluatedCount": len(evaluated),
             "aiReviewedCount": len(reviewed),
@@ -381,10 +375,7 @@ class AIRecommendationVerticalSlice:
             "recommendationIds": recommendation_ids,
             "positionExitRecommendationIds": [],
         }
-        if (
-            len(ranking.ranked)
-            < self._ranker_config.minimum_candidate_target
-        ):
+        if len(ranking.ranked) < self._ranker_config.minimum_candidate_target:
             result["dataPrerequisite"] = (
                 "fewer than 50 screener candidates have usable 52-week daily candles"
             )
@@ -453,8 +444,7 @@ class AIRecommendationVerticalSlice:
                 select(PaperPosition)
                 .join(
                     AndroidPaperAccount,
-                    AndroidPaperAccount.paper_account_id
-                    == PaperPosition.account_id,
+                    AndroidPaperAccount.paper_account_id == PaperPosition.account_id,
                 )
                 .where(
                     AndroidPaperAccount.owner_user_id == owner_user_id,
@@ -468,9 +458,7 @@ class AIRecommendationVerticalSlice:
         ).all()
         for position in holdings:
             market = (
-                "KR"
-                if position.instrument_type == InstrumentType.equity_kr
-                else "US"
+                "KR" if position.instrument_type == InstrumentType.equity_kr else "US"
             )
             candidate = TradingCandidate(
                 symbol=str(position.symbol).strip().upper(),
@@ -545,10 +533,7 @@ class AIRecommendationVerticalSlice:
                         symbol=symbol,
                         market=cast(Any, recommendation_market),
                         name=names.get(symbol),
-                        source=(
-                            "invest_screener_snapshots:"
-                            f"{latest_date.isoformat()}"
-                        ),
+                        source=(f"invest_screener_snapshots:{latest_date.isoformat()}"),
                         turnover=(
                             Decimal(str(row.daily_turnover))
                             if row.daily_turnover is not None
@@ -574,8 +559,7 @@ class AIRecommendationVerticalSlice:
                 )
 
         kr_count = sum(
-            candidate.ranker_market == "KR"
-            and candidate.eligible_for_new_buy
+            candidate.ranker_market == "KR" and candidate.eligible_for_new_buy
             for candidate in ordered.values()
         )
         if (
@@ -831,9 +815,7 @@ class AIRecommendationVerticalSlice:
             limits=snapshot.limits,
             usage=snapshot.usage,
             strategy_stop=(
-                Decimal(strategy_stop_text)
-                if strategy_stop_text is not None
-                else None
+                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
             ),
             strategy_atr=ranking.atr_14 if ranking is not None else None,
             price_as_of=ranking.data_as_of if ranking is not None else None,
@@ -890,6 +872,7 @@ class AIRecommendationVerticalSlice:
             strategy_promotion={
                 "strategyKey": DEFAULT_PAPER_STRATEGY_KEY,
                 "version": DEFAULT_PAPER_STRATEGY_VERSION,
+                "artifactFingerprint": current_strategy_artifact().fingerprint,
             },
         )
         return cast(AIRecommendation, row)
@@ -1048,13 +1031,9 @@ def _merge_trading_candidate(
         name=current.name or incoming.name,
         source="|".join(sources),
         turnover=(
-            incoming.turnover
-            if incoming.turnover is not None
-            else current.turnover
+            incoming.turnover if incoming.turnover is not None else current.turnover
         ),
-        volume=(
-            incoming.volume if incoming.volume is not None else current.volume
-        ),
+        volume=(incoming.volume if incoming.volume is not None else current.volume),
         is_held=current.is_held or incoming.is_held,
         is_watchlisted=current.is_watchlisted or incoming.is_watchlisted,
         eligible_for_new_buy=(

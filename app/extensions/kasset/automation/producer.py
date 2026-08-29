@@ -410,17 +410,34 @@ class RecommendationProducer:
         if strategy_promotion is not None:
             raw_strategy_key = strategy_promotion.get("strategyKey")
             raw_strategy_version = strategy_promotion.get("version")
-            if not isinstance(raw_strategy_key, str) or not isinstance(
-                raw_strategy_version, str
+            raw_artifact_fingerprint = strategy_promotion.get("artifactFingerprint")
+            if not all(
+                isinstance(value, str)
+                for value in (
+                    raw_strategy_key,
+                    raw_strategy_version,
+                    raw_artifact_fingerprint,
+                )
             ):
                 raise ValueError(
-                    "strategy_promotion requires string strategyKey and version"
+                    "strategy_promotion requires string strategyKey, version, "
+                    "and artifactFingerprint"
                 )
-            strategy_key = raw_strategy_key.strip()
-            strategy_version = raw_strategy_version.strip()
-            if not strategy_key or not strategy_version:
+            strategy_key = cast(str, raw_strategy_key).strip()
+            strategy_version = cast(str, raw_strategy_version).strip()
+            artifact_fingerprint = cast(str, raw_artifact_fingerprint).strip()
+            if (
+                not strategy_key
+                or not strategy_version
+                or len(artifact_fingerprint) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in artifact_fingerprint
+                )
+            ):
                 raise ValueError(
-                    "strategy_promotion requires strategyKey and version"
+                    "strategy_promotion requires strategyKey/version and a "
+                    "lowercase 64-hex artifactFingerprint"
                 )
             normalized_strategy_promotion = {
                 "title": "PAPER strategy promotion identity",
@@ -428,8 +445,8 @@ class RecommendationProducer:
                 "kind": "strategy_promotion",
                 "strategyKey": strategy_key,
                 "version": strategy_version,
+                "artifactFingerprint": artifact_fingerprint,
             }
-
 
         rationale = [
             _korean_vote_rationale(valid_results),
@@ -510,7 +527,6 @@ class RecommendationProducer:
         )
         if normalized_strategy_promotion is not None:
             evidence.append(normalized_strategy_promotion)
-
 
         draft = RecommendationDraft(
             owner_user_id=self._owner_user_id,

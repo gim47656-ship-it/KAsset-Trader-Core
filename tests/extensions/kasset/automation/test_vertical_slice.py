@@ -37,6 +37,11 @@ _NOW = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
 async def test_vertical_slice_ranking_includes_schema_required_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        vertical_slice,
+        "current_strategy_artifact",
+        lambda: SimpleNamespace(fingerprint="a" * 64),
+    )
     strategy = StrategyResult(
         action=Action.BUY,
         confidence=Decimal("0.80"),
@@ -165,6 +170,7 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
     assert captured["strategy_promotion"] == {
         "strategyKey": "qullamaggie_breakout_portfolio",
         "version": "1.0.0",
+        "artifactFingerprint": "a" * 64,
     }
 
 
