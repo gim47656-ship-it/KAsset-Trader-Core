@@ -137,7 +137,7 @@ class OpenAiResponsesClient:
                 f"{self._name} unreachable: {type(exc).__name__}"
             ) from exc
 
-        if response.status_code >= 500:
+        if response.status_code == 429 or response.status_code >= 500:
             raise AiProviderUnavailable(
                 f"{self._name} unavailable: HTTP {response.status_code}"
             )

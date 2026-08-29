@@ -146,7 +146,18 @@ async def test_retryable_statuses_raise_unavailable(
         await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
 
 
-@pytest.mark.parametrize("status", [400, 408, 429])
+@pytest.mark.asyncio
+async def test_rate_limit_status_raises_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = _Transport([httpx.Response(429, json={"error": "rate limited"})])
+    _patch_transport(monkeypatch, {"https://example.test": transport})
+
+    with pytest.raises(AiProviderUnavailable, match="HTTP 429"):
+        await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
+
+
+@pytest.mark.parametrize("status", [400, 408])
 @pytest.mark.asyncio
 async def test_nonretryable_4xx_includes_redacted_response_excerpt(
     monkeypatch: pytest.MonkeyPatch,

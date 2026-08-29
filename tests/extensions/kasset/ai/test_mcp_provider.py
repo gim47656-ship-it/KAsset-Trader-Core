@@ -175,7 +175,25 @@ async def test_mcp_retryable_http_status_is_unavailable(
         )
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 429])
+@pytest.mark.asyncio
+async def test_mcp_rate_limit_status_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = _Transport(httpx.Response(429, text="rate limited"))
+    _patch_transport(monkeypatch, transport)
+    client = McpStructuredJsonClient(url="https://mcp.test", token=None)
+
+    with pytest.raises(AiProviderUnavailable, match="HTTP 429"):
+        await client.request_json(
+            model="tool:run_skill",
+            input_payload={"sample": 1},
+            reasoning_effort="medium",
+            schema_name="test_schema",
+            schema={"type": "object"},
+        )
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408])
 @pytest.mark.asyncio
 async def test_mcp_nonretryable_and_auth_statuses_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
