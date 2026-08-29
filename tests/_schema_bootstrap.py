@@ -92,10 +92,13 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v43: KAsset per-user ownership adds device/account/global-runtime ORM tables
 # and changes existing credential/order/runtime/recommendation table shapes.
 # v44: kasset_ai_daily_routine_settings (new ORM table via create_all).
+# v45: KAsset automation promotion trust, position-cycle audit, and
+# AI-recommendation claim-lease ORM shapes. Production migrations remain
+# separate; this forces persistent test databases to rebuild the combined shape.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 44
+SCHEMA_BOOTSTRAP_VERSION = 45
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

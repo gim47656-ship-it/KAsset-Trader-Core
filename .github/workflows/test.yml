@@ -57,6 +57,55 @@ jobs:
     - name: Run call-duration freshness unit tests
       run: uv run pytest scripts/call_durations_test.py -q
 
+  migration:
+    name: migration (PostgreSQL 15 + TimescaleDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: timescale/timescaledb:2.17.2-pg15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
+
+    - name: Install UV
+      run: pip install uv
+
+    - name: Install dependencies
+      run: uv sync --group test
+
+    - name: Set test environment
+      run: |
+        chmod +x scripts/setup-test-env.sh
+        bash scripts/setup-test-env.sh
+
+    - name: Enable TimescaleDB
+      env:
+        PGPASSWORD: postgres
+      run: psql -h localhost -U postgres -d test_db -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS timescaledb'
+
+    - name: Upgrade and round-trip KAsset migrations
+      run: |
+        uv run alembic upgrade head
+        uv run alembic downgrade 20260829_kasset_strategy_promotion
+        uv run alembic upgrade head
+        test "$(uv run alembic heads | wc -l)" -eq 1
+
   # Exact-head source-ownership fence for the fencefix PR itself (ROB-1262
   # follow-up). Evaluates only this PR's actual base/head change set from
   # the GitHub event — never a fixed historical SHA vs. an advancing branch

@@ -33,6 +33,7 @@ tests/extensions/kasset/api/test_multi_user_contract.py
 tests/extensions/kasset/api/test_paper_regression.py
 tests/extensions/kasset/api/test_secret_security.py
 tests/extensions/kasset/api/test_watchlist.py
+tests/extensions/kasset/automation/test_ai_shadow.py
 tests/extensions/kasset/automation/test_ai_trading_policy.py
 tests/extensions/kasset/automation/test_backtest.py
 tests/extensions/kasset/automation/test_candidate_ranker.py
@@ -49,6 +50,7 @@ tests/extensions/kasset/automation/test_regime.py
 tests/extensions/kasset/automation/test_strategies.py
 tests/extensions/kasset/automation/test_strategy_promotion.py
 tests/extensions/kasset/automation/test_vertical_slice.py
+tests/extensions/kasset/test_claim_lease_migration.py
 tests/extensions/kasset/test_multi_user_migration_guards.py
 tests/infra/test_database_guard_completeness.py
 tests/infra/test_run_owned_database.py
@@ -125,6 +127,7 @@ tests/scripts/test_forecast_legacy_rule_migration.py
 tests/scripts/test_healthcheck_native.py
 tests/scripts/test_hermes_roundtrip_smoke_cli.py
 tests/scripts/test_invest_reports_us_schedule_cli.py
+tests/scripts/test_kasset_paper_ops.py
 tests/scripts/test_kis_live_auto_reconcile_cli.py
 tests/scripts/test_native_haproxy_first_cutover.py
 tests/scripts/test_news_relevance_judge_smoke.py
@@ -179,6 +182,7 @@ tests/services/brokers/toss/test_rate_limiter.py
 tests/services/brokers/toss/test_secret_redaction.py
 tests/services/buy_gate_ab_shadow/test_no_live_path_impact.py
 tests/services/buy_gate_ab_shadow/test_scoring_symmetry.py
+tests/services/daily_candles/test_readiness.py
 tests/services/execution_ledger/test_repository.py
 tests/services/execution_outcomes/test_static_boundaries.py
 tests/services/invest_screener_snapshots/test_alerts.py

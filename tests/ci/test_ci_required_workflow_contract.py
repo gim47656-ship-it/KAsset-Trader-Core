@@ -35,6 +35,7 @@ REQUIRED_JOB_IDS = ("lint", "taskiq-smoke", "test")
 
 AGGREGATE_JOB_ID = "ci-required"
 CLASSIFIER_JOB_ID = "change-classifier"
+MIGRATION_JOB_ID = "migration"
 
 
 @pytest.fixture(scope="module")
@@ -105,6 +106,27 @@ def test_test_job_matrix_shape_is_unchanged(workflow: dict[str, Any]) -> None:
         "python-version": ["3.13"],
         "group": [1, 2, 3, 4],
     }
+
+
+def test_kasset_migration_job_runs_unconditionally_on_pg15_timescale(
+    workflow: dict[str, Any],
+) -> None:
+    job = workflow["jobs"][MIGRATION_JOB_ID]
+    assert "if" not in job
+    assert "needs" not in job
+    assert job["services"]["postgres"]["image"] == ("timescale/timescaledb:2.17.2-pg15")
+    assert job.get("continue-on-error") is not True
+
+
+def test_kasset_migration_job_round_trips_all_new_revisions(
+    workflow: dict[str, Any],
+) -> None:
+    job = workflow["jobs"][MIGRATION_JOB_ID]
+    script = "\n".join(step.get("run", "") for step in job["steps"] if step.get("run"))
+    assert "CREATE EXTENSION IF NOT EXISTS timescaledb" in script
+    assert "alembic upgrade head" in script
+    assert "alembic downgrade 20260829_kasset_strategy_promotion" in script
+    assert "alembic heads" in script
 
 
 # --------------------------------------------------------------------------
