@@ -1,0 +1,80 @@
+# KAsset PAPER Breakout Automation Contract
+
+갱신: 2026-08-29
+
+## 목적과 경계
+
+현재 `KAsset-Trader-Core`의 APPROVAL/AUTO_PAPER 흐름에 결정론적 후보 순위, ATR 위험 수량, 보유 포지션 관리, 실전 모듈 재사용 포트폴리오 백테스트를 추가한다. 외부 저장소를 포크하거나 런타임에 yfinance를 추가하지 않는다. LIVE 주문 경로는 만들지 않는다.
+
+## 현재 구조 감사
+
+- `vertical_slice.py`는 관심종목을 먼저 넣고 최신 `InvestScreenerSnapshot`을 거래대금·거래량 순으로 채운 뒤, KRX 후보가 50개 미만일 때 실시간 Screener로 보완한다. PAPER 보유종목은 후보군에 강제 포함되지 않는다.
+- 후보별 최근 60개 일봉을 `DailyCandlesRepository`에서 읽고 4개 기존 전략과 `assess_market_regime`/`compose_weighted_ensemble`을 실행한다. 별도 cross-sectional factor rank는 없다.
+- `policy.py::portfolio_plan`은 운영예산과 종목 최대비중만으로 수량을 정한다. ATR, 손절폭, 유동성, Regime 위험배율은 수량 계산에 쓰지 않는다.
+- `consumer.py::PaperAutomationConsumer`는 APPROVED recommendation만 claim하고, 주문 직전 PAPER preview와 owner policy/Kill Switch를 다시 읽은 뒤 `PAPER` facade에 idempotency key `ai-rec:{recommendation_id}`로 제출한다. LIVE facade는 없다.
+- `backtest.py`는 단일 종목·단일 전략 long-only next-bar backtest다. Candidate Ranker, ensemble, portfolio budget, Position Manager를 재사용하지 않는다.
+- `AIRecommendation.evidence` JSONB는 후보 factor, position sizing, exit 상태, promotion 상태를 추가 저장할 수 있다. 기존 action 제약은 BUY/SELL/HOLD/WATCH이므로 50% 분할익절도 action은 SELL, evidence의 `exitKind=PARTIAL_SELL`로 표현한다.
+
+## 재사용과 최소 변경
+
+| 요구 | 기존 재사용 | 추가 경계 |
+|---|---|---|
+| 후보 데이터 | `DailyCandlesRepository`, `InvestScreenerSnapshot`, `SymbolMaster`, watchlist, KRX Screener provider | `candidate_ranker.py` |
+| 전략/시장 | `STRATEGIES`, `assess_market_regime`, `compose_weighted_ensemble` | 기존 구현 유지 |
+| 수량/위험 | `AITradingLimits`, `AITradingUsage`, `evaluate_hard_risk` | `position_sizing.py`; `policy.py`는 owner DB 조회와 Hard Risk 유지 |
+| 보유 관리 | `PaperPosition`, `AIRecommendationService`, `PaperAutomationConsumer` | `position_manager.py`와 owner-scoped 상태 모델 |
+| 주문 | 기존 PAPER preview/submit facade | 변경 없음; Position Manager는 직접 호출 금지 |
+| 백테스트 | `PriceBar`, 동일 Ranker/Strategy/Regime/Ensemble/Sizer/Manager | `portfolio_backtest.py` |
+| 활성화 | 기존 strategy version | owner-independent promotion 상태 모델 |
+
+## 결정론 계약
+
+### Candidate Ranker
+
+입력은 후보 metadata, 일봉, 시장 또는 cross-sectional benchmark 수익률, Screener 유동성, `as_of`, 중앙 config다. 출력은 다음 불변 필드를 가진다.
+
+- `symbol`, `total_score`, `factor_scores`, `penalties`
+- `data_as_of`, `valid_until`, `exclusion_reason`, `evidence`
+- 후보 출처와 `is_held`, `is_watchlisted`
+
+Factor는 유동성, benchmark 대비 relative strength, 20/60/120일 모멘텀, 20일/52주 신고가 거리, HH/HL, ATR 수축, 돌파 전 거래량 감소, 최근 거래량 증가, 주봉 추세를 포함한다. 돌파선 이격 과열과 비정상 거래량 폭발 뒤 미진정 상태는 감점한다. 미래 bar, stale bar, 비정상 OHLCV, 최소 가격·거래대금·데이터 길이 미달은 점수 보정이 아니라 `exclusion_reason`으로 fail-closed한다. 동일 입력의 정렬 tie-breaker는 symbol이다.
+
+후보군은 관심종목 → 현재 PAPER 보유종목 → 최신 Screener 유동성 상위 → 필요 시 KRX 실시간 Screener 순으로 합치되, 보유종목은 candidate limit 밖이어도 평가한다. Ranker 상위만 기존 전략·AI 검토로 전달하고 전체 factor evidence를 recommendation에 보존한다.
+
+### Position Sizer
+
+BUY 수량은 다음 상한의 최솟값이다.
+
+1. `(운영예산 × 거래당 위험률 × Regime 배율) / abs(진입가 - 손절가)`
+2. 종목 최대비중에서 기존 투자액을 뺀 추가 수량
+3. 남은 운용예산 수량
+4. 시장 최소 주문단위로 내림한 수량
+5. 중앙 config의 평균 거래량/거래대금 참여율 상한
+
+손절가 없음·역전, ATR 없음/비정상, stale/future 가격, 비정상 가격/수량, 예산 없음은 수량 0과 구조화 사유를 반환한다. AI 출력은 수량·손절가를 입력하거나 덮어쓸 수 없다. SELL은 실제 PAPER 보유수량까지만 허용한다.
+
+### Position Manager
+
+owner/account/symbol별 상태는 `entry_price`, `initial_atr`, `initial_stop`, `current_stop`, `highest_close`, `partial_exit_completed`, `entry_at`, `last_evaluated_at`, `strategy_version`을 저장한다. 기본 config는 초기 손절 3 ATR, +3 ATR에서 50% SELL, 잔여분 최고 종가 - 3 ATR trailing, 최대 보유/무수익 time stop이다.
+
+매 cycle에서 보유종목을 신규 후보보다 먼저 평가한다. 결과는 recommendation만 생성하며 Broker/PAPER facade를 직접 호출하지 않는다. APPROVAL은 PENDING, AUTO_PAPER는 기존 승인/claim 계약을 따르고 두 모드 모두 Hard Risk와 주문 직전 preview/Kill Switch 재검사를 거친다. `(owner, position, exit kind, signal bar)` idempotency evidence/state로 같은 청산 신호 중복 생성을 막는다.
+
+백테스트의 stop gap은 stop 가격 체결로 소급하지 않는다. 다음 거래 가능 봉 시가와 설정된 보수적 slippage를 적용한다.
+
+### Portfolio Backtest와 Promotion
+
+백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
+
+전략 상태는 `DRAFT`, `BACKTESTED`, `PAPER_APPROVED`, `PAPER_SUSPENDED`, `RETIRED`다. 백테스트 기준 통과가 확인된 version만 `PAPER_APPROVED`로 승격할 수 있고 AUTO_PAPER 실행은 승인 상태가 아니면 fail-closed한다.
+
+## AI 공급자 역할
+
+- 후보 factor, 수량, stop, exit는 AI를 호출하지 않는다.
+- 추천의 설명·검토만 AI provider를 사용한다.
+- 복잡한 후보/거래 검토는 MCP 직결을 우선하고 direct OpenAI-compatible API, OpenRouter 순으로 availability fallback한다.
+- 뉴스·공시 요약은 direct API 담당으로 두고 OpenRouter fallback을 사용한다. OpenRouter fallback 모델은 공식 slug `z-ai/glm-5.3-flash`다.
+- provider의 4xx/refusal/schema/safety 오류는 다음 provider로 숨기지 않고 fail-closed한다.
+
+## 참고 출처와 라이선스
+
+알고리즘 아이디어는 MIT License의 [VladPetrariu/Qullamaggie-breakout-scanner](https://github.com/VladPetrariu/Qullamaggie-breakout-scanner)를 참고했다. 재사용 아이디어는 multi-factor breakout ranking, relative strength, HH/HL, ATR compression, volume contraction/expansion, weekly confluence, ATR risk sizing, partial profit/trailing/time stop, walk-forward·stress·counterfactual 검증이다. 소스 파일을 복사하지 않고 KAsset의 Decimal·timezone·owner scope·PAPER safety 계약에 맞게 독립 구현한다.
