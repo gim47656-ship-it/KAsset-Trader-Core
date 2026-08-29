@@ -215,6 +215,9 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         published_at=datetime(2026, 8, 29, 9, 0),
     )
     db_session.add_all([success, failed, thin, disclosure])
+    await db_session.flush()
+    success_id = success.id
+    failed_id = failed.id
     await db_session.commit()
     generator = FakeSummaryGenerator(
         {
@@ -239,7 +242,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     assert first.failed == 1
     stored = await db_session.scalar(
         select(NewsAnalysisResult).where(
-            NewsAnalysisResult.article_id == success.id
+            NewsAnalysisResult.article_id == success_id
         )
     )
     assert stored is not None
@@ -247,10 +250,10 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
     )
     assert stored.model_name == "test-news-summary"
-    assert success.summary.startswith("The company reported")
     await db_session.refresh(success)
     await db_session.refresh(failed)
     await db_session.refresh(thin)
+    assert success.summary.startswith("The company reported")
     assert success.is_analyzed is True
     assert failed.is_analyzed is False
     assert thin.is_analyzed is False
@@ -274,7 +277,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         (
             await db_session.scalars(
                 select(NewsAnalysisResult.id).where(
-                    NewsAnalysisResult.article_id.in_([success.id, failed.id])
+                    NewsAnalysisResult.article_id.in_([success_id, failed_id])
                 )
             )
         ).all()
