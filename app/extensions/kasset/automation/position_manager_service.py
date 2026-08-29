@@ -89,6 +89,9 @@ def _trend_intact(rows: list[DailyCandleRow]) -> bool:
 
 
 def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
+    strategy_version = (row.strategy_version or "").strip()
+    if not strategy_version:
+        raise ValueError("position state strategy_version is required")
     return ManagedPositionState(
         market=row.market,
         symbol=row.symbol,
@@ -98,13 +101,35 @@ def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
         current_stop=Decimal(row.current_stop),
         highest_close=Decimal(row.highest_close),
         partial_exit_completed=row.partial_exit_completed,
-        entry_at=_aware_utc(row.entry_at),
+        entry_at=_aware_utc(row.opened_at),
         last_evaluated_at=(
             _aware_utc(row.last_evaluated_at)
             if row.last_evaluated_at is not None
             else None
         ),
-        strategy_version=row.strategy_version,
+        strategy_version=strategy_version,
+        position_cycle_id=int(row.position_cycle_id),
+    )
+
+
+def _state_matches_position_cycle(
+    row: KAssetPaperPositionState,
+    *,
+    owner_user_id: int,
+    account_id: int,
+    market: str,
+    position: PaperPosition,
+) -> bool:
+    return (
+        row.paper_position_id is not None
+        and int(row.paper_position_id) == int(position.id)
+        and int(row.position_cycle_id) == int(position.id)
+        and int(row.owner_user_id) == owner_user_id
+        and int(row.paper_account_id) == account_id
+        and row.market == market
+        and row.symbol == str(position.symbol)
+        and row.closed_at is None
+        and bool((row.strategy_version or "").strip())
     )
 
 
@@ -140,6 +165,26 @@ def position_recommendation_id(signal_key: str, owner_user_id: int) -> str:
     return f"{normalized}:{owner_user_id}"
 
 
+def _strategy_provenance_evidence(
+    row: KAssetPaperPositionState,
+) -> dict[str, object] | None:
+    strategy_key = (row.strategy_key or "").strip()
+    strategy_version = (row.strategy_version or "").strip()
+    if not strategy_key or not strategy_version:
+        return None
+    evidence: dict[str, object] = {
+        "title": "PAPER strategy promotion identity",
+        "source": "kasset_strategy_promotion",
+        "kind": "strategy_promotion",
+        "strategyKey": strategy_key,
+        "version": strategy_version,
+    }
+    fingerprint = (row.strategy_fingerprint or "").strip()
+    if fingerprint:
+        evidence["metricsHash"] = fingerprint
+    return evidence
+
+
 def _persistable_state(
     previous: ManagedPositionState,
     evaluated: ManagedPositionState,
@@ -170,15 +215,25 @@ class PaperPositionManagerService:
         *,
         now: datetime,
         config: PositionManagerConfig = PositionManagerConfig(),
+        strategy_key: str = DEFAULT_PAPER_STRATEGY_KEY,
         strategy_version: str = DEFAULT_PAPER_STRATEGY_VERSION,
+        strategy_fingerprint: str | None = None,
     ) -> None:
+        normalized_key = strategy_key.strip()
         normalized_version = strategy_version.strip()
-        if not normalized_version:
-            raise ValueError("strategy_version is required")
+        normalized_fingerprint = (
+            strategy_fingerprint.strip() if strategy_fingerprint is not None else None
+        )
+        if not normalized_key or not normalized_version:
+            raise ValueError("strategy_key and strategy_version are required")
+        if strategy_fingerprint is not None and not normalized_fingerprint:
+            raise ValueError("strategy_fingerprint must be non-empty when provided")
         self._db = db
         self._now = _aware_utc(now).replace(microsecond=0)
         self._config = config
         self._strategy_version = normalized_version
+        self._strategy_key = normalized_key
+        self._strategy_fingerprint = normalized_fingerprint
         self._policy = AITradingPolicyService()
 
     async def run_owner(self, owner_user_id: int) -> tuple[str, ...]:
@@ -197,6 +252,7 @@ class PaperPositionManagerService:
                     ),
                 )
                 .order_by(PaperPosition.instrument_type, PaperPosition.symbol)
+                .with_for_update(of=PaperPosition)
             )
         ).all()
         if not position_rows:
@@ -205,9 +261,7 @@ class PaperPositionManagerService:
         by_market: dict[str, list[tuple[PaperPosition, int]]] = {"KRX": [], "US": []}
         for position, account_id in position_rows:
             market = (
-                "KRX"
-                if position.instrument_type == InstrumentType.equity_kr
-                else "US"
+                "KRX" if position.instrument_type == InstrumentType.equity_kr else "US"
             )
             by_market[market].append((position, int(account_id)))
 
@@ -273,56 +327,78 @@ class PaperPositionManagerService:
         if latest_at > self._now or self._now - latest_at > _MAX_BAR_AGE:
             return None
 
+        position_id = int(position.id)
+        if position_id < 1:
+            raise ValueError("position_cycle_id must be positive")
         state_row = await self._db.scalar(
             select(KAssetPaperPositionState)
             .where(
-                KAssetPaperPositionState.owner_user_id == owner_user_id,
-                KAssetPaperPositionState.paper_account_id == account_id,
-                KAssetPaperPositionState.symbol == str(position.symbol),
+                KAssetPaperPositionState.paper_position_id == position_id,
+                KAssetPaperPositionState.closed_at.is_(None),
             )
             .with_for_update()
         )
-        if state_row is None:
+        if state_row is not None and int(state_row.position_cycle_id) != position_id:
+            state_row.paper_position_id = None
+            state_row.closed_at = self._now
+            await self._db.flush()
+            state_row = None
+        state_matches = state_row is not None and _state_matches_position_cycle(
+            state_row,
+            owner_user_id=owner_user_id,
+            account_id=account_id,
+            market=market,
+            position=position,
+        )
+        if not state_matches:
             atr = _average_true_range(ordered)
             if atr is None:
                 return None
-            entry_at = _aware_utc(position.created_at)
+            opened_at = _aware_utc(position.created_at)
             state = initialize_position(
                 market=market,
                 symbol=str(position.symbol),
                 entry_price=Decimal(position.avg_price),
                 initial_atr=atr,
-                entry_at=entry_at,
+                entry_at=opened_at,
                 strategy_version=self._strategy_version,
+                position_cycle_id=position_id,
                 config=self._config,
             )
-            state_row = KAssetPaperPositionState(
-                owner_user_id=owner_user_id,
-                paper_account_id=account_id,
-                symbol=state.symbol,
-                market=state.market,
-                entry_price=state.entry_price,
-                initial_atr=state.initial_atr,
-                initial_stop=state.initial_stop,
-                current_stop=state.current_stop,
-                highest_close=state.highest_close,
-                partial_exit_completed=False,
-                entry_at=state.entry_at,
-                last_evaluated_at=None,
-                last_exit_signal_key=None,
-                strategy_version=state.strategy_version,
-            )
-            self._db.add(state_row)
+            if state_row is None:
+                state_row = KAssetPaperPositionState(position_cycle_id=position_id)
+                self._db.add(state_row)
+            state_row.paper_position_id = position_id
+            state_row.owner_user_id = owner_user_id
+            state_row.paper_account_id = account_id
+            state_row.market = state.market
+            state_row.symbol = state.symbol
+            state_row.entry_order_id = None
+            state_row.entry_price = state.entry_price
+            state_row.initial_atr = state.initial_atr
+            state_row.initial_stop = state.initial_stop
+            state_row.current_stop = state.current_stop
+            state_row.highest_close = state.highest_close
+            state_row.partial_exit_completed = False
+            state_row.opened_at = state.entry_at
+            state_row.closed_at = None
+            state_row.last_evaluated_at = None
+            state_row.last_exit_signal_key = None
+            state_row.strategy_key = self._strategy_key
+            state_row.strategy_version = state.strategy_version
+            state_row.strategy_fingerprint = self._strategy_fingerprint
         else:
             state = _state_from_row(state_row)
 
         pending_recommendation_id = state_row.last_exit_signal_key
         pending_kind: ExitKind | None = None
         pending_active = False
+        previous_recommendation: AIRecommendation | None = None
         if pending_recommendation_id is not None:
-            previous_recommendation = await self._db.get(
-                AIRecommendation,
-                pending_recommendation_id,
+            previous_recommendation = await self._db.scalar(
+                select(AIRecommendation)
+                .where(AIRecommendation.id == pending_recommendation_id)
+                .with_for_update()
             )
             if previous_recommendation is not None:
                 previous_kind = _stored_exit_kind(previous_recommendation)
@@ -364,8 +440,7 @@ class PaperPositionManagerService:
             close=_decimal(latest.close),
         )
         bars_held = sum(
-            state.entry_at < _aware_utc(row.time_utc) <= latest_at
-            for row in ordered
+            state.entry_at < _aware_utc(row.time_utc) <= latest_at for row in ordered
         )
         evaluation = evaluate_position(
             state,
@@ -384,6 +459,17 @@ class PaperPositionManagerService:
                 signal_key=pending_recommendation_id,
             )
             return None
+        if (
+            pending_active
+            and pending_kind is ExitKind.PARTIAL_SELL
+            and signal.kind is not ExitKind.PARTIAL_SELL
+            and previous_recommendation is not None
+            and previous_recommendation.paper_execution_status is None
+        ):
+            previous_recommendation.valid_until = self._now
+            previous_recommendation.updated_at = self._now
+            pending_active = False
+            pending_recommendation_id = None
         if pending_active and (
             pending_kind is not ExitKind.PARTIAL_SELL
             or signal.kind is ExitKind.PARTIAL_SELL
@@ -430,6 +516,31 @@ class PaperPositionManagerService:
             now=self._now,
         )
         failed = [check.detail for check in hard_risk.checks if not check.passed]
+        evidence: list[dict[str, object]] = [
+            {
+                "title": "Deterministic PAPER position exit",
+                "source": "position_manager",
+                "kind": "position_exit",
+                "exitKind": signal.kind.value,
+                "idempotencyKey": recommendation_id,
+                "paperPositionId": position_id,
+                "positionCycleId": state.position_cycle_id,
+                "quantityFraction": str(signal.quantity_fraction),
+                "initialAtr": str(state.initial_atr),
+                "initialStop": str(state.initial_stop),
+                "currentStop": str(state.current_stop),
+                "barAsOf": bar.as_of.isoformat(),
+            },
+            {
+                "title": "PAPER exit Hard Risk",
+                "source": "kasset_hard_risk",
+                "kind": "hard_risk",
+                **hard_risk.as_evidence(),
+            },
+        ]
+        strategy_evidence = _strategy_provenance_evidence(state_row)
+        if strategy_evidence is not None:
+            evidence.append(strategy_evidence)
         row = AIRecommendation(
             id=recommendation_id,
             owner_user_id=owner_user_id,
@@ -442,33 +553,7 @@ class PaperPositionManagerService:
             headline=f"{position.symbol} {signal.kind.value} 청산 검토",
             rationale=[signal.reason],
             risks=failed,
-            evidence=[
-                {
-                    "title": "Deterministic PAPER position exit",
-                    "source": "position_manager",
-                    "kind": "position_exit",
-                    "exitKind": signal.kind.value,
-                    "idempotencyKey": recommendation_id,
-                    "quantityFraction": str(signal.quantity_fraction),
-                    "initialAtr": str(state.initial_atr),
-                    "initialStop": str(state.initial_stop),
-                    "currentStop": str(state.current_stop),
-                    "barAsOf": bar.as_of.isoformat(),
-                },
-                {
-                    "title": "PAPER exit Hard Risk",
-                    "source": "kasset_hard_risk",
-                    "kind": "hard_risk",
-                    **hard_risk.as_evidence(),
-                },
-                {
-                    "title": "PAPER strategy promotion identity",
-                    "source": "kasset_strategy_promotion",
-                    "kind": "strategy_promotion",
-                    "strategyKey": DEFAULT_PAPER_STRATEGY_KEY,
-                    "version": state.strategy_version,
-                },
-            ],
+            evidence=evidence,
             confidence="1",
             reference_price=str(signal.reference_price),
             suggested_quantity=str(quantity),

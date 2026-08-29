@@ -7,13 +7,14 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.money import quantize_crypto_qty as _q_crypto_qty
 from app.core.money import quantize_money as _q_money
 from app.core.money import quantize_pct as _q_pct
 from app.core.timezone import now_kst
+from app.extensions.kasset.models import KAssetPaperPositionState
 from app.models.paper_trading import (
     PaperAccount,
     PaperDailySnapshot,
@@ -128,7 +129,21 @@ class PaperTradingService:
         if account is None:
             raise ValueError(f"Account {account_id} not found")
 
-        # Wipe positions for this account.
+        await self.db.execute(
+            select(PaperPosition.id)
+            .where(PaperPosition.account_id == account_id)
+            .with_for_update()
+        )
+        # Close managed cycles before removing their current position rows.
+        closed_at = now_kst()
+        await self.db.execute(
+            update(KAssetPaperPositionState)
+            .where(
+                KAssetPaperPositionState.paper_account_id == account_id,
+                KAssetPaperPositionState.closed_at.is_(None),
+            )
+            .values(paper_position_id=None, closed_at=closed_at)
+        )
         await self.db.execute(
             sa_delete(PaperPosition).where(PaperPosition.account_id == account_id)
         )
@@ -270,10 +285,12 @@ class PaperTradingService:
     # ------------------------------------------------------------------ #
     async def _get_position(self, account_id: int, symbol: str) -> PaperPosition | None:
         result = await self.db.execute(
-            select(PaperPosition).where(
+            select(PaperPosition)
+            .where(
                 PaperPosition.account_id == account_id,
                 PaperPosition.symbol == symbol,
             )
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -380,6 +397,17 @@ class PaperTradingService:
 
             # Update/Delete position
             if position.quantity == qty:
+                managed_state = await self.db.scalar(
+                    select(KAssetPaperPositionState)
+                    .where(
+                        KAssetPaperPositionState.paper_position_id == position.id,
+                        KAssetPaperPositionState.closed_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if managed_state is not None:
+                    managed_state.paper_position_id = None
+                    managed_state.closed_at = now_kst()
                 await self.db.delete(position)
             else:
                 position.quantity -= qty

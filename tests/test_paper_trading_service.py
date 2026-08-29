@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.extensions.kasset.models import KAssetPaperPositionState
 from app.models.paper_trading import (
     PaperAccount,
     PaperDailySnapshot,
@@ -120,9 +122,13 @@ class TestAccountManagement:
 
         assert result.cash_krw == pytest.approx(Decimal("10000000"))
         assert result.cash_usd == pytest.approx(Decimal("0"))
-        # DELETE FROM paper_positions WHERE account_id = 1
-        mock_db.execute.assert_awaited_once()
-        mock_db.commit.assert_awaited_once()
+        assert mock_db.execute.await_count == 3
+        lock_statement, close_statement, delete_statement = (
+            awaited.args[0] for awaited in mock_db.execute.await_args_list
+        )
+        assert tuple(lock_statement.selected_columns)[0].name == "id"
+        assert close_statement.table.name == KAssetPaperPositionState.__tablename__
+        assert delete_statement.table.name == PaperPosition.__tablename__
 
     @pytest.mark.asyncio
     async def test_reset_account_missing_raises(self, service, mock_db, monkeypatch):
@@ -531,6 +537,11 @@ class TestExecuteOrderSell:
         )
         monkeypatch.setattr(service, "_get_position", AsyncMock(return_value=position))
         mock_db.delete = AsyncMock()
+        managed_state = SimpleNamespace(
+            paper_position_id=position.id,
+            closed_at=None,
+        )
+        mock_db.scalar.return_value = managed_state
 
         await service.execute_order(
             account_id=1,
@@ -541,6 +552,8 @@ class TestExecuteOrderSell:
         )
 
         mock_db.delete.assert_awaited_once_with(position)
+        assert managed_state.paper_position_id is None
+        assert managed_state.closed_at is not None
 
     @pytest.mark.asyncio
     async def test_sell_without_position_raises(self, service, monkeypatch, mock_db):

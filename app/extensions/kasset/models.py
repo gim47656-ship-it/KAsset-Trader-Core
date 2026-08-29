@@ -274,8 +274,7 @@ class KAssetDailyRoutineSetting(Base):
         CheckConstraint(
             "recommendation_market_scope IN ('KR_ONLY', 'US_ONLY', 'KR_US')",
             name=(
-                "ck_kasset_ai_daily_routine_settings_"
-                "recommendation_market_scope_valid"
+                "ck_kasset_ai_daily_routine_settings_recommendation_market_scope_valid"
             ),
         ),
     )
@@ -307,7 +306,7 @@ class KAssetDailyRoutineSetting(Base):
 
 
 class KAssetPaperPositionState(Base):
-    """Owner-scoped deterministic lifecycle state for one current PAPER position."""
+    """Deterministic lifecycle state for one concrete PAPER position cycle."""
 
     __tablename__ = "kasset_paper_position_states"
     __table_args__ = (
@@ -344,6 +343,32 @@ class KAssetPaperPositionState(Base):
             "highest_close > 0",
             name="ck_kasset_position_state_highest_close_positive",
         ),
+        CheckConstraint(
+            "position_cycle_id > 0",
+            name="ck_kasset_position_state_cycle_positive",
+        ),
+        CheckConstraint(
+            "(paper_position_id IS NOT NULL AND closed_at IS NULL) "
+            "OR (paper_position_id IS NULL AND closed_at IS NOT NULL)",
+            name="ck_kasset_position_state_lifecycle",
+        ),
+        CheckConstraint(
+            "closed_at IS NULL OR closed_at >= opened_at",
+            name="ck_kasset_position_state_timestamp_order",
+        ),
+        UniqueConstraint(
+            "paper_position_id",
+            name="uq_kasset_position_state_active_position",
+        ),
+        Index(
+            "uq_kasset_position_state_owner_active_holding",
+            "owner_user_id",
+            "paper_account_id",
+            "market",
+            "symbol",
+            unique=True,
+            postgresql_where=text("closed_at IS NULL"),
+        ),
         UniqueConstraint(
             "owner_user_id",
             "last_exit_signal_key",
@@ -356,10 +381,27 @@ class KAssetPaperPositionState(Base):
         ),
     )
 
-    owner_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    paper_account_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    position_cycle_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    paper_position_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "paper.paper_positions.id",
+            name="fk_kasset_position_state_paper_position",
+            ondelete="SET NULL",
+        ),
+    )
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paper_account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     market: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_order_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey(
+            "kasset_android_paper_orders.id",
+            name="fk_kasset_position_state_entry_order",
+            ondelete="SET NULL",
+        ),
+    )
     entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     initial_atr: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     initial_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
@@ -371,15 +413,16 @@ class KAssetPaperPositionState(Base):
         default=False,
         server_default="false",
     )
-    entry_at: Mapped[datetime] = mapped_column(
+    opened_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
     )
-    last_evaluated_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True)
-    )
+    closed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_exit_signal_key: Mapped[str | None] = mapped_column(Text)
-    strategy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy_key: Mapped[str | None] = mapped_column(Text)
+    strategy_version: Mapped[str | None] = mapped_column(Text)
+    strategy_fingerprint: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

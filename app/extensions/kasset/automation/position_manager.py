@@ -63,6 +63,7 @@ class ManagedPositionState:
     entry_at: datetime
     last_evaluated_at: datetime | None
     strategy_version: str
+    position_cycle_id: int | None = None
 
     def __post_init__(self) -> None:
         market = self.market.strip().upper()
@@ -75,6 +76,8 @@ class ManagedPositionState:
         object.__setattr__(self, "market", market)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "strategy_version", strategy_version)
+        if self.position_cycle_id is not None and self.position_cycle_id < 1:
+            raise ValueError("position_cycle_id must be positive")
         for name, value in (
             ("entry_price", self.entry_price),
             ("initial_atr", self.initial_atr),
@@ -147,6 +150,7 @@ def initialize_position(
     initial_atr: Decimal,
     entry_at: datetime,
     strategy_version: str,
+    position_cycle_id: int | None = None,
     config: PositionManagerConfig = PositionManagerConfig(),
 ) -> ManagedPositionState:
     if not entry_price.is_finite() or entry_price <= _ZERO:
@@ -168,6 +172,7 @@ def initialize_position(
         entry_at=entry_at,
         last_evaluated_at=None,
         strategy_version=strategy_version,
+        position_cycle_id=position_cycle_id,
     )
 
 
@@ -177,6 +182,7 @@ def exit_signal_key(
     symbol: str,
     kind: ExitKind,
     signal_at: datetime,
+    position_cycle_id: int | None = None,
 ) -> str:
     normalized_market = market.strip().upper()
     normalized_symbol = symbol.strip().upper()
@@ -184,10 +190,13 @@ def exit_signal_key(
         raise ValueError("market and symbol must identify a PAPER position")
     if signal_at.tzinfo is None or signal_at.utcoffset() is None:
         raise ValueError("signal_at must be timezone-aware")
+    if position_cycle_id is not None and position_cycle_id < 1:
+        raise ValueError("position_cycle_id must be positive")
     material = "|".join(
         (
             normalized_market,
             normalized_symbol,
+            str(position_cycle_id) if position_cycle_id is not None else "",
             kind.value,
             signal_at.astimezone(UTC).isoformat(),
         )
@@ -215,6 +224,7 @@ def _signal(
             symbol=state.symbol,
             kind=kind,
             signal_at=bar.as_of,
+            position_cycle_id=state.position_cycle_id,
         ),
     )
 
