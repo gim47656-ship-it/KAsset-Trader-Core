@@ -17,17 +17,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.timezone import KST
 from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.daily_routine_schemas import (
+    ROUTINE_KEYS,
     AvailableRoutine,
     DailyRoutineAlert,
     DailyRoutineResponse,
-    ROUTINE_KEYS,
     RoutineKey,
 )
 from app.extensions.kasset.api.paper_schemas import Quote
 from app.extensions.kasset.models import KAssetDailyRoutineSetting
 from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.trading import Instrument, InstrumentType, UserWatchItem
-from app.services.daily_candles.repository import DailyCandleRow, DailyCandlesRepository, MarketKey
+from app.services.daily_candles.repository import (
+    DailyCandleRow,
+    DailyCandlesRepository,
+    MarketKey,
+)
 
 _RAPID_CHANGE_THRESHOLD = Decimal("5")
 _NEWS_WINDOW = timedelta(hours=24)

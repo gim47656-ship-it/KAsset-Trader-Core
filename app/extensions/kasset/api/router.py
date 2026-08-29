@@ -102,7 +102,6 @@ from app.extensions.kasset.api.toss_market_data import (
     toss_market_data,
 )
 from app.extensions.kasset.api.watchlist import watchlist_service
-from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
@@ -110,6 +109,7 @@ from app.extensions.kasset.automation.policy import (
     AITradingSnapshot,
     OperatingMode,
 )
+from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.models.trading import UserRole
 from app.schemas.ai_recommendations import (
     AITradingDerivedLimits,

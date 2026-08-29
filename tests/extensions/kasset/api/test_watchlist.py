@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.extensions.kasset.api import krx_quotes
-from app.extensions.kasset.api.schemas import MAX_WATCHLIST_ITEMS
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
+from app.extensions.kasset.api.schemas import MAX_WATCHLIST_ITEMS
 from app.models.symbol_master import SymbolMaster
 from app.models.trading import (
     Exchange,
