@@ -49,6 +49,12 @@ _SUMMARY_INSTRUCTIONS = (
     "보완을 하지 마라. 투자 권유, 매수·매도 추천, 목표주가를 쓰지 마라. "
     "제목이나 form을 본문 사실처럼 확대 해석하지 마라."
 )
+_NUMBER_RETRY_INSTRUCTIONS = (
+    "직전 시도는 원문에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. "
+    "수치를 쓸 때는 body_excerpt에 보이는 숫자 토큰과 단위를 문자 그대로 복사하라. "
+    "반올림, 자릿수 축약, million/billion 환산을 하지 마라. 그대로 복사할 수 없으면 "
+    "그 수치를 생략하고 원문에 명시된 비수치 사실만 2~4문장으로 요약하라."
+)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _NUMBER_RE = re.compile(r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%)?")
 _INVESTMENT_ADVICE_RE = re.compile(
@@ -154,16 +160,7 @@ class OpenAiDisclosureSummaryGenerator:
             "form": disclosure.form,
             "body_excerpt": disclosure.body_excerpt,
         }
-        response = await self._client.request_json(
-            model=self._model,
-            input_payload=payload,
-            reasoning_effort="low",
-            schema_name="kasset_disclosure_summary",
-            schema=_SUMMARY_SCHEMA,
-            additional_instructions=_SUMMARY_INSTRUCTIONS,
-        )
-        if set(response) != {"summary"}:
-            raise ValueError("disclosure summary response shape is invalid")
+        response = await self._request(payload, retry=False)
         source_text = "\n".join(
             value
             for value in (
@@ -174,7 +171,39 @@ class OpenAiDisclosureSummaryGenerator:
             )
             if value
         )
-        return _validated_summary(response["summary"], source_text)
+        try:
+            return _validated_summary(response["summary"], source_text)
+        except ValueError as exc:
+            if str(exc) != "disclosure summary contains numbers absent from source":
+                raise
+        retry_response = await self._request(payload, retry=True)
+        return _validated_summary(retry_response["summary"], source_text)
+
+    async def _request(
+        self,
+        payload: dict[str, object],
+        *,
+        retry: bool,
+    ) -> dict[str, object]:
+        response = await self._client.request_json(
+            model=self._model,
+            input_payload=payload,
+            reasoning_effort="low",
+            schema_name=(
+                "kasset_disclosure_summary_retry"
+                if retry
+                else "kasset_disclosure_summary"
+            ),
+            schema=_SUMMARY_SCHEMA,
+            additional_instructions=(
+                f"{_SUMMARY_INSTRUCTIONS} {_NUMBER_RETRY_INSTRUCTIONS}"
+                if retry
+                else _SUMMARY_INSTRUCTIONS
+            ),
+        )
+        if set(response) != {"summary"}:
+            raise ValueError("disclosure summary response shape is invalid")
+        return response
 
 
 def build_disclosure_summary_generator() -> DisclosureSummaryGenerator | None:
