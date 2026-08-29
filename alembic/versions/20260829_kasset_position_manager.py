@@ -1,7 +1,7 @@
 """KAsset PAPER position-manager state를 추가한다.
 
 Revision ID: 20260829_kasset_position_manager
-Revises: 20260829_kasset_routine_market_scope
+Revises: 20260829_kasset_market_scope
 Create Date: 2026-08-29
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260829_kasset_position_manager"
-down_revision = "20260829_kasset_routine_market_scope"
+down_revision = "20260829_kasset_market_scope"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -55,12 +55,24 @@ def upgrade() -> None:
             server_default=sa.func.now(),
             nullable=False,
         ),
-        sa.CheckConstraint("market IN ('KRX', 'US')", name="ck_kasset_position_state_market_valid"),
-        sa.CheckConstraint("entry_price > 0", name="ck_kasset_position_state_entry_price_positive"),
-        sa.CheckConstraint("initial_atr > 0", name="ck_kasset_position_state_initial_atr_positive"),
-        sa.CheckConstraint("initial_stop > 0", name="ck_kasset_position_state_initial_stop_positive"),
-        sa.CheckConstraint("current_stop > 0", name="ck_kasset_position_state_current_stop_positive"),
-        sa.CheckConstraint("highest_close > 0", name="ck_kasset_position_state_highest_close_positive"),
+        sa.CheckConstraint(
+            "market IN ('KRX', 'US')", name="ck_kasset_position_state_market_valid"
+        ),
+        sa.CheckConstraint(
+            "entry_price > 0", name="ck_kasset_position_state_entry_price_positive"
+        ),
+        sa.CheckConstraint(
+            "initial_atr > 0", name="ck_kasset_position_state_initial_atr_positive"
+        ),
+        sa.CheckConstraint(
+            "initial_stop > 0", name="ck_kasset_position_state_initial_stop_positive"
+        ),
+        sa.CheckConstraint(
+            "current_stop > 0", name="ck_kasset_position_state_current_stop_positive"
+        ),
+        sa.CheckConstraint(
+            "highest_close > 0", name="ck_kasset_position_state_highest_close_positive"
+        ),
         sa.ForeignKeyConstraint(
             ["owner_user_id", "paper_account_id"],
             [

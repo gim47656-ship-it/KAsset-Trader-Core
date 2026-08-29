@@ -19,7 +19,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - **Claim 복구 완료**: `CLAIMED|SUCCEEDED|FAILED`와 token/lease/attempt count를 사용한다. 만료 claim만 회수하고 stale worker 완료 쓰기를 거부한다. `ai-rec:{recommendation_id}`로 기존 주문을 먼저 조회하며, 불명확 submit은 즉시 재전송하지 않는다.
 - **AI shadow 완료**: 최종 선택되어 저장된 recommendation에 exact provider/tier/model ID, normalized input hash, validated response, confidence, 선택 사유를 secret-free evidence로 남긴다. 통계 범위는 `persisted final selections only`다.
 - **429 보강 완료**: direct/MCP provider의 429는 availability fallback으로 처리하고 나머지 4xx·refusal·schema·safety 오류는 fail-closed한다.
-- **CI gate 완료**: 4개 고정 shard가 모든 non-live test 파일을 정확히 한 번 포함한다. `Test` workflow는 `workflow_dispatch`와 PostgreSQL 15 + TimescaleDB migration up/down/up job을 가진다.
+- **CI gate 완료**: 4개 고정 shard가 모든 non-live test 파일을 정확히 한 번 포함한다. `Test` workflow는 `workflow_dispatch`와 PostgreSQL 15에서 ROB-849 경계를 재구성한 뒤 후속 전체 migration을 downgrade/upgrade하는 전용 job을 가진다.
 - **운영 미배포**: `20260830_kasset_position_cycles → 20260830_kasset_promotion_trust → 20260830_kasset_claim_lease` migration을 운영 DB에 적용하지 않았고 scheduler/LIVE 경로를 변경하지 않았다.
 - **실기기 검증 보류**: Android 계약 회귀 unit test는 통과했지만 사용자가 아침에 할 실물기기 확인은 남아 있다.
 
@@ -31,7 +31,8 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - claim lease/token CAS, 만료 회수, owner-scoped client ID 조회, account별 correlation ID 유일성, 불명확 submit 복구를 추가했다. 별도 `PREVIEWED/SUBMITTING/UNKNOWN/RECONCILING` 상태와 heartbeat 열은 같은 사실의 중복 표현이라 만들지 않았다.
 - DB 일봉 readiness에서 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate action 상태, PIT/상장폐지 근거, KOSPI/SPY benchmark 범위를 계산한다.
 - 선택된 recommendation의 AI route metadata와 validated verdict를 `ai_shadow` evidence에 보존하고 read-only 통계를 추가했다. 선택되지 않아 durable row가 없는 후보를 저장했다고 꾸미지 않는다.
-- GitHub Actions에 TimescaleDB 2.17.2/PostgreSQL 15 migration round-trip job을 추가하고 신규 test 파일을 shard manifest에 단일 배정했다.
+- GitHub Actions에 PostgreSQL 15 migration round-trip job을 추가하고 stale fixture-only test manifest entry를 제거했다.
+- Alembic 기본 `version_num VARCHAR(32)`에 맞게 미배포 KAsset revision ID 2개를 단축하고 실제 PostgreSQL round-trip에서 후속 migration 전체를 검증했다.
 - 기존 CI formatter/type gate에서 드러난 KAsset 관련 포맷 drift와 DART receipt number 타입 narrowing을 정리했다.
 
 검증:
@@ -44,7 +45,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - `ty check app/ --error-on-warning`: 통과.
 - `alembic heads`: `20260830_kasset_claim_lease (head)` 단일 head.
 - Android `:app:testDebugUnitTest`: `BUILD SUCCESSFUL`.
-- 로컬 일반 PostgreSQL의 full Alembic upgrade는 기존 migration의 TimescaleDB 필수 조건에서 예상대로 fail-closed했다. GitHub Actions의 고정 TimescaleDB/PostgreSQL 15 job이 fresh upgrade → 신규 3개 revision downgrade → upgrade를 검증한다.
+- 실제 PostgreSQL 15에서 ROB-849 경계 재구성 → 이전 revision downgrade → current head upgrade → 재다운그레이드 → 재업그레이드와 단일 head 확인이 통과했다. 과거 TimescaleDB 연속 집계 migration은 이 KAsset 전용 회귀 job의 검증 범위가 아니며 수정하지 않았다.
 
 주요 커밋:
 

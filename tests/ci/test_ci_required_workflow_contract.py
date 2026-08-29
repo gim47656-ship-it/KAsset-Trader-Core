@@ -108,13 +108,13 @@ def test_test_job_matrix_shape_is_unchanged(workflow: dict[str, Any]) -> None:
     }
 
 
-def test_kasset_migration_job_runs_unconditionally_on_pg15_timescale(
+def test_kasset_migration_job_runs_unconditionally_on_pg15(
     workflow: dict[str, Any],
 ) -> None:
     job = workflow["jobs"][MIGRATION_JOB_ID]
     assert "if" not in job
     assert "needs" not in job
-    assert job["services"]["postgres"]["image"] == ("timescale/timescaledb:2.17.2-pg15")
+    assert job["services"]["postgres"]["image"] == "postgres:15-alpine"
     assert job.get("continue-on-error") is not True
 
 
@@ -123,10 +123,11 @@ def test_kasset_migration_job_round_trips_all_new_revisions(
 ) -> None:
     job = workflow["jobs"][MIGRATION_JOB_ID]
     script = "\n".join(step.get("run", "") for step in job["steps"] if step.get("run"))
-    assert "CREATE EXTENSION IF NOT EXISTS timescaledb" in script
-    assert "alembic upgrade head" in script
-    assert "alembic downgrade 20260829_kasset_strategy_promotion" in script
-    assert "alembic heads" in script
+    assert (
+        "tests/services/paper_cohort/test_migration.py"
+        "::test_real_postgresql_upgrade_downgrade_upgrade_single_head" in script
+    )
+    assert "timescale" not in script.lower()
 
 
 # --------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """KAsset 일일 AI 추천 시장 범위를 추가한다.
 
-Revision ID: 20260829_kasset_routine_market_scope
+Revision ID: 20260829_kasset_market_scope
 Revises: 20260829_kasset_daily_routines
 Create Date: 2026-08-29
 """
@@ -13,13 +13,15 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20260829_kasset_routine_market_scope"
+revision = "20260829_kasset_market_scope"
 down_revision = "20260829_kasset_daily_routines"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _TABLE_NAME = "kasset_ai_daily_routine_settings"
-_CONSTRAINT_NAME = "ck_kasset_ai_daily_routine_settings_recommendation_market_scope_valid"
+_CONSTRAINT_NAME = (
+    "ck_kasset_ai_daily_routine_settings_recommendation_market_scope_valid"
+)
 
 
 def upgrade() -> None:

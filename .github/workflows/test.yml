@@ -58,12 +58,12 @@ jobs:
       run: uv run pytest scripts/call_durations_test.py -q
 
   migration:
-    name: migration (PostgreSQL 15 + TimescaleDB)
+    name: migration (PostgreSQL 15)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
       postgres:
-        image: timescale/timescaledb:2.17.2-pg15
+        image: postgres:15-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -94,17 +94,10 @@ jobs:
         chmod +x scripts/setup-test-env.sh
         bash scripts/setup-test-env.sh
 
-    - name: Enable TimescaleDB
-      env:
-        PGPASSWORD: postgres
-      run: psql -h localhost -U postgres -d test_db -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS timescaledb'
-
-    - name: Upgrade and round-trip KAsset migrations
-      run: |
-        uv run alembic upgrade head
-        uv run alembic downgrade 20260829_kasset_strategy_promotion
-        uv run alembic upgrade head
-        test "$(uv run alembic heads | wc -l)" -eq 1
+    - name: Reconstruct boundary and round-trip all later migrations
+      run: >-
+        uv run pytest -q
+        tests/services/paper_cohort/test_migration.py::test_real_postgresql_upgrade_downgrade_upgrade_single_head
 
   # Exact-head source-ownership fence for the fencefix PR itself (ROB-1262
   # follow-up). Evaluates only this PR's actual base/head change set from

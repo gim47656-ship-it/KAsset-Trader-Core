@@ -760,6 +760,6 @@ def test_cycle_model_and_migration_preserve_closed_audit() -> None:
         / "versions"
         / "20260830_kasset_position_cycles.py"
     ).read_text(encoding="utf-8")
-    assert 'down_revision = "20260829_kasset_strategy_promotion"' in migration
+    assert 'down_revision = "20260829_kasset_promotion"' in migration
     assert 'ondelete="SET NULL"' in migration
     assert "closed_at IS NULL" in migration

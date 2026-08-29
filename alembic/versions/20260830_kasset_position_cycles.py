@@ -1,7 +1,7 @@
 """KAsset PAPER position state를 실제 보유 cycle에 결합한다.
 
 Revision ID: 20260830_kasset_position_cycles
-Revises: 20260829_kasset_strategy_promotion
+Revises: 20260829_kasset_promotion
 Create Date: 2026-08-30
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260830_kasset_position_cycles"
-down_revision = "20260829_kasset_strategy_promotion"
+down_revision = "20260829_kasset_promotion"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

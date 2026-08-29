@@ -1,6 +1,6 @@
 """KAsset strategy promotion 전역 상태를 추가한다.
 
-Revision ID: 20260829_kasset_strategy_promotion
+Revision ID: 20260829_kasset_promotion
 Revises: 20260829_kasset_position_manager
 Create Date: 2026-08-29
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "20260829_kasset_strategy_promotion"
+revision = "20260829_kasset_promotion"
 down_revision = "20260829_kasset_position_manager"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
