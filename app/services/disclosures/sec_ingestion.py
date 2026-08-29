@@ -27,6 +27,7 @@ from app.services.disclosures.sec_edgar import (
     parse_submissions,
     resolve_sec_user_agent,
 )
+from app.services.disclosures.summary_service import summarize_ingested_disclosures
 from app.services.symbol_news_store import (
     DisclosureArticleInput,
     DisclosureUpsertCounts,
@@ -215,12 +216,35 @@ async def _collect_with_client(
         )
 
 
+async def _summarize_after_ingest(
+    db: AsyncSession,
+    items: Sequence[DisclosureArticleInput],
+) -> None:
+    try:
+        result = await summarize_ingested_disclosures(
+            db,
+            [item.url for item in items],
+        )
+    except Exception:
+        await db.rollback()
+        logger.exception("SEC 공시 자동 요약 batch 실패")
+        return
+    logger.info(
+        "SEC 공시 자동 요약: status=%s selected=%d summarized=%d failed=%d",
+        result.status,
+        result.selected,
+        result.summarized,
+        result.failed,
+    )
+
+
 async def _persist_collected(
     db: AsyncSession,
     *,
     run_uuid: str,
     started_at: datetime,
     collected: _CollectedSec,
+    summarize_after_ingest: bool,
 ) -> tuple[DisclosureUpsertCounts, str]:
     await symbol_news_store.create_news_ingestion_run(
         db,
@@ -246,6 +270,8 @@ async def _persist_collected(
         feed_source=SEC_FEED_SOURCE,
     )
     await db.commit()
+    if summarize_after_ingest and collected.items:
+        await _summarize_after_ingest(db, collected.items)
     return counts, status
 
 
@@ -288,6 +314,7 @@ async def ingest_sec_edgar(
     user_agent: str | None = None,
     rate_limiter: SecRateLimiter | None = None,
     ticker_cache: CompanyTickerCache = company_ticker_cache,
+    summarize_after_ingest: bool = False,
 ) -> SecIngestionResult:
     """날짜 하한 안의 SEC 공시를 전량 수집하고 종목별 결과를 기록한다."""
     current_run_uuid = run_uuid or str(uuid.uuid4())
@@ -329,6 +356,7 @@ async def ingest_sec_edgar(
             run_uuid=current_run_uuid,
             started_at=started_at,
             collected=collected,
+            summarize_after_ingest=summarize_after_ingest,
         )
     except asyncio.CancelledError as exc:
         await _record_failed_run(

@@ -70,6 +70,7 @@ async def run_dart_disclosure_ingestion(
                 stock_symbols=stock_symbols,
                 run_uuid=run_uuid,
                 dart_client=dart_client,
+                summarize_after_ingest=True,
             )
         except DartPartialIngestionError as exc:
             return {

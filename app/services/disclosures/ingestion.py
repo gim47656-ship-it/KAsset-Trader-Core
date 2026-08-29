@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import symbol_news_store
 from app.services.disclosures.dart_list import DartListError, fetch_disclosure_list
 from app.services.disclosures.feed_sources import DART_FEED_SOURCE
+from app.services.disclosures.summary_service import summarize_ingested_disclosures
 from app.services.symbol_news_store import (
     DisclosureArticleInput,
     DisclosureUpsertCounts,
@@ -110,6 +111,28 @@ def _normalize_rows(
     return normalized, skipped
 
 
+async def _summarize_after_ingest(
+    db: AsyncSession,
+    items: Sequence[DisclosureArticleInput],
+) -> None:
+    try:
+        result = await summarize_ingested_disclosures(
+            db,
+            [item.url for item in items],
+        )
+    except Exception:
+        await db.rollback()
+        logger.exception("DART 공시 자동 요약 batch 실패")
+        return
+    logger.info(
+        "DART 공시 자동 요약: status=%s selected=%d summarized=%d failed=%d",
+        result.status,
+        result.selected,
+        result.summarized,
+        result.failed,
+    )
+
+
 async def _persist_outcome(
     db: AsyncSession,
     *,
@@ -118,6 +141,7 @@ async def _persist_outcome(
     rows: Sequence[Mapping[str, Any]],
     status: str,
     error_message: str | None,
+    summarize_after_ingest: bool,
 ) -> DisclosureUpsertCounts:
     normalized, invalid_count = _normalize_rows(rows)
     await symbol_news_store.create_news_ingestion_run(
@@ -143,6 +167,8 @@ async def _persist_outcome(
         feed_source=DART_FEED_SOURCE,
     )
     await db.commit()
+    if summarize_after_ingest and normalized:
+        await _summarize_after_ingest(db, normalized)
     return counts
 
 
@@ -183,6 +209,7 @@ async def ingest_dart_disclosures(
     stock_symbols: Sequence[str] | None = None,
     run_uuid: str | None = None,
     dart_client: Any | None = None,
+    summarize_after_ingest: bool = False,
 ) -> tuple[int, int, int]:
     """DART 공시를 수집하고 ``(신규, 갱신, 스킵)`` 건수를 반환한다.
 
@@ -209,6 +236,7 @@ async def ingest_dart_disclosures(
                     rows=exc.partial_filings,
                     status="partial",
                     error_message=str(exc)[:2000],
+                    summarize_after_ingest=summarize_after_ingest,
                 )
             except Exception as persist_exc:
                 await _record_failed_run(
@@ -275,6 +303,7 @@ async def ingest_dart_disclosures(
             rows=rows,
             status="success",
             error_message=None,
+            summarize_after_ingest=summarize_after_ingest,
         )
     except Exception as exc:
         await _record_failed_run(

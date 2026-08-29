@@ -75,6 +75,7 @@ async def run_sec_edgar_ingestion(
                 user_agent=user_agent,
                 rate_limiter=rate_limiter,
                 ticker_cache=ticker_cache,
+                summarize_after_ingest=True,
             )
     except Exception as exc:
         logger.exception("SEC EDGAR 잡 실패: run_uuid=%s", run_uuid)

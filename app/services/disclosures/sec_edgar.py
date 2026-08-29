@@ -78,7 +78,7 @@ def resolve_sec_user_agent(explicit: str | None = None) -> str:
     return normalized
 
 
-async def _shared_sec_rate_limiter() -> AsyncSlidingWindowRateLimiter:
+async def get_shared_sec_rate_limiter() -> AsyncSlidingWindowRateLimiter:
     return await get_limiter(
         "sec_edgar",
         "_global",
@@ -102,7 +102,7 @@ class SecEdgarClient:
         self._rate_limiter = rate_limiter
 
     async def get_json(self, url: str) -> Mapping[str, Any]:
-        limiter = self._rate_limiter or await _shared_sec_rate_limiter()
+        limiter = self._rate_limiter or await get_shared_sec_rate_limiter()
         try:
             await limiter.acquire()
             response = await self._http_client.get(
