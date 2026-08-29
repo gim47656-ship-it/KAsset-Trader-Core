@@ -24,11 +24,19 @@ WatchlistMarket = Literal["KRX", "US", "CRYPTO"]
 InstrumentSearchMarket = Literal["ALL", "KRX", "US"]
 MarketOverviewStatus = Literal["fresh", "partial", "unavailable"]
 MarketOverviewItemStatus = Literal["available", "stale", "unavailable"]
-MarketSessionState = Literal["OPEN", "PREOPEN", "AFTER_HOURS", "CLOSED"]
+MarketSessionState = Literal[
+    "DAY_MARKET",
+    "PRE_MARKET",
+    "REGULAR",
+    "AFTER_MARKET",
+    "CLOSED",
+]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
 MarketIndexRange = Literal["1W", "1M", "3M", "6M"]
 CandleRange = Literal["1D", "1W", "1M", "3M", "6M"]
-CandleInterval = Literal["1m", "1d"]
+CandleInterval = Literal["10m", "1h", "1d"]
+MarketNewsFilterKind = Literal["all", "news", "disclosure"]
+MarketNewsKind = Literal["news", "disclosure"]
 MarketIndicatorKey = Literal[
     "VIX",
     "US10Y",
@@ -89,6 +97,22 @@ class DailyCandlesResponse(AndroidWireModel):
     candles: list[DailyCandle]
 
 
+class MarketNewsItem(AndroidWireModel):
+    kind: MarketNewsKind
+    title: str
+    summary: str | None
+    source: str | None
+    url: str
+    published_at: str | None
+    symbol: str | None
+    stock_name: str | None
+
+
+class MarketNewsResponse(AndroidWireModel):
+    items: list[MarketNewsItem]
+    next_cursor: str | None
+
+
 class MarketOverviewItem(AndroidWireModel):
     symbol: str
     name: str
@@ -130,7 +154,7 @@ class MarketIndexDetailResponse(AndroidWireModel):
 
 class MarketOverviewSession(AndroidWireModel):
     market: Literal["KRX", "US"]
-    state: MarketSessionState
+    state: MarketSessionState | None
 
 
 class MarketOverviewError(AndroidWireModel):

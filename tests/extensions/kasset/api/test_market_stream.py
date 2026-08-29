@@ -198,6 +198,7 @@ def _baseline_quote(symbol: str = "TQQQ", market: str = "US") -> Quote:
         currency="USD" if market == "US" else "KRW",
         price=Decimal("73.00"),
         previous_close=Decimal("72.00"),
+        session="REGULAR",
         as_of=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
         source=krx_quotes.TOSS_QUOTE_SOURCE,
     )
@@ -1128,6 +1129,74 @@ def test_stream_quote_payload_matches_the_rest_quote_model() -> None:
     assert streamed.change_rate == "3.33"
     assert streamed.as_of == "2026-08-28T12:23:04Z"
     assert streamed.source == "TOSS_API_WS"
+
+
+@pytest.mark.asyncio
+async def test_stream_refreshes_quote_baseline_when_calendar_session_changes() -> None:
+    bus = _FakeBus()
+    regular = krx_quotes.build_quote(
+        market="US",
+        symbol="TQQQ",
+        name="ProShares UltraPro QQQ",
+        currency="USD",
+        price=Decimal("71.89"),
+        previous_close=Decimal("73.3"),
+        session="REGULAR",
+        regular_close=None,
+        as_of=datetime(2026, 8, 28, 20, 0, tzinfo=UTC),
+        source=krx_quotes.TOSS_QUOTE_SOURCE,
+    )
+    after = krx_quotes.build_quote(
+        market="US",
+        symbol="TQQQ",
+        name="ProShares UltraPro QQQ",
+        currency="USD",
+        price=Decimal("71.89"),
+        previous_close=Decimal("73.3"),
+        session="AFTER_MARKET",
+        regular_close=Decimal("71.89"),
+        as_of=datetime(2026, 8, 28, 20, 0, tzinfo=UTC),
+        source=krx_quotes.TOSS_QUOTE_SOURCE,
+    )
+    baselines = iter((regular, after))
+    calls = 0
+
+    async def baseline_resolver(_topic) -> Quote:
+        nonlocal calls
+        calls += 1
+        return next(baselines)
+
+    async def session_resolver(market: str, moment: datetime) -> str:
+        assert market == "US"
+        assert moment == datetime(2026, 8, 28, 23, 20, tzinfo=UTC)
+        return "AFTER_MARKET"
+
+    runtime = MarketStreamRuntime(
+        bus=bus,
+        baseline_resolver=baseline_resolver,
+        session_resolver=session_resolver,  # type: ignore[arg-type]
+        start_owner=False,
+    )
+
+    message = await runtime._tick_message(  # noqa: SLF001 — session 경계 주입
+        "quote:US:TQQQ",
+        {
+            "trade": {
+                "price": "71.6995",
+                "asOf": "2026-08-28T23:20:00Z",
+            }
+        },
+    )
+
+    assert message is not None
+    quote = json.loads(message)["quote"]
+    assert calls == 2
+    assert quote["session"] == "AFTER_MARKET"
+    assert quote["regularClose"] == "71.89"
+    assert quote["changeAmount"] == "-1.41"
+    assert quote["changeRate"] == "-1.92"
+    assert quote["sessionChangeAmount"] == "-0.1905"
+    assert quote["sessionChangeRate"] == "-0.26"
 
 
 def test_stream_orderbook_payload_matches_the_rest_orderbook_field_names() -> None:

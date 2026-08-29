@@ -14,10 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from math import ceil
 from typing import cast
@@ -27,6 +28,7 @@ from app.core.config import settings
 from app.services.brokers.toss.candles import TossCandleClient, fetch_toss_candles
 from app.services.brokers.toss.client import TossReadClient
 from app.services.brokers.toss.dto import TossCandlesPage
+from app.services.brokers.toss.market_calendar import TossSessionWindow
 from app.services.invest_price_fallback import TossPriceClient
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,7 @@ TOSS_QUOTE_SOURCE = "TOSS_API_PRICES"
 # 일봉 폴백 실패를 캐시할 시간. 성공값은 거래일이 바뀔 때까지 유지하므로 TTL이
 # 없고, 실패(값 없음)만 짧게 캐시해 장애 중 폴링이 토스를 두드리지 않게 한다.
 _DAILY_CLOSE_MISS_TTL_SECONDS = 60.0
+_REGULAR_CLOSE_MISS_TTL_SECONDS = 60.0
 # previousClose 하나를 찾는 데 필요한 최소 일봉 수는 2다(당일 + 직전 거래일).
 # 같은 날짜가 중복 저장된 응답에서도 직전 거래일을 찾도록 1행 더 읽는다.
 _DAILY_CLOSE_LOOKBACK = 3
@@ -55,6 +58,12 @@ _MAX_PLAUSIBLE_YEAR = 2100
 
 # Toss 사양의 요청당 캔들 상한(`count.maximum`). 페이지 수 계산의 분모다.
 _TOSS_CANDLE_PAGE_LIMIT = 200
+# 닫힌 세션은 최근 128개 종목·세션만 프로세스 안에 보관한다. 390봉 세션 기준
+# 약 5만 봉으로 상한을 고정해, US 전체 종목을 조회해도 캐시가 무한히 자라지 않는다.
+_INTRADAY_BARS_CACHE_MAX_ENTRIES = 128
+
+type _IntradayCacheKey = tuple[str, str, datetime, datetime]
+type _IntradayInflightKey = tuple[_IntradayCacheKey, bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +208,27 @@ def _previous_daily_close(page: object, *, boundary: date) -> Decimal | None:
     return None
 
 
+def _regular_close(page: object, *, window: TossSessionWindow) -> Decimal | None:
+    """정규장 구간 안의 마지막 1분봉 종가만 채택한다."""
+
+    rows = getattr(page, "candles", None)
+    if not rows:
+        return None
+    candidates: list[tuple[datetime, Decimal]] = []
+    for row in rows:
+        as_of = _normalized_as_of(getattr(row, "timestamp", None))
+        close = getattr(row, "close_price", None)
+        if as_of is None or not isinstance(close, Decimal):
+            continue
+        if not close.is_finite() or close <= 0:
+            continue
+        if window.start <= as_of < window.end:
+            candidates.append((as_of, close))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def _daily_bars(page: object) -> list[TossDailyBar]:
     """일봉 페이지를 오래된 순 목록으로 바꾼다. 이상한 봉은 버린다."""
     rows = getattr(page, "candles", None)
@@ -234,6 +264,74 @@ def _daily_bars(page: object) -> list[TossDailyBar]:
     return bars
 
 
+def aggregate_intraday_bars(
+    bars: Sequence[TossDailyBar],
+    *,
+    window: TossSessionWindow,
+    interval_minutes: int,
+) -> list[TossDailyBar]:
+    """정규장 시작을 기준으로 분봉을 고정 간격 OHLCV 봉으로 집계한다.
+
+    거래가 있는 버킷만 만들며, 정규장 끝의 짧은 버킷도 그대로 보존한다.
+    """
+    if interval_minutes <= 0:
+        raise ValueError("interval_minutes must be positive")
+
+    bucket_seconds = interval_minutes * 60
+    aggregated: list[TossDailyBar] = []
+    current_index: int | None = None
+    current_open = Decimal(0)
+    current_high = Decimal(0)
+    current_low = Decimal(0)
+    current_close = Decimal(0)
+    current_volume = Decimal(0)
+
+    for bar in sorted(bars, key=lambda item: item.time_utc):
+        if not window.contains(bar.time_utc):
+            continue
+        bucket_index = int(
+            (bar.time_utc - window.start).total_seconds() // bucket_seconds
+        )
+        if current_index != bucket_index:
+            if current_index is not None:
+                aggregated.append(
+                    TossDailyBar(
+                        time_utc=window.start
+                        + timedelta(minutes=current_index * interval_minutes),
+                        open=current_open,
+                        high=current_high,
+                        low=current_low,
+                        close=current_close,
+                        volume=current_volume,
+                    )
+                )
+            current_index = bucket_index
+            current_open = bar.open
+            current_high = bar.high
+            current_low = bar.low
+            current_close = bar.close
+            current_volume = bar.volume
+            continue
+        current_high = max(current_high, bar.high)
+        current_low = min(current_low, bar.low)
+        current_close = bar.close
+        current_volume += bar.volume
+
+    if current_index is not None:
+        aggregated.append(
+            TossDailyBar(
+                time_utc=window.start
+                + timedelta(minutes=current_index * interval_minutes),
+                open=current_open,
+                high=current_high,
+                low=current_low,
+                close=current_close,
+                volume=current_volume,
+            )
+        )
+    return aggregated
+
+
 class TossSharedMarketData:
     """토스 배치 시세 채널. 클라이언트 재사용 + 짧은 캐시 + 단일비행.
 
@@ -249,7 +347,11 @@ class TossSharedMarketData:
     - `previous_closes`는 저장 일봉이 없는 종목의 전일 종가를 토스 일봉에서
       받아 거래일 단위로 캐시한다. 저장 일봉 유니버스에 없는 종목이
       등락률·차트 없이 보이던 결함을 이 경로가 덮는다.
-    - `daily_bars`는 저장 일봉이 비어 있는 종목의 차트를 토스 일봉으로 채운다.
+    - `regular_closes`는 끝난 정규장의 마지막 1분봉만 읽고 정규장 종료
+      시각별로 캐시해, 연장장 시세의 정규장 기준 등락을 만든다.
+    - `daily_bars`는 저장 일봉이 없거나 부족한 종목의 차트를 토스 일봉으로 채운다.
+    - `intraday_bars`는 진행 중인 세션은 캐시하지 않고, 닫힌 정규장만
+      `(market, symbol, start, end)` 단위의 제한된 LRU에 보관한다.
     """
 
     _CACHE_TTL_SECONDS = 2.0
@@ -279,8 +381,21 @@ class TossSharedMarketData:
             tuple[str, date], asyncio.Future[Decimal | None]
         ] = {}
         self._daily_close_gate = asyncio.Semaphore(_DAILY_CLOSE_CONCURRENCY)
+        # symbol -> (정규장 종료 시각, 정규장 종가). 정규장 종료 시각이
+        # 달라질 때만 새로 조회한다.
+        self._regular_close: dict[str, tuple[datetime, Decimal | None]] = {}
+        self._regular_close_miss: dict[str, float] = {}
+        self._regular_close_inflight: dict[
+            tuple[str, datetime], asyncio.Future[Decimal | None]
+        ] = {}
         # (symbol, count) -> (만료 시각, 일봉). 차트 응답 전용 캐시다.
         self._daily_bars: dict[tuple[str, int], tuple[float, list[TossDailyBar]]] = {}
+        self._closed_intraday_bars: OrderedDict[
+            _IntradayCacheKey, list[TossDailyBar]
+        ] = OrderedDict()
+        self._intraday_inflight: dict[
+            _IntradayInflightKey, asyncio.Future[list[TossDailyBar] | None]
+        ] = {}
 
     async def prices(self, symbols: Sequence[str]) -> dict[str, TossQuotePoint]:
         """요청 종목의 실시간 시세를 조회한다. 실패 종목은 결과에서 빠진다."""
@@ -429,46 +544,191 @@ class TossSharedMarketData:
             if future is not None and not future.done():
                 future.set_result(close)
 
-    async def intraday_bars(self, symbol: str, *, count: int) -> list[TossDailyBar]:
-        """토스 1분봉을 오래된 순으로 돌려준다. 실패하거나 비면 빈 목록이다.
+    async def regular_closes(
+        self, symbols: Sequence[str], *, window: TossSessionWindow
+    ) -> dict[str, Decimal]:
+        """완료된 정규장의 마지막 1분봉 종가를 종목별로 모은다."""
 
-        페이지 수는 요청량에서 유도한다. 상수로 묶으면 `count` 를 늘려도 그 상한이 다시
-        봉을 잘라 낸다(2페이지 = 400봉).
+        if not bool(getattr(settings, "toss_api_enabled", False)):
+            return {}
+        requested = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+        if not requested:
+            return {}
+        self._reset_if_loop_changed()
+
+        now = time.monotonic()
+        resolved: dict[str, Decimal] = {}
+        pending: dict[str, asyncio.Future[Decimal | None]] = {}
+        owned: dict[str, asyncio.Future[Decimal | None]] = {}
+        loop = asyncio.get_running_loop()
+        for symbol in requested:
+            cached = self._regular_close.get(symbol)
+            if cached is not None and cached[0] == window.end:
+                if cached[1] is not None:
+                    resolved[symbol] = cached[1]
+                    continue
+                if now < self._regular_close_miss.get(symbol, 0.0):
+                    continue
+            key = (symbol, window.end)
+            inflight = self._regular_close_inflight.get(key)
+            if inflight is not None:
+                pending[symbol] = inflight
+                continue
+            future: asyncio.Future[Decimal | None] = loop.create_future()
+            self._regular_close_inflight[key] = future
+            owned[symbol] = future
+
+        if owned:
+            await asyncio.gather(
+                *(self._fetch_regular_close(symbol, window=window) for symbol in owned)
+            )
+        for symbol, future in (*owned.items(), *pending.items()):
+            close = await future
+            if close is not None:
+                resolved[symbol] = close
+        return resolved
+
+    async def _fetch_regular_close(
+        self, symbol: str, *, window: TossSessionWindow
+    ) -> None:
+        close: Decimal | None = None
+        try:
+            async with self._daily_close_gate:
+                client = await self._ensure_client()
+                candles = getattr(client, "candles", None)
+                if candles is not None:
+                    page = await candles(
+                        symbol,
+                        interval="1m",
+                        count=1,
+                        before=(window.end - timedelta(microseconds=1)).isoformat(),
+                        adjusted=True,
+                    )
+                    close = _regular_close(page, window=window)
+        except Exception as exc:  # noqa: BLE001 — 정규장 종가는 없으면 null이다
+            logger.warning(
+                "kasset toss regular close unavailable (%s): regularClose omitted",
+                type(exc).__name__,
+            )
+        finally:
+            now = time.monotonic()
+            self._regular_close[symbol] = (window.end, close)
+            if close is None:
+                self._regular_close_miss[symbol] = now + _REGULAR_CLOSE_MISS_TTL_SECONDS
+            else:
+                self._regular_close_miss.pop(symbol, None)
+            future = self._regular_close_inflight.pop((symbol, window.end), None)
+            if future is not None and not future.done():
+                future.set_result(close)
+
+    async def intraday_bars(
+        self,
+        symbol: str,
+        *,
+        count: int,
+        market: str,
+        window: TossSessionWindow,
+        moment: datetime,
+    ) -> list[TossDailyBar]:
+        """정규장 1분봉을 오래된 순으로 돌려준다.
+
+        진행 중인 정규장은 마지막 봉이 계속 변하므로 캐시하지 않되, 동시 요청은
+        한 번의 조회로 합친다. 닫힌 정규장은 종료 직전 시각을 `before`로 주어
+        시간외 봉을 건너뛴 뒤, 시장·종목·정규장 창 단위로 캐시한다.
         """
         if not bool(getattr(settings, "toss_api_enabled", False)):
             return []
         normalized = symbol.strip().upper()
-        if not normalized or count <= 0:
+        normalized_market = market.strip().lower()
+        if not normalized or not normalized_market or count <= 0:
             return []
         self._reset_if_loop_changed()
 
+        key = (normalized_market, normalized, window.start, window.end)
+        is_closed = moment >= window.end
+        inflight_key = (key, is_closed)
+        if is_closed:
+            cached = self._closed_intraday_bars.get(key)
+            if cached is not None:
+                self._closed_intraday_bars.move_to_end(key)
+                return cached
+
+        future = self._intraday_inflight.get(inflight_key)
+        if future is not None:
+            bars = await future
+            return bars if bars is not None else []
+
+        future = asyncio.get_running_loop().create_future()
+        self._intraday_inflight[inflight_key] = future
+        bars: list[TossDailyBar] | None = None
+        try:
+            before = (
+                (window.end - timedelta(microseconds=1)).isoformat()
+                if is_closed
+                else None
+            )
+            bars = await self._fetch_intraday_bars(
+                normalized,
+                count=count,
+                before=before,
+                window=window,
+            )
+            if is_closed and bars is not None:
+                self._closed_intraday_bars[key] = bars
+                self._closed_intraday_bars.move_to_end(key)
+                while (
+                    len(self._closed_intraday_bars) > _INTRADAY_BARS_CACHE_MAX_ENTRIES
+                ):
+                    self._closed_intraday_bars.popitem(last=False)
+        finally:
+            pending = self._intraday_inflight.pop(inflight_key, None)
+            if pending is not None and not pending.done():
+                pending.set_result(bars)
+        return bars if bars is not None else []
+
+    async def _fetch_intraday_bars(
+        self,
+        symbol: str,
+        *,
+        count: int,
+        before: str | None,
+        window: TossSessionWindow,
+    ) -> list[TossDailyBar] | None:
+        """한 세션의 실제 분봉을 읽는다. 공급자 실패는 캐시하지 않는다."""
         try:
             async with self._daily_close_gate:
                 client = await self._ensure_client()
                 candles = getattr(client, "candles", None)
                 if candles is None:
-                    return []
+                    return None
                 rows = await fetch_toss_candles(
                     client=cast(TossCandleClient, client),
-                    symbol=normalized,
+                    symbol=symbol,
                     interval="1m",
                     count=count,
+                    before=before,
                     adjusted=True,
                     max_pages=ceil(count / _TOSS_CANDLE_PAGE_LIMIT),
                 )
-                return _daily_bars(TossCandlesPage(candles=rows, next_before=None))
+                return [
+                    bar
+                    for bar in _daily_bars(
+                        TossCandlesPage(candles=rows, next_before=None)
+                    )
+                    if window.contains(bar.time_utc)
+                ]
         except Exception as exc:  # noqa: BLE001 — 분봉은 없으면 빈 목록이다
             logger.warning(
                 "kasset toss intraday bars unavailable (%s): chart omitted",
                 type(exc).__name__,
             )
-            return []
+            return None
 
     async def daily_bars(self, symbol: str, *, count: int) -> list[TossDailyBar]:
         """토스 일봉을 오래된 순으로 돌려준다. 실패하면 빈 목록이다.
 
-        저장 일봉이 비어 있는 종목의 차트를 채우는 용도다. 저장 일봉이 있으면
-        호출부가 그것을 그대로 쓰고 이 경로는 타지 않는다.
+        저장 일봉이 없거나 요청 수보다 부족한 종목의 차트를 채우는 용도다.
+        같은 종목·요청 수는 기존 짧은 TTL 캐시로 반복 호출을 흡수한다.
         """
         if not bool(getattr(settings, "toss_api_enabled", False)):
             return []
@@ -575,8 +835,13 @@ class TossSharedMarketData:
         self._daily_close.clear()
         self._daily_close_miss.clear()
         self._daily_close_inflight.clear()
+        self._regular_close.clear()
+        self._regular_close_miss.clear()
+        self._regular_close_inflight.clear()
         self._daily_close_gate = asyncio.Semaphore(_DAILY_CLOSE_CONCURRENCY)
         self._daily_bars.clear()
+        self._closed_intraday_bars.clear()
+        self._intraday_inflight.clear()
 
     async def aclose(self) -> None:
         """lifespan 종료 시 공용 클라이언트를 닫는다."""
@@ -600,7 +865,12 @@ class TossSharedMarketData:
         self._daily_close.clear()
         self._daily_close_miss.clear()
         self._daily_close_inflight.clear()
+        self._regular_close.clear()
+        self._regular_close_miss.clear()
+        self._regular_close_inflight.clear()
         self._daily_bars.clear()
+        self._closed_intraday_bars.clear()
+        self._intraday_inflight.clear()
 
 
 toss_market_data = TossSharedMarketData()

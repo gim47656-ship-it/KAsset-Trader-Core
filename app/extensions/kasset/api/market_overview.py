@@ -10,6 +10,7 @@ from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal
 
 from app.core.config import settings
+from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.schemas import (
     MarketIndexCandle,
@@ -41,12 +42,6 @@ from app.mcp_server.tooling.market_session import (
     DATA_STATE_MARKET_CLOSED,
     DATA_STATE_PREMARKET_UNAVAILABLE,
     DATA_STATE_STALE,
-    US_SESSION_AFTERHOURS,
-    US_SESSION_CLOSED,
-    US_SESSION_PREMARKET,
-    US_SESSION_REGULAR,
-    kr_market_data_state,
-    us_market_session,
 )
 from app.services.brokers.upbit.client import fetch_multiple_tickers
 from app.services.exchange_rate_service import (
@@ -144,17 +139,7 @@ _TOSS_INDICATOR_SYMBOLS: tuple[str, ...] = tuple(
     if provider == "toss"
 )
 _UPBIT_BTC_MARKET = "KRW-BTC"
-_KR_SESSION_STATES: dict[str, MarketSessionState] = {
-    DATA_STATE_FRESH: "OPEN",
-    DATA_STATE_PREMARKET_UNAVAILABLE: "PREOPEN",
-    DATA_STATE_MARKET_CLOSED: "CLOSED",
-}
-_US_SESSION_STATES: dict[str, MarketSessionState] = {
-    US_SESSION_REGULAR: "OPEN",
-    US_SESSION_PREMARKET: "PREOPEN",
-    US_SESSION_AFTERHOURS: "AFTER_HOURS",
-    US_SESSION_CLOSED: "CLOSED",
-}
+_SessionStates = dict[str, MarketSessionState | None]
 
 _cache: dict[str, object] = {}
 _lock: asyncio.Lock | None = None
@@ -310,12 +295,12 @@ def _latest_as_of(items: list[MarketOverviewItem]) -> str | None:
     return max(parsed_values, key=lambda pair: pair[0])[1]
 
 
-def _session_snapshot() -> tuple[
-    list[MarketOverviewSession], dict[str, MarketSessionState]
-]:
-    kr_state = _KR_SESSION_STATES[kr_market_data_state()]
-    us_state = _US_SESSION_STATES[us_market_session()]
-    states: dict[str, MarketSessionState] = {"KRX": kr_state, "US": us_state}
+async def _session_snapshot() -> tuple[list[MarketOverviewSession], _SessionStates]:
+    kr_state, us_state = await asyncio.gather(
+        krx_quotes.resolve_market_session_state("KRX"),
+        krx_quotes.resolve_market_session_state("US"),
+    )
+    states: _SessionStates = {"KRX": kr_state, "US": us_state}
     return (
         [
             MarketOverviewSession(market="KRX", state=kr_state),
@@ -348,7 +333,7 @@ def _unavailable_item(
 
 
 def _index_status(
-    row: dict[str, Any], *, session_state: MarketSessionState
+    row: dict[str, Any], *, session_state: MarketSessionState | None
 ) -> MarketOverviewItemStatus:
     data_state = row.get("data_state")
     if data_state == DATA_STATE_FRESH:
@@ -361,7 +346,7 @@ def _index_status(
         return "stale"
     if row.get("source") == "yfinance_history_fallback":
         return "stale"
-    return "available" if session_state == "OPEN" else "stale"
+    return "available" if session_state == "REGULAR" else "stale"
 
 
 def _index_rows_by_symbol(result: object) -> dict[str, dict[str, Any]]:
@@ -458,7 +443,7 @@ def _index_summary(
     *,
     symbol: str,
     range_: MarketIndexRange,
-    sessions: dict[str, MarketSessionState],
+    sessions: _SessionStates,
 ) -> MarketIndexSummary:
     name, market, currency = _INDEX_DEFINITIONS_BY_SYMBOL[symbol]
     session_state = sessions[market]
@@ -507,7 +492,7 @@ def _index_summary(
 def _index_items(
     result: object,
     *,
-    sessions: dict[str, MarketSessionState],
+    sessions: _SessionStates,
     group_error_code: MarketOverviewErrorCode | None = None,
 ) -> tuple[list[MarketOverviewItem], list[MarketOverviewError]]:
     rows_by_symbol = _index_rows_by_symbol(result)
@@ -636,7 +621,7 @@ def _indicator_status(
     row: dict[str, Any],
     *,
     provider: _IndicatorProvider,
-    sessions: dict[str, MarketSessionState],
+    sessions: _SessionStates,
 ) -> MarketOverviewItemStatus:
     """지표 한 줄의 신선도. 지표는 세션 필드를 노출하지 않으므로 여기서만 쓴다."""
     if provider == "toss":
@@ -645,8 +630,8 @@ def _indicator_status(
         return "available" if row.get("quote_asof") else "stale"
     # Upbit(암호화폐)는 24시간 시장이라 세션 개념이 없다. US 배치 지표만 미국
     # 세션 상태로 판정한다(고정 키 조회이므로 sessions KeyError 경로가 없다).
-    session_state: MarketSessionState = (
-        sessions["US"] if provider == "us_batch" else "OPEN"
+    session_state: MarketSessionState | None = (
+        sessions["US"] if provider == "us_batch" else "REGULAR"
     )
     return _index_status(row, session_state=session_state)
 
@@ -656,7 +641,7 @@ def _indicator_items(
     btc_ticker: object,
     toss_points: object,
     *,
-    sessions: dict[str, MarketSessionState],
+    sessions: _SessionStates,
     us_batch_error_code: MarketOverviewErrorCode | None = None,
     upbit_error_code: MarketOverviewErrorCode | None = None,
     toss_error_code: MarketOverviewErrorCode | None = None,
@@ -840,25 +825,32 @@ async def _toss_indicator_points() -> dict[str, TossIndicatorPoint]:
 
 
 async def _build_market_overview() -> MarketOverviewResponse:
-    sessions, session_states = _session_snapshot()
-    # 소스는 모두 동시에 나가고 각각 SOURCE_TIMEOUT_SECONDS로 묶인다. yfinance
-    # 지표는 지수와 같은 배치 한 번에 들어가고 토스 국채도 배치 1회이므로,
-    # 지표를 추가해도 늘어나는 소스는 둘(Upbit·토스)뿐이고 이들은 기존 소스와
-    # 병렬로 나가므로 전체 지연 예산은 그대로다.
+    # 소스는 모두 동시에 나가고 각각 SOURCE_TIMEOUT_SECONDS로 묶인다. calendar도
+    # 같은 fan-out에 합류하므로 첫 조회에서 소스 왕복이 직렬로 늘지 않는다.
     (
         index_result,
         fx_result,
         toss_usd_result,
         btc_result,
         toss_indicator_result,
+        session_result,
     ) = await asyncio.gather(
         _bounded(handle_get_market_index_current_batch(_OVERVIEW_BATCH_SYMBOLS)),
         _bounded(get_open_er_api_usd_snapshot()),
         _bounded(_toss_usd_quote()),
         _bounded(_upbit_btc_ticker()),
         _bounded(_toss_indicator_points()),
+        _session_snapshot(),
         return_exceptions=True,
     )
+    if isinstance(session_result, BaseException):
+        sessions = [
+            MarketOverviewSession(market="KRX", state=None),
+            MarketOverviewSession(market="US", state=None),
+        ]
+        session_states: _SessionStates = {"KRX": None, "US": None}
+    else:
+        sessions, session_states = session_result
 
     index_error_code: MarketOverviewErrorCode | None = None
     if isinstance(index_result, BaseException):
@@ -982,7 +974,7 @@ async def _build_market_index_detail(
     symbol: str,
     range_: MarketIndexRange,
 ) -> MarketIndexDetailResponse:
-    _, session_states = _session_snapshot()
+    _, session_states = await _session_snapshot()
     period, count = _INDEX_RANGE_CONFIG[range_]
     try:
         result: object = await _bounded(

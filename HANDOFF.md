@@ -407,6 +407,74 @@ NH 호가 WS 수집과 라우트가 모두 정상인데 앱의 1초 호가 폴�
 
 이 저장소는 기존 KAsset Trading Core다. 이번 통합은 기존 인증·DB·PAPER 시세·`PaperTradingService`를 재사용하면서 `V:/HANSE/KAsset-Trader/android`의 `TraderApi`와 호환되는 HTTP 표면을 추가했다.
 
+### 최종 목표 — 운용 2모드 (2026-08-29 사용자 확정)
+
+**① AI 추천 + 사용자 승인**: 시장 스캔 → 신규 종목 발굴 → 전략·AI 종합판단 → 매수/매도 추천
+→ 사용자 승인 → 주문.
+
+**② AI 완전자동 운용**: 사용자가 운용 예산 / 보수적 일 운용목표 / 일 최대손실 /
+하루 최대 매매횟수 / 종목당 최대비중 / 동시 보유수만 정하면, AI가 장중 지속적으로
+발굴 → 판단 → 매수 → 관리 → 매도.
+
+**절대 원칙: 목표수익률을 억지로 달성하려고 거래하지 않는다.**
+
+Hard Risk Layer 는 항상 AI 위에 둔다. 우선순위:
+
+> 손실한도 > 예산한도 > 포지션한도 > 매매횟수 > AI 판단 > 목표수익률
+
+AI 확신도가 99%여도 위 규칙을 넘지 못한다.
+
+기준 아키텍처:
+
+```
+Screener(후보 발굴) → 전략 Skills(진입 타이밍) → Market Regime
+→ Dynamic Strategy Ensemble → AI + 뉴스 + DART → Candidate Ranking
+→ Portfolio Manager → 예산/손실/횟수/비중 Risk Gate
+→ [사용자 승인 모드 | 완전자동 모드] → PAPER → 검증 → LIVE
+```
+
+역할 분리를 지킨다: `Screener` = 후보 발굴, `Strategy` = 진입 타이밍, `AI` = 최종 판단.
+개별 스크리너를 독립 매수전략으로 취급하지 않는다.
+
+외부 GitHub 프로젝트는 완성형 봇으로 도입하지 않는다. **우리 구조의 어느 빈칸을 채울
+Skill 인지**로 평가하고 모듈만 이식한다. 브로커 연결·API·웹 UI 는 이미 우리 것이 있어
+우선순위가 낮다. 우선순위 높은 빈칸: 중소형주·신규종목 발굴, Market Regime Detection,
+Position Sizing, Trailing/분할청산, Dynamic Ensemble 가중치.
+
+### 이미 구현돼 있어 살려야 할 자산 (2026-08-29 Main 이 코드로 대조 확인)
+
+문서상 주장이 아니라 실물이다. 전부 `app/extensions/kasset/automation/` 에 있다.
+
+- `strategies.py` — 전략 4개(`MomentumStrategy`, `MeanReversionStrategy`,
+  `BreakoutStrategy`, `VolatilityTrendStrategy`). 외부 전략 도입 시 **Baseline Strategy
+  Set** 으로 쓴다. 버리지 않는다.
+- `strategies.py:44,58-70` — `_average_true_range(period=14)` 와 `_trade_levels`:
+  `risk = max(atr*1.5, entry*0.01)`, BUY 손절 `entry-risk` / 목표 `entry+risk*2`.
+  즉 **1:2 Risk/Reward 뼈대가 이미 있다.** Trailing Stop·분할익절·Break-even·Time Stop
+  을 여기에 Skill 로 얹는다.
+- `backtest.py` — `fee_rate=0.001`(0.1%), `slippage_rate=0.0005`(0.05%),
+  **신호 다음 봉 시가 체결**(`execution_bar.open`, look-ahead 완화), `max_drawdown`,
+  종료 시 청산. 외부 전략을 우리 Strategy 인터페이스로 변환해 기존 4개와 동일 데이터로
+  비교할 수 있다.
+- `producer.py` `RecommendationProducer` — 전략 + 외부 AI Evidence 교차검증, medium
+  임계값 `0.50`. **현재는 사실상 단순 투표제**이고, Market Regime 기반 동적 가중치로
+  발전시키는 것이 핵심 개선점이다.
+
+2모드 목표에 대해 지금 없는 것:
+
+- `RiskPolicy`(`paper_schemas.py:192`)는 비율 한도만 있다(`max_order_ratio`,
+  `max_symbol_ratio`, `allow_short_sell`). **절대 예산·일 수익률 목표·일 최대손실·
+  하루 최대 매매횟수·동시 보유수 개념이 없다.**
+- 목표 달성 시 정지, 일일 손실 한도 정지, 동일종목 재진입 제한이 없다.
+- 모드 A/B 를 사용자가 고르는 UI 가 없다.
+- Market Regime Detection, Position Sizing, Portfolio Manager 계층이 없다.
+
+유리한 조건: `user_settings` 는 `key`/`value` JSON(`app/models/user_settings.py:32-33`)
+이라 **마이그레이션 없이** 예산·목표·한도를 담을 수 있다. `TradingModeRequest{mode}` 와
+kill-switch, `/orders/preview`(`RiskAssessment`) → `/orders` 경로는 이미 있어 모드 ①의
+뼈대는 서 있다. 모드 ②는 `run_paper_automation_once` +
+`AI_PAPER_AUTO_EXECUTION_ENABLED`(fail-closed, PAPER 전용)가 골격이다.
+
 고정 경계:
 
 - `PAPER`는 기존 Core 기능을 facade로 재사용한다. 별도 가짜 거래 엔진을 만들지 않는다.

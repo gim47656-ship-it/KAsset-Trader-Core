@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import Field, model_validator
 
-from app.extensions.kasset.api.schemas import AndroidWireModel
+from app.extensions.kasset.api.schemas import AndroidWireModel, MarketSessionState
 
 
 class CashBalance(AndroidWireModel):
@@ -57,6 +57,10 @@ class Quote(AndroidWireModel):
     previous_close: str | None = None
     change_amount: str | None = None
     change_rate: str | None = None
+    session: MarketSessionState | None = None
+    regular_close: str | None = None
+    session_change_amount: str | None = None
+    session_change_rate: str | None = None
     as_of: str
     source: str
 

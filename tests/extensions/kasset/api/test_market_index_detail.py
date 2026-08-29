@@ -15,13 +15,19 @@ from app.extensions.kasset.api import market_overview as mod
 from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.schemas import MarketIndexRange
-from app.mcp_server.tooling.market_session import DATA_STATE_FRESH, US_SESSION_REGULAR
+from app.mcp_server.tooling.market_session import DATA_STATE_FRESH
 from app.middleware.auth import AuthMiddleware
 
 
 @pytest.fixture(autouse=True)
-def clear_index_detail_cache() -> None:
+def clear_index_detail_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     mod._index_detail_cache.clear()
+
+    async def session_state(market: str, *, moment=None) -> str:
+        del market, moment
+        return "REGULAR"
+
+    monkeypatch.setattr(mod.krx_quotes, "resolve_market_session_state", session_state)
 
 
 async def _session_override() -> object:
@@ -85,8 +91,6 @@ async def test_index_detail_maps_each_public_range(
 ) -> None:
     source = AsyncMock(return_value=_index_result())
     monkeypatch.setattr(mod, "handle_get_market_index", source)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     response = await mod.get_market_index_detail("spx", range_)
 
@@ -116,8 +120,6 @@ async def test_new_us_indices_are_whitelisted_for_every_public_range(
     """신설 지수도 상세 화이트리스트와 range 4종을 그대로 탄다."""
     source = AsyncMock(return_value=_index_result(symbol))
     monkeypatch.setattr(mod, "handle_get_market_index", source)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     response = await mod.get_market_index_detail(symbol.lower(), range_)
 
@@ -190,8 +192,6 @@ def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
         ],
     }
     monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     with _client() as client:
         response = client.get("/api/v1/market/indices/spx?range=1M")
@@ -208,7 +208,7 @@ def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
         "changeRate": "0.31",
         "asOf": None,
         "status": "available",
-        "sessionState": "OPEN",
+        "sessionState": "REGULAR",
         "range": "1M",
     }
     assert body["candles"] == [
@@ -251,8 +251,6 @@ def test_index_detail_normalizes_kr_quote_timestamp_to_utc(
         "history": [],
     }
     monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     with _client() as client:
         response = client.get("/api/v1/market/indices/KOSPI?range=1W")
@@ -290,8 +288,6 @@ def test_index_detail_keeps_kr_bars_that_carry_no_volume(
         ],
     }
     monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     with _client() as client:
         response = client.get("/api/v1/market/indices/KOSPI?range=1M")
@@ -317,8 +313,6 @@ async def test_index_detail_returns_sanitized_unavailable_contract(
         raise RuntimeError("sensitive provider exception")
 
     monkeypatch.setattr(mod, "handle_get_market_index", fail_source)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
 
     response = await mod.get_market_index_detail("NASDAQ", "1W")
     payload = response.model_dump(by_alias=True)
@@ -333,7 +327,7 @@ async def test_index_detail_returns_sanitized_unavailable_contract(
         "changeRate": None,
         "asOf": None,
         "status": "unavailable",
-        "sessionState": "OPEN",
+        "sessionState": "REGULAR",
         "range": "1W",
     }
     assert payload["candles"] == []
@@ -353,8 +347,6 @@ async def test_index_detail_cache_is_keyed_single_flight_for_fifteen_seconds(
         return _index_result(symbol)
 
     monkeypatch.setattr(mod, "handle_get_market_index", source)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
     monkeypatch.setattr(mod.time, "monotonic", lambda: monotonic_now)
 
     same_key = await asyncio.gather(

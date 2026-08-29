@@ -22,8 +22,6 @@ from app.extensions.kasset.api.toss_market_data import TossIndicatorPoint
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
     DATA_STATE_MARKET_CLOSED,
-    US_SESSION_AFTERHOURS,
-    US_SESSION_REGULAR,
 )
 from app.middleware.auth import AuthMiddleware
 from app.services.exchange_rate_service import (
@@ -214,9 +212,21 @@ def _fx_snapshot() -> OpenErApiUsdSnapshot:
     )
 
 
+def _stub_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kr: str = "REGULAR",
+    us: str = "REGULAR",
+) -> None:
+    async def resolve(market: str, *, moment: datetime | None = None) -> str:
+        del moment
+        return us if market == "US" else kr
+
+    monkeypatch.setattr(mod.krx_quotes, "resolve_market_session_state", resolve)
+
+
 def _stub_successful_sources(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    _stub_sessions(monkeypatch)
     monkeypatch.setattr(
         mod,
         "handle_get_market_index_current_batch",
@@ -310,8 +320,8 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert all(item["changeRate"] is None for item in body["fx"])
     assert all(item["sessionState"] is None for item in body["fx"])
     assert body["sessions"] == [
-        {"market": "KRX", "state": "OPEN"},
-        {"market": "US", "state": "OPEN"},
+        {"market": "KRX", "state": "REGULAR"},
+        {"market": "US", "state": "REGULAR"},
     ]
     assert body["errors"] == []
 
@@ -336,7 +346,7 @@ def test_overview_quantizes_live_provider_precision_without_exponent_notation() 
     }
     indices, index_errors = mod._index_items(
         index_result,
-        sessions={"KRX": "OPEN", "US": "OPEN"},
+        sessions={"KRX": "REGULAR", "US": "REGULAR"},
     )
 
     assert index_errors == []
@@ -383,7 +393,7 @@ def test_overview_quantizes_live_provider_precision_without_exponent_notation() 
                 as_of=datetime(2026, 8, 28, 6, 30, tzinfo=UTC),
             )
         },
-        sessions={"KRX": "OPEN", "US": "OPEN"},
+        sessions={"KRX": "REGULAR", "US": "REGULAR"},
     )
     indicators_by_key = {item.key: item for item in indicators}
 
@@ -465,8 +475,7 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
     for row in payload["indices"]:
         if row["symbol"] in {"KOSPI", "KOSDAQ"}:
             row["data_state"] = DATA_STATE_MARKET_CLOSED
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_MARKET_CLOSED)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_AFTERHOURS)
+    _stub_sessions(monkeypatch, kr="CLOSED", us="AFTER_MARKET")
     monkeypatch.setattr(
         mod,
         "handle_get_market_index_current_batch",
@@ -487,7 +496,7 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
     assert response.status == "partial"
     assert [session.state for session in response.sessions] == [
         "CLOSED",
-        "AFTER_HOURS",
+        "AFTER_MARKET",
     ]
     assert all(item.status == "stale" for item in response.indices)
     assert all(item.status == "available" for item in response.fx)
@@ -516,8 +525,7 @@ async def test_overview_retains_failed_item_with_null_numbers_and_partial_status
 ) -> None:
     payload = _index_payload()
     payload["indices"][1] = {"symbol": "KOSDAQ", "error": "provider unavailable"}
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    _stub_sessions(monkeypatch)
     monkeypatch.setattr(
         mod,
         "handle_get_market_index_current_batch",
@@ -563,8 +571,7 @@ async def test_overview_returns_all_fixed_entries_when_both_source_groups_fail(
     async def fail_toss() -> dict[str, object]:
         raise RuntimeError("toss indicators failed")
 
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", fail_indices)
     monkeypatch.setattr(mod, "fetch_multiple_tickers", fail_btc)
     monkeypatch.setattr(mod, "_toss_indicator_points", fail_toss)
@@ -617,8 +624,7 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
         raise AssertionError(symbols)
 
     monkeypatch.setattr(mod, "SOURCE_TIMEOUT_SECONDS", 0.001)
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", slow_indices)
     monkeypatch.setattr(
         mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
@@ -657,8 +663,7 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
         await asyncio.sleep(0)
         return _index_payload()
 
-    monkeypatch.setattr(mod, "kr_market_data_state", lambda: DATA_STATE_FRESH)
-    monkeypatch.setattr(mod, "us_market_session", lambda: US_SESSION_REGULAR)
+    _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", indices)
     monkeypatch.setattr(
         mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])

@@ -29,7 +29,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
 
@@ -39,6 +39,7 @@ from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.paper_schemas import Quote
+from app.extensions.kasset.api.schemas import MarketSessionState
 from app.extensions.kasset.api.stream import bus as bus_module
 from app.extensions.kasset.api.stream import toss_protocol as protocol
 from app.extensions.kasset.api.stream.bus import StreamBus
@@ -62,8 +63,8 @@ from app.extensions.kasset.api.stream.upstream import (
 
 logger = logging.getLogger(__name__)
 
-# baseline 은 전일 종가·종목명·통화만 담는다. 하루 단위로만 바뀌므로 짧게 캐시해도
-# 같은 종목을 여는 클라이언트마다 DB·공급자를 두드리지 않는다.
+# baseline에는 정규장 종가와 현재 세션도 들어간다. 5분 캐시는 유지하되,
+# Toss calendar의 시장 구간이 바뀌면 아래 경계 감지가 즉시 무효화한다.
 BASELINE_TTL_SECONDS: Final[float] = 300.0
 # 수요 게시 디바운스. full-replace 구조에서 화면 전환마다 즉시 반영하면 상향
 # 선언 빈도(5회/초)에 쉽게 닿는다. 여기서 한 번 코얼레스하고, 소유자 쪽에서
@@ -71,6 +72,10 @@ BASELINE_TTL_SECONDS: Final[float] = 300.0
 DEMAND_DEBOUNCE_SECONDS: Final[float] = 0.2
 
 BaselineResolver = Callable[[Topic], Awaitable[Quote | None]]
+SessionResolver = Callable[
+    [str, datetime],
+    Awaitable[MarketSessionState | None],
+]
 
 
 class MarketStreamRuntime:
@@ -81,6 +86,7 @@ class MarketStreamRuntime:
         *,
         bus: StreamBus | None = None,
         baseline_resolver: BaselineResolver | None = None,
+        session_resolver: SessionResolver | None = None,
         owner: TossUpstreamOwner | None = None,
         start_owner: bool = True,
         demand_debounce_seconds: float = DEMAND_DEBOUNCE_SECONDS,
@@ -89,6 +95,7 @@ class MarketStreamRuntime:
     ) -> None:
         self._bus = bus
         self._baseline_resolver = baseline_resolver or _resolve_baseline
+        self._session_resolver = session_resolver or _resolve_session
         self._owner = owner
         self._start_owner = start_owner
         self._demand_debounce_seconds = demand_debounce_seconds
@@ -98,6 +105,7 @@ class MarketStreamRuntime:
         self._sessions: set[StreamSession] = set()
         self._demand: dict[str, int] = {}
         self._baselines: dict[str, tuple[float, Quote]] = {}
+        self._baseline_market_states: dict[str, MarketSessionState] = {}
         self._baseline_locks: dict[str, asyncio.Lock] = {}
         self._start_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
@@ -170,6 +178,7 @@ class MarketStreamRuntime:
             self._sessions.clear()
             self._demand.clear()
             self._baselines.clear()
+            self._baseline_market_states.clear()
             if self._bus is not None:
                 with contextlib.suppress(Exception):
                     await self._bus.publish_demand({})
@@ -283,6 +292,10 @@ class MarketStreamRuntime:
                 # 열 때 받은 REST 스냅샷 위에 첫 푸시를 얹는다.
                 continue
             baseline = await self._baseline(topic)
+            if baseline is not None:
+                baseline = await self._baseline_at_session_boundary(
+                    topic, baseline, datetime.now(UTC)
+                )
             if baseline is not None:
                 session.offer(key, quote_message(topic, baseline))
         return accepted, rejected
@@ -415,12 +428,15 @@ class MarketStreamRuntime:
 
         trade = event.get("trade")
         if isinstance(trade, dict):
-            baseline = await self._baseline(topic)
-            if baseline is None:
-                return None
             price = _decimal(trade.get("price"))
             as_of = _isoformat(trade.get("asOf"))
             if price is None or as_of is None:
+                return None
+            baseline = await self._baseline(topic)
+            if baseline is None:
+                return None
+            baseline = await self._baseline_at_session_boundary(topic, baseline, as_of)
+            if baseline is None:
                 return None
             return quote_message(
                 topic,
@@ -477,6 +493,37 @@ class MarketStreamRuntime:
             self._baselines[topic.key] = (self._clock(), quote)
             return quote
 
+    async def _baseline_at_session_boundary(
+        self,
+        topic: Topic,
+        baseline: Quote,
+        moment: datetime,
+    ) -> Quote | None:
+        """calendar 구간이 바뀌면 세션/정규장 종가 baseline을 즉시 갱신한다."""
+
+        try:
+            market_state = await self._session_resolver(topic.market, moment)
+        except Exception as exc:  # noqa: BLE001 — 기존 baseline으로 계속 전송한다
+            logger.warning(
+                "kasset stream session unavailable topic=%s (%s)",
+                topic.key,
+                type(exc).__name__,
+            )
+            return baseline
+        if market_state is None:
+            return baseline
+        previous_state = self._baseline_market_states.get(topic.key)
+        self._baseline_market_states[topic.key] = market_state
+        if previous_state is None:
+            # 방금 얻은 baseline과 시장 상태가 같으면 다시 조회할 이유가 없다.
+            if baseline.session == market_state:
+                return baseline
+        elif previous_state == market_state:
+            return baseline
+
+        self._baselines.pop(topic.key, None)
+        return await self._baseline(topic)
+
 
 async def _resolve_baseline(topic: Topic) -> Quote | None:
     """기존 REST 시세 해석 경로를 그대로 쓴다.
@@ -490,6 +537,10 @@ async def _resolve_baseline(topic: Topic) -> Quote | None:
             db, market=topic.market, symbols=[topic.symbol]
         )
     return quotes[0] if quotes else None
+
+
+async def _resolve_session(market: str, moment: datetime) -> MarketSessionState | None:
+    return await krx_quotes.resolve_market_session_state(market, moment=moment)
 
 
 def _decimal(raw: object) -> Decimal | None:

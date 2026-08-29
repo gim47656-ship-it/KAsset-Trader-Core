@@ -20,7 +20,7 @@ from app.extensions.kasset.api.toss_market_data import (
 )
 from app.services.brokers.toss.dto import TossMarketIndicatorPrice
 
-_SESSIONS = {"KRX": "OPEN", "US": "OPEN"}
+_SESSIONS = {"KRX": "REGULAR", "US": "REGULAR"}
 
 
 def _us_batch_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:

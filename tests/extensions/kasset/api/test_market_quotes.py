@@ -25,9 +25,15 @@ from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.paper_schemas import Quote
-from app.extensions.kasset.api.toss_market_data import TossSharedMarketData
+from app.extensions.kasset.api.toss_market_data import (
+    TossQuotePoint,
+    TossSharedMarketData,
+    _regular_close,
+)
 from app.middleware.auth import AuthMiddleware
 from app.services.brokers.toss.dto import TossPrice
+from app.services.brokers.toss.market_calendar import TossSessionWindow
+from app.services.nxt_preflight import NxtTradability
 
 
 class _FakeResult:
@@ -161,6 +167,21 @@ def toss_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "toss_api_enabled", True, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def regular_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def context(
+        db: object, *, market: str, symbols: Sequence[str]
+    ) -> tuple[dict[str, str], None]:
+        del db, market
+        return (dict.fromkeys(symbols, "REGULAR"), None)
+
+    monkeypatch.setattr(krx_quotes, "_quote_session_context", context)
+
+
+def _window(start: datetime, end: datetime) -> TossSessionWindow:
+    return TossSessionWindow(start=start, end=end)
+
+
 def _install_toss(
     monkeypatch: pytest.MonkeyPatch, client: _StubTossClient
 ) -> TossSharedMarketData:
@@ -222,6 +243,10 @@ def test_batch_quotes_serve_many_symbols_from_one_toss_call(
                 "previousClose": "250000",
                 "changeAmount": "6500",
                 "changeRate": "2.60",
+                "session": "REGULAR",
+                "regularClose": None,
+                "sessionChangeAmount": None,
+                "sessionChangeRate": None,
                 # +09:00 공급자 시각은 UTC `Z`로 정규화된다.
                 "asOf": "2026-08-28T09:44:26Z",
                 "source": "TOSS_API_PRICES",
@@ -237,6 +262,10 @@ def test_batch_quotes_serve_many_symbols_from_one_toss_call(
                 "previousClose": None,
                 "changeAmount": None,
                 "changeRate": None,
+                "session": "REGULAR",
+                "regularClose": None,
+                "sessionChangeAmount": None,
+                "sessionChangeRate": None,
                 "asOf": "2026-08-28T09:44:26Z",
                 "source": "TOSS_API_PRICES",
             },
@@ -262,6 +291,31 @@ def test_batch_quotes_deduplicate_symbols_before_calling_toss(
     assert toss.calls == [["005930"]]
 
 
+def test_batch_quotes_accept_us_interest_symbols_in_one_toss_call(
+    monkeypatch: pytest.MonkeyPatch, toss_enabled: None
+) -> None:
+    toss = _StubTossClient(
+        {
+            "TQQQ": _toss_price("TQQQ", price="71.89", currency="USD"),
+            "AAPL": _toss_price("AAPL", price="111.62", currency="USD"),
+        }
+    )
+    _install_toss(monkeypatch, toss)
+
+    with _client(_FakeDb()) as client:
+        response = client.get("/api/v1/market/quotes?market=US&symbols=tqqq,AAPL")
+
+    assert response.status_code == 200
+    assert [
+        (quote["market"], quote["symbol"], quote["session"])
+        for quote in response.json()["quotes"]
+    ] == [
+        ("US", "TQQQ", "REGULAR"),
+        ("US", "AAPL", "REGULAR"),
+    ]
+    assert toss.calls == [["TQQQ", "AAPL"]]
+
+
 @pytest.mark.parametrize(
     ("query", "message"),
     [
@@ -272,7 +326,7 @@ def test_batch_quotes_deduplicate_symbols_before_calling_toss(
             "market=KRX&symbols=" + ",".join(f"{index:06d}" for index in range(51)),
             "한 번에 최대 50종목까지 조회할 수 있습니다.",
         ),
-        ("market=NASDAQ&symbols=005930", "지원하지 않는 시장입니다."),
+        ("market=LSE&symbols=005930", "지원하지 않는 시장입니다."),
     ],
 )
 def test_batch_quotes_reject_contract_violations(query: str, message: str) -> None:
@@ -332,6 +386,10 @@ def test_batch_quotes_degrade_to_nh_then_stored_candles_when_toss_fails(
         "previousClose": "175000",
         "changeAmount": "5000",
         "changeRate": "2.86",
+        "session": "REGULAR",
+        "regularClose": None,
+        "sessionChangeAmount": None,
+        "sessionChangeRate": None,
         "asOf": "2026-08-27T00:00:00Z",
         "source": "PAPER_CANDLES",
     }
@@ -482,6 +540,243 @@ async def test_toss_channel_merges_concurrent_requests_into_one_batch_call(
     again = await service.prices(["005930", "000660"])
     assert set(again) == {"005930", "000660"}
     assert toss.calls == [["005930", "000660"]]
+
+
+def test_us_day_market_uses_latest_regular_close_as_previous_close() -> None:
+    quote = krx_quotes._toss_quote(
+        TossQuotePoint(
+            symbol="TQQQ",
+            price=Decimal("73.45"),
+            currency="USD",
+            as_of=datetime.fromisoformat("2026-08-28T09:30:00+09:00"),
+        ),
+        market="US",
+        name=None,
+        rows=(),
+        previous_close_fallback=Decimal("72.00"),
+        session="DAY_MARKET",
+        regular_close=Decimal("73.30"),
+    )
+
+    assert quote.previous_close == "73.30"
+    assert quote.change_amount == "0.00"
+    assert quote.change_rate == "0.00"
+    assert quote.session_change_amount == "0.15"
+    assert quote.session_change_rate == "0.20"
+
+
+def test_us_after_market_quote_separates_regular_and_session_changes(
+    monkeypatch: pytest.MonkeyPatch, toss_enabled: None
+) -> None:
+    toss = _StubTossClient(
+        {
+            "TQQQ": _toss_price(
+                "TQQQ",
+                price="71.6995",
+                timestamp="2026-08-28T08:20:00+09:00",
+                currency="USD",
+            )
+        }
+    )
+    _install_toss(monkeypatch, toss)
+    regular_window = _window(
+        datetime.fromisoformat("2026-08-27T22:30:00+09:00"),
+        datetime.fromisoformat("2026-08-28T05:00:00+09:00"),
+    )
+
+    async def after_context(
+        db: object, *, market: str, symbols: Sequence[str]
+    ) -> tuple[dict[str, str], TossSessionWindow]:
+        del db
+        assert market == "US"
+        return (dict.fromkeys(symbols, "AFTER_MARKET"), regular_window)
+
+    monkeypatch.setattr(krx_quotes, "_quote_session_context", after_context)
+    monkeypatch.setattr(krx_quotes, "_candle_rows", AsyncMock(return_value={}))
+    monkeypatch.setattr(krx_quotes, "_instrument_names", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        krx_quotes,
+        "_previous_close_fallback",
+        AsyncMock(return_value={"TQQQ": Decimal("73.3")}),
+    )
+    monkeypatch.setattr(
+        krx_quotes,
+        "_regular_closes",
+        AsyncMock(return_value={"TQQQ": Decimal("71.89")}),
+    )
+
+    with _client(_FakeDb()) as client:
+        response = client.get("/api/v1/market/quote?broker=PAPER&market=US&symbol=TQQQ")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "broker": "PAPER",
+        "market": "US",
+        "symbol": "TQQQ",
+        "name": None,
+        "currency": "USD",
+        "price": "71.6995",
+        "previousClose": "73.3",
+        "changeAmount": "-1.41",
+        "changeRate": "-1.92",
+        "session": "AFTER_MARKET",
+        "regularClose": "71.89",
+        "sessionChangeAmount": "-0.1905",
+        "sessionChangeRate": "-0.26",
+        "asOf": "2026-08-27T23:20:00Z",
+        "source": "TOSS_API_PRICES",
+    }
+
+
+@pytest.mark.parametrize(
+    ("market", "state", "tradability", "expected"),
+    [
+        (
+            "KRX",
+            "PRE_MARKET",
+            NxtTradability(
+                nxt_eligible=True,
+                nxt_trading_suspended=False,
+                asof=datetime(2026, 8, 28, tzinfo=UTC),
+            ),
+            "PRE_MARKET",
+        ),
+        (
+            "KRX",
+            "AFTER_MARKET",
+            NxtTradability(
+                nxt_eligible=False,
+                nxt_trading_suspended=False,
+                asof=datetime(2026, 8, 28, tzinfo=UTC),
+            ),
+            "CLOSED",
+        ),
+        ("KRX", "PRE_MARKET", None, None),
+        ("US", "DAY_MARKET", None, "DAY_MARKET"),
+    ],
+)
+def test_symbol_session_never_leaks_nxt_only_windows(
+    market: str,
+    state: str,
+    tradability: NxtTradability | None,
+    expected: str | None,
+) -> None:
+    assert (
+        krx_quotes._symbol_session_state(
+            market,
+            state,  # type: ignore[arg-type]
+            tradability,
+            moment=datetime(2026, 8, 28, 1, tzinfo=UTC),
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("market", "provider_session", "expected"),
+    [
+        ("US", "day", "DAY_MARKET"),
+        ("US", "pre", "PRE_MARKET"),
+        ("US", "regular", "REGULAR"),
+        ("US", "post", "AFTER_MARKET"),
+        ("US", "closed", "CLOSED"),
+        ("US", None, None),
+        ("KRX", "nxt_premarket", "PRE_MARKET"),
+        ("KRX", "regular", "REGULAR"),
+        ("KRX", "nxt_after", "AFTER_MARKET"),
+        ("KRX", "closed", "CLOSED"),
+        ("KRX", None, None),
+    ],
+)
+async def test_public_session_vocabulary_maps_each_provider_window_once(
+    monkeypatch: pytest.MonkeyPatch,
+    market: str,
+    provider_session: str | None,
+    expected: str | None,
+) -> None:
+    target = (
+        "get_us_toss_session_from_toss"
+        if market == "US"
+        else "get_kr_toss_session_from_toss"
+    )
+    monkeypatch.setattr(
+        krx_quotes,
+        target,
+        AsyncMock(return_value=provider_session),
+    )
+
+    assert (
+        await krx_quotes.resolve_market_session_state(
+            market,
+            moment=datetime(2026, 8, 28, 1, tzinfo=UTC),
+        )
+        == expected
+    )
+
+
+def test_regular_close_rejects_a_candle_at_the_after_market_boundary() -> None:
+    window = _window(
+        datetime.fromisoformat("2026-08-27T22:30:00+09:00"),
+        datetime.fromisoformat("2026-08-28T05:00:00+09:00"),
+    )
+    page = SimpleNamespace(
+        candles=[
+            SimpleNamespace(
+                timestamp="2026-08-28T05:00:00+09:00",
+                close_price=Decimal("71.6995"),
+            )
+        ]
+    )
+
+    assert _regular_close(page, window=window) is None
+
+
+@pytest.mark.asyncio
+async def test_regular_close_fetches_one_candle_per_symbol_then_caches(
+    monkeypatch: pytest.MonkeyPatch, toss_enabled: None
+) -> None:
+    class Client(_StubTossClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.candle_calls: list[tuple[str, str, int, str, bool]] = []
+
+        async def candles(
+            self,
+            symbol: str,
+            *,
+            interval: str,
+            count: int,
+            before: str,
+            adjusted: bool,
+        ) -> object:
+            self.candle_calls.append((symbol, interval, count, before, adjusted))
+            return SimpleNamespace(
+                candles=[
+                    SimpleNamespace(
+                        timestamp="2026-08-28T04:59:00+09:00",
+                        close_price=Decimal("71.89"),
+                    )
+                ]
+            )
+
+    client = Client()
+    service = TossSharedMarketData(client_factory=lambda: client)
+    window = _window(
+        datetime.fromisoformat("2026-08-27T22:30:00+09:00"),
+        datetime.fromisoformat("2026-08-28T05:00:00+09:00"),
+    )
+    symbols = [f"T{index:02d}" for index in range(20)]
+
+    first = await service.regular_closes(symbols, window=window)
+    second = await service.regular_closes(symbols, window=window)
+
+    assert first == second == {symbol: Decimal("71.89") for symbol in symbols}
+    assert len(client.candle_calls) == 20
+    assert all(call[1:3] == ("1m", 1) for call in client.candle_calls)
+    assert all(
+        call[3] == "2026-08-28T04:59:59.999999+09:00" for call in client.candle_calls
+    )
 
 
 @pytest.mark.asyncio

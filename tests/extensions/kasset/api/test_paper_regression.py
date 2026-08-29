@@ -10,6 +10,7 @@ from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
     AmendRequest,
     OrderRequest,
+    Quote,
     RiskAssessment,
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
@@ -65,13 +66,16 @@ def _account() -> SimpleNamespace:
     return SimpleNamespace(id="paper-account", cash_krw=Decimal("10000000"))
 
 
-def _quote() -> SimpleNamespace:
-    return SimpleNamespace(
+def _quote() -> Quote:
+    return Quote(
+        broker="PAPER",
         market="KRX",
         symbol="005930",
         name="삼성전자",
         currency="KRW",
         price="70000",
+        as_of="2026-08-28T00:00:00Z",
+        source="TEST",
     )
 
 

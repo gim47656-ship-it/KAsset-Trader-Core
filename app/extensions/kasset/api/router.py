@@ -14,6 +14,7 @@ from app.auth.web_router import limiter
 from app.core.config import settings
 from app.core.db import get_db
 from app.extensions.kasset.api import krx_quotes
+from app.extensions.kasset.api import market_news as market_news_service
 from app.extensions.kasset.api import market_overview as market_overview_service
 from app.extensions.kasset.api.ai_briefing import (
     DEFAULT_LIMIT,
@@ -77,6 +78,8 @@ from app.extensions.kasset.api.schemas import (
     LoginRequest,
     MarketIndexDetailResponse,
     MarketIndexRange,
+    MarketNewsFilterKind,
+    MarketNewsResponse,
     MarketOverviewResponse,
     NicknameUpdateRequest,
     OrderbookResponse,
@@ -90,7 +93,10 @@ from app.extensions.kasset.api.schemas import (
     WatchlistMarket,
     WatchlistResponse,
 )
-from app.extensions.kasset.api.toss_market_data import toss_market_data
+from app.extensions.kasset.api.toss_market_data import (
+    aggregate_intraday_bars,
+    toss_market_data,
+)
 from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.models.trading import UserRole
@@ -149,6 +155,10 @@ _TOSS_INTRADAY_POST_SESSION_ALLOWANCE = 420
 _MAX_TRADING_DATE_LOOKBACK_DAYS = 10
 
 
+def _regular_session_candle_count(window: TossSessionWindow) -> int:
+    return ceil((window.end - window.start).total_seconds() / 60)
+
+
 def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
     """정규장 분수 + 정규장 종료 후 경과 분.
 
@@ -161,7 +171,7 @@ def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
     그대로이므로 흔한 경로의 호출 수가 늘지 않는다. 경과분은 그 거래일의 시간외 봉 분량으로
     묶는다 — 휴장일에는 봉이 생기지 않으니 며칠이 지나도 침식량은 더 늘지 않는다.
     """
-    regular_minutes = ceil((window.end - window.start).total_seconds() / 60)
+    regular_minutes = _regular_session_candle_count(window)
     elapsed_after = 0
     if moment > window.end:
         elapsed_after = min(
@@ -169,6 +179,17 @@ def _intraday_candle_budget(window: TossSessionWindow, moment: datetime) -> int:
             _TOSS_INTRADAY_POST_SESSION_ALLOWANCE,
         )
     return min(regular_minutes + elapsed_after, _TOSS_INTRADAY_MAX_CANDLE_COUNT)
+
+
+def _intraday_request_candle_count(window: TossSessionWindow, moment: datetime) -> int:
+    """조회 방식에 맞는 분봉 수를 정한다.
+
+    닫힌 세션은 종료 직전을 `before`로 집으므로 시간외 봉 여유가 필요 없다.
+    진행 중 세션은 미래 커서를 쓰지 않고 기존 최신 봉 예산을 유지한다.
+    """
+    if moment >= window.end:
+        return _regular_session_candle_count(window)
+    return _intraday_candle_budget(window, moment)
 
 
 async def _recent_session(
@@ -189,6 +210,22 @@ async def _recent_session(
         if window is not None:
             return candidate, window
     return None
+
+
+async def _recent_sessions(
+    market: str, boundary: date, *, count: int
+) -> list[tuple[date, TossSessionWindow]]:
+    """`boundary` 이하의 최근 거래 세션을 오래된 순서로 돌려준다."""
+    sessions: list[tuple[date, TossSessionWindow]] = []
+    cursor = boundary
+    for _ in range(count):
+        session = await _recent_session(market, cursor)
+        if session is None:
+            break
+        sessions.append(session)
+        cursor = session[0] - timedelta(days=1)
+    sessions.reverse()
+    return sessions
 
 
 def _current_market_trading_date(market: str) -> date:
@@ -519,6 +556,29 @@ async def market_overview(
     return await market_overview_service.get_market_overview()
 
 
+@router.get("/market/news", response_model=MarketNewsResponse)
+async def market_news(
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    market: Annotated[str | None, Query(min_length=1, max_length=20)] = None,
+    symbol: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    kind: Annotated[MarketNewsFilterKind, Query()] = "all",
+    limit: Annotated[
+        int,
+        Query(ge=market_news_service.MIN_LIMIT, le=market_news_service.MAX_LIMIT),
+    ] = market_news_service.DEFAULT_LIMIT,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+) -> MarketNewsResponse:
+    return await market_news_service.list_market_news(
+        db,
+        market=market,
+        symbol=symbol,
+        kind=kind,
+        limit=limit,
+        cursor=cursor,
+    )
+
+
 @router.get(
     "/market/indices/{symbol}",
     response_model=MarketIndexDetailResponse,
@@ -557,7 +617,7 @@ async def market_quotes(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuotesResponse:
     normalized_market = krx_quotes.normalize_market(market)
-    normalized_symbols = krx_quotes.normalize_symbols(symbols)
+    normalized_symbols = krx_quotes.normalize_symbols(symbols, market=normalized_market)
     return QuotesResponse(
         quotes=await krx_quotes.resolve_quotes(
             db,
@@ -603,20 +663,35 @@ async def market_candles(
             422, "VALIDATION_ERROR", "지원하지 않는 시장입니다."
         ) from err
 
-    if range_ == "1D":
-        session = await _recent_session(
-            candle_market.value, _current_market_trading_date(market)
+    if range_ in {"1D", "1W"}:
+        interval = "10m" if range_ == "1D" else "1h"
+        interval_minutes = 10 if range_ == "1D" else 60
+        session_count = 1 if range_ == "1D" else _CANDLE_RANGE_COUNTS["1W"]
+        sessions = await _recent_sessions(
+            candle_market.value,
+            _current_market_trading_date(market),
+            count=session_count,
         )
-        if session is None:
-            return DailyCandlesResponse(interval="1m", candles=[])
-        boundary, regular_market = session
-        bars = await toss_market_data.intraday_bars(
-            normalized_symbol,
-            count=_intraday_candle_budget(regular_market, datetime.now(UTC)),
-        )
-        return DailyCandlesResponse(
-            interval="1m",
-            candles=[
+        if not sessions:
+            return DailyCandlesResponse(interval=interval, candles=[])
+
+        moment = datetime.now(UTC)
+        candles: list[DailyCandle] = []
+        for boundary, regular_market in sessions:
+            bars = await toss_market_data.intraday_bars(
+                normalized_symbol,
+                count=_intraday_request_candle_count(regular_market, moment),
+                market=candle_market.value,
+                window=regular_market,
+                moment=moment,
+            )
+            session_bars = [
+                bar
+                for bar in bars
+                if krx_quotes._market_trading_date(market, bar.time_utc) == boundary
+                and regular_market.contains(bar.time_utc)
+            ]
+            candles.extend(
                 DailyCandle(
                     time=iso_z(bar.time_utc),
                     open=decimal_text(bar.open),
@@ -625,11 +700,13 @@ async def market_candles(
                     close=decimal_text(bar.close),
                     volume=decimal_text(bar.volume),
                 )
-                for bar in bars
-                if krx_quotes._market_trading_date(market, bar.time_utc) == boundary
-                and regular_market.contains(bar.time_utc)
-            ],
-        )
+                for bar in aggregate_intraday_bars(
+                    session_bars,
+                    window=regular_market,
+                    interval_minutes=interval_minutes,
+                )
+            )
+        return DailyCandlesResponse(interval=interval, candles=candles)
 
     limit = _CANDLE_RANGE_COUNTS[range_]
     rows = await DailyCandlesRepository(session=db).fetch_recent(
@@ -638,36 +715,38 @@ async def market_candles(
         partition=partition,
         count=limit,
     )
-    if rows:
-        return DailyCandlesResponse(
-            interval="1d",
-            candles=[
-                DailyCandle(
-                    time=iso_z(row.time_utc),
-                    open=decimal_text(str(row.open)),
-                    high=decimal_text(str(row.high)),
-                    low=decimal_text(str(row.low)),
-                    close=decimal_text(str(row.close)),
-                    volume=decimal_text(str(row.volume)),
-                )
-                for row in rows
-            ],
+    candles_by_trading_date = {
+        krx_quotes._market_trading_date(market, row.time_utc): DailyCandle(
+            time=iso_z(row.time_utc),
+            open=decimal_text(str(row.open)),
+            high=decimal_text(str(row.high)),
+            low=decimal_text(str(row.low)),
+            close=decimal_text(str(row.close)),
+            volume=decimal_text(str(row.volume)),
         )
-    # 저장 일봉 유니버스는 관심종목 전체를 담고 있지 않아, 새로 추가한 종목의
-    # 차트가 계속 빈 배열이었다. 저장 값이 없을 때만 토스 일봉으로 채운다.
-    bars = await toss_market_data.daily_bars(normalized_symbol, count=limit)
+        for row in rows
+    }
+    if len(rows) < limit:
+        # Toss 자체도 `limit`보다 적게 돌려주면 실제 상장 이력이 짧은 종목이다.
+        # `daily_bars`의 기존 TTL 캐시가 같은 상세 요청의 반복 호출을 흡수한다.
+        bars = await toss_market_data.daily_bars(normalized_symbol, count=limit)
+        for bar in bars:
+            candles_by_trading_date.setdefault(
+                krx_quotes._market_trading_date(market, bar.time_utc),
+                DailyCandle(
+                    time=iso_z(bar.time_utc),
+                    open=decimal_text(bar.open),
+                    high=decimal_text(bar.high),
+                    low=decimal_text(bar.low),
+                    close=decimal_text(bar.close),
+                    volume=decimal_text(bar.volume),
+                ),
+            )
+    ordered_dates = sorted(candles_by_trading_date)[-limit:]
     return DailyCandlesResponse(
         interval="1d",
         candles=[
-            DailyCandle(
-                time=iso_z(bar.time_utc),
-                open=decimal_text(bar.open),
-                high=decimal_text(bar.high),
-                low=decimal_text(bar.low),
-                close=decimal_text(bar.close),
-                volume=decimal_text(bar.volume),
-            )
-            for bar in bars
+            candles_by_trading_date[trading_date] for trading_date in ordered_dates
         ],
     )
 

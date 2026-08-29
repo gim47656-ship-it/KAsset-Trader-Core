@@ -20,9 +20,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -39,6 +41,7 @@ from app.extensions.kasset.api.toss_market_data import (
     _previous_daily_close,
 )
 from app.services.brokers.toss.dto import TossCandle, TossCandlesPage, TossPrice
+from app.services.brokers.toss.market_calendar import TossSessionWindow
 
 
 class _FakeResult:
@@ -336,13 +339,48 @@ def test_candles_fall_back_to_toss_when_store_is_empty(
     _install(monkeypatch, client)
 
     with _client(_FakeDb()) as http:
-        response = http.get("/api/v1/market/candles?market=KRX&symbol=005380&range=1W")
+        response = http.get("/api/v1/market/candles?market=KRX&symbol=005380&range=1M")
 
     assert response.status_code == 200
     assert response.json()["interval"] == "1d"
     candles = response.json()["candles"]
     assert [candle["close"] for candle in candles] == ["401000", "398500"]
     assert candles[0]["time"] < candles[1]["time"]
+    assert client.candle_calls == ["005380"]
+
+
+@pytest.mark.usefixtures("toss_enabled")
+def test_one_week_candles_do_not_fall_back_to_daily_when_store_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`1W`는 저장 일봉과 무관하게 분봉을 집계하고 일봉으로 대체하지 않는다."""
+    start = datetime(2026, 8, 28, 0, 0, tzinfo=UTC)
+    window = TossSessionWindow(start=start, end=start + timedelta(minutes=390))
+    provider = SimpleNamespace(
+        intraday_bars=AsyncMock(return_value=[]),
+        daily_bars=AsyncMock(side_effect=AssertionError("unexpected daily fallback")),
+        aclose=AsyncMock(),
+    )
+    monkeypatch.setattr(router_module, "toss_market_data", provider)
+    monkeypatch.setattr(
+        router_module,
+        "_recent_sessions",
+        AsyncMock(return_value=[(date(2026, 8, 28), window)]),
+    )
+
+    with _client(_FakeDb()) as http:
+        response = http.get("/api/v1/market/candles?market=KRX&symbol=005380&range=1W")
+
+    assert response.status_code == 200
+    assert response.json() == {"interval": "1h", "candles": []}
+    awaited = provider.intraday_bars.await_args
+    assert awaited is not None
+    args, kwargs = awaited
+    assert args == ("005380",)
+    assert kwargs["count"] == 390
+    assert kwargs["market"] == "kr"
+    assert kwargs["window"] == window
+    provider.daily_bars.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("toss_enabled")

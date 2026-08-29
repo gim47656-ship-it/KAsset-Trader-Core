@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from app.services.brokers.toss.client import TossReadClient
 
@@ -12,9 +13,10 @@ logger = logging.getLogger(__name__)
 Market = Literal["kr", "us"]
 KrNxtSession = Literal["nxt_premarket", "nxt_after", "closed"]
 KrTossSession = Literal["nxt_premarket", "regular", "nxt_after", "closed"]
-UsTossSession = Literal["day", "pre", "regular", "post"]
+UsTossSession = Literal["day", "pre", "regular", "post", "closed"]
 
 _KST = dt.timezone(dt.timedelta(hours=9))
+_US_EASTERN = ZoneInfo("America/New_York")
 _CACHE: dict[tuple[Market, dt.date], tuple[dt.date, TossMarketCalendar]] = {}
 
 
@@ -151,10 +153,11 @@ def kr_toss_session_for(
     day = calendar.day_for(local.date())
     if not isinstance(day, TossKrMarketDay):
         return None
-    if day.pre_market is not None and day.pre_market.contains(local):
-        return "nxt_premarket"
+    # 공급자 데이터가 잘못 겹쳐도 정규장을 가장 강한 상태로 판정한다.
     if day.regular_market is not None and day.regular_market.contains(local):
         return "regular"
+    if day.pre_market is not None and day.pre_market.contains(local):
+        return "nxt_premarket"
     if day.after_market is not None and day.after_market.contains(local):
         return "nxt_after"
     return None
@@ -167,15 +170,40 @@ def us_toss_session_for(
     for day in calendar.days:
         if not isinstance(day, TossUsMarketDay):
             continue
-        if day.day_market is not None and day.day_market.contains(local):
-            return "day"
-        if day.pre_market is not None and day.pre_market.contains(local):
-            return "pre"
+        # 정규장 > 프리마켓 > 애프터마켓 > 데이마켓 순으로 우선한다.
+        # 정상 calendar의 구간은 겹치지 않지만, 공급자 이상 시에도 결과가
+        # iteration 순서에 따라 흔들리지 않게 명시한다.
         if day.regular_market is not None and day.regular_market.contains(local):
             return "regular"
+        if day.pre_market is not None and day.pre_market.contains(local):
+            return "pre"
         if day.after_market is not None and day.after_market.contains(local):
             return "post"
+        if day.day_market is not None and day.day_market.contains(local):
+            return "day"
     return None
+
+
+def latest_completed_regular_window(
+    moment: dt.datetime, *, calendar: TossMarketCalendar
+) -> TossSessionWindow | None:
+    """calendar 안에서 ``moment`` 이전에 끝난 가장 최근 정규장 구간을 찾는다."""
+
+    local = _to_kst(moment)
+    completed = [
+        day.regular_market
+        for day in calendar.days
+        if day.regular_market is not None and day.regular_market.end <= local
+    ]
+    return max(completed, key=lambda window: window.end, default=None)
+
+
+def _calendar_query_date(market: Market, moment: dt.datetime) -> dt.date:
+    if market == "us":
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=_KST)
+        return moment.astimezone(_US_EASTERN).date()
+    return _to_kst(moment).date()
 
 
 async def get_toss_market_calendar(
@@ -225,15 +253,25 @@ async def get_kr_nxt_session_from_toss(moment: dt.datetime) -> KrNxtSession | No
 
 async def get_kr_toss_session_from_toss(moment: dt.datetime) -> KrTossSession | None:
     local = _to_kst(moment)
-    calendar = await get_toss_market_calendar("kr", local.date())
+    calendar = await get_toss_market_calendar("kr", _calendar_query_date("kr", local))
     if calendar is None:
         return None
     return kr_toss_session_for(local, calendar=calendar) or "closed"
 
 
 async def get_us_toss_session_from_toss(moment: dt.datetime) -> UsTossSession | None:
-    local = _to_kst(moment)
-    calendar = await get_toss_market_calendar("us", local.date())
+    calendar = await get_toss_market_calendar("us", _calendar_query_date("us", moment))
     if calendar is None:
         return None
-    return us_toss_session_for(local, calendar=calendar)
+    return us_toss_session_for(moment, calendar=calendar) or "closed"
+
+
+async def get_latest_completed_regular_window_from_toss(
+    market: Market, moment: dt.datetime
+) -> TossSessionWindow | None:
+    calendar = await get_toss_market_calendar(
+        market, _calendar_query_date(market, moment)
+    )
+    if calendar is None:
+        return None
+    return latest_completed_regular_window(moment, calendar=calendar)

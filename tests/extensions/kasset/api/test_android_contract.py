@@ -93,6 +93,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/market/quote": {"get"},
         "/api/v1/market/quotes": {"get"},
         "/api/v1/market/overview": {"get"},
+        "/api/v1/market/news": {"get"},
         "/api/v1/market/indices/{symbol}": {"get"},
         "/api/v1/market/symbols": {"get"},
         "/api/v1/instruments/search": {"get"},
@@ -286,6 +287,10 @@ def test_nh_quote_normalizes_official_current_price_fields(
         "previousClose": "71000",
         "changeAmount": "500",
         "changeRate": "0.7",
+        "session": None,
+        "regularClose": None,
+        "sessionChangeAmount": None,
+        "sessionChangeRate": None,
         "asOf": quote.as_of,
         "source": "NH_PLUG_MOCK",
     }

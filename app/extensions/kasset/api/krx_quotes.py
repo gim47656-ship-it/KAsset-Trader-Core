@@ -24,6 +24,7 @@ from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.nh_adapter import nh_market_data
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_schemas import Quote
+from app.extensions.kasset.api.schemas import MarketSessionState
 from app.extensions.kasset.api.toss_market_data import (
     TOSS_QUOTE_SOURCE,
     TossQuotePoint,
@@ -31,10 +32,18 @@ from app.extensions.kasset.api.toss_market_data import (
 )
 from app.extensions.kasset.automation.market_pipeline import _market_route
 from app.models.trading import Instrument
+from app.services.brokers.toss.market_calendar import (
+    TossSessionWindow,
+    get_kr_toss_session_from_toss,
+    get_latest_completed_regular_window_from_toss,
+    get_us_toss_session_from_toss,
+)
 from app.services.daily_candles.repository import (
     DailyCandleRow,
     DailyCandlesRepository,
 )
+from app.services.kr_symbol_universe_service import get_kr_nxt_tradability
+from app.services.nxt_preflight import NxtTradability
 
 logger = logging.getLogger(__name__)
 
@@ -61,24 +70,30 @@ _NH_BATCH_BUDGET_SECONDS = 2.5
 
 def normalize_market(market: str) -> str:
     normalized = market.strip().upper()
-    if normalized not in _KRX_MARKETS:
-        raise MobileApiError(422, "VALIDATION_ERROR", "지원하지 않는 시장입니다.")
-    return normalized
+    if normalized in _KRX_MARKETS:
+        return "KRX"
+    if normalized in _US_MARKETS:
+        return "US"
+    raise MobileApiError(422, "VALIDATION_ERROR", "지원하지 않는 시장입니다.")
 
 
-def normalize_symbols(symbols: str) -> list[str]:
-    """`symbols` 쿼리를 계약대로 정규화한다(1..50개, 중복 제거, 6자리 KRX)."""
+def normalize_symbols(symbols: str, *, market: str = "KRX") -> list[str]:
+    """`symbols` 쿼리를 시장별 계약대로 정규화한다(1..50개, 중복 제거)."""
+
+    wire_market = _wire_market(market)
+    pattern = _US_SYMBOL_RE if wire_market == "US" else _KRX_SYMBOL_RE
+    error_message = (
+        "미국 종목코드만 조회할 수 있습니다."
+        if wire_market == "US"
+        else "KRX 6자리 종목코드만 조회할 수 있습니다."
+    )
     normalized: list[str] = []
     for part in symbols.split(","):
         candidate = part.strip().upper()
         if not candidate:
             continue
-        if _KRX_SYMBOL_RE.fullmatch(candidate) is None:
-            raise MobileApiError(
-                422,
-                "VALIDATION_ERROR",
-                "KRX 6자리 종목코드만 조회할 수 있습니다.",
-            )
+        if pattern.fullmatch(candidate) is None:
+            raise MobileApiError(422, "VALIDATION_ERROR", error_message)
         if candidate not in normalized:
             normalized.append(candidate)
     if not normalized:
@@ -117,6 +132,89 @@ def _market_trading_date(market: str, value: datetime) -> date:
     return value.astimezone(zone).date()
 
 
+async def resolve_market_session_state(
+    market: str, *, moment: datetime | None = None
+) -> MarketSessionState | None:
+    """Toss calendar의 현재 구간을 Android 와이어 상태로 바꾼다."""
+
+    current = moment or datetime.now(UTC)
+    if _wire_market(market) == "US":
+        session = await get_us_toss_session_from_toss(current)
+        return {
+            "day": "DAY_MARKET",
+            "pre": "PRE_MARKET",
+            "regular": "REGULAR",
+            "post": "AFTER_MARKET",
+            "closed": "CLOSED",
+            None: None,
+        }[session]
+    session = await get_kr_toss_session_from_toss(current)
+    return {
+        "nxt_premarket": "PRE_MARKET",
+        "regular": "REGULAR",
+        "nxt_after": "AFTER_MARKET",
+        "closed": "CLOSED",
+        None: None,
+    }[session]
+
+
+def _symbol_session_state(
+    market: str,
+    market_state: MarketSessionState | None,
+    tradability: NxtTradability | None,
+    *,
+    moment: datetime,
+) -> MarketSessionState | None:
+    """KR NXT 전용 구간에서 종목별 참여 가능 여부를 반영한다."""
+
+    if _wire_market(market) != "KRX" or market_state not in {
+        "PRE_MARKET",
+        "AFTER_MARKET",
+    }:
+        return market_state
+    if tradability is None or tradability.is_stale(now=moment):
+        return None
+    return market_state if tradability.nxt_tradable else "CLOSED"
+
+
+async def _quote_session_context(
+    db: AsyncSession, *, market: str, symbols: Sequence[str]
+) -> tuple[
+    dict[str, MarketSessionState | None],
+    TossSessionWindow | None,
+]:
+    moment = datetime.now(UTC)
+    market_state = await resolve_market_session_state(market, moment=moment)
+    tradability: dict[str, NxtTradability] = {}
+    if _wire_market(market) == "KRX" and market_state in {
+        "PRE_MARKET",
+        "AFTER_MARKET",
+    }:
+        try:
+            tradability = await get_kr_nxt_tradability(list(symbols), db=db)
+        except Exception as exc:  # noqa: BLE001 — 종목별 세션은 모르면 null이다
+            logger.warning(
+                "kasset quote NXT tradability unavailable (%s): session omitted",
+                type(exc).__name__,
+            )
+    states = {
+        symbol: _symbol_session_state(
+            market,
+            market_state,
+            tradability.get(symbol),
+            moment=moment,
+        )
+        for symbol in symbols
+    }
+    regular_window = None
+    if market_state is not None and market_state != "REGULAR":
+        regular_window = await get_latest_completed_regular_window_from_toss(
+            "us" if _wire_market(market) == "US" else "kr",
+            moment,
+        )
+    return states, regular_window
+
+
 async def quote_for_market(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     """PAPER 시세의 단일 진입점.
 
@@ -139,12 +237,25 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     """
     normalized = symbol.strip().upper()
     wire_market = _wire_market(market)
+    sessions, regular_window = await _quote_session_context(
+        db, market=market, symbols=[normalized]
+    )
+    session = sessions.get(normalized)
     point = (await _toss_points(market, [normalized])).get(normalized)
     if point is not None:
         rows = (await _candle_rows(db, market, [normalized])).get(normalized, ())
         names = await _instrument_names(db, [normalized])
+        regular_close = await _regular_closes(
+            {normalized: point}, window=regular_window
+        )
+        known_previous_close = (
+            regular_close if session in {"DAY_MARKET", "PRE_MARKET"} else {}
+        )
         fallback = await _previous_close_fallback(
-            market, {normalized: point}, {normalized: rows}
+            market,
+            {normalized: point},
+            {normalized: rows},
+            known=known_previous_close,
         )
         return _toss_quote(
             point,
@@ -152,24 +263,42 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
             name=names.get(normalized),
             rows=rows,
             previous_close_fallback=fallback.get(normalized),
+            session=session,
+            regular_close=regular_close.get(normalized),
         )
     if wire_market == "KRX":
         shared = await _nh_quote(market=market, symbol=normalized)
         if shared is not None:
-            return shared
-    return await paper_account_adapter.quote(db, market=market, symbol=normalized)
+            return shared.model_copy(update={"session": session})
+    fallback_quote = await paper_account_adapter.quote(
+        db, market=market, symbol=normalized
+    )
+    return fallback_quote.model_copy(update={"session": session})
 
 
 async def resolve_quotes(
     db: AsyncSession, *, market: str, symbols: Sequence[str]
 ) -> list[Quote]:
-    """배치 시세. 한 번의 토스 호출 + 한 번의 일봉 조회로 구성한다."""
     requested = list(symbols)
     wire_market = _wire_market(market)
+    sessions, regular_window = await _quote_session_context(
+        db, market=market, symbols=requested
+    )
     points = await _toss_points(market, requested)
     candles = await _candle_rows(db, market, requested)
     names = await _instrument_names(db, requested)
-    fallback = await _previous_close_fallback(market, points, candles)
+    regular_closes = await _regular_closes(points, window=regular_window)
+    known_previous_closes = {
+        symbol: close
+        for symbol, close in regular_closes.items()
+        if sessions.get(symbol) in {"DAY_MARKET", "PRE_MARKET"}
+    }
+    fallback = await _previous_close_fallback(
+        market,
+        points,
+        candles,
+        known=known_previous_closes,
+    )
 
     quotes: list[Quote] = []
     nh_deadline = time.monotonic() + _NH_BATCH_BUDGET_SECONDS
@@ -177,6 +306,7 @@ async def resolve_quotes(
         name = names.get(symbol)
         rows = candles.get(symbol, ())
         point = points.get(symbol)
+        session = sessions.get(symbol)
         if point is not None:
             quotes.append(
                 _toss_quote(
@@ -185,15 +315,23 @@ async def resolve_quotes(
                     name=name,
                     rows=rows,
                     previous_close_fallback=fallback.get(symbol),
+                    session=session,
+                    regular_close=regular_closes.get(symbol),
                 )
             )
             continue
         if wire_market == "KRX" and time.monotonic() < nh_deadline:
             shared = await _nh_quote(market=market, symbol=symbol)
             if shared is not None:
-                quotes.append(shared)
+                quotes.append(shared.model_copy(update={"session": session}))
                 continue
-        candle_quote = _candle_quote(symbol, market=wire_market, name=name, rows=rows)
+        candle_quote = _candle_quote(
+            symbol,
+            market=wire_market,
+            name=name,
+            rows=rows,
+            session=session,
+        )
         if candle_quote is not None:
             quotes.append(candle_quote)
     return quotes
@@ -213,6 +351,8 @@ async def _previous_close_fallback(
     market: str,
     points: dict[str, TossQuotePoint],
     candles: dict[str, Sequence[DailyCandleRow]] | dict[str, list[DailyCandleRow]],
+    *,
+    known: dict[str, Decimal] | None = None,
 ) -> dict[str, Decimal]:
     """저장 일봉으로 전일 종가를 못 구한 종목만 토스 일봉으로 메운다.
 
@@ -223,21 +363,29 @@ async def _previous_close_fallback(
     기준일은 **시장의 거래일**이다. 미국을 KST 날짜로 넘기면 정규장이 자정을
     넘는 순간 진행 중인 당일 봉이 전일 종가로 잡힌다.
     """
+    resolved = dict(known or {})
     missing: dict[date, list[str]] = {}
     for symbol, point in points.items():
+        if symbol in resolved:
+            continue
         rows = candles.get(symbol) or ()
         if _previous_close(rows, market=market, before=point.as_of) is not None:
             continue
         boundary = _market_trading_date(market, point.as_of)
         missing.setdefault(boundary, []).append(symbol)
-    if not missing:
-        return {}
-    resolved: dict[str, Decimal] = {}
     for boundary, symbols in missing.items():
         resolved.update(
             await toss_market_data.previous_closes(symbols, boundary=boundary)
         )
     return resolved
+
+
+async def _regular_closes(
+    points: dict[str, TossQuotePoint], *, window: TossSessionWindow | None
+) -> dict[str, Decimal]:
+    if not points or window is None:
+        return {}
+    return await toss_market_data.regular_closes(list(points), window=window)
 
 
 async def _nh_quote(*, market: str, symbol: str) -> Quote | None:
@@ -257,10 +405,17 @@ def _toss_quote(
     name: str | None,
     rows: Sequence[DailyCandleRow],
     previous_close_fallback: Decimal | None = None,
+    session: MarketSessionState | None,
+    regular_close: Decimal | None,
 ) -> Quote:
     previous_close = _previous_close(rows, market=market, before=point.as_of)
     if previous_close is None:
         previous_close = previous_close_fallback
+    # US 데이마켓은 ET 전날 저녁에 열리지만 다음 거래일 구간이다. 시세
+    # timestamp의 ET 날짜로 일봉 경계를 잡으면 하루 전 종가를 하나 더
+    # 건너뛰므로, calendar가 증명한 직전 정규장 종가를 previousClose로 쓴다.
+    if session == "DAY_MARKET":
+        previous_close = regular_close
     return build_quote(
         market=market,
         symbol=point.symbol,
@@ -271,6 +426,8 @@ def _toss_quote(
         currency="USD" if market == "US" else "KRW",
         price=point.price,
         previous_close=previous_close,
+        session=session,
+        regular_close=regular_close,
         as_of=point.as_of,
         source=TOSS_QUOTE_SOURCE,
     )
@@ -282,6 +439,7 @@ def _candle_quote(
     market: str,
     name: str | None,
     rows: Sequence[DailyCandleRow],
+    session: MarketSessionState | None,
 ) -> Quote | None:
     if not rows:
         return None
@@ -297,6 +455,8 @@ def _candle_quote(
         currency="USD" if market == "US" else "KRW",
         price=price,
         previous_close=_previous_close(rows, market=market, before=as_of),
+        session=session,
+        regular_close=None,
         as_of=as_of,
         source=CANDLE_QUOTE_SOURCE,
     )
@@ -312,16 +472,20 @@ def build_quote(
     previous_close: Decimal | None,
     as_of: datetime,
     source: str,
+    session: MarketSessionState | None = None,
+    regular_close: Decimal | None = None,
 ) -> Quote:
-    """`Quote` 와이어 응답의 단일 생성점.
+    """REST와 스트림이 공유하는 정규장/현재 세션 등락 생성점."""
 
-    REST 경로(토스 배치·저장 일봉)와 실시간 스트림 경로가 같이 쓴다. 등락
-    계산과 문자열 표기가 두 경로에서 갈라지면 앱이 폴링 결과와 스트림 결과를
-    같은 모델로 다룰 수 없으므로, 생성점을 하나로 유지한다.
-    """
-
-    change_amount = price - previous_close if previous_close is not None else None
+    if session == "REGULAR":
+        regular_close = None
+    regular_basis = regular_close if regular_close is not None else price
+    change_amount = (
+        regular_basis - previous_close if previous_close is not None else None
+    )
     rate = change_rate(change_amount, previous_close)
+    session_change_amount = price - regular_close if regular_close is not None else None
+    session_rate = change_rate(session_change_amount, regular_close)
     return Quote(
         broker="PAPER",
         market=market,
@@ -336,6 +500,18 @@ def build_quote(
             decimal_text(change_amount) if change_amount is not None else None
         ),
         change_rate=decimal_text(rate) if rate is not None else None,
+        session=session,
+        regular_close=(
+            decimal_text(regular_close) if regular_close is not None else None
+        ),
+        session_change_amount=(
+            decimal_text(session_change_amount)
+            if session_change_amount is not None
+            else None
+        ),
+        session_change_rate=(
+            decimal_text(session_rate) if session_rate is not None else None
+        ),
         as_of=iso_z(as_of),
         source=source,
     )

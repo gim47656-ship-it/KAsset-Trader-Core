@@ -273,6 +273,9 @@ def quote_from_tick(
         if baseline.previous_close is not None
         else None
     )
+    regular_close = (
+        Decimal(baseline.regular_close) if baseline.regular_close is not None else None
+    )
     return build_quote(
         market=baseline.market,
         symbol=baseline.symbol,
@@ -280,6 +283,8 @@ def quote_from_tick(
         currency=baseline.currency,
         price=price,
         previous_close=previous_close,
+        session=baseline.session,
+        regular_close=regular_close,
         as_of=as_of,
         source=source,
     )

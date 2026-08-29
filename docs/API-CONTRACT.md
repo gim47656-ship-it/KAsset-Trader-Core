@@ -50,22 +50,26 @@
 
 NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지목한 국내주식 `openapi.json`의 `x-realtime-channels`이다. 모의투자 접속 주소는 `wss://moapi.nhplug.com:17070/websocket`, 채널은 `tr_cd=ob`, 구독 키는 6자리 `code`다. access token은 WebSocket HTTP 헤더가 아니라 구독 메시지의 `header.token`으로 전달한다.
 
-## 국내주식 시세 (단일·배치)
+## 주식 시세 (단일·배치)
 
 `GET /api/v1/market/quote?broker=PAPER&market=KRX&symbol=005930`
 
 `GET /api/v1/market/quotes?market=KRX&symbols=005930,000660`
 
+`GET /api/v1/market/quote?broker=PAPER&market=US&symbol=TQQQ`
+
 - 인증된 KAsset 모바일 세션이 필요하다. 미인증은 `401 UNAUTHORIZED`다.
-- 배치 응답은 `{"quotes": [Quote, ...]}`이며 `Quote`는 단일 조회와 완전히 같은 camelCase 계약(`broker`, `market`, `symbol`, `name`, `currency`, `price`, `previousClose`, `changeAmount`, `changeRate`, `asOf`, `source`)이다. 모든 가격·등락 값은 JSON number가 아닌 십진수 문자열이다.
-- `symbols`는 콤마 구분 1~50개이며 6자리 KRX 종목코드만 허용한다. 중복은 서버가 제거하고 응답에서도 한 번만 나온다. 개수·형식 위반과 `market`이 `KRX`(또는 `KR`)가 아닌 경우는 `422 VALIDATION_ERROR`다.
+- 배치 응답은 `{"quotes": [Quote, ...]}`이며 `Quote`는 단일 조회와 완전히 같은 camelCase 계약(`broker`, `market`, `symbol`, `name`, `currency`, `price`, `previousClose`, `changeAmount`, `changeRate`, `session`, `regularClose`, `sessionChangeAmount`, `sessionChangeRate`, `asOf`, `source`)이다. 모든 가격·등락 값은 JSON number가 아닌 십진수 문자열이다.
+- `symbols`는 콤마 구분 1~50개다. `KRX`(`KR`)는 6자리 종목코드, `US`(`NASDAQ`·`NYSE`·`AMEX`)는 미국 티커만 허용한다. 중복은 서버가 제거하고 응답에서도 한 번만 나온다. 개수·형식·시장 위반은 `422 VALIDATION_ERROR`다.
 - 조회에 실패한 종목은 값을 만들어내지 않고 응답 배열에서 제외한다. 요청 순서는 성공한 종목 사이에서 유지된다.
-- KRX 시세 우선순위는 **토스 인증 REST 배치 → 서버 공용 NH PLUG 채널 → 저장 일봉(PAPER)** 이다. 앞 단계가 실패하면 조용히 다음 단계로 강등하며, 어떤 단계도 서버 현재 시각을 시세 시각으로 위조하지 않는다. `source`가 그 응답이 실제로 어느 채널에서 나왔는지 알려준다(`TOSS_API_PRICES`, `NH_PLUG_MOCK`, `PAPER_CANDLES`). 자격증명이나 공급자 원문 예외는 응답·로그 어디에도 담지 않는다.
-- `TOSS_API_ENABLED`가 꺼져 있으면 토스 단계를 아예 시도하지 않고 기존 NH → 저장 일봉 경로만 쓴다.
-- 토스 단계는 종목당 2초 캐시 + 종목별 단일비행으로 보호한다. 같은 종목을 동시에 조회하는 여러 요청은 한 번의 배치 호출로 합쳐지고, 배치 호출 실패 직후 2초는 재호출하지 않는다. `TossReadClient`는 프로세스에서 한 번 만들어 재사용하고 앱 lifespan 종료 때 닫는다.
+- KRX 시세 우선순위는 **토스 인증 REST 배치 → 서버 공용 NH PLUG 채널 → 저장 일봉(PAPER)**, US는 **토스 인증 REST 배치 → 저장 일봉(PAPER)** 이다. 앞 단계가 실패하면 조용히 다음 단계로 강등하며, 어떤 단계도 서버 현재 시각을 시세 시각으로 위조하지 않는다. `source`가 실제 채널을 구분하며 자격증명이나 공급자 원문 예외는 응답·로그 어디에도 담지 않는다.
+- `TOSS_API_ENABLED`가 꺼져 있으면 토스 가격 단계를 시도하지 않고 기존 폴백 경로를 쓴다.
+- 토스 가격 단계는 종목당 2초 캐시 + 종목별 단일비행으로 보호한다. 같은 종목을 동시에 조회하는 여러 요청은 한 번의 배치 호출로 합쳐지고, 배치 호출 실패 직후 2초는 재호출하지 않는다. `TossReadClient`는 프로세스에서 한 번 만들어 재사용하고 앱 lifespan 종료 때 닫는다.
 - 배치에서 NH 공용 채널은 전 종목 공용 호출 간격(0.45초)에 묶여 있어 총 2.5초 예산까지만 시도하고, 예산을 넘긴 종목은 저장 일봉으로 강등한다. 응답 안에서 종목별 `source`가 서로 다를 수 있다.
-- `asOf`는 항상 UTC `Z` 표기다. 토스가 `+09:00` 오프셋으로 준 시각은 UTC로 정규화해 내려보내며(예: `2026-08-28T18:44:26+09:00` → `2026-08-28T09:44:26Z`), 공급자가 시각을 주지 않거나 오프셋 없는 시각을 주면 그 종목은 이 채널에서 제외하고 다음 폴백으로 내려간다. 저장 일봉 시세의 `asOf`는 그 일봉 거래일의 `T00:00:00Z`다.
-- `previousClose`는 저장 일봉에서 **해당 시세 거래일의 직전 거래일 종가**를 읽는다. 당일 일봉만 있거나 저장 일봉이 없으면 값을 만들지 않고 `null`이며, 이때 `changeAmount`·`changeRate`도 `null`이다. `changeRate` 단위는 퍼센트 포인트이고 소수 둘째 자리로 반올림한다.
+- `asOf`는 항상 UTC `Z` 표기다. 토스가 `+09:00` 오프셋으로 준 시각은 UTC로 정규화하며, 공급자가 시각을 주지 않거나 오프셋 없는 시각을 주면 그 종목은 다음 폴백으로 내려간다. 저장 일봉 시세의 `asOf`는 그 일봉 거래일의 `T00:00:00Z`다.
+- `session`은 Toss market calendar 원문 구간을 `DAY_MARKET`, `PRE_MARKET`, `REGULAR`, `AFTER_MARKET`, `CLOSED`로 옮긴 값이다. US만 `DAY_MARKET`을 가질 수 있다. KR calendar는 KRX+NXT 통합 구간만 주므로 별도 `NXT` 상태를 만들지 않는다. `singlePriceAuctionStart/End`는 상위 구간 안의 동시호가 경계라 별도 상태로 쪼개지 않으며, 공급자 명세가 제외한 시간외종가·시간외단일가는 이 계약에도 포함하지 않는다. KRX의 `PRE_MARKET`·`AFTER_MARKET`은 NXT 전용이므로 종목 universe의 최신 `nxt_eligible`·`nxt_trading_suspended`가 참여 가능함을 증명할 때만 그 상태를 내리고, 미지원·정지 종목은 `CLOSED`, 근거가 없거나 오래되었으면 `null`이다. calendar 조회 자체가 실패해도 휴장으로 만들지 않고 `null`이다.
+- `price`는 현재 세션 최신가이고 `previousClose`는 전일 정규장 종가다. `changeAmount`·`changeRate`는 정규장 진행 중에는 현재가, 정규장 종료 뒤에는 `regularClose`를 `previousClose`와 비교한다. `regularClose`는 완료된 정규장의 마지막 1분봉 종가이며 정규장 진행 중에는 `null`이다. `sessionChangeAmount`·`sessionChangeRate`는 현재가를 `regularClose`와 비교한다. 정규장 종가를 증명할 수 없으면 세 필드는 `null`이고, 기존 `changeAmount`·`changeRate`는 이전 호환 동작인 현재가-전일종가로 강등한다. 등락률 단위는 퍼센트 포인트이고 소수 둘째 자리로 반올림한다.
+- 정규장 종료 뒤 처음 조회하는 종목은 Toss 1분봉 요청 1회를 추가로 사용한다. 결과는 `(symbol, 정규장 종료 시각)`으로 캐시하므로 같은 정규장 기준의 후속 폴링·스트림은 재조회하지 않으며, 실패만 60초 동안 음수 캐시한다.
 - 클라이언트는 홈 화면과 관심종목 시세를 15초 주기로 폴링한다. 서버 개요 캐시도 15초라 최악 지연이 폴링 주기 수준으로 유지된다.
 
 배치 응답 예:
@@ -83,6 +87,10 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
       "previousClose": "250000",
       "changeAmount": "6500",
       "changeRate": "2.60",
+      "session": "REGULAR",
+      "regularClose": null,
+      "sessionChangeAmount": null,
+      "sessionChangeRate": null,
       "asOf": "2026-08-28T09:44:26Z",
       "source": "TOSS_API_PRICES"
     }
@@ -114,7 +122,7 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 - `USDKRW`는 Toss Open API가 설정되어 정상 응답하면 그 값을 우선하고, 실패하거나 미설정이면 open.er-api 값으로 강등한다. `JPYKRW`는 관행적인 100엔 단위가 아니라 **1 JPY당 KRW**, `EURKRW`는 **1 EUR당 KRW**다. 두 교차 환율은 USD-base open.er-api 스냅샷 한 건의 양수 유한 환율만 검증해 계산한다.
 - `status`는 전체 7개 항목이 `available`이면 `fresh`, 하나라도 `stale` 또는 `unavailable`이면 `partial`, 7개 모두 `unavailable`이면 `unavailable`이다. 항목 `status`가 시세 신선도의 권한자이며 클라이언트는 자체 시간 차 계산으로 덮어쓰지 않는다.
 - KRX는 기존 지수 응답의 `data_state`를 그대로 신선도 권한으로 사용한다. US는 정규장 기본 batch 또는 직접 시세만 `available`, 프리마켓·애프터마켓·휴장 또는 단일 심볼 current 실패의 일봉 fallback은 `stale`이다. FX는 검증된 스냅샷이면 `available`이며 서버가 항목 시각으로 별도 나이 계산을 하지 않는다.
-- `sessionState`와 `sessions[].state`는 `OPEN`, `PREOPEN`, `AFTER_HOURS`, `CLOSED` 중 하나다. 지수 항목에만 `sessionState`가 있고 FX 항목은 `null`이다. `sessions` 순서는 `KRX`, `US`다.
+- `sessionState`와 `sessions[].state`는 `DAY_MARKET`, `PRE_MARKET`, `REGULAR`, `AFTER_MARKET`, `CLOSED` 중 하나이며 calendar를 읽지 못하면 `null`이다. `DAY_MARKET`은 US에만 나타난다. 지수 항목에만 `sessionState`가 있고 FX 항목은 `null`이다. `sessions` 순서는 `KRX`, `US`다.
 - `errors`는 실패 항목마다 `{scope, symbol, code}`를 제공한다. `scope`는 `indices` 또는 `fx`, `code`는 `UNAVAILABLE` 또는 `TIMEOUT`이다. 공급자 이름이나 원본 예외 문자열은 모바일 계약에 노출하지 않는다.
 - `asOf`는 공급자가 제공한 시각만 사용한다. KRX 지수는 실제 quote timestamp, Toss USD/KRW는 `validFrom`, open.er-api는 실제 `time_last_update_unix`가 있을 때만 채운다. US 지수나 공급자 응답에 시각이 없으면 `null`이며 서버 현재 시각을 시세 시각으로 만들지 않는다. 최상위 `asOf`는 파싱 가능한 항목 시각 중 가장 최신 값이고, 아무 값도 없으면 `null`이다.
 - 응답 스냅샷은 프로세스 내에서 15초 동안 단일비행 캐시한다. 앱 홈 폴링 주기(15초)와 같은 값이라 서버 캐시와 앱 폴링이 겹쳐 지연이 누적되지 않는다. 지수와 FX 소스는 동시에 조회하며 각각 6초로 제한한다. 한 소스 또는 항목이 실패해도 HTTP `200`으로 `partial`/`unavailable` 계약을 반환한다.
@@ -277,6 +285,36 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
       "volume": null
     }
   ]
+}
+```
+
+## 종목 뉴스·공시 목록
+
+`GET /api/v1/market/news?market=KRX&symbol=005930&kind=all&limit=20`
+
+- 인증된 KAsset 모바일 세션이 필요하다. 없는 종목도 오류가 아니라 `200`과 `{"items": [], "nextCursor": null}`을 반환한다.
+- `market`과 `symbol`은 선택이다. `market`은 다른 KAsset 시장 조회와 같은 표기인 `KRX`(`KR`) 또는 `US`(`NASDAQ`·`NYSE`·`AMEX`)를 대소문자 구분 없이 받는다. `symbol`은 앞뒤 공백을 제거하고 대문자로 정규화한다.
+- `kind`는 `all`, `news`, `disclosure` 중 하나이며 기본값은 `all`이다. 저장값 `feed_source == "dart"`만 `disclosure`, 나머지 모든 공급자는 `news`다. `feed_source`와 공급자 식별자는 응답에 노출하지 않는다.
+- `limit`은 `1..50`, 기본값은 `20`이다. `cursor`는 서버가 발급한 opaque keyset 토큰만 허용하며 잘못되거나 변조된 값은 `422 VALIDATION_ERROR`다. 토큰은 `(article_published_at, id)` 경계를 함께 보존하므로 같은 시각의 여러 항목도 다음 페이지에서 누락하거나 중복하지 않는다.
+- 정렬은 `article_published_at DESC NULLS LAST, id DESC`다. 게시시각이 없는 실제 행도 값을 만들지 않고 `publishedAt=null`로 목록 마지막에 둔 뒤 `id DESC`로 결정적으로 정렬한다.
+- 저장 `article_published_at`은 KST 벽시각을 담은 timezone 없는 열이다. 서버는 이를 먼저 KST로 해석한 뒤 UTC `Z`로 변환한다. 예를 들어 저장값 `2026-08-29 00:00:00`은 `2026-08-28T15:00:00Z`다.
+- `is_analyzed=false`인 항목도 그대로 조회한다. AI 분석 완료 여부는 이 목록의 전제 조건이 아니다.
+
+```json
+{
+  "items": [
+    {
+      "kind": "disclosure",
+      "title": "주요사항보고서(자기주식취득결정)",
+      "summary": null,
+      "source": "DART",
+      "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829000123",
+      "publishedAt": "2026-08-28T15:00:00Z",
+      "symbol": "005930",
+      "stockName": "삼성전자"
+    }
+  ],
+  "nextCursor": null
 }
 ```
 

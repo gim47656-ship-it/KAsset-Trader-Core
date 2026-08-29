@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.news import NewsArticle, NewsArticleRelatedSymbol
+from app.models.news import NewsArticle, NewsArticleRelatedSymbol, NewsIngestionRun
 from app.models.symbol_news_relevance import SymbolNewsRelevance
 from app.services.symbol_news_relevance import build_relevance_hints
 
@@ -35,6 +35,33 @@ class FeedArticleInput:
     source: str | None
     published_at: datetime | None
     summary: str | None = None
+
+
+@dataclass(frozen=True)
+class DisclosureArticleInput:
+    url: str
+    title: str
+    source: str
+    feed_source: str
+    market: str
+    stock_symbol: str | None
+    stock_name: str | None
+    published_at: datetime | None
+    keywords: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class DisclosureUpsertCounts:
+    inserted: int
+    updated: int
+    skipped: int
+
+
+@dataclass(frozen=True)
+class FeedArticleUpsertCounts:
+    inserted: int
+    updated: int
+    skipped: int
 
 
 @dataclass(frozen=True)
@@ -78,6 +105,38 @@ def _relevance_block(link: SymbolNewsRelevance) -> dict[str, Any]:
     }
 
 
+async def count_feed_article_changes(
+    db: AsyncSession,
+    items: list[FeedArticleInput],
+) -> FeedArticleUpsertCounts:
+    """URL별 현재 제목·출처와 비교해 실제 기사 변경 건수를 계산한다."""
+    deduplicated = {item.url: item for item in items}
+    if not deduplicated:
+        return FeedArticleUpsertCounts(inserted=0, updated=0, skipped=0)
+
+    existing_rows = await db.execute(
+        select(NewsArticle.url, NewsArticle.title, NewsArticle.source).where(
+            NewsArticle.url.in_(deduplicated)
+        )
+    )
+    existing_by_url = {
+        url: (title, source) for url, title, source in existing_rows.all()
+    }
+    normalized_by_url = {
+        url: (item.title[:500], item.source) for url, item in deduplicated.items()
+    }
+    inserted = sum(url not in existing_by_url for url in normalized_by_url)
+    updated = sum(
+        url in existing_by_url and existing_by_url[url] != normalized
+        for url, normalized in normalized_by_url.items()
+    )
+    return FeedArticleUpsertCounts(
+        inserted=inserted,
+        updated=updated,
+        skipped=len(normalized_by_url) - inserted - updated,
+    )
+
+
 async def upsert_feed_articles(
     db: AsyncSession,
     market: str,
@@ -85,14 +144,16 @@ async def upsert_feed_articles(
     items: list[FeedArticleInput],
     *,
     feed_source: str,
+    commit: bool = True,
 ) -> int:
-    """Set-difference upsert: new urls insert, known urls no-op (idempotent).
+    """URL 기준 기사 upsert와 후보 종목의 pending 관련도 링크를 함께 쓴다.
 
-    Returns the number of *newly created* pending links (ROB-506 enqueue
-    trigger). 0 when every (article, symbol) pair already existed.
+    충돌 기사는 ID를 유지하고 제목·출처만 갱신한다. 반환값은 새로 만든
+    ``symbol_news_relevance`` pending 링크 수다.
     """
     if not items:
         return 0
+    deduplicated = {item.url: item for item in items}
     now = _utcnow()
     article_values = [
         {
@@ -100,31 +161,42 @@ async def upsert_feed_articles(
             "title": item.title[:500],
             "source": item.source,
             "summary": item.summary,
+            "article_content": None,
             "market": market,
             "feed_source": feed_source,
             "article_published_at": item.published_at.replace(tzinfo=None)
             if item.published_at
             else None,
             "is_analyzed": False,
+            "stock_symbol": None,
+            "stock_name": None,
             "scraped_at": now,
             "created_at": now,
             "updated_at": now,
         }
-        for item in items
+        for item in deduplicated.values()
     ]
+    insert_stmt = pg_insert(NewsArticle).values(article_values)
+    excluded = insert_stmt.excluded
     await db.execute(
-        pg_insert(NewsArticle)
-        .values(article_values)
-        .on_conflict_do_nothing(index_elements=[NewsArticle.url])
+        insert_stmt.on_conflict_do_update(
+            index_elements=[NewsArticle.url],
+            set_={
+                "title": excluded.title,
+                "source": excluded.source,
+            },
+            where=NewsArticle.title.is_distinct_from(excluded.title)
+            | NewsArticle.source.is_distinct_from(excluded.source),
+        )
     )
-    urls = [item.url for item in items]
+    urls = list(deduplicated)
     id_rows = await db.execute(
         select(NewsArticle.id, NewsArticle.url).where(NewsArticle.url.in_(urls))
     )
     url_to_id = {url: article_id for article_id, url in id_rows.all()}
 
     link_values = []
-    for item in items:
+    for item in deduplicated.values():
         article_id = url_to_id.get(item.url)
         if (
             article_id is None
@@ -159,7 +231,8 @@ async def upsert_feed_articles(
             )
         )
         new_links = int(result.rowcount or 0)
-    await db.commit()
+    if commit:
+        await db.commit()
     return new_links
 
 
@@ -344,3 +417,150 @@ async def load_symbol_news(
         )
     ).scalar_one()
     return stored, int(excluded_count)
+
+
+async def upsert_disclosures(
+    db: AsyncSession,
+    items: list[DisclosureArticleInput],
+) -> DisclosureUpsertCounts:
+    """발행 법인이 특정된 공시를 URL 기준으로 멱등 저장한다.
+
+    충돌 행은 제목·법인명만 갱신한다. 원천 식별용 키워드는 최초 삽입값을
+    보존해 후속 분석이 추가한 키워드를 재수집으로 덮어쓰지 않는다. 같은
+    회차에 같은 URL이 반복되면 마지막 값을 한 번만 쓰고 나머지는 스킵한다.
+    """
+    if not items:
+        return DisclosureUpsertCounts(inserted=0, updated=0, skipped=0)
+
+    deduplicated: dict[str, DisclosureArticleInput] = {}
+    duplicate_count = 0
+    for item in items:
+        if item.url in deduplicated:
+            duplicate_count += 1
+        deduplicated[item.url] = item
+
+    now = _utcnow()
+    article_values = []
+    normalized_by_url: dict[str, tuple[str, str | None]] = {}
+    for item in deduplicated.values():
+        title = item.title[:500]
+        stock_name = item.stock_name[:100] if item.stock_name else None
+        stock_symbol = item.stock_symbol[:20] if item.stock_symbol else None
+        keywords = list(item.keywords) if item.keywords is not None else None
+        article_values.append(
+            {
+                "url": item.url,
+                "title": title,
+                "source": item.source[:100],
+                "article_content": None,
+                "summary": None,
+                "feed_source": item.feed_source[:50],
+                "market": item.market[:20],
+                "keywords": keywords,
+                "is_analyzed": False,
+                "stock_symbol": stock_symbol,
+                "stock_name": stock_name,
+                "article_published_at": item.published_at,
+                "scraped_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        normalized_by_url[item.url] = (title, stock_name)
+
+    urls = list(normalized_by_url)
+    existing_rows = await db.execute(
+        select(NewsArticle.url, NewsArticle.title, NewsArticle.stock_name).where(
+            NewsArticle.url.in_(urls)
+        )
+    )
+    existing_by_url = {
+        url: (title, stock_name) for url, title, stock_name in existing_rows.all()
+    }
+    inserted = sum(url not in existing_by_url for url in urls)
+    updated = sum(
+        url in existing_by_url and existing_by_url[url] != normalized
+        for url, normalized in normalized_by_url.items()
+    )
+    unchanged = len(urls) - inserted - updated
+
+    insert_stmt = pg_insert(NewsArticle).values(article_values)
+    excluded = insert_stmt.excluded
+    await db.execute(
+        insert_stmt.on_conflict_do_update(
+            index_elements=[NewsArticle.url],
+            set_={
+                "title": excluded.title,
+                "stock_name": excluded.stock_name,
+            },
+            where=NewsArticle.title.is_distinct_from(excluded.title)
+            | NewsArticle.stock_name.is_distinct_from(excluded.stock_name),
+        )
+    )
+    return DisclosureUpsertCounts(
+        inserted=inserted,
+        updated=updated,
+        skipped=duplicate_count + unchanged,
+    )
+
+
+async def create_news_ingestion_run(
+    db: AsyncSession,
+    *,
+    run_uuid: str,
+    started_at: datetime,
+    market: str,
+    feed_source: str,
+) -> None:
+    """수집 회차의 시작값을 현재 트랜잭션에 추가한다.
+
+    모델에 ``running`` 상태가 없으므로 허용값인 ``success``를 임시 지정하지만,
+    호출자는 같은 트랜잭션에서 :func:`finish_news_ingestion_run`으로 닫은 뒤에만
+    커밋한다. 따라서 미종료 ``success`` 행은 외부에 노출되지 않는다.
+    """
+    db.add(
+        NewsIngestionRun(
+            run_uuid=run_uuid,
+            market=market,
+            feed_set=feed_source,
+            started_at=started_at,
+            finished_at=None,
+            status="success",
+            source_counts={feed_source: {}},
+            inserted_count=0,
+            skipped_count=0,
+            error_message=None,
+            created_at=started_at,
+        )
+    )
+    await db.flush()
+
+
+async def finish_news_ingestion_run(
+    db: AsyncSession,
+    *,
+    run_uuid: str,
+    status: str,
+    finished_at: datetime,
+    counts: DisclosureUpsertCounts | FeedArticleUpsertCounts,
+    error_message: str | None,
+    feed_source: str,
+) -> None:
+    """수집 회차를 허용 상태로 닫고 갱신 건수는 JSON 건수 필드에 보존한다."""
+    run = (
+        await db.execute(
+            select(NewsIngestionRun).where(NewsIngestionRun.run_uuid == run_uuid)
+        )
+    ).scalar_one()
+    run.finished_at = finished_at
+    run.status = status
+    run.source_counts = {
+        feed_source: {
+            "inserted": counts.inserted,
+            "updated": counts.updated,
+            "skipped": counts.skipped,
+        }
+    }
+    run.inserted_count = counts.inserted
+    run.skipped_count = counts.skipped
+    run.error_message = error_message
