@@ -61,6 +61,20 @@ _INVESTMENT_ADVICE_RE = re.compile(
     r"(?:매수|매도|투자)(?:를|가|는)?\s*(?:권고|권유|추천|해야)|"
     r"목표\s*주가|목표가"
 )
+_ENGLISH_MONTHS = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +132,24 @@ def _number_set(text: str) -> set[tuple[Decimal, bool]]:
     return numbers
 
 
+def _is_calendar_month_translation(
+    number: tuple[Decimal, bool],
+    *,
+    summary: str,
+    source_text: str,
+) -> bool:
+    value, is_percent = number
+    if is_percent or value != value.to_integral_value():
+        return False
+    month_number = int(value)
+    if not 1 <= month_number <= len(_ENGLISH_MONTHS):
+        return False
+    if re.search(rf"(?<!\d){month_number}\s*월", summary) is None:
+        return False
+    month_name = _ENGLISH_MONTHS[month_number - 1]
+    return re.search(rf"\b{month_name}\b", source_text, re.IGNORECASE) is not None
+
+
 def _validated_summary(summary: object, source_text: str) -> str:
     if not isinstance(summary, str):
         raise ValueError("disclosure summary must be a string")
@@ -137,7 +169,15 @@ def _validated_summary(summary: object, source_text: str) -> str:
 
     source_numbers = _number_set(source_text)
     generated_numbers = _number_set(normalized)
-    invented_numbers = generated_numbers - source_numbers
+    invented_numbers = {
+        number
+        for number in generated_numbers - source_numbers
+        if not _is_calendar_month_translation(
+            number,
+            summary=normalized,
+            source_text=source_text,
+        )
+    }
     if invented_numbers:
         raise ValueError("disclosure summary contains numbers absent from source")
     return normalized

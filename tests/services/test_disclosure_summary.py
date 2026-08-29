@@ -124,6 +124,32 @@ async def test_openai_generator_uses_strict_low_cost_summary_contract() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_openai_generator_accepts_english_month_translated_to_korean_number() -> (
+    None
+):
+    client = FakeResponsesClient(
+        "회사는 2026년 7월 26일 분기 실적을 발표했다. 매출과 순이익을 공시했다."
+    )
+    generator = OpenAiDisclosureSummaryGenerator(client, model="gpt-5.6-luna")
+
+    result = await generator.summarize(
+        DisclosureSummaryInput(
+            title="분기 실적",
+            company="테스트상장사",
+            form="8-K",
+            body_excerpt=(
+                "The quarter ended July 26, 2026. "
+                "Revenue and net income were disclosed."
+            ),
+        )
+    )
+
+    assert "2026년 7월 26일" in result
+    assert len(client.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_openai_generator_retries_numeric_unit_conversion_once() -> None:
     client = SequenceResponsesClient(
         [
