@@ -286,16 +286,22 @@ class StrategyPromotionService:
         operator_reason: str,
     ) -> StrategyPromotion:
         reason = _operator_reason(operator_reason)
-        trust = await self._candidate_trust(candidate_id)
+        preview = await self._candidate_trust(candidate_id, for_update=False)
         if (
             await self._promotion_row(
-                strategy_key=trust.experiment.strategy_key,
-                version=trust.experiment.strategy_version,
+                strategy_key=preview.experiment.strategy_key,
+                version=preview.experiment.strategy_version,
                 for_update=True,
             )
             is not None
         ):
             raise ValueError("strategy/version promotion already exists")
+        trust = await self._candidate_trust(candidate_id)
+        if (
+            trust.experiment.strategy_key != preview.experiment.strategy_key
+            or trust.experiment.strategy_version != preview.experiment.strategy_version
+        ):
+            raise PromotionCandidateTrustError("candidate_identity_changed")
         evidence = (
             _candidate_evidence(trust),
             PromotionEvidence(
@@ -548,10 +554,15 @@ class StrategyPromotionService:
             statement = statement.with_for_update()
         return await self._db.scalar(statement)
 
-    async def _candidate_trust(self, candidate_id: int) -> _CandidateTrust:
+    async def _candidate_trust(
+        self,
+        candidate_id: int,
+        *,
+        for_update: bool = True,
+    ) -> _CandidateTrust:
         if type(candidate_id) is not int or candidate_id < 1:
             raise PromotionCandidateTrustError("candidate_id_invalid")
-        result = await self._db.execute(
+        statement = (
             select(
                 ResearchPromotionCandidate,
                 ResearchBacktestRun,
@@ -567,8 +578,10 @@ class StrategyPromotionService:
                 == ResearchBacktestRun.strategy_experiment_id,
             )
             .where(ResearchPromotionCandidate.id == candidate_id)
-            .with_for_update()
         )
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._db.execute(statement)
         joined = result.one_or_none()
         if joined is None:
             raise PromotionCandidateTrustError("promotion_candidate_missing")

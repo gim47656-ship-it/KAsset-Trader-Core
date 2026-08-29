@@ -464,6 +464,8 @@ def derive_promotion_metrics(
     folds = walk_forward.folds
     if not folds:
         raise PromotionEvidenceBuildError("walk_forward_folds_missing")
+    for fold in folds:
+        _require_benchmark_window_coverage(fold.test_result, readiness)
     hashes = (
         diagnostics.determinism_hash,
         baseline.determinism_hash,
@@ -1207,6 +1209,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     for item in folds:
         fold = _required_mapping(item, "walkForward.fold")
         test = _required_mapping(fold.get("test"), "walkForward.fold.test")
+        _require_stored_benchmark_window_coverage(test, selected)
         passed = _stored_fold_passed(test)
         if fold.get("passed") is not passed:
             raise PromotionEvidenceBuildError("walk_forward_pass_mismatch")

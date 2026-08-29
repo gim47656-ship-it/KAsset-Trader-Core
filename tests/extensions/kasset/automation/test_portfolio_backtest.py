@@ -608,3 +608,14 @@ def test_stored_evidence_fails_closed_when_benchmark_window_is_short() -> None:
 
     with pytest.raises(PromotionEvidenceBuildError, match="benchmark_window_mismatch"):
         derive_metrics_from_stored_payload(tampered)
+
+
+def test_stored_evidence_fails_closed_when_fold_benchmark_market_is_missing() -> None:
+    raw, _metrics = _stored_evidence_payload()
+    tampered = copy.deepcopy(raw)
+    folds = tampered["walkForward"]["folds"]  # type: ignore[index]
+    fold_test = folds[0]["test"]  # type: ignore[index]
+    fold_test["benchmarkMarkets"] = ["KR"]  # type: ignore[index]
+
+    with pytest.raises(PromotionEvidenceBuildError, match="benchmark_market_mismatch"):
+        derive_metrics_from_stored_payload(tampered)
