@@ -33,10 +33,6 @@ def upgrade() -> None:
     )
     op.add_column(
         _TABLE_NAME,
-        sa.Column("entry_order_id", sa.Text(), nullable=True),
-    )
-    op.add_column(
-        _TABLE_NAME,
         sa.Column("opened_at", sa.TIMESTAMP(timezone=True), nullable=True),
     )
     op.add_column(
@@ -117,14 +113,6 @@ def upgrade() -> None:
         referent_schema="paper",
         ondelete="SET NULL",
     )
-    op.create_foreign_key(
-        "fk_kasset_position_state_entry_order",
-        _TABLE_NAME,
-        "kasset_android_paper_orders",
-        ["entry_order_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
     op.create_unique_constraint(
         "uq_kasset_position_state_active_position",
         _TABLE_NAME,
@@ -190,11 +178,6 @@ def downgrade() -> None:
         type_="unique",
     )
     op.drop_constraint(
-        "fk_kasset_position_state_entry_order",
-        _TABLE_NAME,
-        type_="foreignkey",
-    )
-    op.drop_constraint(
         "fk_kasset_position_state_paper_position",
         _TABLE_NAME,
         type_="foreignkey",
@@ -225,6 +208,5 @@ def downgrade() -> None:
     op.drop_column(_TABLE_NAME, "strategy_key")
     op.drop_column(_TABLE_NAME, "closed_at")
     op.drop_column(_TABLE_NAME, "opened_at")
-    op.drop_column(_TABLE_NAME, "entry_order_id")
     op.drop_column(_TABLE_NAME, "paper_position_id")
     op.drop_column(_TABLE_NAME, "position_cycle_id")

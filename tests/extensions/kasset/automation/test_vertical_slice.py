@@ -38,11 +38,8 @@ _NOW = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
 async def test_vertical_slice_ranking_includes_schema_required_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        vertical_slice,
-        "current_strategy_artifact",
-        lambda: SimpleNamespace(fingerprint="a" * 64),
-    )
+    artifact_loader = MagicMock(return_value=SimpleNamespace(fingerprint="a" * 64))
+    monkeypatch.setattr(vertical_slice, "current_strategy_artifact", artifact_loader)
     strategy = StrategyResult(
         action=Action.BUY,
         confidence=Decimal("0.80"),
@@ -147,6 +144,11 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         )
     )
     instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
+    artifact_loader.assert_called_once_with()
+    assert (
+        instance._position_manager._strategy_fingerprint  # noqa: SLF001
+        == "a" * 64
+    )
     instance._policy = SimpleNamespace(  # type: ignore[assignment]
         portfolio_plan=portfolio_plan,
         evaluate_hard_risk=AsyncMock(
@@ -193,6 +195,19 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
     assert ai_shadow["kind"] == "ai_shadow"
     assert ai_shadow["modelId"] == "configured-terra-model"
     assert ai_shadow["selected"] is True
+
+
+def test_strategy_artifact_lookup_failure_prevents_recommendation_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        vertical_slice,
+        "current_strategy_artifact",
+        MagicMock(side_effect=OSError("artifact unavailable")),
+    )
+
+    with pytest.raises(OSError, match="artifact unavailable"):
+        AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
 
 
 @pytest.mark.asyncio

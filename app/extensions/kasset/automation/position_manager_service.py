@@ -167,22 +167,27 @@ def position_recommendation_id(signal_key: str, owner_user_id: int) -> str:
 
 def _strategy_provenance_evidence(
     row: KAssetPaperPositionState,
-) -> dict[str, object] | None:
+) -> dict[str, object]:
     strategy_key = (row.strategy_key or "").strip()
     strategy_version = (row.strategy_version or "").strip()
-    if not strategy_key or not strategy_version:
-        return None
-    evidence: dict[str, object] = {
+    artifact_fingerprint = (row.strategy_fingerprint or "").strip()
+    if (
+        not strategy_key
+        or not strategy_version
+        or len(artifact_fingerprint) != 64
+        or any(
+            character not in "0123456789abcdef" for character in artifact_fingerprint
+        )
+    ):
+        raise ValueError("position strategy promotion identity is incomplete")
+    return {
         "title": "PAPER strategy promotion identity",
         "source": "kasset_strategy_promotion",
         "kind": "strategy_promotion",
         "strategyKey": strategy_key,
         "version": strategy_version,
+        "artifactFingerprint": artifact_fingerprint,
     }
-    fingerprint = (row.strategy_fingerprint or "").strip()
-    if fingerprint:
-        evidence["metricsHash"] = fingerprint
-    return evidence
 
 
 def _persistable_state(
@@ -217,17 +222,17 @@ class PaperPositionManagerService:
         config: PositionManagerConfig = PositionManagerConfig(),
         strategy_key: str = DEFAULT_PAPER_STRATEGY_KEY,
         strategy_version: str = DEFAULT_PAPER_STRATEGY_VERSION,
-        strategy_fingerprint: str | None = None,
+        strategy_fingerprint: str,
     ) -> None:
         normalized_key = strategy_key.strip()
         normalized_version = strategy_version.strip()
-        normalized_fingerprint = (
-            strategy_fingerprint.strip() if strategy_fingerprint is not None else None
-        )
+        normalized_fingerprint = strategy_fingerprint.strip()
         if not normalized_key or not normalized_version:
             raise ValueError("strategy_key and strategy_version are required")
-        if strategy_fingerprint is not None and not normalized_fingerprint:
-            raise ValueError("strategy_fingerprint must be non-empty when provided")
+        if len(normalized_fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_fingerprint
+        ):
+            raise ValueError("strategy_fingerprint must be lowercase 64-hex")
         self._db = db
         self._now = _aware_utc(now).replace(microsecond=0)
         self._config = config
@@ -373,7 +378,6 @@ class PaperPositionManagerService:
             state_row.paper_account_id = account_id
             state_row.market = state.market
             state_row.symbol = state.symbol
-            state_row.entry_order_id = None
             state_row.entry_price = state.entry_price
             state_row.initial_atr = state.initial_atr
             state_row.initial_stop = state.initial_stop
@@ -389,6 +393,19 @@ class PaperPositionManagerService:
             state_row.strategy_fingerprint = self._strategy_fingerprint
         else:
             state = _state_from_row(state_row)
+            stored_strategy_key = (state_row.strategy_key or "").strip()
+            if (
+                not stored_strategy_key
+                and state.strategy_version == self._strategy_version
+            ):
+                state_row.strategy_key = self._strategy_key
+                stored_strategy_key = self._strategy_key
+            if (
+                not (state_row.strategy_fingerprint or "").strip()
+                and stored_strategy_key == self._strategy_key
+                and state.strategy_version == self._strategy_version
+            ):
+                state_row.strategy_fingerprint = self._strategy_fingerprint
 
         pending_recommendation_id = state_row.last_exit_signal_key
         pending_kind: ExitKind | None = None
@@ -538,9 +555,7 @@ class PaperPositionManagerService:
                 **hard_risk.as_evidence(),
             },
         ]
-        strategy_evidence = _strategy_provenance_evidence(state_row)
-        if strategy_evidence is not None:
-            evidence.append(strategy_evidence)
+        evidence.append(_strategy_provenance_evidence(state_row))
         row = AIRecommendation(
             id=recommendation_id,
             owner_user_id=owner_user_id,

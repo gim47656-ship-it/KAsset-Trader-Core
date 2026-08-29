@@ -180,10 +180,12 @@ class AIRecommendationVerticalSlice:
         )
         self._ranker_config = ranker_config
         self._ranker = CandidateRanker(ranker_config)
+        self._strategy_artifact_fingerprint = current_strategy_artifact().fingerprint
         self._position_manager = PaperPositionManagerService(
             db,
             now=self._now,
             strategy_version=DEFAULT_PAPER_STRATEGY_VERSION,
+            strategy_fingerprint=self._strategy_artifact_fingerprint,
         )
 
     async def run_owner(self, owner_user_id: int) -> dict[str, object]:
@@ -882,7 +884,7 @@ class AIRecommendationVerticalSlice:
             strategy_promotion={
                 "strategyKey": DEFAULT_PAPER_STRATEGY_KEY,
                 "version": DEFAULT_PAPER_STRATEGY_VERSION,
-                "artifactFingerprint": current_strategy_artifact().fingerprint,
+                "artifactFingerprint": self._strategy_artifact_fingerprint,
             },
             ai_shadow_evidence=item.ai_shadow.as_selected_evidence(),
         )

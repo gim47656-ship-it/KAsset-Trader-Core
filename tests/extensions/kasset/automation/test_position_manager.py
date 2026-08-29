@@ -26,6 +26,9 @@ from app.extensions.kasset.automation.position_manager_service import (
     _state_matches_position_cycle,
     position_recommendation_id,
 )
+from app.extensions.kasset.automation.strategy_promotion_service import (
+    recommendation_strategy_identity,
+)
 from app.extensions.kasset.models import (
     AndroidPaperAccount,
     KAssetPaperPositionState,
@@ -36,6 +39,7 @@ from app.models.trading import InstrumentType, User
 
 D = Decimal
 ENTRY_AT = datetime(2026, 8, 1, tzinfo=UTC)
+_ARTIFACT_FINGERPRINT = "a" * 64
 
 
 def _state(
@@ -112,6 +116,7 @@ def _state_row(
     high: str = "100",
     last_evaluated_at: datetime | None = None,
     last_exit_signal_key: str | None = None,
+    strategy_fingerprint: str | None = _ARTIFACT_FINGERPRINT,
 ) -> KAssetPaperPositionState:
     return KAssetPaperPositionState(
         position_cycle_id=position_id,
@@ -120,7 +125,6 @@ def _state_row(
         paper_account_id=account_id,
         market=market,
         symbol=symbol,
-        entry_order_id=None,
         entry_price=D("100"),
         initial_atr=D("10"),
         initial_stop=D("70"),
@@ -133,7 +137,7 @@ def _state_row(
         last_exit_signal_key=last_exit_signal_key,
         strategy_key="qullamaggie_breakout_portfolio",
         strategy_version="1.0.0",
-        strategy_fingerprint=None,
+        strategy_fingerprint=strategy_fingerprint,
     )
 
 
@@ -159,7 +163,11 @@ def _atr_candles() -> list[SimpleNamespace]:
 
 
 def _manager(db: MagicMock, *, now: datetime) -> PaperPositionManagerService:
-    service = PaperPositionManagerService(db, now=now)
+    service = PaperPositionManagerService(
+        db,
+        now=now,
+        strategy_fingerprint=_ARTIFACT_FINGERPRINT,
+    )
     service._policy.evaluate_hard_risk = AsyncMock(  # type: ignore[method-assign]
         return_value=SimpleNamespace(
             checks=(),
@@ -354,7 +362,11 @@ async def test_data_error_skip_logs_owner_market_symbol_and_exception(
         "DailyCandlesRepository",
         lambda **_kwargs: repository,
     )
-    service = PaperPositionManagerService(db, now=ENTRY_AT)
+    service = PaperPositionManagerService(
+        db,
+        now=ENTRY_AT,
+        strategy_fingerprint=_ARTIFACT_FINGERPRINT,
+    )
     service._manage_position = AsyncMock(  # type: ignore[method-assign]
         side_effect=ValueError("invalid position data")
     )
@@ -400,10 +412,54 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
     assert state_row.entry_price != _atr_candles()[-1].close
     assert state_row.initial_atr == D("4")
     assert state_row.initial_stop == D("88")
-    assert state_row.entry_order_id is None
     assert state_row.strategy_key == "qullamaggie_breakout_portfolio"
     assert state_row.strategy_version == "1.0.0"
-    assert state_row.strategy_fingerprint is None
+    assert state_row.strategy_fingerprint == _ARTIFACT_FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_exit_recommendation_has_authorizable_strategy_identity() -> None:
+    state_row = _state_row(strategy_fingerprint=None)
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[_candle(1, open_="65", high="80", low="60", close="70")],
+    )
+    assert state_row.strategy_fingerprint == _ARTIFACT_FINGERPRINT
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    strategy_evidence = next(
+        item
+        for item in recommendation.evidence
+        if item.get("kind") == "strategy_promotion"
+    )
+    assert strategy_evidence == {
+        "title": "PAPER strategy promotion identity",
+        "source": "kasset_strategy_promotion",
+        "kind": "strategy_promotion",
+        "strategyKey": "qullamaggie_breakout_portfolio",
+        "version": "1.0.0",
+        "artifactFingerprint": _ARTIFACT_FINGERPRINT,
+    }
+    identity = recommendation_strategy_identity(recommendation)
+    assert identity is not None
+    assert identity.strategy_key == "qullamaggie_breakout_portfolio"
+    assert identity.version == "1.0.0"
+    assert identity.artifact_fingerprint == _ARTIFACT_FINGERPRINT
 
 
 @pytest.mark.asyncio
@@ -745,7 +801,6 @@ def test_cycle_model_and_migration_preserve_closed_audit() -> None:
     )
     assert position_fk.ondelete == "SET NULL"
     assert table.c.paper_position_id.nullable
-    assert table.c.entry_order_id.nullable
     assert table.c.strategy_key.nullable
     assert table.c.strategy_version.nullable
     assert table.c.strategy_fingerprint.nullable

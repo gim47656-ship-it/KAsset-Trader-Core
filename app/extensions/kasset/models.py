@@ -394,14 +394,6 @@ class KAssetPaperPositionState(Base):
     paper_account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     market: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
-    entry_order_id: Mapped[str | None] = mapped_column(
-        Text,
-        ForeignKey(
-            "kasset_android_paper_orders.id",
-            name="fk_kasset_position_state_entry_order",
-            ondelete="SET NULL",
-        ),
-    )
     entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     initial_atr: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     initial_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
