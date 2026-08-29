@@ -113,6 +113,35 @@ async def test_sec_fetch_sends_contract_user_agent_and_limits_clean_text() -> No
 
 
 @pytest.mark.unit
+def test_extract_disclosure_text_drops_inline_xbrl_hidden_header() -> None:
+    text = extract_disclosure_text(
+        """
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL">
+          <body>
+            <ix:header style="display:none">
+              <ix:resources>
+                <xbrli:context>0001045810 2026-07-26 us-gaap:Revenue</xbrli:context>
+              </ix:resources>
+              <ix:hidden>999999 hidden metadata</ix:hidden>
+            </ix:header>
+            <div hidden>888888 hidden attribute</div>
+            <div style="visibility: hidden">777777 hidden style</div>
+            <h1>Quarterly report</h1>
+            <p>Revenue increased to 30 billion dollars in the quarter.</p>
+          </body>
+        </html>
+        """
+    )
+
+    assert text == (
+        "Quarterly report\nRevenue increased to 30 billion dollars in the quarter."
+    )
+    assert "0001045810" not in text
+    assert "999999" not in text
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_dart_landing_resolves_viewer_and_extracts_actual_body() -> None:
     calls: list[tuple[str, str | None]] = []

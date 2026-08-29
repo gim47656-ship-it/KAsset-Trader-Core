@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 import re
+import warnings
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
-from bs4 import BeautifulSoup, Comment
+from bs4 import BeautifulSoup, Comment, XMLParsedAsHTMLWarning
 
 from app.services.disclosures.sec_edgar import (
     SecEdgarError,
@@ -252,9 +253,30 @@ def extract_disclosure_text(
     if max_chars < MIN_TEXT_CHARS:
         raise ValueError(f"max_chars must be at least {MIN_TEXT_CHARS}")
 
-    soup = BeautifulSoup(html_body, "lxml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+        soup = BeautifulSoup(html_body, "lxml")
+    for tag_name in (
+        "ix:header",
+        "ix:hidden",
+        "ix:references",
+        "ix:resources",
+        "xbrli:context",
+        "xbrli:unit",
+    ):
+        for element in soup.find_all(tag_name):
+            element.decompose()
     for element in soup(["script", "style", "noscript", "template", "svg"]):
         element.decompose()
+    for element in soup.find_all(attrs={"hidden": True}):
+        if element.parent is not None:
+            element.decompose()
+    for element in soup.find_all(style=True):
+        style = "".join(str(element.get("style", "")).lower().split())
+        if element.parent is not None and (
+            "display:none" in style or "visibility:hidden" in style
+        ):
+            element.decompose()
     for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
         comment.extract()
 
