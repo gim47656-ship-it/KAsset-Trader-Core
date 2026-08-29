@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     TIMESTAMP,
+    BigInteger,
     Date,
     Boolean,
     CheckConstraint,
