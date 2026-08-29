@@ -288,6 +288,7 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
     first = await summarize_pending_disclosures(
         db_session,
         batch_size=2,
+        article_urls=(successful_url, failed_url),
         fetcher=fetcher,
         generator=generator,
     )
@@ -317,6 +318,7 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
     second = await summarize_pending_disclosures(
         db_session,
         batch_size=2,
+        article_urls=(successful_url, failed_url),
         fetcher=fetcher,
         generator=generator,
     )
@@ -335,6 +337,7 @@ async def test_summary_batch_isolates_failure_persists_success_and_is_idempotent
     third = await summarize_pending_disclosures(
         db_session,
         batch_size=2,
+        article_urls=(successful_url, failed_url),
         fetcher=fetcher,
         generator=generator,
     )
