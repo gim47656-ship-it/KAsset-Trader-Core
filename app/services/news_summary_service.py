@@ -18,7 +18,8 @@ from sqlalchemy import case, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
+from app.extensions.kasset.ai.base import StructuredJsonClient
+from app.extensions.kasset.ai.factory import build_summary_json_client
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 
@@ -66,12 +67,6 @@ _TITLE_ONLY_INSTRUCTIONS = (
     "article_content와 raw_excerpt가 모두 없으면 title에 명시된 주체와 사건만 자연스러운 "
     "한국어 한 문장으로 번역·재서술하라. 제목을 그대로 복사하지 말고 배경 설명, 원인, "
     "수치, 영향 또는 전망을 추가하지 마라."
-)
-_NUMBER_RETRY_INSTRUCTIONS = (
-    "직전 시도는 입력에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. 수치를 쓸 "
-    "때는 입력에 보이는 숫자 토큰과 단위를 문자 그대로 복사하라. 반올림, 자릿수 "
-    "축약, million/billion 환산을 하지 마라. 그대로 복사할 수 없으면 그 수치를 "
-    "생략하고 입력에 명시된 비수치 사실만 요약하라."
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _NUMBER_RE = re.compile(r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%)?")
@@ -266,6 +261,7 @@ def _is_calendar_month_translation(
     month_name = _ENGLISH_MONTHS[month_number - 1]
     return re.search(rf"\b{month_name}\b", source_text, re.IGNORECASE) is not None
 
+
 def _comparison_key(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
 
@@ -276,8 +272,6 @@ def _duplicates_title(sentence: str, title: str) -> bool:
     if len(title_key) < 8:
         return sentence_key == title_key
     return SequenceMatcher(None, sentence_key, title_key).ratio() >= 0.94
-
-
 
 
 def _validated_summary(summary: object, news: NewsSummaryInput) -> str:
@@ -346,9 +340,9 @@ def _instructions_for(news: NewsSummaryInput) -> str:
 
 
 class OpenAiNewsSummaryGenerator:
-    """기존 Responses API와 Luna tier로 일반 뉴스 요약을 생성한다."""
+    """Generate news summaries through the common structured JSON transport."""
 
-    def __init__(self, client: OpenAiResponsesClient, *, model: str) -> None:
+    def __init__(self, client: StructuredJsonClient, *, model: str) -> None:
         normalized_model = model.strip()
         if not normalized_model:
             raise ValueError("news summary model is required")
@@ -356,14 +350,8 @@ class OpenAiNewsSummaryGenerator:
         self._model = normalized_model
 
     async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary:
-        response = await self._request(news, retry=False)
-        try:
-            summary = _validated_summary(response.get("summary"), news)
-        except ValueError as exc:
-            if str(exc) != "news summary contains numbers absent from source":
-                raise
-            response = await self._request(news, retry=True)
-            summary = _validated_summary(response.get("summary"), news)
+        response = await self._request(news)
+        summary = _validated_summary(response.get("summary"), news)
         sentiment = _validated_sentiment(response.get("sentiment"))
         confidence = _validated_confidence(response.get("confidence"))
         prompt = json.dumps(
@@ -378,7 +366,7 @@ class OpenAiNewsSummaryGenerator:
             summary=summary,
             sentiment=sentiment,
             confidence=confidence,
-            model_name=self._model,
+            model_name=str(getattr(response, "model_name", self._model)),
             prompt=prompt,
             raw_response=json.dumps(
                 response,
@@ -388,23 +376,14 @@ class OpenAiNewsSummaryGenerator:
             ),
         )
 
-    async def _request(
-        self,
-        news: NewsSummaryInput,
-        *,
-        retry: bool,
-    ) -> dict[str, object]:
+    async def _request(self, news: NewsSummaryInput) -> dict[str, object]:
         response = await self._client.request_json(
             model=self._model,
             input_payload=news.to_payload(),
             reasoning_effort="low",
-            schema_name="kasset_news_summary_retry" if retry else "kasset_news_summary",
+            schema_name="kasset_news_summary",
             schema=_SUMMARY_SCHEMA,
-            additional_instructions=(
-                f"{_instructions_for(news)} {_NUMBER_RETRY_INSTRUCTIONS}"
-                if retry
-                else _instructions_for(news)
-            ),
+            additional_instructions=_instructions_for(news),
         )
         if set(response) != {"summary", "sentiment", "confidence"}:
             raise ValueError("news summary response shape is invalid")
@@ -412,24 +391,20 @@ class OpenAiNewsSummaryGenerator:
 
 
 def build_news_summary_generator() -> NewsSummaryGenerator | None:
-    """가장 낮은 기존 분석 tier인 Luna가 설정됐을 때만 생성기를 만든다."""
+    """direct API -> OpenRouter 일반 뉴스 요약 route를 만든다."""
 
-    api_key = (
-        settings.KASSET_AI_API_KEY.get_secret_value().strip()
-        if settings.KASSET_AI_API_KEY is not None
-        else ""
+    direct_model = settings.KASSET_AI_MODEL_LUNA.strip()
+    fallback_model = settings.KASSET_AI_OPENROUTER_MODEL_FLASH.strip()
+    client = build_summary_json_client(
+        name="news-summary",
+        direct_model=direct_model,
+        fallback_model=fallback_model,
     )
-    model = settings.KASSET_AI_MODEL_LUNA.strip() or settings.KASSET_AI_API_MODEL.strip()
-    if not api_key or not model:
+    if client is None:
         return None
     return OpenAiNewsSummaryGenerator(
-        OpenAiResponsesClient(
-            name="news-summary",
-            base_url=settings.KASSET_AI_API_BASE_URL,
-            api_key=api_key,
-            timeout_seconds=60.0,
-        ),
-        model=model,
+        client,
+        model=direct_model or fallback_model,
     )
 
 

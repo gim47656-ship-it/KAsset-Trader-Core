@@ -21,6 +21,7 @@ from app.extensions.kasset.api.daily_routine_schemas import (
     AvailableRoutine,
     DailyRoutineAlert,
     DailyRoutineResponse,
+    RecommendationMarketScope,
     RoutineKey,
 )
 from app.extensions.kasset.api.paper_schemas import Quote
@@ -140,6 +141,7 @@ class _EffectiveSelection:
     routine_date: date
     inherited_from: date | None
     enabled_routines: tuple[RoutineKey, ...]
+    recommendation_market_scope: RecommendationMarketScope
     updated_at: datetime
 
 
@@ -174,6 +176,12 @@ def _canonical_routines(values: Sequence[str]) -> tuple[RoutineKey, ...]:
         raise ValueError("stored daily routine settings are invalid")
     selected = set(raw)
     return tuple(key for key in ROUTINE_KEYS if key in selected)
+
+
+def _canonical_market_scope(value: str) -> RecommendationMarketScope:
+    if value not in {"KR_ONLY", "US_ONLY", "KR_US"}:
+        raise ValueError("stored recommendation market scope is invalid")
+    return value  # type: ignore[return-value]
 
 
 def _decimal(value: object) -> Decimal | None:
@@ -264,21 +272,50 @@ class DailyRoutineService:
         )
         return self._response(selection, alerts)
 
+    async def recommendation_markets(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> frozenset[MarketKey]:
+        instant = _current_instant(now)
+        selection = await self._load_effective_selection(
+            db,
+            owner_user_id,
+            now=instant,
+        )
+        if selection.recommendation_market_scope == "KR_ONLY":
+            return frozenset({"kr"})
+        if selection.recommendation_market_scope == "US_ONLY":
+            return frozenset({"us"})
+        return frozenset({"kr", "us"})
+
     async def update(
         self,
         db: AsyncSession,
         owner_user_id: int,
         enabled_routines: Sequence[RoutineKey],
+        recommendation_market_scope: RecommendationMarketScope | None = None,
         *,
         now: datetime | None = None,
     ) -> DailyRoutineResponse:
         instant = _current_instant(now)
         routine_date = instant.astimezone(KST).date()
         canonical = _canonical_routines(enabled_routines)
+        if recommendation_market_scope is None:
+            recommendation_market_scope = (
+                await self._load_effective_selection(
+                    db,
+                    owner_user_id,
+                    now=instant,
+                )
+            ).recommendation_market_scope
         statement = pg_insert(KAssetDailyRoutineSetting).values(
             owner_user_id=owner_user_id,
             routine_date=routine_date,
             enabled_routines=list(canonical),
+            recommendation_market_scope=recommendation_market_scope,
             updated_at=instant,
         )
         statement = statement.on_conflict_do_update(
@@ -288,6 +325,7 @@ class DailyRoutineService:
             ],
             set_={
                 "enabled_routines": list(canonical),
+                "recommendation_market_scope": recommendation_market_scope,
                 "updated_at": instant,
             },
         ).returning(KAssetDailyRoutineSetting.updated_at)
@@ -298,6 +336,7 @@ class DailyRoutineService:
             routine_date=routine_date,
             inherited_from=None,
             enabled_routines=canonical,
+            recommendation_market_scope=recommendation_market_scope,
             updated_at=_aware(updated_at),
         )
         alerts = await self._alerts_for_selection(
@@ -344,6 +383,7 @@ class DailyRoutineService:
                 routine_date=today,
                 inherited_from=None,
                 enabled_routines=ROUTINE_KEYS,
+                recommendation_market_scope="KR_US",
                 updated_at=now,
             )
         return _EffectiveSelection(
@@ -352,6 +392,9 @@ class DailyRoutineService:
                 None if row.routine_date == today else row.routine_date
             ),
             enabled_routines=_canonical_routines(row.enabled_routines),
+            recommendation_market_scope=_canonical_market_scope(
+                row.recommendation_market_scope
+            ),
             updated_at=_aware(row.updated_at),
         )
 
@@ -364,6 +407,7 @@ class DailyRoutineService:
             date=selection.routine_date,
             inherited_from=selection.inherited_from,
             enabled_routines=list(selection.enabled_routines),
+            recommendation_market_scope=selection.recommendation_market_scope,
             available_routines=list(_AVAILABLE_ROUTINES),
             alerts=alerts,
             updated_at=selection.updated_at,

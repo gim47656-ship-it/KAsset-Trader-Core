@@ -36,6 +36,9 @@ from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
     OperatingMode,
 )
+from app.extensions.kasset.automation.strategy_promotion_service import (
+    StrategyPromotionService,
+)
 from app.models.ai_recommendations import AIRecommendation, RecommendationDecision
 from app.services.ai_recommendations.service import AIRecommendationService
 
@@ -43,9 +46,20 @@ from app.services.ai_recommendations.service import AIRecommendationService
 class RuntimeStateSafetyGate:
     """Resolve the persisted operating mode again at every execution boundary."""
 
-    def __init__(self, db: AsyncSession, *, automatic: bool = True) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        *,
+        automatic: bool = True,
+        recommendation_id: str | None = None,
+    ) -> None:
         self._db = db
         self._automatic = automatic
+        self._recommendation_id = (
+            recommendation_id.strip()
+            if recommendation_id is not None and recommendation_id.strip()
+            else None
+        )
 
     async def get_policy(
         self,
@@ -65,6 +79,20 @@ class RuntimeStateSafetyGate:
         enabled = snapshot.mode == required_mode
         if self._automatic:
             enabled = enabled and settings.AI_PAPER_AUTO_EXECUTION_ENABLED
+            if enabled and self._recommendation_id is not None:
+                recommendation = await self._db.get(
+                    AIRecommendation,
+                    self._recommendation_id,
+                )
+                enabled = (
+                    recommendation is not None
+                    and recommendation.owner_user_id == int(owner_user_id)
+                    and (
+                        await StrategyPromotionService(
+                            self._db
+                        ).approval_for_recommendation(recommendation)
+                    ).approved
+                )
         return OwnerExecutionPolicy(
             owner_user_id=owner_user_id,
             paper_automation_enabled=enabled,
@@ -81,25 +109,94 @@ class OwnerScopedRecommendationService:
         db: AsyncSession,
         *,
         recommendation_id: str | None = None,
+        require_promotion: bool = False,
     ) -> None:
+        self._db = db
         self._service = AIRecommendationService(db)
         self._recommendation_id = recommendation_id
+        self._require_promotion = require_promotion
 
     async def authorize_next_for_auto_execution(
         self,
         owner_user_id: str,
         now: datetime,
-    ) -> None:
-        await self._service.authorize_next_for_auto_execution(
-            int(owner_user_id),
-            now=now,
+    ) -> str | None:
+        owner_id = int(owner_user_id)
+        base = (
+            select(AIRecommendation)
+            .where(
+                AIRecommendation.owner_user_id == owner_id,
+                AIRecommendation.action.in_(("BUY", "SELL")),
+                AIRecommendation.valid_until > now,
+                AIRecommendation.paper_execution_status.is_(None),
+                AIRecommendation.source == "kasset-automation",
+            )
+            .limit(100)
         )
+        approved_rows = list(
+            (
+                await self._db.scalars(
+                    base.where(
+                        AIRecommendation.decision
+                        == RecommendationDecision.APPROVED
+                    ).order_by(
+                        AIRecommendation.decided_at,
+                        AIRecommendation.created_at,
+                        AIRecommendation.id,
+                    )
+                )
+            ).all()
+        )
+        pending_rows = list(
+            (
+                await self._db.scalars(
+                    base.where(
+                        AIRecommendation.decision
+                        == RecommendationDecision.PENDING
+                    ).order_by(
+                        AIRecommendation.created_at,
+                        AIRecommendation.id,
+                    )
+                )
+            ).all()
+        )
+        promotion_service = StrategyPromotionService(self._db)
+        for row in (*approved_rows, *pending_rows):
+            approval = await promotion_service.approval_for_recommendation(row)
+            if not approval.approved:
+                continue
+            if row.decision == RecommendationDecision.PENDING:
+                row = await self._service.decide(
+                    owner_id,
+                    recommendation_id=row.id,
+                    decision=RecommendationDecision.APPROVED,
+                )
+            self._recommendation_id = row.id
+            return row.id
+        return None
 
     async def claim_for_paper_execution(
         self,
         owner_user_id: str,
         now: datetime,
     ) -> PaperExecutionClaim | None:
+        if self._require_promotion:
+            if self._recommendation_id is None:
+                return None
+            candidate = await self._db.get(
+                AIRecommendation,
+                self._recommendation_id,
+            )
+            if (
+                candidate is None
+                or candidate.owner_user_id != int(owner_user_id)
+                or not (
+                    await StrategyPromotionService(
+                        self._db
+                    ).approval_for_recommendation(candidate)
+                ).approved
+            ):
+                return None
         row = await self._service.claim_for_paper_execution(
             int(owner_user_id),
             now,
@@ -151,8 +248,14 @@ class OwnerScopedRecommendationService:
 class OwnerScopedPaperOrders:
     """Apply KAsset Hard Risk, then delegate only to the shared PAPER facade."""
 
-    def __init__(self, *, now: datetime | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now: datetime | None = None,
+        require_promotion: bool = False,
+    ) -> None:
         self._now = (now or datetime.now(UTC)).replace(microsecond=0)
+        self._require_promotion = require_promotion
 
     async def preview(
         self,
@@ -231,6 +334,26 @@ class OwnerScopedPaperOrders:
             int(owner_user_id),
             recommendation_id,
         )
+        if self._require_promotion:
+            promotion = await StrategyPromotionService(
+                db
+            ).approval_for_recommendation(recommendation, for_update=True)
+            if not promotion.approved:
+                raise MobileApiError(
+                    409,
+                    "STRATEGY_PROMOTION_REQUIRED",
+                    "승인된 전략 버전의 PAPER 추천만 자동 주문할 수 있습니다.",
+                    {
+                        "strategyKey": promotion.strategy_key,
+                        "version": promotion.version,
+                        "state": (
+                            promotion.state.value
+                            if promotion.state is not None
+                            else None
+                        ),
+                        "reason": promotion.reason,
+                    },
+                )
         try:
             price = Decimal(
                 reference_price
@@ -323,20 +446,43 @@ async def run_paper_automation_once(
                         status="BLOCKED",
                         reason="auto_paper_mode_required",
                     )
+                elif snapshot.kill_switch:
+                    outcome = PaperExecutionOutcome(
+                        status="BLOCKED",
+                        reason="global_kill_switch_enabled",
+                    )
                 else:
-                    recommendation_service = OwnerScopedRecommendationService(db)
-                    await recommendation_service.authorize_next_for_auto_execution(
-                        str(owner_id),
-                        current,
+                    recommendation_service = OwnerScopedRecommendationService(
+                        db,
+                        require_promotion=True,
                     )
-                    consumer = PaperAutomationConsumer(
-                        owner_user_id=str(owner_id),
-                        safety_gate=RuntimeStateSafetyGate(db, automatic=True),
-                        recommendation_service=recommendation_service,
-                        paper_orders=OwnerScopedPaperOrders(now=current),
-                        db=db,
+                    recommendation_id = (
+                        await recommendation_service.authorize_next_for_auto_execution(
+                            str(owner_id),
+                            current,
+                        )
                     )
-                    outcome = await consumer.run_once(now=current)
+                    if recommendation_id is None:
+                        outcome = PaperExecutionOutcome(
+                            status="BLOCKED",
+                            reason="strategy_promotion_required",
+                        )
+                    else:
+                        consumer = PaperAutomationConsumer(
+                            owner_user_id=str(owner_id),
+                            safety_gate=RuntimeStateSafetyGate(
+                                db,
+                                automatic=True,
+                                recommendation_id=recommendation_id,
+                            ),
+                            recommendation_service=recommendation_service,
+                            paper_orders=OwnerScopedPaperOrders(
+                                now=current,
+                                require_promotion=True,
+                            ),
+                            db=db,
+                        )
+                        outcome = await consumer.run_once(now=current)
         except Exception as exc:  # one owner's failure must not stop the sweep
             outcome = PaperExecutionOutcome(
                 status="FAILED",

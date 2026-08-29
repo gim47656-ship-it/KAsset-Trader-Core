@@ -289,6 +289,7 @@ class RecommendationProducer:
         ranking: Mapping[str, object] | None = None,
         portfolio: Mapping[str, object] | None = None,
         hard_risk: Mapping[str, object] | None = None,
+        strategy_promotion: Mapping[str, object] | None = None,
     ) -> object:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
         normalized_symbol = symbol.strip().upper()
@@ -405,6 +406,30 @@ class RecommendationProducer:
                 normalized_hard_risk.get("blockedReason") or "HARD_RISK_REJECTED"
             )
             rejected_reasons.append(f"hard risk blocked: {blocked_reason}")
+        normalized_strategy_promotion: dict[str, object] | None = None
+        if strategy_promotion is not None:
+            raw_strategy_key = strategy_promotion.get("strategyKey")
+            raw_strategy_version = strategy_promotion.get("version")
+            if not isinstance(raw_strategy_key, str) or not isinstance(
+                raw_strategy_version, str
+            ):
+                raise ValueError(
+                    "strategy_promotion requires string strategyKey and version"
+                )
+            strategy_key = raw_strategy_key.strip()
+            strategy_version = raw_strategy_version.strip()
+            if not strategy_key or not strategy_version:
+                raise ValueError(
+                    "strategy_promotion requires strategyKey and version"
+                )
+            normalized_strategy_promotion = {
+                "title": "PAPER strategy promotion identity",
+                "source": "kasset_strategy_promotion",
+                "kind": "strategy_promotion",
+                "strategyKey": strategy_key,
+                "version": strategy_version,
+            }
+
 
         rationale = [
             _korean_vote_rationale(valid_results),
@@ -483,6 +508,9 @@ class RecommendationProducer:
                 "hardRisk": normalized_hard_risk,
             }
         )
+        if normalized_strategy_promotion is not None:
+            evidence.append(normalized_strategy_promotion)
+
 
         draft = RecommendationDraft(
             owner_user_id=self._owner_user_id,

@@ -153,6 +153,42 @@ class RecommendationRanking(BaseModel):
     note: str
 
 
+class RecommendationPositionSizeCap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    quantity: DecimalText
+
+
+class RecommendationPositionSizingReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str
+    detail: str
+
+
+class RecommendationPositionSizing(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    action: Literal["BUY", "SELL"]
+    market: Literal["KRX", "US"]
+    quantity: DecimalText
+    unrounded_quantity: DecimalText = Field(alias="unroundedQuantity")
+    lot_size: DecimalText = Field(alias="lotSize")
+    entry_price: DecimalText | None = Field(default=None, alias="entryPrice")
+    strategy_stop: DecimalText | None = Field(default=None, alias="strategyStop")
+    strategy_atr: DecimalText | None = Field(default=None, alias="strategyAtr")
+    risk_budget: DecimalText = Field(alias="riskBudget")
+    risk_per_unit: DecimalText = Field(alias="riskPerUnit")
+    risk_per_trade_rate: DecimalText = Field(alias="riskPerTradeRate")
+    regime: str | None = None
+    regime_multiplier: DecimalText = Field(alias="regimeMultiplier")
+    caps: list[RecommendationPositionSizeCap]
+    limiting_caps: list[str] = Field(alias="limitingCaps")
+    zero_reasons: list[RecommendationPositionSizingReason] = Field(alias="zeroReasons")
+
+
 class RecommendationPortfolio(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -160,6 +196,10 @@ class RecommendationPortfolio(BaseModel):
     target_quantity: DecimalText | None = Field(default=None, alias="targetQuantity")
     cash_after: DecimalText | None = Field(default=None, alias="cashAfter")
     note: str
+    position_sizing: RecommendationPositionSizing | None = Field(
+        default=None,
+        alias="positionSizing",
+    )
 
 
 class RecommendationHardRiskCheck(BaseModel):
@@ -291,6 +331,12 @@ class _AITradingSettingsFields(BaseModel):
     )
     kill_switch: bool = Field(alias="killSwitch")
     currency: Literal["KRW", "USD"]
+    custom_max_buys_per_day: int | None = Field(
+        default=None, ge=1, strict=True, alias="customMaxBuysPerDay"
+    )
+    custom_max_sells_per_day: int | None = Field(
+        default=None, ge=1, strict=True, alias="customMaxSellsPerDay"
+    )
 
     @field_serializer(
         "operating_budget",
@@ -319,6 +365,11 @@ class AITradingDerivedLimits(BaseModel):
     max_concurrent_holdings: int = Field(ge=0, alias="maxConcurrentHoldings")
     max_buys_per_day: int = Field(ge=0, alias="maxBuysPerDay")
     max_orders_per_day: int = Field(ge=0, alias="maxOrdersPerDay")
+    max_sells_per_day: int = Field(ge=0, alias="maxSellsPerDay")
+    max_custom_buys_per_day: int = Field(ge=1, alias="maxCustomBuysPerDay")
+    max_custom_sells_per_day: int = Field(ge=1, alias="maxCustomSellsPerDay")
+    max_custom_orders_per_day: int = Field(ge=2, alias="maxCustomOrdersPerDay")
+    risk_per_trade_rate: Decimal = Field(ge=0, le=1, alias="riskPerTradeRate")
     same_symbol_reentry_limit: int = Field(
         ge=0, alias="sameSymbolReentryLimit"
     )
@@ -328,6 +379,7 @@ class AITradingDerivedLimits(BaseModel):
         "daily_target_amount",
         "max_daily_loss_amount",
         "max_symbol_allocation_pct",
+        "risk_per_trade_rate",
         "min_ai_confidence",
         when_used="json",
     )
@@ -352,6 +404,7 @@ class AITradingUsageResponse(BaseModel):
     realized_pnl_today: Decimal = Field(alias="realizedPnlToday")
     realized_loss_today: Decimal = Field(alias="realizedLossToday")
     buys_today: int = Field(alias="buysToday")
+    sells_today: int = Field(alias="sellsToday")
     orders_today: int = Field(alias="ordersToday")
     concurrent_holdings: int = Field(alias="concurrentHoldings")
     budget_used: Decimal = Field(alias="budgetUsed")

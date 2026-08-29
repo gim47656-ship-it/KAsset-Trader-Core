@@ -76,7 +76,7 @@ class CloudflareAiProvider:
             result_payload["provider"] = "api"
             result_payload["skill"] = request.skill
             result_payload["correlation_id"] = request.correlation_id
-            return SkillResult.model_validate(result_payload)
+            return SkillResult.model_validate(result_payload, strict=True)
         finally:
             if owns_client:
                 await client.aclose()

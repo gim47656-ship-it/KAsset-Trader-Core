@@ -88,7 +88,7 @@ print("```")
 
 
 @pytest.mark.asyncio
-async def test_cli_invoker_nonzero_exit_is_unavailable(tmp_path: Path) -> None:
+async def test_cli_invoker_nonzero_exit_fails_closed(tmp_path: Path) -> None:
     command = _script_command(
         tmp_path,
         """
@@ -100,7 +100,7 @@ raise SystemExit(7)
 """,
     )
 
-    with pytest.raises(AiProviderUnavailable, match="exit_code=7"):
+    with pytest.raises(ValueError, match="exit_code=7"):
         await build_cli_invoker(command, timeout_seconds=2.0)(_REQUEST)
 
 
@@ -160,21 +160,21 @@ async def test_cli_invoker_timeout_kills_process(
 
 
 @pytest.mark.asyncio
-async def test_cli_invoker_without_json_is_unavailable(tmp_path: Path) -> None:
+async def test_cli_invoker_without_json_fails_closed(tmp_path: Path) -> None:
     command = _script_command(tmp_path, 'print("plain text only")\n')
 
-    with pytest.raises(AiProviderUnavailable, match="no JSON object"):
+    with pytest.raises(ValueError, match="no JSON object"):
         await build_cli_invoker(command, timeout_seconds=2.0)(_REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_cli_invoker_schema_error_is_unavailable(tmp_path: Path) -> None:
+async def test_cli_invoker_schema_error_fails_closed(tmp_path: Path) -> None:
     command = _script_command(
         tmp_path,
         'print(\'{"signal": "BUY", "confidence": 0.5}\')\n',
     )
 
-    with pytest.raises(AiProviderUnavailable, match="invalid SkillResult"):
+    with pytest.raises(ValueError, match="invalid SkillResult"):
         await build_cli_invoker(command, timeout_seconds=2.0)(_REQUEST)
 
 
@@ -193,7 +193,7 @@ raise SystemExit(9)
 """,
     )
 
-    with pytest.raises(AiProviderUnavailable) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         await build_cli_invoker(command, timeout_seconds=2.0)(_REQUEST)
 
     message = str(excinfo.value)

@@ -8,8 +8,8 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from html.parser import HTMLParser
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -70,6 +70,27 @@ def market_config(market: str) -> GoogleNewsMarketConfig:
         raise ValueError(f"unsupported market: {market!r}") from exc
 
 
+def _validated_google_news_url(value: str, *, index: int) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise GoogleNewsRssError(f"item[{index}] has an invalid link") from exc
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme.lower() != "https"
+        or host != "news.google.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or any(character.isspace() for character in value)
+    ):
+        raise GoogleNewsRssError(
+            f"item[{index}] link must be a public Google News HTTPS URL"
+        )
+    return value
+
+
 def normalize_us_company_name(value: str) -> str:
     """관측된 잡음 접미를 토큰 단위로만 영문 회사명 끝에서 제거한다."""
     words = value.strip().split()
@@ -99,45 +120,6 @@ def build_symbol_query(*, market: str, name: str) -> str:
     return normalized
 
 
-class _DescriptionTextExtractor(HTMLParser):
-    _BLOCK_TAGS = frozenset(
-        {"br", "div", "li", "ol", "p", "table", "td", "th", "tr", "ul"}
-    )
-    _IGNORED_TAGS = frozenset({"script", "style"})
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
-        if tag in self._IGNORED_TAGS:
-            self._ignored_depth += 1
-        elif self._ignored_depth == 0 and tag in self._BLOCK_TAGS:
-            self.parts.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in self._IGNORED_TAGS and self._ignored_depth > 0:
-            self._ignored_depth -= 1
-        elif self._ignored_depth == 0 and tag in self._BLOCK_TAGS:
-            self.parts.append(" ")
-
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth == 0:
-            self.parts.append(data)
-
-
-def html_to_text(value: str | None) -> str | None:
-    """description HTML에서 태그와 엔티티를 제거하고 공백을 정규화한다."""
-    if not value:
-        return None
-    parser = _DescriptionTextExtractor()
-    parser.feed(value)
-    parser.close()
-    normalized = " ".join("".join(parser.parts).split())
-    return normalized or None
-
 
 def _published_at(value: str | None) -> datetime | None:
     if not value or not value.strip():
@@ -160,7 +142,7 @@ def _normalized_item(item: ET.Element, *, index: int) -> FeedArticleInput:
     if raw_url is None or not raw_url.strip():
         raise GoogleNewsRssError(f"item[{index}] missing required link")
 
-    url = raw_url.strip()
+    url = _validated_google_news_url(raw_url.strip(), index=index)
     if len(url) > 2048:
         raise GoogleNewsRssError(f"item[{index}] link exceeds 2048 characters")
     source_text = item.findtext("source")
@@ -178,7 +160,9 @@ def _normalized_item(item: ET.Element, *, index: int) -> FeedArticleInput:
         title=title[:500],
         source=source[:100] if source else None,
         published_at=_published_at(item.findtext("pubDate")),
-        summary=html_to_text(item.findtext("description")),
+        # Google RSS description is a headline/source card, not an article summary.
+        # Saving it here prevents the real body summarizer from running after ingest.
+        summary=None,
     )
 
 

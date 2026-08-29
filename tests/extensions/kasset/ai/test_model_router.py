@@ -303,7 +303,7 @@ async def test_primary_unavailable_uses_tier_openrouter_fallback(
     kind: AnalysisKind,
     expected_fallback_model: str,
 ) -> None:
-    primary = _ScriptedTransport([httpx.Response(429, json={"error": "busy"})])
+    primary = _ScriptedTransport([httpx.Response(503, json={"error": "busy"})])
     fallback = _ScriptedTransport([_wire_response(_verdict())])
     _patch_transports(
         monkeypatch,
@@ -357,7 +357,7 @@ async def test_primary_success_does_not_call_configured_fallback(
 async def test_both_primary_and_fallback_unavailable_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    primary = _ScriptedTransport([httpx.Response(429, json={})])
+    primary = _ScriptedTransport([httpx.Response(500, json={})])
     fallback = _ScriptedTransport([httpx.Response(503, json={})])
     _patch_transports(
         monkeypatch,
@@ -372,7 +372,7 @@ async def test_both_primary_and_fallback_unavailable_raise(
             AnalysisKind.MARKET_STATE, {"sample": 1}
         )
 
-    assert "HTTP 429" in str(excinfo.value)
+    assert "HTTP 500" in str(excinfo.value)
     assert "HTTP 503" in str(excinfo.value)
     assert len(primary.requests) == 1
     assert len(fallback.requests) == 1
@@ -382,7 +382,7 @@ async def test_both_primary_and_fallback_unavailable_raise(
 async def test_missing_openrouter_key_does_not_attempt_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    primary = _ScriptedTransport([httpx.Response(429, json={})])
+    primary = _ScriptedTransport([httpx.Response(503, json={})])
     fallback = _ScriptedTransport([_wire_response(_verdict())])
     _patch_transports(
         monkeypatch,
@@ -392,18 +392,20 @@ async def test_missing_openrouter_key_does_not_attempt_fallback(
         },
     )
 
-    with pytest.raises(AiProviderUnavailable, match="HTTP 429"):
+    with pytest.raises(AiProviderUnavailable, match="HTTP 503"):
         await _router().analyze(AnalysisKind.MARKET_STATE, {"sample": 1})
 
     assert len(primary.requests) == 1
     assert fallback.requests == []
 
 
+@pytest.mark.parametrize("status", [400, 408, 429])
 @pytest.mark.asyncio
 async def test_primary_nonretryable_4xx_does_not_attempt_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    status: int,
 ) -> None:
-    primary = _ScriptedTransport([httpx.Response(400, text="bad request")])
+    primary = _ScriptedTransport([httpx.Response(status, text="bad request")])
     fallback = _ScriptedTransport([_wire_response(_verdict())])
     _patch_transports(
         monkeypatch,
@@ -413,7 +415,7 @@ async def test_primary_nonretryable_4xx_does_not_attempt_fallback(
         },
     )
 
-    with pytest.raises(ValueError, match="HTTP 400"):
+    with pytest.raises(ValueError, match=f"HTTP {status}"):
         await _router(openrouter_api_key="openrouter-key").analyze(
             AnalysisKind.MARKET_STATE, {"sample": 1}
         )

@@ -240,28 +240,6 @@ class AIRecommendationService:
             return current
         raise RecommendationStateConflictError(recommendation_id)
 
-    async def authorize_next_for_auto_execution(
-        self,
-        owner_user_id: int,
-        *,
-        now: datetime,
-    ) -> AIRecommendation | None:
-        decided_at = self._normalized_now(now)
-        row = await self._repository.next_pending_actionable(owner_user_id, decided_at)
-        if row is None:
-            return None
-        self._validate_approval(row, now=decided_at)
-        resolved = await self._repository.resolve_pending(
-            owner_user_id,
-            recommendation_id=row.id,
-            decision=RecommendationDecision.APPROVED,
-            decided_at=decided_at,
-        )
-        if resolved is None:
-            await self._session.rollback()
-            return None
-        await self._session.commit()
-        return resolved
 
     async def claim_for_paper_execution(
         self,

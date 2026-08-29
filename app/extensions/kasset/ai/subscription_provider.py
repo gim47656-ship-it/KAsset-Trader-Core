@@ -53,4 +53,4 @@ class SubscriptionAgentProvider:
         payload["provider"] = "subscription"
         payload["skill"] = request.skill
         payload["correlation_id"] = request.correlation_id
-        return SkillResult.model_validate(payload)
+        return SkillResult.model_validate(payload, strict=True)

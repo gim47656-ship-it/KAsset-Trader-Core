@@ -6,6 +6,9 @@ x-logging: &default-logging
   options:
     max-size: "20m"
     max-file: "3"
+# 공통 runtime env는 API, MCP, worker, scheduler, 일회성 migration에
+# 필요한 모든 KASSET_AI_* route 설정을 함께 전달한다.
+x-kasset-runtime-env-file: &kasset-runtime-env-file .env.kasset
 services:
   db:
     image: timescale/timescaledb-ha:pg17
@@ -42,7 +45,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
     env_file:
-      - .env.kasset
+      - *kasset-runtime-env-file
       - .env.nhplug-mock.native
     volumes:
       - /opt/kasset-nhplug:/home/appuser/.nhplug
@@ -66,7 +69,7 @@ services:
   mcp:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
-      - .env.kasset
+      - *kasset-runtime-env-file
     environment:
       MCP_TYPE: streamable-http
       MCP_HOST: 0.0.0.0
@@ -96,7 +99,7 @@ services:
   migration:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
-      - .env.kasset
+      - *kasset-runtime-env-file
     depends_on:
       db:
         condition: service_healthy
@@ -108,7 +111,7 @@ services:
   worker:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
-      - .env.kasset
+      - *kasset-runtime-env-file
       - .env.nhplug-mock.native
     command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", "--workers", "1"]
     depends_on:
@@ -125,7 +128,7 @@ services:
   scheduler:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
-      - .env.kasset
+      - *kasset-runtime-env-file
       - .env.nhplug-mock.native
     command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks"]
     depends_on:

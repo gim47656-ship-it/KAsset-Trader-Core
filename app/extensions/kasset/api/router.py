@@ -921,13 +921,20 @@ def _ai_trading_state_response(
             maxDailyLossRatePct=limits.max_daily_loss_rate_pct,
             killSwitch=limits.kill_switch,
             currency=limits.currency,
+            customMaxBuysPerDay=limits.custom_max_buys_per_day,
+            customMaxSellsPerDay=limits.custom_max_sells_per_day,
             derivedLimits=AITradingDerivedLimits(
                 dailyTargetAmount=limits.daily_target_amount,
                 maxDailyLossAmount=limits.max_daily_loss_amount,
                 maxSymbolAllocationPct=limits.max_symbol_allocation_pct,
                 maxConcurrentHoldings=limits.max_concurrent_holdings,
                 maxBuysPerDay=limits.max_buys_per_day,
+                maxSellsPerDay=limits.max_sells_per_day,
                 maxOrdersPerDay=limits.max_orders_per_day,
+                maxCustomBuysPerDay=limits.max_custom_buys_per_day,
+                maxCustomSellsPerDay=limits.max_custom_sells_per_day,
+                maxCustomOrdersPerDay=limits.max_custom_orders_per_day,
+                riskPerTradeRate=limits.risk_per_trade_rate,
                 sameSymbolReentryLimit=limits.same_symbol_reentry_limit,
                 minAiConfidence=limits.min_ai_confidence,
             ),
@@ -936,6 +943,7 @@ def _ai_trading_state_response(
             realizedPnlToday=usage.realized_pnl_today,
             realizedLossToday=usage.realized_loss_today,
             buysToday=usage.buys_today,
+            sellsToday=usage.sells_today,
             ordersToday=usage.orders_today,
             concurrentHoldings=usage.concurrent_holdings,
             budgetUsed=usage.budget_used,
@@ -983,18 +991,29 @@ async def update_ai_trading_state(
 ) -> AITradingStateResponse:
     _require_trader(session)
     values = request.settings
-    snapshot = await AITradingPolicyService().put_snapshot(
-        db,
-        session.user.id,
-        mode=OperatingMode(request.mode),
-        limits=AITradingLimits(
+    try:
+        limits = AITradingLimits(
             risk_level=values.risk_level,
             operating_budget=values.operating_budget,
             daily_target_rate_pct=values.daily_target_rate_pct,
             max_daily_loss_rate_pct=values.max_daily_loss_rate_pct,
+            custom_max_buys_per_day=values.custom_max_buys_per_day,
+            custom_max_sells_per_day=values.custom_max_sells_per_day,
             kill_switch=values.kill_switch,
             currency=values.currency,
-        ),
+        )
+    except ValueError as exc:
+        raise MobileApiError(
+            422,
+            "INVALID_AI_TRADING_LIMITS",
+            "AI 거래 한도가 서버 안전 범위를 벗어났습니다.",
+            {"reason": str(exc)},
+        ) from exc
+    snapshot = await AITradingPolicyService().put_snapshot(
+        db,
+        session.user.id,
+        mode=OperatingMode(request.mode),
+        limits=limits,
         now=datetime.now(UTC),
     )
     return _ai_trading_state_response(snapshot)
@@ -1018,6 +1037,7 @@ async def update_ai_daily_routine(
         db,
         session.user.id,
         request.enabled_routines,
+        request.recommendation_market_scope,
     )
 
 

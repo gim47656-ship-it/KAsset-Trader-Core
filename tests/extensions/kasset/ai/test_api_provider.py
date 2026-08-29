@@ -91,7 +91,7 @@ async def test_provider_preserves_run_skill_contract_over_responses_api(
                 json=_response(
                     {
                         "summary": "Momentum is improving.",
-                        "signal": "buy",
+                        "signal": "BUY",
                         "confidence": 0.62,
                         "rationale": ["RSI recovered", ""],
                     }
@@ -133,7 +133,7 @@ async def test_provider_preserves_run_skill_contract_over_responses_api(
     assert request.headers["Authorization"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [500, 503])
 @pytest.mark.asyncio
 async def test_retryable_statuses_raise_unavailable(
     monkeypatch: pytest.MonkeyPatch,
@@ -146,19 +146,21 @@ async def test_retryable_statuses_raise_unavailable(
         await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
 
 
+@pytest.mark.parametrize("status", [400, 408, 429])
 @pytest.mark.asyncio
 async def test_nonretryable_4xx_includes_redacted_response_excerpt(
     monkeypatch: pytest.MonkeyPatch,
+    status: int,
 ) -> None:
     body = "invalid request; echoed credential=test-key; " + ("x" * 250)
-    transport = _Transport([httpx.Response(400, text=body)])
+    transport = _Transport([httpx.Response(status, text=body)])
     _patch_transport(monkeypatch, {"https://example.test": transport})
 
     with pytest.raises(ValueError) as excinfo:
         await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
 
     message = str(excinfo.value)
-    assert "HTTP 400" in message
+    assert f"HTTP {status}" in message
     assert "invalid request" in message
     assert "[REDACTED]" in message
     assert "test-key" not in message
@@ -194,7 +196,74 @@ async def test_malformed_analysis_surfaces_instead_of_falling_back(
         ]
     )
 
-    with pytest.raises(ValueError, match="missing a summary"):
+    with pytest.raises(ValueError, match="response shape is invalid"):
+        await chain.run_skill(_REQUEST)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "summary": "sample",
+                "signal": "buy",
+                "confidence": 0.5,
+                "rationale": [],
+            },
+            "unknown signal",
+        ),
+        (
+            {
+                "summary": "sample",
+                "signal": "BUY",
+                "confidence": "0.5",
+                "rationale": [],
+            },
+            "invalid confidence",
+        ),
+        (
+            {
+                "summary": "sample",
+                "signal": "BUY",
+                "confidence": 0.5,
+                "rationale": [1],
+            },
+            "invalid rationale",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_schema_type_errors_do_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    transport = _Transport(
+        [
+            httpx.Response(200, json=_response(payload)),
+            httpx.Response(
+                200,
+                json=_response(
+                    {
+                        "summary": "unused",
+                        "signal": None,
+                        "confidence": None,
+                        "rationale": [],
+                    }
+                ),
+            ),
+        ]
+    )
+    _patch_transport(monkeypatch, {"https://example.test": transport})
+    chain = ChainedApiProvider(
+        [
+            OpenAiCompatibleProvider(_profile("primary-api")),
+            OpenAiCompatibleProvider(_profile("openrouter")),
+        ]
+    )
+
+    with pytest.raises(ValueError, match=message):
         await chain.run_skill(_REQUEST)
     assert len(transport.requests) == 1
 
@@ -233,9 +302,21 @@ async def test_refusal_and_empty_output_raise_value_error(
 async def test_chain_falls_back_only_on_unavailability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    primary = _Transport([httpx.Response(429, json={"error": "quota"})])
+    primary = _Transport([httpx.Response(503, json={"error": "unavailable"})])
     fallback = _Transport(
-        [httpx.Response(200, json=_response({"summary": "from openrouter"}))]
+        [
+            httpx.Response(
+                200,
+                json=_response(
+                    {
+                        "summary": "from openrouter",
+                        "signal": None,
+                        "confidence": None,
+                        "rationale": [],
+                    }
+                ),
+            )
+        ]
     )
     _patch_transport(
         monkeypatch,
@@ -272,7 +353,7 @@ async def test_chain_falls_back_only_on_unavailability(
 async def test_exhausted_chain_reports_every_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    primary = _Transport([httpx.Response(429, json={})])
+    primary = _Transport([httpx.Response(500, json={})])
     fallback = _Transport([httpx.ConnectError("down")])
     _patch_transport(
         monkeypatch,
@@ -302,7 +383,7 @@ async def test_exhausted_chain_reports_every_reason(
     with pytest.raises(AiProviderUnavailable) as excinfo:
         await chain.run_skill(_REQUEST)
     message = str(excinfo.value)
-    assert "HTTP 429" in message
+    assert "HTTP 500" in message
     assert "ConnectError" in message
 
 
@@ -311,20 +392,18 @@ def test_factory_skips_unconfigured_profiles(
 ) -> None:
     monkeypatch.setattr(settings, "KASSET_AI_API_KEY", None)
     monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "")
-    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "")
     monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
-    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL", "")
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL_PRO", "")
     assert build_api_provider_chain() is None
 
 
-def test_factory_prefers_terra_and_orders_primary_before_openrouter(
+def test_factory_orders_terra_before_openrouter_pro(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("k1"))
     monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "gpt-terra")
-    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "legacy-model")
     monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", SecretStr("k2"))
-    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL", "fallback-model")
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL_PRO", "fallback-model")
 
     chain = build_api_provider_chain()
 
@@ -335,15 +414,15 @@ def test_factory_prefers_terra_and_orders_primary_before_openrouter(
     assert models == ["gpt-terra", "fallback-model"]
 
 
-def test_factory_uses_legacy_model_only_when_terra_is_empty(
+def test_factory_skips_direct_when_terra_model_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("k1"))
     monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "")
-    monkeypatch.setattr(settings, "KASSET_AI_API_MODEL", "legacy-model")
-    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", SecretStr("k2"))
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL_PRO", "fallback-model")
 
     chain = build_api_provider_chain()
 
     assert chain is not None
-    assert chain._providers[0]._profile.model == "legacy-model"
+    assert [provider.name for provider in chain._providers] == ["openrouter"]

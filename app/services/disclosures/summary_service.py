@@ -17,7 +17,8 @@ from sqlalchemy import and_, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
+from app.extensions.kasset.ai.base import StructuredJsonClient
+from app.extensions.kasset.ai.factory import build_summary_json_client
 from app.models.news import NewsArticle
 from app.services.disclosures.content_fetcher import (
     MAX_TEXT_CHARS,
@@ -63,12 +64,6 @@ _SUMMARY_INSTRUCTIONS = (
     "원문에 없는 시장 영향이나 전망을 만들지 마라. 투자 권유, 매수·매도 추천, "
     "목표주가를 쓰지 마라. '본 공시는', '공시 내용에 따르면' 같은 상투적 서두, "
     "제목 복제, form/표제 나열 대신 실제 사건과 변경 내용을 직접 서술하라."
-)
-_NUMBER_RETRY_INSTRUCTIONS = (
-    "직전 시도는 원문에 없는 수치 형식 또는 단위 변환 때문에 폐기됐다. "
-    "수치를 쓸 때는 body_excerpt에 보이는 숫자 토큰과 단위를 문자 그대로 복사하라. "
-    "반올림, 자릿수 축약, million/billion 환산을 하지 마라. 그대로 복사할 수 없으면 "
-    "그 수치를 생략하고 원문에 명시된 비수치 사실만 2~4문장으로 요약하라."
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _NUMBER_RE = re.compile(r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%)?")
@@ -169,6 +164,7 @@ def _is_calendar_month_translation(
     month_name = _ENGLISH_MONTHS[month_number - 1]
     return re.search(rf"\b{month_name}\b", source_text, re.IGNORECASE) is not None
 
+
 def _comparison_key(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
 
@@ -187,8 +183,6 @@ def _correction_comparison_required(body: str) -> bool:
         ("정정전" in body_key or "변경전" in body_key)
         and ("정정후" in body_key or "변경후" in body_key)
     )
-
-
 
 
 def _validated_summary(
@@ -250,9 +244,9 @@ def _validated_summary(
 
 
 class OpenAiDisclosureSummaryGenerator:
-    """기존 Responses API 클라이언트로 저비용 Luna 단일 호출을 수행한다."""
+    """Generate disclosure summaries through the common JSON transport."""
 
-    def __init__(self, client: OpenAiResponsesClient, *, model: str) -> None:
+    def __init__(self, client: StructuredJsonClient, *, model: str) -> None:
         normalized_model = model.strip()
         if not normalized_model:
             raise ValueError("disclosure summary model is required")
@@ -266,36 +260,20 @@ class OpenAiDisclosureSummaryGenerator:
             "form": disclosure.form,
             "body_excerpt": disclosure.body_excerpt,
         }
-        response = await self._request(payload, retry=False)
-        try:
-            return _validated_summary(response["summary"], disclosure)
-        except ValueError as exc:
-            if str(exc) != "disclosure summary contains numbers absent from source":
-                raise
-        retry_response = await self._request(payload, retry=True)
-        return _validated_summary(retry_response["summary"], disclosure)
+        response = await self._request(payload)
+        return _validated_summary(response["summary"], disclosure)
 
     async def _request(
         self,
         payload: dict[str, object],
-        *,
-        retry: bool,
     ) -> dict[str, object]:
         response = await self._client.request_json(
             model=self._model,
             input_payload=payload,
             reasoning_effort="low",
-            schema_name=(
-                "kasset_disclosure_summary_retry"
-                if retry
-                else "kasset_disclosure_summary"
-            ),
+            schema_name="kasset_disclosure_summary",
             schema=_SUMMARY_SCHEMA,
-            additional_instructions=(
-                f"{_SUMMARY_INSTRUCTIONS} {_NUMBER_RETRY_INSTRUCTIONS}"
-                if retry
-                else _SUMMARY_INSTRUCTIONS
-            ),
+            additional_instructions=_SUMMARY_INSTRUCTIONS,
         )
         if set(response) != {"summary"}:
             raise ValueError("disclosure summary response shape is invalid")
@@ -303,25 +281,20 @@ class OpenAiDisclosureSummaryGenerator:
 
 
 def build_disclosure_summary_generator() -> DisclosureSummaryGenerator | None:
-    """가장 낮은 기존 분석 tier인 Luna가 설정됐을 때만 API 생성기를 만든다."""
-    api_key = (
-        settings.KASSET_AI_API_KEY.get_secret_value().strip()
-        if settings.KASSET_AI_API_KEY is not None
-        else ""
+    """direct API -> OpenRouter 공시 요약 route를 만든다."""
+
+    direct_model = settings.KASSET_AI_MODEL_LUNA.strip()
+    fallback_model = settings.KASSET_AI_OPENROUTER_MODEL_FLASH.strip()
+    client = build_summary_json_client(
+        name="disclosure-summary",
+        direct_model=direct_model,
+        fallback_model=fallback_model,
     )
-    model = (
-        settings.KASSET_AI_MODEL_LUNA.strip() or settings.KASSET_AI_API_MODEL.strip()
-    )
-    if not api_key or not model:
+    if client is None:
         return None
     return OpenAiDisclosureSummaryGenerator(
-        OpenAiResponsesClient(
-            name="disclosure-summary",
-            base_url=settings.KASSET_AI_API_BASE_URL,
-            api_key=api_key,
-            timeout_seconds=60.0,
-        ),
-        model=model,
+        client,
+        model=direct_model or fallback_model,
     )
 
 

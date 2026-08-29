@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -14,6 +14,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.runtime_state import runtime_state
+from app.extensions.kasset.automation.position_sizing import (
+    DEFAULT_POSITION_SIZING_CONFIG,
+    PositionSizingConfig,
+    PositionSizingInput,
+    PositionSizingResult,
+    calculate_position_size,
+)
+from app.extensions.kasset.automation.regime import MarketRegime
 from app.extensions.kasset.models import (
     AndroidPaperAccount,
     AndroidPaperOrder,
@@ -31,29 +39,72 @@ _DEFAULT_OPERATING_BUDGET = Decimal("10000000")
 class _RiskPreset:
     daily_target_rate_pct: Decimal
     max_daily_loss_rate_pct: Decimal
+    risk_per_trade_rate: Decimal
     max_symbol_allocation: Decimal
     max_concurrent_holdings: int
     max_buys_per_day: int
-    max_orders_per_day: int
+    max_sells_per_day: int
     same_symbol_reentry_limit: int
 
 
 _RISK_PRESETS = {
     1: _RiskPreset(
-        Decimal("0.3"), Decimal("0.5"), Decimal("0.10"), 3, 1, 2, 1
+        Decimal("0.3"),
+        Decimal("0.5"),
+        Decimal("0.0025"),
+        Decimal("0.10"),
+        3,
+        1,
+        1,
+        1,
     ),
     2: _RiskPreset(
-        Decimal("0.5"), Decimal("1.0"), Decimal("0.15"), 4, 2, 3, 1
+        Decimal("0.5"),
+        Decimal("1.0"),
+        Decimal("0.005"),
+        Decimal("0.15"),
+        4,
+        2,
+        1,
+        1,
     ),
     3: _RiskPreset(
-        Decimal("0.8"), Decimal("1.5"), Decimal("0.20"), 5, 3, 5, 1
+        Decimal("0.8"),
+        Decimal("1.5"),
+        Decimal("0.0075"),
+        Decimal("0.20"),
+        5,
+        3,
+        2,
+        1,
     ),
     4: _RiskPreset(
-        Decimal("1.2"), Decimal("2.5"), Decimal("0.25"), 5, 5, 8, 1
+        Decimal("1.2"),
+        Decimal("2.5"),
+        Decimal("0.01"),
+        Decimal("0.25"),
+        5,
+        5,
+        3,
+        1,
     ),
     5: _RiskPreset(
-        Decimal("2.0"), Decimal("4.0"), Decimal("0.30"), 6, 8, 12, 2
+        Decimal("2.0"),
+        Decimal("4.0"),
+        Decimal("0.015"),
+        Decimal("0.30"),
+        6,
+        8,
+        4,
+        2,
     ),
+}
+_LEGACY_PRESET_DAILY_LIMITS = {
+    1: {"max_buys_per_day": 1, "max_orders_per_day": 2},
+    2: {"max_buys_per_day": 2, "max_orders_per_day": 3},
+    3: {"max_buys_per_day": 3, "max_orders_per_day": 5},
+    4: {"max_buys_per_day": 5, "max_orders_per_day": 8},
+    5: {"max_buys_per_day": 8, "max_orders_per_day": 12},
 }
 _DEFAULT_RISK_LEVEL = 2
 
@@ -73,8 +124,15 @@ class AITradingLimits:
     max_daily_loss_rate_pct: Decimal = _RISK_PRESETS[
         _DEFAULT_RISK_LEVEL
     ].max_daily_loss_rate_pct
+    risk_per_trade_rate: Decimal = field(init=False)
+    custom_max_buys_per_day: int | None = None
+    custom_max_sells_per_day: int | None = None
     max_buys_per_day: int = field(init=False)
+    max_sells_per_day: int = field(init=False)
     max_orders_per_day: int = field(init=False)
+    max_custom_buys_per_day: int = field(init=False)
+    max_custom_sells_per_day: int = field(init=False)
+    max_custom_orders_per_day: int = field(init=False)
     max_symbol_allocation: Decimal = field(init=False)
     max_concurrent_holdings: int = field(init=False)
     same_symbol_reentry_limit: int = field(init=False)
@@ -88,6 +146,8 @@ class AITradingLimits:
         operating_budget: Decimal = _DEFAULT_OPERATING_BUDGET,
         daily_target_rate_pct: Decimal | None = None,
         max_daily_loss_rate_pct: Decimal | None = None,
+        custom_max_buys_per_day: int | None = None,
+        custom_max_sells_per_day: int | None = None,
         kill_switch: bool = False,
         currency: Literal["KRW", "USD"] = "KRW",
     ) -> None:
@@ -126,8 +186,7 @@ class AITradingLimits:
                 maximum=Decimal("20"),
             ),
         )
-        object.__setattr__(self, "max_buys_per_day", preset.max_buys_per_day)
-        object.__setattr__(self, "max_orders_per_day", preset.max_orders_per_day)
+        object.__setattr__(self, "risk_per_trade_rate", preset.risk_per_trade_rate)
         object.__setattr__(
             self, "max_symbol_allocation", preset.max_symbol_allocation
         )
@@ -138,6 +197,46 @@ class AITradingLimits:
             self,
             "same_symbol_reentry_limit",
             preset.same_symbol_reentry_limit,
+        )
+        max_custom_buys = preset.max_concurrent_holdings * max(
+            2, preset.same_symbol_reentry_limit * 2
+        )
+        max_custom_sells = preset.max_concurrent_holdings * (
+            preset.same_symbol_reentry_limit + 3
+        )
+        effective_buys = _optional_daily_limit(
+            custom_max_buys_per_day,
+            "custom_max_buys_per_day",
+            maximum=max_custom_buys,
+            default=preset.max_buys_per_day,
+        )
+        effective_sells = _optional_daily_limit(
+            custom_max_sells_per_day,
+            "custom_max_sells_per_day",
+            maximum=max_custom_sells,
+            default=preset.max_sells_per_day,
+        )
+        object.__setattr__(
+            self, "custom_max_buys_per_day", custom_max_buys_per_day
+        )
+        object.__setattr__(
+            self, "custom_max_sells_per_day", custom_max_sells_per_day
+        )
+        object.__setattr__(self, "max_buys_per_day", effective_buys)
+        object.__setattr__(self, "max_sells_per_day", effective_sells)
+        object.__setattr__(
+            self, "max_orders_per_day", effective_buys + effective_sells
+        )
+        object.__setattr__(
+            self, "max_custom_buys_per_day", max_custom_buys
+        )
+        object.__setattr__(
+            self, "max_custom_sells_per_day", max_custom_sells
+        )
+        object.__setattr__(
+            self,
+            "max_custom_orders_per_day",
+            max_custom_buys + max_custom_sells,
         )
         object.__setattr__(
             self, "kill_switch", _strict_bool(kill_switch, "kill_switch")
@@ -165,7 +264,7 @@ class AITradingLimits:
         return _MIN_AI_CONFIDENCE
 
     def to_storage(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "risk_level": self.risk_level,
             "operating_budget": str(self.operating_budget),
             "daily_target_rate_pct": str(self.daily_target_rate_pct),
@@ -173,6 +272,11 @@ class AITradingLimits:
             "kill_switch": self.kill_switch,
             "currency": self.currency,
         }
+        if self.custom_max_buys_per_day is not None:
+            payload["custom_max_buys_per_day"] = self.custom_max_buys_per_day
+        if self.custom_max_sells_per_day is not None:
+            payload["custom_max_sells_per_day"] = self.custom_max_sells_per_day
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +284,7 @@ class AITradingUsage:
     realized_pnl_today: Decimal = Decimal("0")
     realized_loss_today: Decimal = Decimal("0")
     buys_today: int = 0
+    sells_today: int = 0
     orders_today: int = 0
     concurrent_holdings: int = 0
     budget_used: Decimal = Decimal("0")
@@ -217,14 +322,18 @@ class PortfolioPlan:
     target_quantity: Decimal
     cash_after: Decimal
     note: str
+    position_sizing: PositionSizingResult | None = None
 
     def as_evidence(self) -> dict[str, object]:
-        return {
+        evidence: dict[str, object] = {
             "targetWeight": str(self.target_weight),
             "targetQuantity": str(self.target_quantity),
             "cashAfter": str(self.cash_after),
             "note": self.note,
         }
+        if self.position_sizing is not None:
+            evidence["positionSizing"] = self.position_sizing.as_evidence()
+        return evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +459,18 @@ class AITradingPolicyService:
             )
             or 0
         )
+        sells_today = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(AndroidPaperOrder)
+                .where(
+                    AndroidPaperOrder.owner_user_id == owner_user_id,
+                    AndroidPaperOrder.side == "SELL",
+                    AndroidPaperOrder.created_at >= start,
+                )
+            )
+            or 0
+        )
         concurrent_holdings = int(
             await db.scalar(
                 select(func.count())
@@ -381,6 +502,7 @@ class AITradingPolicyService:
             realized_pnl_today=realized_pnl,
             realized_loss_today=max(Decimal("0"), -realized_pnl),
             buys_today=buys_today,
+            sells_today=sells_today,
             orders_today=orders_today,
             concurrent_holdings=concurrent_holdings,
             budget_used=budget_used,
@@ -397,6 +519,15 @@ class AITradingPolicyService:
         reference_price: Decimal,
         limits: AITradingLimits,
         usage: AITradingUsage,
+        strategy_stop: Decimal | None = None,
+        strategy_atr: Decimal | None = None,
+        price_as_of: datetime | None = None,
+        evaluated_at: datetime | None = None,
+        regime: MarketRegime | str = MarketRegime.SIDEWAYS,
+        average_volume: Decimal | None = None,
+        average_turnover: Decimal | None = None,
+        strategy_quantity: Decimal | None = None,
+        sizing_config: PositionSizingConfig = DEFAULT_POSITION_SIZING_CONFIG,
     ) -> PortfolioPlan:
         account_id = await db.scalar(
             select(AndroidPaperAccount.paper_account_id)
@@ -413,45 +544,64 @@ class AITradingPolicyService:
                     PaperPosition.quantity > 0,
                 )
             )
-        current_quantity = _decimal_or_zero(
-            position.quantity if position is not None else None
+        current_quantity = (
+            position.quantity if position is not None else Decimal("0")
         )
-        current_invested = _decimal_or_zero(
-            position.total_invested if position is not None else None
+        current_invested = (
+            position.total_invested if position is not None else Decimal("0")
         )
+        normalized_action = str(action).upper()
         target_weight = limits.max_symbol_allocation
-        if action == "SELL":
-            quantity = current_quantity
+        sizing = calculate_position_size(
+            PositionSizingInput(
+                action=normalized_action,
+                market=market,
+                entry_price=reference_price,
+                price_as_of=price_as_of,
+                evaluated_at=evaluated_at,
+                operating_budget=limits.operating_budget,
+                budget_used=usage.budget_used,
+                max_symbol_allocation=target_weight,
+                current_symbol_invested=current_invested,
+                current_holding_quantity=current_quantity,
+                risk_per_trade_rate=limits.risk_per_trade_rate,
+                regime=regime,
+                strategy_stop=strategy_stop,
+                strategy_atr=strategy_atr,
+                strategy_quantity=strategy_quantity,
+                average_volume=average_volume,
+                average_turnover=average_turnover,
+            ),
+            config=sizing_config,
+        )
+        quantity = sizing.quantity
+        if normalized_action == "SELL":
             cash_after = min(
                 limits.operating_budget,
                 max(Decimal("0"), limits.operating_budget - usage.budget_used)
                 + quantity * reference_price,
             )
-            note = "현재 PAPER 보유수량 안에서만 매도 수량을 산정했습니다."
         else:
-            target_notional = limits.operating_budget * target_weight
-            additional_notional = max(Decimal("0"), target_notional - current_invested)
-            additional_notional = min(
-                additional_notional,
-                max(Decimal("0"), limits.operating_budget - usage.budget_used),
-            )
-            raw_quantity = additional_notional / reference_price
-            quantum = Decimal("1") if market == "KRX" else Decimal("0.0001")
-            quantity = raw_quantity.quantize(quantum, rounding=ROUND_DOWN)
             cash_after = max(
                 Decimal("0"),
                 limits.operating_budget
                 - usage.budget_used
                 - quantity * reference_price,
             )
-            note = (
-                "운영예산과 종목별 배분 상한 안에서 추가 PAPER 매수수량을 산정했습니다."
+        if sizing.actionable:
+            caps = ",".join(cap.value for cap in sizing.limiting_caps)
+            note = f"Deterministic ATR risk sizing; limitingCaps={caps}."
+        else:
+            reasons = ",".join(
+                reason.code.value for reason in sizing.zero_reasons
             )
+            note = f"Deterministic position sizing returned zero; reasons={reasons}."
         return PortfolioPlan(
             target_weight=target_weight,
             target_quantity=quantity,
             cash_after=cash_after,
             note=note,
+            position_sizing=sizing,
         )
 
     async def evaluate_hard_risk(
@@ -544,17 +694,25 @@ class AITradingPolicyService:
                 or (action == "SELL" and current_quantity >= quantity)
             )
         )
-        order_count_passed = usage.orders_today < limits.max_orders_per_day and (
-            (not is_buy)
-            or (
-                usage.buys_today < limits.max_buys_per_day
+        side_count_passed = (
+            (
+                is_buy
+                and usage.buys_today < limits.max_buys_per_day
                 and same_symbol_buys < limits.same_symbol_reentry_limit
             )
+            or (
+                action == "SELL"
+                and usage.sells_today < limits.max_sells_per_day
+            )
+        )
+        order_count_passed = (
+            usage.orders_today < limits.max_orders_per_day
+            and side_count_passed
         )
         checks = [
             HardRiskCheck(
                 "DAILY_MAX_LOSS",
-                usage.realized_loss_today < daily_loss_limit,
+                (not is_buy) or usage.realized_loss_today < daily_loss_limit,
                 (
                     f"realizedLossToday={usage.realized_loss_today}; "
                     f"limit={daily_loss_limit}"
@@ -586,6 +744,10 @@ class AITradingPolicyService:
                 (
                     f"ordersToday={usage.orders_today}/{limits.max_orders_per_day}; "
                     f"buysToday={usage.buys_today}/{limits.max_buys_per_day}; "
+                    f"sellsToday={usage.sells_today}/{limits.max_sells_per_day}; "
+                    f"hardMaxBuys={limits.max_custom_buys_per_day}; "
+                    f"hardMaxSells={limits.max_custom_sells_per_day}; "
+                    f"hardMaxOrders={limits.max_custom_orders_per_day}; "
                     f"sameSymbolBuys={same_symbol_buys}/{limits.same_symbol_reentry_limit}"
                 ),
             ),
@@ -739,6 +901,8 @@ def _decode_setting(value: object) -> tuple[OperatingMode, AITradingLimits]:
         operating_budget=budget,
         daily_target_rate_pct=target_rate,
         max_daily_loss_rate_pct=loss_rate,
+        custom_max_buys_per_day=raw.get("custom_max_buys_per_day"),
+        custom_max_sells_per_day=raw.get("custom_max_sells_per_day"),
         kill_switch=_strict_bool(
             raw.get("kill_switch", False), "kill_switch"
         ),
@@ -882,9 +1046,16 @@ def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
 
     def score(level: int) -> Decimal:
         preset = _RISK_PRESETS[level]
+        legacy_limits = _LEGACY_PRESET_DAILY_LIMITS[level]
+
+        def expected(field_name: str) -> object:
+            if field_name in legacy_limits:
+                return legacy_limits[field_name]
+            return getattr(preset, field_name)
+
         return sum(
             (
-                abs(actual - Decimal(str(getattr(preset, field_name)))) / scale
+                abs(actual - Decimal(str(expected(field_name)))) / scale
                 for actual, field_name, scale in components
             ),
             start=Decimal("0"),
@@ -898,6 +1069,24 @@ def _nonnegative_int(value: object, field: str) -> int:
         raise ValueError(f"{field} must be an integer")
     if value < 0:
         raise ValueError(f"{field} must not be negative")
+    return value
+
+
+def _optional_daily_limit(
+    value: object,
+    field: str,
+    *,
+    maximum: int,
+    default: int,
+) -> int:
+    if value is None:
+        if default > maximum:
+            raise ValueError(f"default {field} exceeds hard maximum {maximum}")
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    if value < 1 or value > maximum:
+        raise ValueError(f"{field} must be between 1 and {maximum}")
     return value
 
 

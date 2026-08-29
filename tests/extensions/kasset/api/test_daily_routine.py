@@ -136,6 +136,7 @@ async def test_kst_midnight_inherits_latest_empty_setting_and_keeps_users_isolat
         db_session,
         owner_b.id,
         ["RAPID_RISE"],
+        "US_ONLY",
         now=before_midnight,
     )
 
@@ -147,15 +148,24 @@ async def test_kst_midnight_inherits_latest_empty_setting_and_keeps_users_isolat
     assert inherited_a.enabled_routines == []
     assert inherited_b.inherited_from == date(2026, 8, 29)
     assert inherited_b.enabled_routines == ["RAPID_RISE"]
+    assert inherited_a.recommendation_market_scope == "KR_US"
+    assert inherited_b.recommendation_market_scope == "US_ONLY"
+    assert await service.recommendation_markets(
+        db_session,
+        owner_b.id,
+        now=after_midnight,
+    ) == frozenset({"us"})
 
     stored_today = await service.update(
         db_session,
         owner_a.id,
         ["TRUMP_POLICY"],
+        "KR_ONLY",
         now=after_midnight,
     )
     assert stored_today.inherited_from is None
     assert stored_today.enabled_routines == ["TRUMP_POLICY"]
+    assert stored_today.recommendation_market_scope == "KR_ONLY"
     assert (
         await db_session.scalar(
             select(func.count())
@@ -221,7 +231,10 @@ async def test_api_put_contract_rejects_unknown_duplicate_and_extra_fields(
     ) as client:
         accepted = await client.put(
             "/api/v1/ai/daily-routine",
-            json={"enabledRoutines": []},
+            json={
+                "enabledRoutines": [],
+                "recommendationMarketScope": "KR_ONLY",
+            },
         )
         unknown = await client.put(
             "/api/v1/ai/daily-routine",
@@ -231,9 +244,20 @@ async def test_api_put_contract_rejects_unknown_duplicate_and_extra_fields(
             "/api/v1/ai/daily-routine",
             json={"enabledRoutines": ["RAPID_RISE", "RAPID_RISE"]},
         )
+        invalid_scope = await client.put(
+            "/api/v1/ai/daily-routine",
+            json={
+                "enabledRoutines": [],
+                "recommendationMarketScope": "CRYPTO",
+            },
+        )
         extra = await client.put(
             "/api/v1/ai/daily-routine",
             json={"enabledRoutines": [], "enabled": True},
+        )
+        preserved = await client.put(
+            "/api/v1/ai/daily-routine",
+            json={"enabledRoutines": ["RAPID_FALL"]},
         )
         loaded = await client.get("/api/v1/ai/daily-routine")
 
@@ -243,21 +267,29 @@ async def test_api_put_contract_rejects_unknown_duplicate_and_extra_fields(
         "date",
         "inheritedFrom",
         "enabledRoutines",
+        "recommendationMarketScope",
         "availableRoutines",
         "alerts",
         "updatedAt",
     }
     assert body["inheritedFrom"] is None
     assert body["enabledRoutines"] == []
+    assert body["recommendationMarketScope"] == "KR_ONLY"
     assert [item["key"] for item in body["availableRoutines"]] == [
         "RAPID_RISE",
         "RAPID_FALL",
         "TRUMP_POLICY",
         "GLOBAL_FINANCIAL_NEWS",
     ]
+    assert preserved.status_code == 200
+    assert preserved.json()["recommendationMarketScope"] == "KR_ONLY"
     assert loaded.status_code == 200
-    assert loaded.json()["enabledRoutines"] == []
-    assert all(response.status_code == 422 for response in (unknown, duplicate, extra))
+    assert loaded.json()["enabledRoutines"] == ["RAPID_FALL"]
+    assert loaded.json()["recommendationMarketScope"] == "KR_ONLY"
+    assert all(
+        response.status_code == 422
+        for response in (unknown, duplicate, invalid_scope, extra)
+    )
 
 
 @pytest.mark.asyncio

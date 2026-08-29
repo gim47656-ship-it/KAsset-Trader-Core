@@ -13,10 +13,12 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Numeric,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -263,11 +265,18 @@ class KAssetDailyRoutineSetting(Base):
     __table_args__ = (
         CheckConstraint(
             "jsonb_typeof(enabled_routines) = 'array'",
-            name="enabled_routines_array",
+            name="ck_kasset_ai_daily_routine_settings_enabled_routines_array",
         ),
         CheckConstraint(
             "jsonb_array_length(enabled_routines) <= 4",
-            name="enabled_routines_bounded",
+            name="ck_kasset_ai_daily_routine_settings_enabled_routines_bounded",
+        ),
+        CheckConstraint(
+            "recommendation_market_scope IN ('KR_ONLY', 'US_ONLY', 'KR_US')",
+            name=(
+                "ck_kasset_ai_daily_routine_settings_"
+                "recommendation_market_scope_valid"
+            ),
         ),
     )
 
@@ -282,6 +291,230 @@ class KAssetDailyRoutineSetting(Base):
         nullable=False,
         default=list,
         server_default="[]",
+    )
+    recommendation_market_scope: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="KR_US",
+        server_default="KR_US",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class KAssetPaperPositionState(Base):
+    """Owner-scoped deterministic lifecycle state for one current PAPER position."""
+
+    __tablename__ = "kasset_paper_position_states"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "paper_account_id"],
+            [
+                "kasset_android_paper_accounts.owner_user_id",
+                "kasset_android_paper_accounts.paper_account_id",
+            ],
+            name="fk_kasset_position_state_owner_paper_account",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "market IN ('KRX', 'US')",
+            name="ck_kasset_position_state_market_valid",
+        ),
+        CheckConstraint(
+            "entry_price > 0",
+            name="ck_kasset_position_state_entry_price_positive",
+        ),
+        CheckConstraint(
+            "initial_atr > 0",
+            name="ck_kasset_position_state_initial_atr_positive",
+        ),
+        CheckConstraint(
+            "initial_stop > 0",
+            name="ck_kasset_position_state_initial_stop_positive",
+        ),
+        CheckConstraint(
+            "current_stop > 0",
+            name="ck_kasset_position_state_current_stop_positive",
+        ),
+        CheckConstraint(
+            "highest_close > 0",
+            name="ck_kasset_position_state_highest_close_positive",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "last_exit_signal_key",
+            name="uq_kasset_position_state_owner_exit_signal",
+        ),
+        Index(
+            "ix_kasset_position_state_owner_updated",
+            "owner_user_id",
+            "updated_at",
+        ),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    paper_account_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    market: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    initial_atr: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    initial_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    current_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    highest_close: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    partial_exit_completed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    entry_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    last_exit_signal_key: Mapped[str | None] = mapped_column(Text)
+    strategy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class KAssetStrategyPromotion(Base):
+    """Owner-independent lifecycle for one exact PAPER strategy version."""
+
+    __tablename__ = "kasset_strategy_promotions"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(strategy_key) <> '' AND btrim(version) <> ''",
+            name="ck_kasset_strategy_promotion_identity",
+        ),
+        CheckConstraint(
+            "state IN ('DRAFT','BACKTESTED','PAPER_APPROVED',"
+            "'PAPER_SUSPENDED','RETIRED')",
+            name="ck_kasset_strategy_promotion_state",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(metrics) = 'object'",
+            name="ck_kasset_strategy_promotion_metrics_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'array'",
+            name="ck_kasset_strategy_promotion_evidence_array",
+        ),
+        CheckConstraint(
+            "threshold_evaluation IS NULL "
+            "OR jsonb_typeof(threshold_evaluation) = 'object'",
+            name="ck_kasset_strategy_promotion_threshold_object",
+        ),
+        CheckConstraint(
+            "metrics_hash IS NULL OR metrics_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_kasset_strategy_promotion_hash_format",
+        ),
+        CheckConstraint(
+            "(state = 'DRAFT' AND metrics = '{}'::jsonb AND metrics_hash IS NULL)"
+            " OR (state IN ('BACKTESTED','PAPER_APPROVED','PAPER_SUSPENDED')"
+            " AND metrics <> '{}'::jsonb AND metrics_hash IS NOT NULL)"
+            " OR (state = 'RETIRED' AND ((metrics = '{}'::jsonb"
+            " AND metrics_hash IS NULL) OR (metrics <> '{}'::jsonb"
+            " AND metrics_hash IS NOT NULL)))",
+            name="ck_kasset_strategy_promotion_metrics_state",
+        ),
+        CheckConstraint(
+            "(state IN ('PAPER_APPROVED','PAPER_SUSPENDED')"
+            " AND threshold_evaluation IS NOT NULL)"
+            " OR state IN ('DRAFT','BACKTESTED','RETIRED')",
+            name="ck_kasset_strategy_promotion_threshold_state",
+        ),
+        CheckConstraint(
+            "(state IN ('PAPER_APPROVED','PAPER_SUSPENDED')"
+            " AND approved_at IS NOT NULL)"
+            " OR (state IN ('DRAFT','BACKTESTED') AND approved_at IS NULL)"
+            " OR state = 'RETIRED'",
+            name="ck_kasset_strategy_promotion_approved_at",
+        ),
+        CheckConstraint(
+            "(state = 'PAPER_SUSPENDED' AND suspended_at IS NOT NULL)"
+            " OR (state IN ('DRAFT','BACKTESTED','PAPER_APPROVED')"
+            " AND suspended_at IS NULL) OR state = 'RETIRED'",
+            name="ck_kasset_strategy_promotion_suspended_at",
+        ),
+        CheckConstraint(
+            "(state = 'RETIRED' AND retired_at IS NOT NULL)"
+            " OR (state <> 'RETIRED' AND retired_at IS NULL)",
+            name="ck_kasset_strategy_promotion_retired_at",
+        ),
+        CheckConstraint(
+            "suspended_at IS NULL OR approved_at IS NOT NULL",
+            name="ck_kasset_strategy_promotion_suspend_after_approve",
+        ),
+        CheckConstraint(
+            "updated_at >= created_at"
+            " AND (approved_at IS NULL OR approved_at >= created_at)"
+            " AND (suspended_at IS NULL OR suspended_at >= approved_at)"
+            " AND (retired_at IS NULL OR retired_at >= created_at)"
+            " AND (retired_at IS NULL OR approved_at IS NULL"
+            " OR retired_at >= approved_at)"
+            " AND (retired_at IS NULL OR suspended_at IS NULL"
+            " OR retired_at >= suspended_at)",
+            name="ck_kasset_strategy_promotion_timestamp_order",
+        ),
+        UniqueConstraint(
+            "strategy_key",
+            "version",
+            name="uq_kasset_strategy_promotion_key_version",
+        ),
+        Index(
+            "ix_kasset_strategy_promotion_state_updated",
+            "state",
+            "updated_at",
+        ),
+        {"schema": "review"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    strategy_key: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="DRAFT",
+        server_default="DRAFT",
+    )
+    metrics: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    metrics_hash: Mapped[str | None] = mapped_column(Text)
+    threshold_evaluation: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    evidence: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    suspended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

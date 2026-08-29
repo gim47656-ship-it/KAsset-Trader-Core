@@ -16,6 +16,8 @@ RoutineKey = Literal[
     "GLOBAL_FINANCIAL_NEWS",
 ]
 
+RecommendationMarketScope = Literal["KR_ONLY", "US_ONLY", "KR_US"]
+
 ROUTINE_KEYS: tuple[RoutineKey, ...] = (
     "RAPID_RISE",
     "RAPID_FALL",
@@ -45,6 +47,7 @@ class DailyRoutineResponse(AndroidWireModel):
     date: date
     inherited_from: date | None = None
     enabled_routines: list[RoutineKey]
+    recommendation_market_scope: RecommendationMarketScope
     available_routines: list[AvailableRoutine]
     alerts: list[DailyRoutineAlert]
     updated_at: datetime
@@ -52,6 +55,7 @@ class DailyRoutineResponse(AndroidWireModel):
 
 class DailyRoutineUpdateRequest(AndroidWireModel):
     enabled_routines: list[RoutineKey] = Field(max_length=len(ROUTINE_KEYS))
+    recommendation_market_scope: RecommendationMarketScope | None = None
 
     @field_validator("enabled_routines")
     @classmethod
@@ -67,5 +71,6 @@ __all__ = [
     "DailyRoutineResponse",
     "DailyRoutineUpdateRequest",
     "ROUTINE_KEYS",
+    "RecommendationMarketScope",
     "RoutineKey",
 ]

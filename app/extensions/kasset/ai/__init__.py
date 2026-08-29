@@ -1,6 +1,11 @@
 """KAsset AI provider abstraction layer."""
 
-from app.extensions.kasset.ai.base import AiProviderUnavailable, ExternalSkillRunner
+from app.extensions.kasset.ai.base import (
+    AiProviderUnavailable,
+    ExternalSkillRunner,
+    StructuredJsonClient,
+)
+from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
 from app.extensions.kasset.ai.model_router import (
     AnalysisKind,
     OpenAiModelRouter,
@@ -18,5 +23,7 @@ __all__ = [
     "AiProviderUnavailable",
     "SkillRequest",
     "SkillResult",
+    "McpStructuredJsonClient",
+    "StructuredJsonClient",
     "TierVerdict",
 ]

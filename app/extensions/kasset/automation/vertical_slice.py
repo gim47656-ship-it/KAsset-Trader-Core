@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,16 @@ from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.ai.base import AiProviderUnavailable
 from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
 from app.extensions.kasset.api.watchlist import watchlist_service
+from app.extensions.kasset.automation.candidate_ranker import (
+    DEFAULT_CANDIDATE_RANKER_CONFIG,
+    CandidateKey,
+    CandidateMetadata,
+    CandidateRanker,
+    CandidateRankerConfig,
+    CandidateRankResult,
+    cap_candidate_universe,
+    normalize_allowed_markets,
+)
 from app.extensions.kasset.automation.contracts import (
     Action,
     ExternalEvidence,
@@ -25,6 +35,9 @@ from app.extensions.kasset.automation.contracts import (
     StrategyResult,
 )
 from app.extensions.kasset.automation.policy import AITradingPolicyService
+from app.extensions.kasset.automation.position_manager_service import (
+    PaperPositionManagerService,
+)
 from app.extensions.kasset.automation.producer import (
     RecommendationProducer,
     WeightedEnsembleDecision,
@@ -35,19 +48,23 @@ from app.extensions.kasset.automation.regime import (
     assess_market_regime,
 )
 from app.extensions.kasset.automation.strategies import STRATEGIES
+from app.extensions.kasset.automation.strategy_promotion import (
+    DEFAULT_PAPER_STRATEGY_KEY,
+    DEFAULT_PAPER_STRATEGY_VERSION,
+)
+from app.extensions.kasset.daily_routine_service import daily_routine_service
+from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.ai_recommendations import AIRecommendation
 from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.news import NewsArticle
+from app.models.paper_trading import PaperPosition
 from app.models.symbol_master import SymbolMaster
-from app.models.trading import User, UserRole
+from app.models.trading import InstrumentType, User, UserRole
 from app.services.ai_recommendations.service import AIRecommendationService
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 from app.services.symbol_news_store import load_symbol_news
 
-_CANDIDATE_LIMIT = 100
-_MIN_CANDIDATE_TARGET = 50
-_AI_REVIEW_LIMIT = 12
 _RECOMMENDATION_LIMIT = 5
 _OWNER_COOLDOWN = timedelta(hours=1)
 
@@ -55,9 +72,22 @@ _OWNER_COOLDOWN = timedelta(hours=1)
 @dataclass(frozen=True, slots=True)
 class TradingCandidate:
     symbol: str
-    market: str
+    market: Literal["KRX", "US"]
     name: str | None
     source: str
+    turnover: Decimal | None = None
+    volume: Decimal | None = None
+    is_held: bool = False
+    is_watchlisted: bool = False
+    eligible_for_new_buy: bool = True
+
+    @property
+    def ranker_market(self) -> Literal["KR", "US"]:
+        return "KR" if self.market == "KRX" else "US"
+
+    @property
+    def ranker_key(self) -> CandidateKey:
+        return self.ranker_market, self.symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +95,8 @@ class EvaluatedCandidate:
     candidate: TradingCandidate
     strategy_results: tuple[StrategyResult, ...]
     ensemble: WeightedEnsembleDecision
-
+    factor_ranking: CandidateRankResult | None = None
+    regime: RegimeAssessment | None = None
 
 @dataclass(frozen=True, slots=True)
 class ReviewedCandidate:
@@ -76,18 +107,23 @@ class ReviewedCandidate:
     score: Decimal
 
 
-async def _load_live_kr_candidates() -> tuple[TradingCandidate, ...]:
+async def _load_live_kr_candidates(
+    *,
+    limit: int = DEFAULT_CANDIDATE_RANKER_CONFIG.candidate_limit,
+) -> tuple[TradingCandidate, ...]:
     from app.services.invest_kr_fundamentals_snapshots.provider import (
         TvScreenerKrFundamentalsProvider,
     )
 
     rows = await TvScreenerKrFundamentalsProvider(timeout=30).fetch_rows(
-        limit=_CANDIDATE_LIMIT
+        limit=limit
     )
     ordered = sorted(
         rows,
-        key=lambda row: (row.price or Decimal("0")) * (row.volume or Decimal("0")),
-        reverse=True,
+        key=lambda row: (
+            -((row.price or Decimal("0")) * (row.volume or Decimal("0"))),
+            str(row.symbol).strip().upper(),
+        ),
     )
     candidates: list[TradingCandidate] = []
     seen: set[str] = set()
@@ -103,6 +139,9 @@ async def _load_live_kr_candidates() -> tuple[TradingCandidate, ...]:
                 market="KRX",
                 name=name if name and name != symbol else None,
                 source="tvscreener_kr",
+                turnover=(row.price or Decimal("0"))
+                * (row.volume or Decimal("0")),
+                volume=row.volume,
             )
         )
     return tuple(candidates)
@@ -114,10 +153,12 @@ class AIRecommendationVerticalSlice:
     def __init__(
         self,
         db: AsyncSession,
-        ai_router: OpenAiModelRouter,
+        ai_router: OpenAiModelRouter | None,
         *,
         now: datetime,
         live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] | None = None,
+        allowed_markets: frozenset[str] | None = None,
+        ranker_config: CandidateRankerConfig = DEFAULT_CANDIDATE_RANKER_CONFIG,
     ) -> None:
         self._db = db
         self._ai_router = ai_router
@@ -126,13 +167,40 @@ class AIRecommendationVerticalSlice:
         self._live_candidates_cache = (
             live_candidates_cache if live_candidates_cache is not None else {}
         )
+        self._allowed_markets = (
+            normalize_allowed_markets(allowed_markets)
+            if allowed_markets is not None
+            else None
+        )
+        self._ranker_config = ranker_config
+        self._ranker = CandidateRanker(ranker_config)
+        self._position_manager = PaperPositionManagerService(
+            db,
+            now=self._now,
+            strategy_version=DEFAULT_PAPER_STRATEGY_VERSION,
+        )
 
     async def run_owner(self, owner_user_id: int) -> dict[str, object]:
-        if await self._cooldown_active(owner_user_id):
+        cooldown_active = await self._cooldown_active(owner_user_id)
+        position_exit_ids = await self._position_manager.run_owner(owner_user_id)
+        if cooldown_active or position_exit_ids:
             return {
                 "ownerUserId": owner_user_id,
-                "skipped": "recommendation_cooldown_active",
+                "skipped": (
+                    "position_exit_recommendation_created"
+                    if position_exit_ids
+                    else "recommendation_cooldown_active"
+                ),
                 "candidateCount": 0,
+                "positionExitRecommendationIds": list(position_exit_ids),
+                "recommendationIds": list(position_exit_ids),
+            }
+        if self._ai_router is None:
+            return {
+                "ownerUserId": owner_user_id,
+                "skipped": "ai_unavailable",
+                "candidateCount": 0,
+                "positionExitRecommendationIds": [],
                 "recommendationIds": [],
             }
 
@@ -142,57 +210,107 @@ class AIRecommendationVerticalSlice:
             now=self._now,
             execution_limit=0,
         )
+        configured_markets = await daily_routine_service.recommendation_markets(
+            self._db,
+            owner_user_id,
+            now=self._now,
+        )
+        allowed_markets = self._allowed_markets or normalize_allowed_markets(
+            frozenset(market.upper() for market in configured_markets)
+        )
         candidates = await self._load_candidates(
             owner_user_id,
             currency=snapshot.limits.currency,
+            allowed_markets=allowed_markets,
         )
-        if not candidates:
+        recommendation_candidates = [
+            candidate for candidate in candidates if candidate.eligible_for_new_buy
+        ]
+        management_only = [
+            candidate
+            for candidate in candidates
+            if candidate.is_held and not candidate.eligible_for_new_buy
+        ]
+        if not recommendation_candidates:
             return {
                 "ownerUserId": owner_user_id,
                 "skipped": "screener_candidates_unavailable",
                 "candidateCount": 0,
+                "heldManagementOnly": [
+                    {
+                        "symbol": candidate.symbol,
+                        "market": candidate.ranker_market,
+                        "isHeld": True,
+                    }
+                    for candidate in management_only
+                ],
                 "recommendationIds": [],
+                "positionExitRecommendationIds": [],
             }
-        candle_sync = (
-            await self._sync_missing_kr_candles(candidates)
-            if snapshot.limits.currency == "KRW"
-            else {"requested": 0, "synced": 0, "failed": 0}
-        )
 
-        market_key = MarketKey.KR if snapshot.limits.currency == "KRW" else MarketKey.US
-        bars_by_symbol = await DailyCandlesRepository(
-            session=self._db
-        ).fetch_recent_batch(
-            market=market_key,
-            symbols=[candidate.symbol for candidate in candidates],
-            partition="KRX" if market_key == MarketKey.KR else None,
-            count=60,
+        candle_sync = await self._sync_missing_kr_candles(
+            [
+                candidate
+                for candidate in recommendation_candidates
+                if candidate.market == "KRX"
+            ]
         )
-        normalized_bars = {
-            symbol: _price_bars(rows) for symbol, rows in bars_by_symbol.items()
+        bars_by_candidate = await self._load_candidate_bars(
+            recommendation_candidates
+        )
+        metadata = tuple(
+            _candidate_metadata(candidate) for candidate in candidates
+        )
+        ranking = self._ranker.rank(
+            metadata,
+            bars_by_candidate,
+            as_of=self._now,
+            allowed_markets=allowed_markets,
+        )
+        ranks_for_review = ranking.for_strategy_review(
+            self._ranker_config.strategy_review_limit
+        )
+        candidate_by_key = {
+            candidate.ranker_key: candidate for candidate in candidates
         }
-        regime = assess_market_regime(normalized_bars)
-        evaluated = self._evaluate_candidates(candidates, normalized_bars, regime)
-        actionable = sorted(
-            (
-                item
-                for item in evaluated
-                if item.ensemble.action in {Action.BUY, Action.SELL}
-            ),
-            key=lambda item: (
-                abs(item.ensemble.score),
-                item.candidate.symbol,
-            ),
-            reverse=True,
+        selected_candidates = [
+            candidate_by_key[result.key]
+            for result in ranks_for_review
+            if result.key in candidate_by_key
+        ]
+        selected_rankings = {result.key: result for result in ranks_for_review}
+        regimes = {
+            market: assess_market_regime(
+                {
+                    symbol: bars
+                    for (bar_market, symbol), bars in bars_by_candidate.items()
+                    if bar_market == market
+                }
+            )
+            for market in sorted(allowed_markets)
+        }
+        evaluated = self._evaluate_candidates(
+            selected_candidates,
+            bars_by_candidate,
+            regimes,
+            factor_rankings=selected_rankings,
         )
+        actionable = [
+            item
+            for item in evaluated
+            if item.ensemble.action in {Action.BUY, Action.SELL}
+        ]
         reviewed: list[ReviewedCandidate] = []
         ai_failures = 0
-        for item in actionable[:_AI_REVIEW_LIMIT]:
+        for item in actionable:
             try:
+                candidate_regime = item.regime
+                if candidate_regime is None:
+                    continue
                 reviewed_item = await self._review_candidate(
                     owner_user_id,
                     item,
-                    regime,
+                    candidate_regime,
                 )
             except AiProviderUnavailable:
                 ai_failures += 1
@@ -201,16 +319,22 @@ class AIRecommendationVerticalSlice:
                 reviewed.append(reviewed_item)
 
         reviewed.sort(
-            key=lambda item: (item.score, item.evaluated.candidate.symbol),
-            reverse=True,
+            key=lambda item: (
+                -item.score,
+                item.evaluated.candidate.symbol,
+                item.evaluated.candidate.market,
+            )
         )
         recommendation_ids: list[str] = []
-        total = len(evaluated)
+        total = len(ranking.ranked)
         for position, item in enumerate(reviewed[:_RECOMMENDATION_LIMIT], start=1):
+            candidate_regime = item.evaluated.regime
+            if candidate_regime is None:
+                continue
             row = await self._persist_recommendation(
                 owner_user_id,
                 item,
-                regime,
+                candidate_regime,
                 position=position,
                 total=total,
                 snapshot=snapshot,
@@ -218,20 +342,51 @@ class AIRecommendationVerticalSlice:
             if row.action in {"BUY", "SELL"}:
                 recommendation_ids.append(row.id)
 
+        ranked_evidence = [
+            result.as_evidence()
+            for result in ranking.ranked[: self._ranker_config.strategy_review_limit]
+        ]
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
-            "candidateCount": len(candidates),
-            "candidateTargetMet": len(evaluated) >= _MIN_CANDIDATE_TARGET,
+            "candidateCount": len(recommendation_candidates),
+            "candidateTargetMet": (
+                len(ranking.ranked)
+                >= self._ranker_config.minimum_candidate_target
+            ),
             "strategyEvaluatedCount": len(evaluated),
             "aiReviewedCount": len(reviewed),
             "aiFailureCount": ai_failures,
             "candleSync": candle_sync,
-            "regime": regime.regime.value,
+            "regime": (
+                next(iter(regimes.values())).regime.value
+                if len(regimes) == 1
+                else "MULTI_MARKET"
+            ),
+            "regimes": {
+                market: assessment.regime.value
+                for market, assessment in regimes.items()
+            },
+            "rankedCandidates": ranked_evidence,
+            "candidateExclusions": [
+                result.as_evidence() for result in ranking.excluded
+            ],
+            "heldManagementOnly": [
+                {
+                    "symbol": candidate.symbol,
+                    "market": candidate.ranker_market,
+                    "isHeld": True,
+                }
+                for candidate in management_only
+            ],
             "recommendationIds": recommendation_ids,
+            "positionExitRecommendationIds": [],
         }
-        if len(evaluated) < _MIN_CANDIDATE_TARGET:
+        if (
+            len(ranking.ranked)
+            < self._ranker_config.minimum_candidate_target
+        ):
             result["dataPrerequisite"] = (
-                "fewer than 50 screener candidates have usable daily candles"
+                "fewer than 50 screener candidates have usable 52-week daily candles"
             )
         if not actionable:
             result["skipped"] = "no_dynamic_ensemble_signal"
@@ -239,37 +394,115 @@ class AIRecommendationVerticalSlice:
             result["skipped"] = "no_ai_confirmed_signal"
         return result
 
+    async def _load_candidate_bars(
+        self,
+        candidates: Sequence[TradingCandidate],
+    ) -> dict[CandidateKey, tuple[PriceBar, ...]]:
+        repository = DailyCandlesRepository(session=self._db)
+        output: dict[CandidateKey, tuple[PriceBar, ...]] = {}
+        for market in ("KR", "US"):
+            symbols = [
+                candidate.symbol
+                for candidate in candidates
+                if candidate.ranker_market == market
+            ]
+            if not symbols:
+                continue
+            rows_by_symbol = await repository.fetch_recent_batch(
+                market=MarketKey.KR if market == "KR" else MarketKey.US,
+                symbols=symbols,
+                partition="KRX" if market == "KR" else None,
+                count=self._ranker_config.history_bars,
+            )
+            for symbol, rows in rows_by_symbol.items():
+                output[(market, symbol)] = _price_bars(rows)
+        return output
+
     async def _load_candidates(
         self,
         owner_user_id: int,
         *,
         currency: str,
+        allowed_markets: frozenset[str] | None = None,
     ) -> list[TradingCandidate]:
-        market = "kr" if currency == "KRW" else "us"
-        recommendation_market = "KRX" if market == "kr" else "US"
+        requested_markets = normalize_allowed_markets(
+            allowed_markets
+            if allowed_markets is not None
+            else frozenset({"KR" if currency == "KRW" else "US"})
+        )
+        ordered: dict[CandidateKey, TradingCandidate] = {}
         watchlist = await watchlist_service.list_items(self._db, owner_user_id)
-        ordered: dict[str, TradingCandidate] = {}
         for item in watchlist.items:
-            if item.market != recommendation_market:
+            market = "KR" if item.market == "KRX" else item.market
+            if market not in requested_markets:
                 continue
-            ordered[item.symbol] = TradingCandidate(
-                symbol=item.symbol,
-                market=recommendation_market,
+            candidate = TradingCandidate(
+                symbol=item.symbol.strip().upper(),
+                market=cast(Any, "KRX" if market == "KR" else "US"),
                 name=item.name,
                 source="watchlist",
+                is_watchlisted=True,
+            )
+            ordered[candidate.ranker_key] = _merge_trading_candidate(
+                ordered.get(candidate.ranker_key),
+                candidate,
             )
 
-        latest_date = await self._db.scalar(
-            select(func.max(InvestScreenerSnapshot.snapshot_date)).where(
-                InvestScreenerSnapshot.market == market
+        holdings = (
+            await self._db.scalars(
+                select(PaperPosition)
+                .join(
+                    AndroidPaperAccount,
+                    AndroidPaperAccount.paper_account_id
+                    == PaperPosition.account_id,
+                )
+                .where(
+                    AndroidPaperAccount.owner_user_id == owner_user_id,
+                    PaperPosition.quantity > 0,
+                    PaperPosition.instrument_type.in_(
+                        (InstrumentType.equity_kr, InstrumentType.equity_us)
+                    ),
+                )
+                .order_by(PaperPosition.instrument_type, PaperPosition.symbol)
             )
-        )
-        if latest_date is not None:
+        ).all()
+        for position in holdings:
+            market = (
+                "KR"
+                if position.instrument_type == InstrumentType.equity_kr
+                else "US"
+            )
+            candidate = TradingCandidate(
+                symbol=str(position.symbol).strip().upper(),
+                market=cast(Any, "KRX" if market == "KR" else "US"),
+                name=None,
+                source="paper_holding",
+                is_held=True,
+                eligible_for_new_buy=market in requested_markets,
+            )
+            ordered[candidate.ranker_key] = _merge_trading_candidate(
+                ordered.get(candidate.ranker_key),
+                candidate,
+            )
+
+        snapshot_candidates: dict[str, list[TradingCandidate]] = {
+            market: [] for market in sorted(requested_markets)
+        }
+        for market in sorted(requested_markets):
+            snapshot_market = market.lower()
+            recommendation_market = "KRX" if market == "KR" else "US"
+            latest_date = await self._db.scalar(
+                select(func.max(InvestScreenerSnapshot.snapshot_date)).where(
+                    InvestScreenerSnapshot.market == snapshot_market
+                )
+            )
+            if latest_date is None:
+                continue
             rows = (
                 await self._db.scalars(
                     select(InvestScreenerSnapshot)
                     .where(
-                        InvestScreenerSnapshot.market == market,
+                        InvestScreenerSnapshot.market == snapshot_market,
                         InvestScreenerSnapshot.snapshot_date == latest_date,
                     )
                     .order_by(
@@ -277,70 +510,117 @@ class AIRecommendationVerticalSlice:
                         InvestScreenerSnapshot.daily_volume.desc().nullslast(),
                         InvestScreenerSnapshot.symbol,
                     )
-                    .limit(_CANDIDATE_LIMIT)
+                    .limit(self._ranker_config.candidate_limit)
                 )
             ).all()
-            snapshot_symbols = tuple(
+            symbols = tuple(
                 dict.fromkeys(
                     str(row.symbol).strip().upper()
                     for row in rows
                     if str(row.symbol).strip()
                 )
             )
-            snapshot_names = (
+            names = (
                 {
                     symbol: name
                     for symbol, name in (
                         await self._db.execute(
                             select(SymbolMaster.symbol, SymbolMaster.name).where(
                                 SymbolMaster.market == recommendation_market,
-                                SymbolMaster.symbol.in_(snapshot_symbols),
+                                SymbolMaster.symbol.in_(symbols),
                             )
                         )
                     ).all()
                     if name and name.strip() and name.strip() != symbol
                 }
-                if snapshot_symbols
+                if symbols
                 else {}
             )
             for row in rows:
                 symbol = str(row.symbol).strip().upper()
-                if symbol and symbol not in ordered:
-                    ordered[symbol] = TradingCandidate(
+                if not symbol:
+                    continue
+                snapshot_candidates[market].append(
+                    TradingCandidate(
                         symbol=symbol,
-                        market=recommendation_market,
-                        name=snapshot_names.get(symbol),
-                        source=f"invest_screener_snapshots:{latest_date.isoformat()}",
+                        market=cast(Any, recommendation_market),
+                        name=names.get(symbol),
+                        source=(
+                            "invest_screener_snapshots:"
+                            f"{latest_date.isoformat()}"
+                        ),
+                        turnover=(
+                            Decimal(str(row.daily_turnover))
+                            if row.daily_turnover is not None
+                            else None
+                        ),
+                        volume=(
+                            Decimal(str(row.daily_volume))
+                            if row.daily_volume is not None
+                            else None
+                        ),
                     )
-                if len(ordered) >= _CANDIDATE_LIMIT:
-                    break
-        if market == "kr" and ordered and len(ordered) < _MIN_CANDIDATE_TARGET:
-            live = self._live_candidates_cache.get(market)
-            if live is None:
-                live = await _load_live_kr_candidates()
-                self._live_candidates_cache[market] = live
-            for candidate in live:
-                ordered.setdefault(candidate.symbol, candidate)
-                if len(ordered) >= _CANDIDATE_LIMIT:
-                    break
+                )
 
-        return list(ordered.values())[:_CANDIDATE_LIMIT]
+        for index in range(self._ranker_config.candidate_limit):
+            for market in sorted(requested_markets):
+                rows = snapshot_candidates[market]
+                if index >= len(rows):
+                    continue
+                candidate = rows[index]
+                ordered[candidate.ranker_key] = _merge_trading_candidate(
+                    ordered.get(candidate.ranker_key),
+                    candidate,
+                )
+
+        kr_count = sum(
+            candidate.ranker_market == "KR"
+            and candidate.eligible_for_new_buy
+            for candidate in ordered.values()
+        )
+        if (
+            "KR" in requested_markets
+            and kr_count < self._ranker_config.minimum_candidate_target
+        ):
+            live = self._live_candidates_cache.get("kr")
+            if live is None:
+                live = await _load_live_kr_candidates(
+                    limit=self._ranker_config.candidate_limit
+                )
+                self._live_candidates_cache["kr"] = live
+            for candidate in live:
+                ordered[candidate.ranker_key] = _merge_trading_candidate(
+                    ordered.get(candidate.ranker_key),
+                    candidate,
+                )
+
+        metadata = tuple(
+            _candidate_metadata(candidate) for candidate in ordered.values()
+        )
+        capped = cap_candidate_universe(
+            metadata,
+            limit=self._ranker_config.candidate_limit,
+        )
+        return [ordered[item.key] for item in capped]
 
     async def _sync_missing_kr_candles(
         self,
         candidates: Sequence[TradingCandidate],
     ) -> dict[str, int]:
+        if not candidates:
+            return {"requested": 0, "synced": 0, "failed": 0}
         repository = DailyCandlesRepository(session=self._db)
         existing = await repository.fetch_recent_batch(
             market=MarketKey.KR,
             symbols=[candidate.symbol for candidate in candidates],
             partition="KRX",
-            count=20,
+            count=self._ranker_config.history_bars,
         )
         missing = [
             candidate
             for candidate in candidates
-            if len(existing.get(candidate.symbol, ())) < 20
+            if len(existing.get(candidate.symbol, ()))
+            < self._ranker_config.minimum_history_bars
         ]
         if not missing:
             return {"requested": 0, "synced": 0, "failed": 0}
@@ -355,7 +635,7 @@ class AIRecommendationVerticalSlice:
                 try:
                     frame = await fetch_daily_toss_frame(
                         symbol=candidate.symbol,
-                        count=60,
+                        count=self._ranker_config.history_bars,
                     )
                     return candidate.symbol, frame, None
                 except Exception as exc:  # noqa: BLE001 - bounded per-symbol failure
@@ -369,7 +649,7 @@ class AIRecommendationVerticalSlice:
                 failed += 1
                 continue
             rows = frame_to_rows(frame, symbol=symbol, partition="KRX", source="toss")
-            if len(rows) < 20:
+            if len(rows) < self._ranker_config.minimum_history_bars:
                 failed += 1
                 continue
             await repository.upsert_rows(market=MarketKey.KR, rows=rows)
@@ -380,12 +660,20 @@ class AIRecommendationVerticalSlice:
     def _evaluate_candidates(
         self,
         candidates: Sequence[TradingCandidate],
-        bars_by_symbol: Mapping[str, Sequence[PriceBar]],
-        regime: RegimeAssessment,
+        bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
+        regimes: Mapping[str, RegimeAssessment],
+        *,
+        factor_rankings: Mapping[CandidateKey, CandidateRankResult],
     ) -> list[EvaluatedCandidate]:
         evaluated: list[EvaluatedCandidate] = []
         for candidate in candidates:
-            bars = bars_by_symbol.get(candidate.symbol, ())
+            ranking = factor_rankings.get(candidate.ranker_key)
+            if ranking is None or not ranking.included:
+                continue
+            regime = regimes.get(candidate.ranker_market)
+            if regime is None:
+                continue
+            bars = bars_by_candidate.get(candidate.ranker_key, ())
             if len(bars) < 20:
                 continue
             results = tuple(
@@ -402,6 +690,8 @@ class AIRecommendationVerticalSlice:
                     candidate=candidate,
                     strategy_results=results,
                     ensemble=compose_weighted_ensemble(results, regime.weights),
+                    factor_ranking=ranking,
+                    regime=regime,
                 )
             )
         return evaluated
@@ -412,11 +702,17 @@ class AIRecommendationVerticalSlice:
         item: EvaluatedCandidate,
         regime: RegimeAssessment,
     ) -> ReviewedCandidate | None:
+        if self._ai_router is None:
+            return None
+        ranking = item.factor_ranking
+        if ranking is None or not ranking.included or ranking.valid_until is None:
+            return None
         events = await self._event_evidence(item.candidate)
         payload = {
             "symbol": item.candidate.symbol,
             "market": item.candidate.market,
             "candidateSource": item.candidate.source,
+            "candidateRanking": ranking.as_evidence(),
             "regime": regime.regime.value,
             "regimeDetail": regime.detail,
             "strategyVotes": list(item.ensemble.votes),
@@ -455,7 +751,11 @@ class AIRecommendationVerticalSlice:
             ),
             default=self._now,
         )
-        valid_until = min(valid_until, self._now + timedelta(hours=1))
+        valid_until = min(
+            valid_until,
+            ranking.valid_until.astimezone(UTC),
+            self._now + timedelta(hours=1),
+        )
         if valid_until <= self._now:
             return None
         external = ExternalEvidence(
@@ -470,6 +770,8 @@ class AIRecommendationVerticalSlice:
             + (f"AI risk={verdict.risk}",),
             evidence=(
                 {
+                    "title": "AI candidate review",
+                    "source": f"model_router:{verdict.tier_used}",
                     "kind": "ai_analysis",
                     "tier": verdict.tier_used,
                     "confidence": str(confidence),
@@ -478,6 +780,7 @@ class AIRecommendationVerticalSlice:
                     "bearishScore": int(verdict.bearish_score),
                     "eventCount": len(events),
                 },
+                ranking.as_evidence(),
             ),
         )
         directional_score = Decimal(
@@ -485,8 +788,9 @@ class AIRecommendationVerticalSlice:
         ) / Decimal("100")
         event_score = directional_score if events else Decimal("0")
         score = (
-            abs(item.ensemble.score) * Decimal("0.65")
-            + confidence * Decimal("0.25")
+            ranking.total_score * Decimal("0.40")
+            + abs(item.ensemble.score) * Decimal("0.35")
+            + confidence * Decimal("0.15")
             + event_score * Decimal("0.10")
         ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
         return ReviewedCandidate(
@@ -509,6 +813,11 @@ class AIRecommendationVerticalSlice:
     ) -> AIRecommendation:
         candidate = item.evaluated.candidate
         reference_price_text = _level_text(item.evaluated.ensemble.agreeing, "entry")
+        ranking = item.evaluated.factor_ranking
+        strategy_stop_text = _level_text(
+            item.evaluated.ensemble.agreeing,
+            "stop",
+        )
         if reference_price_text is None:
             raise ValueError("ensemble has no reference price")
         reference_price = Decimal(reference_price_text)
@@ -521,6 +830,23 @@ class AIRecommendationVerticalSlice:
             reference_price=reference_price,
             limits=snapshot.limits,
             usage=snapshot.usage,
+            strategy_stop=(
+                Decimal(strategy_stop_text)
+                if strategy_stop_text is not None
+                else None
+            ),
+            strategy_atr=ranking.atr_14 if ranking is not None else None,
+            price_as_of=ranking.data_as_of if ranking is not None else None,
+            evaluated_at=self._now,
+            regime=regime.regime,
+            average_volume=_liquidity_cap(
+                candidate.volume,
+                ranking.average_volume_20 if ranking is not None else None,
+            ),
+            average_turnover=_liquidity_cap(
+                candidate.turnover,
+                ranking.average_turnover_20 if ranking is not None else None,
+            ),
         )
         hard_risk = await self._policy.evaluate_hard_risk(
             self._db,
@@ -561,6 +887,10 @@ class AIRecommendationVerticalSlice:
             },
             portfolio=plan.as_evidence(),
             hard_risk=hard_risk.as_evidence(),
+            strategy_promotion={
+                "strategyKey": DEFAULT_PAPER_STRATEGY_KEY,
+                "version": DEFAULT_PAPER_STRATEGY_VERSION,
+            },
         )
         return cast(AIRecommendation, row)
 
@@ -639,14 +969,9 @@ async def run_ai_recommendation_cycle_once(
     from app.extensions.kasset.ai.factory import build_model_router
 
     try:
-        ai_router = build_model_router()
+        ai_router: OpenAiModelRouter | None = build_model_router()
     except AiProviderUnavailable:
-        return {
-            "enabled": True,
-            "owners": [],
-            "candidateCount": 0,
-            "skipped": "ai_unavailable",
-        }
+        ai_router = None
     live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] = {}
     async with _session() as db:
         owner_ids = list(
@@ -684,7 +1009,70 @@ async def run_ai_recommendation_cycle_once(
         "enabled": True,
         "owners": owners,
         "candidateCount": total_candidates,
+        "aiAvailable": ai_router is not None,
     }
+
+
+def _candidate_metadata(candidate: TradingCandidate) -> CandidateMetadata:
+    return CandidateMetadata(
+        symbol=candidate.symbol,
+        market=candidate.ranker_market,
+        sources=tuple(candidate.source.split("|")),
+        name=candidate.name,
+        screener_turnover=candidate.turnover,
+        screener_volume=candidate.volume,
+        is_held=candidate.is_held,
+        is_watchlisted=candidate.is_watchlisted,
+        eligible_for_new_buy=candidate.eligible_for_new_buy,
+    )
+
+
+def _merge_trading_candidate(
+    current: TradingCandidate | None,
+    incoming: TradingCandidate,
+) -> TradingCandidate:
+    if current is None:
+        return incoming
+    if current.ranker_key != incoming.ranker_key:
+        raise ValueError("candidate merge requires identical market and symbol")
+    sources = tuple(
+        dict.fromkeys(
+            (
+                *current.source.split("|"),
+                *incoming.source.split("|"),
+            )
+        )
+    )
+    return replace(
+        current,
+        name=current.name or incoming.name,
+        source="|".join(sources),
+        turnover=(
+            incoming.turnover
+            if incoming.turnover is not None
+            else current.turnover
+        ),
+        volume=(
+            incoming.volume if incoming.volume is not None else current.volume
+        ),
+        is_held=current.is_held or incoming.is_held,
+        is_watchlisted=current.is_watchlisted or incoming.is_watchlisted,
+        eligible_for_new_buy=(
+            current.eligible_for_new_buy or incoming.eligible_for_new_buy
+        ),
+    )
+
+
+def _liquidity_cap(
+    screener_value: Decimal | None,
+    historical_average: Decimal | None,
+) -> Decimal | None:
+    values = tuple(
+        value
+        for value in (screener_value, historical_average)
+        if value is not None and value.is_finite() and value > 0
+    )
+    return min(values) if values else None
 
 
 def _price_bars(rows: Sequence[Any]) -> tuple[PriceBar, ...]:
@@ -693,9 +1081,11 @@ def _price_bars(rows: Sequence[Any]) -> tuple[PriceBar, ...]:
         timestamp = row.time_utc
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             timestamp = timestamp.replace(tzinfo=UTC)
+        else:
+            timestamp = timestamp.astimezone(UTC)
         bars.append(
             PriceBar(
-                timestamp=timestamp.astimezone(UTC),
+                timestamp=timestamp,
                 open=Decimal(str(row.open)),
                 high=Decimal(str(row.high)),
                 low=Decimal(str(row.low)),

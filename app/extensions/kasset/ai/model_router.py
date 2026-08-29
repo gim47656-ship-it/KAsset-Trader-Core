@@ -9,8 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
-from app.extensions.kasset.ai.base import AiProviderUnavailable
+from app.extensions.kasset.ai.base import StructuredJsonClient
 from app.extensions.kasset.ai.prompt_context import build_owner_address_instruction
+from app.extensions.kasset.ai.structured_router import (
+    AvailabilityRoutedJsonClient,
+    StructuredJsonRoute,
+)
 
 
 class AnalysisKind(StrEnum):
@@ -23,7 +27,7 @@ class AnalysisKind(StrEnum):
 
 
 class _TierAnalysis(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     action: Literal["BUY", "SELL", "HOLD", "IGNORE", "REVIEW"]
     confidence: float = Field(ge=0.0, le=1.0)
@@ -71,11 +75,20 @@ _REASONING_EFFORT: dict[AnalysisKind, Literal["low", "medium", "high"]] = {
     AnalysisKind.CRITICAL_REVIEW: "high",
 }
 
+_MCP_REVIEW_KINDS = frozenset(
+    {
+        AnalysisKind.CANDIDATE_REVIEW,
+        AnalysisKind.TRADE_REVIEW,
+        AnalysisKind.CRITICAL_REVIEW,
+    }
+)
+
+
 _TIER_ANALYSIS_SCHEMA: dict[str, object] = _TierAnalysis.model_json_schema()
 
 
 class OpenAiModelRouter:
-    """Route an analysis to its starting model and escalate deterministically."""
+    """Route analysis by feature, provider availability, and model tier."""
 
     def __init__(
         self,
@@ -90,6 +103,7 @@ class OpenAiModelRouter:
         openrouter_flash_model: str = "",
         openrouter_pro_model: str = "",
         timeout_seconds: float = 60.0,
+        mcp_client: StructuredJsonClient | None = None,
     ) -> None:
         self._models: dict[_Tier, str] = {
             "luna": luna_model.strip(),
@@ -101,10 +115,11 @@ class OpenAiModelRouter:
             "terra": openrouter_pro_model.strip(),
             "sol": openrouter_pro_model.strip(),
         }
+        self._mcp_client = mcp_client
         normalized_key = api_key.strip() if api_key is not None else ""
         self._primary_client = (
             OpenAiResponsesClient(
-                name="openai-model-router",
+                name="direct-api",
                 base_url=base_url,
                 api_key=normalized_key,
                 timeout_seconds=timeout_seconds,
@@ -121,7 +136,7 @@ class OpenAiModelRouter:
             )
         self._fallback_client = (
             OpenAiResponsesClient(
-                name="openrouter-model-router",
+                name="openrouter",
                 base_url=openrouter_base_url or "",
                 api_key=normalized_openrouter_key,
                 timeout_seconds=timeout_seconds,
@@ -205,46 +220,53 @@ class OpenAiModelRouter:
         correlation_id: str | None,
         address_instruction: str | None,
     ) -> TierVerdict:
-        primary_model = self._models[tier]
-        if self._primary_client is None:
-            raise AiProviderUnavailable("OpenAI model router is not configured")
-        if not primary_model:
-            raise AiProviderUnavailable(f"OpenAI {tier} model is not configured")
-        try:
-            return await self._request_verdict(
-                self._primary_client,
-                model=primary_model,
-                kind=kind,
-                payload=payload,
-                correlation_id=correlation_id,
-                include_reasoning=True,
-                address_instruction=address_instruction,
+        routes: list[StructuredJsonRoute] = []
+        if self._mcp_client is not None and kind in _MCP_REVIEW_KINDS:
+            tool_name = str(getattr(self._mcp_client, "tool_name", "run_skill"))
+            routes.append(
+                StructuredJsonRoute(
+                    client=self._mcp_client,
+                    model=f"tool:{tool_name}",
+                )
             )
-        except AiProviderUnavailable as exc:
-            primary_error = exc
+
+        primary_model = self._models[tier]
+        if self._primary_client is not None and primary_model:
+            routes.append(
+                StructuredJsonRoute(
+                    client=self._primary_client,
+                    model=primary_model,
+                )
+            )
 
         fallback_model = self._fallback_models[tier]
-        if self._fallback_client is None or not fallback_model:
-            raise primary_error
-        try:
-            return await self._request_verdict(
-                self._fallback_client,
-                model=fallback_model,
-                kind=kind,
-                payload=payload,
-                correlation_id=correlation_id,
-                include_reasoning=False,
-                address_instruction=address_instruction,
+        if self._fallback_client is not None and fallback_model:
+            routes.append(
+                StructuredJsonRoute(
+                    client=self._fallback_client,
+                    model=fallback_model,
+                    include_reasoning=False,
+                )
             )
-        except AiProviderUnavailable as fallback_error:
-            raise AiProviderUnavailable(
-                f"OpenAI and OpenRouter {tier} models are unavailable: "
-                f"{primary_error}; {fallback_error}"
-            ) from fallback_error
+
+        routed_client = AvailabilityRoutedJsonClient(
+            name=f"{kind.value}:{tier}",
+            routes=routes,
+        )
+        request_model = primary_model or fallback_model or tier
+        return await self._request_verdict(
+            routed_client,
+            model=request_model,
+            kind=kind,
+            payload=payload,
+            correlation_id=correlation_id,
+            include_reasoning=True,
+            address_instruction=address_instruction,
+        )
 
     @staticmethod
     async def _request_verdict(
-        client: OpenAiResponsesClient,
+        client: StructuredJsonClient,
         *,
         model: str,
         kind: AnalysisKind,
@@ -264,7 +286,7 @@ class OpenAiModelRouter:
         analysis = _TierAnalysis.model_validate(raw)
         return TierVerdict(
             **analysis.model_dump(),
-            tier_used=model,
+            tier_used=str(getattr(raw, "model_name", model)),
             kind=kind,
             correlation_id=correlation_id,
         )

@@ -335,3 +335,31 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
   }
 }
 ```
+
+## AI PAPER 운용 설정
+
+`GET|PUT /api/v1/ai/trading/state`
+
+- `settings`의 사용자 입력은 `riskLevel(1..5)`, `operatingBudget`,
+  `dailyTargetRatePct`, `maxDailyLossRatePct`, `killSwitch`, `currency(KRW|USD)`와
+  nullable 양의 정수 `customMaxBuysPerDay`, `customMaxSellsPerDay`다.
+- `derivedLimits`는 서버 계산값이다. `maxBuysPerDay`, `maxSellsPerDay`,
+  `maxOrdersPerDay`, `maxCustomBuysPerDay`, `maxCustomSellsPerDay`,
+  `maxCustomOrdersPerDay`와 종목 비중·동시보유·재진입·AI 확신도 한도를 포함한다.
+- 기본 `하루 매수/매도/전체 주문`은 `1단계 1/1/2`, `2단계 2/1/3`,
+  `3단계 3/2/5`, `4단계 5/3/8`, `5단계 8/4/12`다. 사용자 횟수가 `null`이면
+  이 기본값을 쓰고, 값이 있으면 각 side의 `maxCustom*` 상한을 넘을 수 없다.
+- `usage`는 `buysToday`, `sellsToday`, `ordersToday`, `concurrentHoldings`,
+  `budgetUsed`, 당일 실현 손익을 반환한다. 목표수익은 참고값이고 최대손실은 신규 매수를
+  차단한다. 위험을 줄이는 매도는 최대손실 도달만을 이유로 차단하지 않는다.
+
+## AI 추천 시장 범위와 일일 루틴
+
+`GET|PUT /api/v1/ai/daily-routine`
+
+- 응답은 `date`, `inheritedFrom`, `recommendationMarketScope`, `enabledRoutines`,
+  `availableRoutines`, `alerts`, `updatedAt`을 반환한다.
+- `recommendationMarketScope`는 `KR_ONLY`, `US_ONLY`, `KR_US` 중 하나다. 추천 후보
+  범위만 정하며 PAPER 주문 가능 여부는 설정 통화·예산·보유량·Hard Risk에서 다시 검사한다.
+- `PUT`은 `enabledRoutines`와 선택 필드 `recommendationMarketScope`를 받는다.
+  범위를 생략하면 기존 값을 유지하고, 모르는 값은 `422 VALIDATION_ERROR`다.

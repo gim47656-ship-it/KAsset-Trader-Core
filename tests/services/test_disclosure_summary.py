@@ -29,16 +29,6 @@ class FakeResponsesClient:
         return {"summary": self.summary}
 
 
-class SequenceResponsesClient:
-    def __init__(self, summaries: list[str]) -> None:
-        self.summaries = summaries
-        self.calls: list[dict[str, object]] = []
-
-    async def request_json(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        return {"summary": self.summaries[len(self.calls) - 1]}
-
-
 class FakeBodyFetcher:
     def __init__(self, outcomes: dict[str, str | BaseException]) -> None:
         self.outcomes = outcomes
@@ -153,28 +143,23 @@ async def test_openai_generator_accepts_english_month_translated_to_korean_numbe
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_openai_generator_retries_numeric_unit_conversion_once() -> None:
-    client = SequenceResponsesClient(
-        [
-            "매출은 96.2 billion으로 공시됐다. 회사는 분기 실적을 발표했다.",
-            "매출은 96,221 million으로 공시됐다. 회사는 분기 실적을 발표했다.",
-        ]
+async def test_openai_generator_fails_closed_on_numeric_unit_conversion() -> None:
+    client = FakeResponsesClient(
+        "매출은 96.2 billion으로 공시됐다. 회사는 분기 실적을 발표했다."
     )
     generator = OpenAiDisclosureSummaryGenerator(client, model="gpt-5.6-luna")
 
-    result = await generator.summarize(
-        DisclosureSummaryInput(
-            title="분기 실적",
-            company="테스트상장사",
-            form="8-K",
-            body_excerpt="분기 매출은 96,221 million이다.",
+    with pytest.raises(ValueError, match="numbers absent from source"):
+        await generator.summarize(
+            DisclosureSummaryInput(
+                title="분기 실적",
+                company="테스트상장사",
+                form="8-K",
+                body_excerpt="분기 매출은 96,221 million이다.",
+            )
         )
-    )
 
-    assert result.startswith("매출은 96,221 million")
-    assert len(client.calls) == 2
-    assert client.calls[1]["schema_name"] == "kasset_disclosure_summary_retry"
-    assert "million/billion 환산" in client.calls[1]["additional_instructions"]
+    assert len(client.calls) == 1
 
 
 @pytest.mark.unit

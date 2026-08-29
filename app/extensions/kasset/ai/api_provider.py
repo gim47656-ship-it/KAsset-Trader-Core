@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Literal
 
 import httpx
 
-from app.extensions.kasset.ai.base import AiProviderUnavailable, ExternalSkillRunner
+from app.extensions.kasset.ai.base import (
+    STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS,
+    AiProviderUnavailable,
+    ExternalSkillRunner,
+    ReasoningEffort,
+)
 from app.extensions.kasset.ai.models import SkillRequest, SkillResult
 
-_SYSTEM_CONTRACT = (
-    "You are KAsset Core's read-only market-analysis layer. Use only the JSON "
-    "input supplied by the application. Return one JSON object matching the "
-    "provided schema and no explanatory text. Never call tools or request more "
-    "data. Never provide broker, account, leverage, quantity, or order-execution "
-    "instructions."
-)
+_SYSTEM_CONTRACT = STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS
 
 _SKILL_RESULT_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -42,8 +40,6 @@ _SKILL_RESULT_SCHEMA: dict[str, object] = {
 }
 
 _ALLOWED_SIGNALS = frozenset({"BUY", "SELL", "HOLD", "WATCH"})
-
-ReasoningEffort = Literal["low", "medium", "high"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +82,10 @@ class OpenAiResponsesClient:
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
         self._extra_headers = dict(extra_headers or {})
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     async def request_json(
         self,
@@ -137,7 +137,7 @@ class OpenAiResponsesClient:
                 f"{self._name} unreachable: {type(exc).__name__}"
             ) from exc
 
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code >= 500:
             raise AiProviderUnavailable(
                 f"{self._name} unavailable: HTTP {response.status_code}"
             )
@@ -237,27 +237,35 @@ class OpenAiCompatibleProvider:
         analysis: dict[str, object],
     ) -> SkillResult:
         profile = self._profile
-        summary = analysis.get("summary")
+        if set(analysis) != {"summary", "signal", "confidence", "rationale"}:
+            raise ValueError(f"{profile.name} analysis response shape is invalid")
+        summary = analysis["summary"]
         if not isinstance(summary, str) or not summary.strip():
             raise ValueError(f"{profile.name} analysis is missing a summary")
-        signal = analysis.get("signal")
-        if signal is not None:
-            signal = str(signal).strip().upper()
-            if signal not in _ALLOWED_SIGNALS:
-                raise ValueError(f"{profile.name} returned an unknown signal")
-        confidence = analysis.get("confidence")
-        rationale = analysis.get("rationale")
+        signal = analysis["signal"]
+        if signal is not None and (
+            not isinstance(signal, str) or signal not in _ALLOWED_SIGNALS
+        ):
+            raise ValueError(f"{profile.name} returned an unknown signal")
+        confidence = analysis["confidence"]
+        if confidence is not None and (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0.0 <= confidence <= 1.0
+        ):
+            raise ValueError(f"{profile.name} returned invalid confidence")
+        rationale = analysis["rationale"]
+        if not isinstance(rationale, list) or any(
+            not isinstance(item, str) for item in rationale
+        ):
+            raise ValueError(f"{profile.name} returned invalid rationale")
         return SkillResult(
             skill=request.skill,
             provider="api",
             summary=summary.strip(),
             signal=signal,
-            confidence=confidence if isinstance(confidence, (int, float)) else None,
-            rationale=[
-                str(item)
-                for item in (rationale if isinstance(rationale, list) else [])
-                if str(item).strip()
-            ],
+            confidence=confidence,
+            rationale=[item for item in rationale if item.strip()],
             metadata={"provider_profile": profile.name, "model": profile.model},
             correlation_id=request.correlation_id,
         )

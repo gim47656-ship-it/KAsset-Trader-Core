@@ -1,7 +1,7 @@
-"""Configuration-driven assembly of the KAsset AI provider stacks.
+"""설정에 따라 KAsset AI provider route를 조립한다.
 
-The event pipeline uses the OpenAI-only Luna/Terra/Sol router. The legacy
-``run_skill`` provider router remains available for existing MCP consumers.
+복잡한 검토는 MCP, direct API, OpenRouter 순서로 사용한다. 요약은 MCP를
+사용하지 않고 direct API 다음 OpenRouter를 사용하며 availability 오류에만 fallback한다.
 """
 
 from __future__ import annotations
@@ -13,10 +13,16 @@ from app.extensions.kasset.ai.api_provider import (
     ApiProviderProfile,
     ChainedApiProvider,
     OpenAiCompatibleProvider,
+    OpenAiResponsesClient,
 )
 from app.extensions.kasset.ai.base import ExternalSkillRunner
+from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
 from app.extensions.kasset.ai.model_router import OpenAiModelRouter
 from app.extensions.kasset.ai.provider_router import AiProviderRouter
+from app.extensions.kasset.ai.structured_router import (
+    AvailabilityRoutedJsonClient,
+    StructuredJsonRoute,
+)
 from app.extensions.kasset.ai.subscription_cli import build_cli_invoker
 from app.extensions.kasset.ai.subscription_provider import (
     SubscriptionAgentProvider,
@@ -24,35 +30,119 @@ from app.extensions.kasset.ai.subscription_provider import (
 )
 
 
+def _build_mcp_json_client() -> McpStructuredJsonClient | None:
+    mcp_url = settings.KASSET_AI_MCP_URL.strip()
+    if not mcp_url:
+        return None
+    mcp_token = (
+        settings.KASSET_AI_MCP_TOKEN.get_secret_value()
+        if settings.KASSET_AI_MCP_TOKEN is not None
+        else None
+    )
+    return McpStructuredJsonClient(
+        url=mcp_url,
+        token=mcp_token,
+        tool_name=settings.KASSET_AI_MCP_TOOL_NAME,
+        timeout_seconds=settings.KASSET_AI_MCP_TIMEOUT_SECONDS,
+    )
+
+
+def _build_api_json_routes(
+    *,
+    direct_model: str,
+    fallback_model: str,
+) -> list[StructuredJsonRoute]:
+    routes: list[StructuredJsonRoute] = []
+    normalized_direct_model = direct_model.strip()
+    direct_key = (
+        settings.KASSET_AI_API_KEY.get_secret_value().strip()
+        if settings.KASSET_AI_API_KEY is not None
+        else ""
+    )
+    if direct_key and normalized_direct_model:
+        routes.append(
+            StructuredJsonRoute(
+                client=OpenAiResponsesClient(
+                    name="direct-api",
+                    base_url=settings.KASSET_AI_API_BASE_URL,
+                    api_key=direct_key,
+                ),
+                model=normalized_direct_model,
+            )
+        )
+
+    normalized_fallback_model = fallback_model.strip()
+    openrouter_key = (
+        settings.KASSET_AI_OPENROUTER_API_KEY.get_secret_value().strip()
+        if settings.KASSET_AI_OPENROUTER_API_KEY is not None
+        else ""
+    )
+    if openrouter_key and normalized_fallback_model:
+        routes.append(
+            StructuredJsonRoute(
+                client=OpenAiResponsesClient(
+                    name="openrouter",
+                    base_url=settings.KASSET_AI_OPENROUTER_BASE_URL,
+                    api_key=openrouter_key,
+                ),
+                model=normalized_fallback_model,
+                include_reasoning=False,
+            )
+        )
+    return routes
+
+
+def build_summary_json_client(
+    *,
+    name: str,
+    direct_model: str,
+    fallback_model: str,
+) -> AvailabilityRoutedJsonClient | None:
+    """direct API -> OpenRouter 요약 route를 만든다."""
+
+    routes = _build_api_json_routes(
+        direct_model=direct_model,
+        fallback_model=fallback_model,
+    )
+    if not routes:
+        return None
+    return AvailabilityRoutedJsonClient(name=name, routes=routes)
+
+
 def build_api_provider_chain() -> ChainedApiProvider | None:
     """Build the compatibility ``run_skill`` API provider chain."""
 
     providers: list[ExternalSkillRunner] = []
-    primary_model = (
-        settings.KASSET_AI_MODEL_TERRA.strip() or settings.KASSET_AI_API_MODEL.strip()
+    primary_model = settings.KASSET_AI_MODEL_TERRA.strip()
+    primary_key = (
+        settings.KASSET_AI_API_KEY.get_secret_value().strip()
+        if settings.KASSET_AI_API_KEY is not None
+        else ""
     )
-    if settings.KASSET_AI_API_KEY is not None and primary_model:
+    if primary_key and primary_model:
         providers.append(
             OpenAiCompatibleProvider(
                 ApiProviderProfile(
                     name="primary-api",
                     base_url=settings.KASSET_AI_API_BASE_URL,
-                    api_key=settings.KASSET_AI_API_KEY.get_secret_value(),
+                    api_key=primary_key,
                     model=primary_model,
                 )
             )
         )
-    if (
-        settings.KASSET_AI_OPENROUTER_API_KEY is not None
-        and settings.KASSET_AI_OPENROUTER_MODEL.strip()
-    ):
+    openrouter_key = (
+        settings.KASSET_AI_OPENROUTER_API_KEY.get_secret_value().strip()
+        if settings.KASSET_AI_OPENROUTER_API_KEY is not None
+        else ""
+    )
+    if openrouter_key and settings.KASSET_AI_OPENROUTER_MODEL_PRO.strip():
         providers.append(
             OpenAiCompatibleProvider(
                 ApiProviderProfile(
                     name="openrouter",
                     base_url=settings.KASSET_AI_OPENROUTER_BASE_URL,
-                    api_key=settings.KASSET_AI_OPENROUTER_API_KEY.get_secret_value(),
-                    model=settings.KASSET_AI_OPENROUTER_MODEL,
+                    api_key=openrouter_key,
+                    model=settings.KASSET_AI_OPENROUTER_MODEL_PRO,
                 )
             )
         )
@@ -74,6 +164,7 @@ def build_model_router() -> OpenAiModelRouter:
         if settings.KASSET_AI_OPENROUTER_API_KEY is not None
         else None
     )
+    mcp_client = _build_mcp_json_client()
     return OpenAiModelRouter(
         base_url=settings.KASSET_AI_API_BASE_URL,
         api_key=api_key,
@@ -84,6 +175,7 @@ def build_model_router() -> OpenAiModelRouter:
         openrouter_api_key=openrouter_api_key,
         openrouter_flash_model=settings.KASSET_AI_OPENROUTER_MODEL_FLASH,
         openrouter_pro_model=settings.KASSET_AI_OPENROUTER_MODEL_PRO,
+        mcp_client=mcp_client,
     )
 
 
@@ -117,4 +209,5 @@ __all__ = [
     "build_ai_provider_router",
     "build_api_provider_chain",
     "build_model_router",
+    "build_summary_json_client",
 ]

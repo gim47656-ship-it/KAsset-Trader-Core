@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic.fields import FieldInfo
@@ -712,25 +713,26 @@ class Settings(BaseSettings):
     AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
     # Event-driven market analysis is opt-in and remains fail-closed by default.
     KASSET_MARKET_EVENTS_ENABLED: bool = False
-    # Event-driven OpenAI analysis uses a fixed Luna -> Terra -> Sol model stack.
-    # The legacy run_skill provider chain remains for existing MCP consumers;
-    # every API-backed path stays inactive until an API key is configured.
+    # Event analysis selects provider routes by feature. The compatibility
+    # subscription CLI stays separate from the concrete HTTP MCP provider.
     KASSET_AI_PROVIDER_MODE: Literal["subscription", "api", "hybrid"] = "hybrid"
     KASSET_AI_SUBSCRIPTION_CMD: str = ""
     KASSET_AI_SUBSCRIPTION_TIMEOUT_SECONDS: float = 120.0
+    KASSET_AI_MCP_URL: str = ""
+    KASSET_AI_MCP_TOKEN: SecretStr | None = None
+    KASSET_AI_MCP_TOOL_NAME: str = "run_skill"
+    KASSET_AI_MCP_TIMEOUT_SECONDS: Annotated[
+        float, Field(gt=0.0, le=120.0, allow_inf_nan=False)
+    ] = 30.0
     KASSET_AI_API_BASE_URL: str = "https://api.openai.com/v1"
     KASSET_AI_API_KEY: SecretStr | None = None
-    KASSET_AI_API_MODEL: str = ""
     KASSET_AI_MODEL_LUNA: str = "gpt-5.6-luna"
     KASSET_AI_MODEL_TERRA: str = "gpt-5.6-terra"
     KASSET_AI_MODEL_SOL: str = "gpt-5.6-sol"
     KASSET_AI_OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
-    KASSET_AI_OPENROUTER_MODEL_FLASH: str = (
-        "deepseek/deepseek-v4-flash-0731@preset/kasset-cheap"
-    )
-    KASSET_AI_OPENROUTER_MODEL_PRO: str = "deepseek/deepseek-v4-pro-0813"
-    KASSET_AI_OPENROUTER_MODEL: str = ""
+    KASSET_AI_OPENROUTER_MODEL_FLASH: str = "z-ai/glm-5.3-flash"
+    KASSET_AI_OPENROUTER_MODEL_PRO: str = "z-ai/glm-5.3-flash"
 
     # JWT Authentication settings
     SECRET_KEY: str
@@ -1022,6 +1024,56 @@ class Settings(BaseSettings):
     # ROB-842 — automated Alpaca paper submit boundary (preview→claim→POST). The
     # automated cohort broker mutation is fail-closed unless this gate is armed.
     alpaca_paper_automated_submit_enabled: bool = False
+
+    @field_validator(
+        "KASSET_AI_API_BASE_URL",
+        "KASSET_AI_OPENROUTER_BASE_URL",
+        mode="before",
+    )
+    @classmethod
+    def validate_kasset_ai_base_url(cls, value: Any) -> str:
+        normalized = str(value).strip().rstrip("/")
+        if not normalized:
+            raise ValueError("KAsset AI base URL must not be blank")
+        return cls._validated_kasset_ai_http_url(normalized)
+
+    @field_validator("KASSET_AI_MCP_URL", mode="before")
+    @classmethod
+    def validate_kasset_ai_mcp_url(cls, value: Any) -> str:
+        normalized = str(value or "").strip().rstrip("/")
+        if not normalized:
+            return ""
+        return cls._validated_kasset_ai_http_url(normalized)
+
+    @field_validator("KASSET_AI_MCP_TOOL_NAME", mode="before")
+    @classmethod
+    def validate_kasset_ai_mcp_tool_name(cls, value: Any) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("KASSET_AI_MCP_TOOL_NAME must not be blank")
+        return normalized
+
+    @staticmethod
+    def _validated_kasset_ai_http_url(value: str) -> str:
+        parsed = urlsplit(value)
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("KAsset AI URL contains an invalid port") from exc
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or parsed.hostname is None
+            or any(character.isspace() for character in value)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "KAsset AI URLs must be absolute HTTP(S) URLs without "
+                "credentials, whitespace, query strings, or fragments"
+            )
+        return value
 
     @field_validator("alpaca_paper_base_url", mode="before")
     @classmethod

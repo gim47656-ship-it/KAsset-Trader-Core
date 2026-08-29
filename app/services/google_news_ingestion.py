@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -13,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Protocol
 from urllib import robotparser
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Comment
@@ -51,6 +52,10 @@ ARTICLE_MIN_TEXT_CHARS = 160
 _ARTICLE_USER_AGENT = "KAsset-Trader-Core news-ingestion/1.0"
 _ARTICLE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _GOOGLE_NEWS_HOST = "news.google.com"
+_GOOGLE_NEWS_BATCH_URL = (
+    "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+)
+_GOOGLE_NEWS_BATCH_RPC = "Fbv4je"
 _PAYWALL_RE = re.compile(
     r"(?:subscribe|sign in|register)\s+to\s+continue|"
     r"(?:유료|구독)\s*(?:회원|서비스).{0,20}(?:전용|가입|로그인)|"
@@ -182,7 +187,6 @@ def _provider_url_from_google_html(body: str, *, base_url: str) -> str | None:
     for selector, attribute in (
         ('meta[property="og:url"]', "content"),
         ('link[rel="canonical"]', "href"),
-        ("a[href]", "href"),
     ):
         for element in soup.select(selector):
             value = element.get(attribute)
@@ -191,6 +195,60 @@ def _provider_url_from_google_html(body: str, *, base_url: str) -> str | None:
             candidate = _external_google_news_url(value, base_url=base_url)
             if candidate is not None:
                 return candidate
+    return None
+
+
+def _google_decode_params(body: str, *, base_url: str) -> tuple[str, int, str] | None:
+    soup = BeautifulSoup(body, "lxml")
+    signed = soup.select_one("[data-n-a-sg][data-n-a-ts]")
+    if signed is None:
+        return None
+    signature = signed.get("data-n-a-sg")
+    timestamp = signed.get("data-n-a-ts")
+    token = urlsplit(base_url).path.rstrip("/").rsplit("/", 1)[-1]
+    if (
+        not isinstance(signature, str)
+        or not signature
+        or len(signature) > 4096
+        or not isinstance(timestamp, str)
+        or not timestamp.isdecimal()
+        or not token
+        or len(token) > 4096
+    ):
+        return None
+    return token, int(timestamp), signature
+
+
+def _google_batch_provider_url(body: str) -> str | None:
+    for line in body.splitlines():
+        candidate = line.strip()
+        if not candidate.startswith("["):
+            continue
+        try:
+            rows = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if (
+                not isinstance(row, list)
+                or len(row) < 3
+                or row[0] != "wrb.fr"
+                or row[1] != _GOOGLE_NEWS_BATCH_RPC
+                or not isinstance(row[2], str)
+            ):
+                continue
+            try:
+                decoded = json.loads(row[2])
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(decoded, list)
+                and len(decoded) > 1
+                and isinstance(decoded[1], str)
+            ):
+                return decoded[1]
     return None
 
 
@@ -297,6 +355,32 @@ def _decode_article_body(response: httpx.Response, payload: bytes) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
+async def _read_bounded_response(
+    response: httpx.Response,
+    *,
+    max_bytes: int,
+    empty_error: str,
+    oversized_error: str,
+) -> bytes:
+    declared_length = response.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if int(declared_length) > max_bytes:
+                raise NewsArticleFetchError(oversized_error)
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    consumed = 0
+    async for chunk in response.aiter_bytes():
+        consumed += len(chunk)
+        if consumed > max_bytes:
+            raise NewsArticleFetchError(oversized_error)
+        chunks.append(chunk)
+    if not chunks:
+        raise NewsArticleFetchError(empty_error)
+    return b"".join(chunks)
+
+
 class GoogleNewsArticleFetcher:
     """Google News 링크를 공개 HTTPS 원문까지만 따라가 제한 본문을 추출한다."""
 
@@ -366,6 +450,103 @@ class GoogleNewsArticleFetcher:
         if rules is not None and not rules.can_fetch(_ARTICLE_USER_AGENT, url):
             raise NewsArticleFetchError("article fetch is disallowed by robots.txt")
 
+    async def _decode_google_provider_url(
+        self,
+        body: str,
+        *,
+        base_url: str,
+    ) -> str | None:
+        params = await asyncio.to_thread(
+            _google_decode_params,
+            body,
+            base_url=base_url,
+        )
+        if params is None:
+            return None
+        token, timestamp, signature = params
+        rpc_argument = [
+            "garturlreq",
+            [
+                [
+                    "X",
+                    "X",
+                    ["X", "X"],
+                    None,
+                    None,
+                    1,
+                    1,
+                    "US:en",
+                    None,
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    1,
+                ],
+                "X",
+                "X",
+                1,
+                [1, 1, 1],
+                1,
+                1,
+                None,
+                0,
+                0,
+                None,
+                0,
+            ],
+            token,
+            timestamp,
+            signature,
+        ]
+        rpc = [_GOOGLE_NEWS_BATCH_RPC, json.dumps(rpc_argument)]
+        request = self._client.build_request(
+            "POST",
+            _GOOGLE_NEWS_BATCH_URL,
+            headers={
+                "Accept": "application/json,text/plain;q=0.8",
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "User-Agent": _ARTICLE_USER_AGENT,
+            },
+            content=urlencode({"f.req": json.dumps([[rpc]])}),
+        )
+        try:
+            response = await self._client.send(
+                request,
+                stream=True,
+                follow_redirects=False,
+            )
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            raise NewsArticleFetchError(
+                f"Google News URL decode failed: {type(exc).__name__}"
+            ) from exc
+        try:
+            if not response.is_success:
+                raise NewsArticleFetchError(
+                    f"Google News URL decode returned HTTP {response.status_code}"
+                )
+            payload = await _read_bounded_response(
+                response,
+                max_bytes=ARTICLE_MAX_RESPONSE_BYTES,
+                empty_error="Google News URL decode response is empty",
+                oversized_error="Google News URL decode response exceeds the size limit",
+            )
+            decoded_url = await asyncio.to_thread(
+                _google_batch_provider_url,
+                _decode_article_body(response, payload),
+            )
+        finally:
+            await response.aclose()
+        if decoded_url is None:
+            return None
+        return _external_google_news_url(
+            decoded_url,
+            base_url=_GOOGLE_NEWS_BATCH_URL,
+        )
+
     async def fetch(self, url: str) -> str:
         current_url = url
         for hop in range(ARTICLE_MAX_REDIRECTS + 1):
@@ -411,19 +592,25 @@ class GoogleNewsArticleFetcher:
                 await response.aclose()
 
             if host == _GOOGLE_NEWS_HOST:
-                provider_url = _provider_url_from_google_html(
+                provider_url = await asyncio.to_thread(
+                    _provider_url_from_google_html,
                     body,
                     base_url=str(response.url),
                 )
                 if provider_url is None:
+                    provider_url = await self._decode_google_provider_url(
+                        body,
+                        base_url=str(response.url),
+                    )
+                if provider_url is None:
                     raise NewsArticleFetchError(
-                        "Google News page has no public provider URL"
+                        "Google News page has no decodable public provider URL"
                     )
                 if hop >= ARTICLE_MAX_REDIRECTS:
                     raise NewsArticleFetchError("too many article redirects")
                 current_url = provider_url
                 continue
-            return _extract_article_text(body)
+            return await asyncio.to_thread(_extract_article_text, body)
         raise NewsArticleFetchError("too many article redirects")
 
 

@@ -170,21 +170,17 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
     with pytest.raises(ValueError, match="duplicates raw input"):
         await copy_generator.summarize(news)
 
+    number_client = FakeResponsesClient(
+        [
+            {
+                "summary": "회사는 신규 제품을 공개했다. 매출은 999억원으로 예상됐다.",
+                "sentiment": "positive",
+                "confidence": 70,
+            }
+        ]
+    )
     number_generator = OpenAiNewsSummaryGenerator(
-        FakeResponsesClient(
-            [
-                {
-                    "summary": "회사는 신규 제품을 공개했다. 매출은 999억원으로 예상됐다.",
-                    "sentiment": "positive",
-                    "confidence": 70,
-                },
-                {
-                    "summary": "회사는 신규 제품을 공개했다. 매출은 999억원으로 예상됐다.",
-                    "sentiment": "positive",
-                    "confidence": 70,
-                },
-            ]
-        ),
+        number_client,
         model="gpt-5.6-luna",
     )
     with pytest.raises(ValueError, match="numbers absent from source"):
@@ -199,6 +195,7 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
                 raw_excerpt=None,
             )
         )
+    assert len(number_client.calls) == 1
 
 
 @pytest.mark.unit

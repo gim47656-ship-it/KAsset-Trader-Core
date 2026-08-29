@@ -23,6 +23,10 @@ from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
     OperatingMode,
 )
+from app.extensions.kasset.automation.strategy_promotion import PaperApprovalDecision
+from app.extensions.kasset.automation.strategy_promotion_service import (
+    StrategyPromotionService,
+)
 from app.models.ai_recommendations import AIRecommendation
 from app.models.trading import User, UserRole
 from app.tasks import TASKIQ_TASK_MODULES, kasset_paper_automation_tasks
@@ -178,6 +182,25 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
         await _set_auto_policy(db_session, owner_b_id, kill_switch=True)
         # Owner B never reaches the claim stage: the kill switch blocks first.
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        async def _approved_promotion(
+            self: object,
+            recommendation: AIRecommendation,
+        ) -> PaperApprovalDecision:
+            return PaperApprovalDecision(
+                approved=True,
+                strategy_key="qullamaggie_breakout_portfolio",
+                version="1.0.0",
+                state=None,
+                metrics_hash="a" * 64,
+                reason="paper_approved",
+            )
+
+        monkeypatch.setattr(
+            StrategyPromotionService,
+            "approval_for_recommendation",
+            _approved_promotion,
+        )
+
 
         async def _broken_claim(self: object, owner: str, now: datetime) -> None:
             raise RuntimeError("transient claim failure")
@@ -202,6 +225,39 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
     finally:
         await _cleanup_owner(db_session, username_a)
         await _cleanup_owner(db_session, username_b)
+
+
+@pytest.mark.asyncio
+async def test_auto_paper_leaves_unpromoted_recommendation_unclaimed(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        outcome = next(
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        )
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "strategy_promotion_required"
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
 
 
 @pytest.mark.asyncio

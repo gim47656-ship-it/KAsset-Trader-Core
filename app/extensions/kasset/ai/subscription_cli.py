@@ -123,7 +123,7 @@ async def _invoke(
         ) from None
 
     if process.returncode != 0:
-        raise AiProviderUnavailable(
+        raise ValueError(
             _failure_message(
                 "failed",
                 exit_code=process.returncode,
@@ -134,7 +134,7 @@ async def _invoke(
 
     raw_result = _last_json_object(stdout.decode("utf-8", errors="replace"))
     if raw_result is None:
-        raise AiProviderUnavailable(
+        raise ValueError(
             _failure_message(
                 "returned no JSON object",
                 exit_code=process.returncode,
@@ -150,16 +150,16 @@ async def _invoke(
         correlation_id=request.correlation_id,
     )
     try:
-        return SkillResult.model_validate(payload)
-    except ValidationError:
-        raise AiProviderUnavailable(
+        return SkillResult.model_validate(payload, strict=True)
+    except ValidationError as exc:
+        raise ValueError(
             _failure_message(
                 "returned invalid SkillResult",
                 exit_code=process.returncode,
                 stdout=stdout,
                 stderr=stderr,
             )
-        ) from None
+        ) from exc
 
 
 def build_cli_invoker(

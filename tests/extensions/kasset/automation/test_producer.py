@@ -150,6 +150,47 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
 
 
 @pytest.mark.asyncio
+async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
+    persistence = RecordingPersistence()
+    producer = RecommendationProducer(
+        owner_user_id="user-a",
+        persistence=persistence,
+    )
+    hard_risk = {
+        "passed": False,
+        "blockedReason": "currency-market mismatch",
+        "checks": [
+            {
+                "rule": "POSITION",
+                "passed": False,
+                "detail": "market=US; expectedMarket=KRX",
+            }
+        ],
+    }
+
+    await producer.produce(
+        symbol="AAPL",
+        market="US",
+        strategy_results=_strategy_quorum(),
+        external_evidence=_external(),
+        suggested_quantity="2",
+        now=_NOW,
+        hard_risk=hard_risk,
+    )
+
+    _, draft = persistence.calls[0]
+    assert draft.action == Action.BUY  # type: ignore[attr-defined]
+    assert draft.suggested_quantity == Decimal("2")  # type: ignore[attr-defined]
+    risks = draft.risks  # type: ignore[attr-defined]
+    evidence = draft.evidence  # type: ignore[attr-defined]
+    assert "hard risk blocked: currency-market mismatch" in risks
+    detail = next(
+        item for item in evidence if item["kind"] == "ai_vertical_slice"
+    )
+    assert detail["hardRisk"] == hard_risk
+
+
+@pytest.mark.asyncio
 async def test_external_contradiction_fails_closed_to_hold() -> None:
     persistence = RecordingPersistence()
     producer = RecommendationProducer(
