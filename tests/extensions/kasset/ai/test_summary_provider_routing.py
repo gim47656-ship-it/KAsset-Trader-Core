@@ -310,11 +310,11 @@ async def test_summary_schema_failure_does_not_fallback(
 
 
 @pytest.mark.asyncio
-async def test_summary_4xx_does_not_fallback(
+async def test_summary_non_rate_limit_4xx_does_not_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_routes(monkeypatch)
-    direct = _Transport([httpx.Response(429, text="quota rejected")])
+    direct = _Transport([httpx.Response(401, text="authentication rejected")])
     openrouter = _Transport([])
     _patch_transports(
         monkeypatch,
@@ -323,7 +323,7 @@ async def test_summary_4xx_does_not_fallback(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    with pytest.raises(ValueError, match="HTTP 429"):
+    with pytest.raises(ValueError, match="HTTP 401"):
         await generator.summarize(
             NewsSummaryInput(
                 title="Test headline",
@@ -337,6 +337,47 @@ async def test_summary_4xx_does_not_fallback(
 
     assert len(direct.requests) == 1
     assert openrouter.requests == []
+
+
+@pytest.mark.asyncio
+async def test_summary_429_falls_back_to_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_routes(monkeypatch)
+    direct = _Transport([httpx.Response(429, text="quota rejected")])
+    openrouter = _Transport(
+        [
+            _response(
+                {
+                    "summary": (
+                        "테스트 기업이 신제품을 공개했다. "
+                        "회사는 공급 확대 계획을 밝혔다."
+                    ),
+                    "sentiment": "neutral",
+                    "confidence": 75,
+                }
+            )
+        ]
+    )
+    _patch_transports(
+        monkeypatch,
+        {"https://direct.test": direct, "https://openrouter.test": openrouter},
+    )
+
+    generator = build_news_summary_generator()
+    assert generator is not None
+    generated = await generator.summarize(
+        NewsSummaryInput(
+            title="Test headline",
+            source="Wire",
+            article_content="A sufficiently detailed article body for summary input.",
+            raw_excerpt=None,
+        )
+    )
+
+    assert generated.model_name == "z-ai/glm-5.3-flash"
+    assert len(direct.requests) == 1
+    assert len(openrouter.requests) == 1
 
 
 @pytest.mark.asyncio

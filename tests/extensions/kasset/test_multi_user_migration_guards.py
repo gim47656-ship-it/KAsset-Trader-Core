@@ -29,6 +29,9 @@ PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
 
 _BOUNDARY_TABLES = (
     "review.ai_recommendations",
+    "review.kasset_strategy_promotions",
+    "kasset_paper_position_states",
+    "kasset_ai_daily_routine_settings",
     "kasset_android_paper_orders",
     "kasset_android_paper_accounts",
     "kasset_android_runtime_state",
@@ -98,6 +101,9 @@ async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
             await connection.run_sync(Base.metadata.create_all)
             for table in _BOUNDARY_TABLES:
                 await connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
+            await connection.execute(
+                text("DROP INDEX IF EXISTS paper.uq_paper_trades_account_correlation")
+            )
             for index in ("uq_users_username_ci", "uq_users_email_ci"):
                 await connection.execute(text(f"DROP INDEX IF EXISTS {index}"))
             # The Google sign-in migration is later than this boundary and its
