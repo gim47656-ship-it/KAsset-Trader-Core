@@ -436,6 +436,46 @@ async def test_us_completed_batch_excludes_forming_session_and_preserves_close_t
     ]
 
 
+@pytest.mark.asyncio
+async def test_us_completed_batch_uses_latest_non_null_closed_row_with_its_own_asof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "Open": [99.0, 101.0, 106.0],
+            "High": [102.0, 106.0, 107.0],
+            "Low": [98.0, 100.0, 89.0],
+            "Close": [100.0, 105.0, float("nan")],
+            "Volume": [1000.0, 1200.0, float("nan")],
+        },
+        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28"]),
+    )
+
+    def download(_tickers: list[str], **_kwargs: Any) -> pd.DataFrame:
+        return frame
+
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(index_sources.yf, "download", download)
+    monkeypatch.setattr(
+        index_sources,
+        "yfinance_tracing_session",
+        traced_session,
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["SPX"],
+        completed_as_of=_US_COMPLETED_END,
+    )
+
+    assert rows[0]["current"] == 105.0
+    assert rows[0]["previous_close"] == 100.0
+    assert rows[0]["quote_asof"] == "2026-08-27T20:00:00+00:00"
+    assert rows[0]["data_state"] == "market_closed"
+
+
 def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:
     index_result = {
         "indices": [

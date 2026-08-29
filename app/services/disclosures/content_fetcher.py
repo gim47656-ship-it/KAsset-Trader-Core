@@ -33,6 +33,10 @@ _DART_VIEWER_URL_RE = re.compile(
     r"(?P<url>(?:https://dart\.fss\.or\.kr)?/report/viewer\.do\?[^\"'<>\\\s]+)",
     re.IGNORECASE,
 )
+_SEC_EXHIBIT_LABEL_RE = re.compile(
+    r"(?:\bex(?:hibit)?\s*99[.\-]?[12]\b|\b99[.\-][12]\b|press\s+release|cfo\s+commentary)",
+    re.IGNORECASE,
+)
 
 
 class DisclosureContentError(RuntimeError):
@@ -113,8 +117,8 @@ def _headers_for(
             raise DisclosureContentError(str(exc)) from exc
     else:
         headers["User-Agent"] = _DART_USER_AGENT
-        if referer is not None:
-            headers["Referer"] = referer
+    if referer is not None:
+        headers["Referer"] = referer
     return headers
 
 
@@ -185,6 +189,45 @@ async def _fetch_html(
             await response.aclose()
 
     raise DisclosureContentError("too many disclosure redirects")
+
+
+def _sec_material_exhibit_url(document: _FetchedHtml) -> str | None:
+    """8-K의 같은 filing 디렉터리에 있는 99.1/99.2 자료 중 99.1을 우선한다."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+        soup = BeautifulSoup(document.body, "lxml")
+    visible_text = " ".join(soup.stripped_strings)
+    if re.search(r"\bFORM\s*8-K\b", visible_text, re.IGNORECASE) is None:
+        return None
+
+    parent = urlsplit(document.url)
+    parent_directory = parent.path.rsplit("/", 1)[0]
+    candidates: list[tuple[int, str]] = []
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if not isinstance(href, str):
+            continue
+        label = " ".join(anchor.stripped_strings)
+        searchable = f"{label} {href}"
+        if _SEC_EXHIBIT_LABEL_RE.search(searchable) is None:
+            continue
+        candidate = html.unescape(urljoin(document.url, href.strip()))
+        try:
+            if _provider_for_url(candidate) != "sec":
+                continue
+        except DisclosureContentError:
+            continue
+        parsed = urlsplit(candidate)
+        if parsed.path.rsplit("/", 1)[0] != parent_directory:
+            continue
+        if parsed.path == parent.path or not parsed.path.lower().endswith(
+            (".htm", ".html")
+        ):
+            continue
+        normalized = "".join(searchable.lower().split())
+        priority = 0 if ("99.1" in normalized or "pressrelease" in normalized) else 1
+        candidates.append((priority, candidate))
+    return min(candidates, default=(2, ""))[1] or None
 
 
 def _javascript_value(source: str, name: str) -> str | None:
@@ -311,6 +354,7 @@ class DisclosureTextFetcher:
             sec_user_agent=self._sec_user_agent,
             sec_rate_limiter=self._sec_rate_limiter,
         )
+        exhibit: _FetchedHtml | None = None
         if provider == "dart" and urlsplit(document.url).path == _DART_LANDING_PATH:
             viewer_url = _dart_viewer_url(document)
             document = await _fetch_html(
@@ -320,10 +364,32 @@ class DisclosureTextFetcher:
                 sec_rate_limiter=self._sec_rate_limiter,
                 referer=document.url,
             )
-        return extract_disclosure_text(
+        elif provider == "sec":
+            exhibit_url = _sec_material_exhibit_url(document)
+            if exhibit_url is not None:
+                try:
+                    exhibit = await _fetch_html(
+                        self._client,
+                        exhibit_url,
+                        sec_user_agent=self._sec_user_agent,
+                        sec_rate_limiter=self._sec_rate_limiter,
+                        referer=document.url,
+                    )
+                except DisclosureContentError:
+                    exhibit = None
+
+        primary_text = extract_disclosure_text(
             document.body,
             max_chars=self._max_text_chars,
         )
+        remaining = self._max_text_chars - len(primary_text) - 2
+        if exhibit is None or remaining < MIN_TEXT_CHARS:
+            return primary_text
+        try:
+            exhibit_text = extract_disclosure_text(exhibit.body, max_chars=remaining)
+        except DisclosureContentError:
+            return primary_text
+        return f"{primary_text}\n\n{exhibit_text}"
 
 
 __all__ = [

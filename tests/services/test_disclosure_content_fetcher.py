@@ -113,6 +113,51 @@ async def test_sec_fetch_sends_contract_user_agent_and_limits_clean_text() -> No
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sec_8k_appends_same_filing_press_release_exhibit() -> None:
+    calls: list[tuple[str, str | None]] = []
+    limiter = FakeRateLimiter()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((str(request.url), request.headers.get("referer")))
+        if request.url.path.endswith("/report.htm"):
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><h1>FORM 8-K</h1>"
+                    "<p>Item 2.02 Results of Operations and Financial Condition.</p>"
+                    '<a href="report-ex99-1.htm">Exhibit 99.1 Press Release</a>'
+                    "</body></html>"
+                ),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            text=(
+                "<html><body><h1>Quarterly results</h1>"
+                "<p>Revenue was 30 billion dollars and net income was 12 billion dollars.</p>"
+                "</body></html>"
+            ),
+            request=request,
+        )
+
+    report_url = "https://www.sec.gov/Archives/edgar/data/1/filing/report.htm"
+    exhibit_url = "https://www.sec.gov/Archives/edgar/data/1/filing/report-ex99-1.htm"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        text = await DisclosureTextFetcher(
+            client,
+            sec_user_agent="KAsset tests test@example.com",
+            sec_rate_limiter=limiter,
+            max_text_chars=300,
+        ).fetch(report_url)
+
+    assert "Item 2.02 Results of Operations" in text
+    assert "Revenue was 30 billion dollars" in text
+    assert limiter.acquire_count == 2
+    assert calls == [(report_url, None), (exhibit_url, report_url)]
+
+
+@pytest.mark.unit
 def test_extract_disclosure_text_drops_inline_xbrl_hidden_header() -> None:
     text = extract_disclosure_text(
         """
