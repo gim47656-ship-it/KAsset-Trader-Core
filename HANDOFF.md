@@ -28,10 +28,10 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - **코드 완료·push — `39319729`**: 결정론적 candidate ranker, ATR/regime/liquidity/lot 포지션 크기, 보유 포지션 청산, next-bar portfolio backtest와 walk-forward·비용 stress·regime/period·turnover·counterfactual 진단을 구현했다.
 - **승격 gate 완료**: AUTO_PAPER는 recommendation의 단일 strategy identity와 전역 exact-version `PAPER_APPROVED` 행이 일치해야 선정·claim된다. submit 경계는 승격 행을 잠그고 다시 검사한다. 자동 seed는 없다.
 - **추천 시장·일일 횟수 완료**: owner별 `KR_ONLY|US_ONLY|KR_US`를 후보에 적용하고 기존 보유는 범위 밖이어도 계속 관리한다. 기본 매수·전체 주문 수는 이전 운영값을 보존하며 사용자가 side별 서버 상한 안에서 횟수를 정할 수 있다.
-- **AI 공급자 경로 완료**: 모든 structured AI 진입점은 MCP → direct API → OpenRouter(`z-ai/glm-5.3-flash`) 순서다. 미설정·전송·timeout·429·5xx만 fallback하고 4xx·거절·형식·스키마·안전 실패는 닫는다.
+- **AI 공급자 경로 구현·집중 감사 완료**: 뉴스·공시 요약과 저비용 분석은 direct API → OpenRouter, 후보·거래·critical review는 MCP → direct API → OpenRouter 순서다. 미설정·전송·timeout·5xx만 fallback하며 429를 포함한 4xx·거절·형식·스키마·안전 실패는 현재 fail-closed다. 최종 provider 이름은 영속 결과에 완전히 남지 않아 보강이 필요하다.
 - **뉴스 원문 경계 보강**: Google News redirect마다 공개 IP·robots·응답 크기를 검사한다. RSS description은 실제 본문 요약으로 저장하지 않는다.
 - **Android 대응 완료·push — `66a739b4`**: 시장 범위 3분할 선택과 하루 매수·매도 스테퍼가 같은 wire 계약을 사용한다.
-- **운영 미배포**: 이번 코드와 `20260829_kasset_*` 세 마이그레이션은 운영에 적용하지 않았다. 운영 상태는 이전 `fd70defa`다.
+- **운영 미배포**: 이번 코드와 `20260829_kasset_*` 세 마이그레이션은 운영에 적용하지 않았다. 운영 Core는 `4e6329d1`이라 새 설정 저장과 MCP 기반 review routing이 아직 적용되지 않았다.
 - **실기기 UI 확인**: 최신 Android APK를 S24+에 설치해 시장 범위·Material3 루틴 스위치·일일 횟수 fail-closed 화면을 확인했다. `국내+미국` 저장은 운영 Core의 구 계약이 422를 반환해 아직 완료되지 않는다.
 - **실기기 QA 산출물 계약**: 검증에 만든 스크린샷은 휴대폰과 PC에서 즉시 삭제한다. 이번 검증은 스크린샷 없이 UI hierarchy XML만 사용했고 양쪽 임시 파일을 삭제했다.
 - **의도적 차단**: promotion 등록·승격 운영 도구가 아직 없으므로 AUTO_PAPER는 `strategy_promotion_required`로 닫힌다. 검증 증거와 사용자 결정 없이 DB 행을 자동 생성하지 않는다.
@@ -44,8 +44,8 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 - AUTO_PAPER의 선정·claim·submit 전 exact-version promotion을 검사하고 row lock으로 suspension race를 막았다. kill switch·owner scope·idempotency·PAPER facade를 유지했다.
 - `recommendationMarketScope`, `customMaxBuysPerDay`, `customMaxSellsPerDay`, `maxSellsPerDay`, `maxCustom*`, `sellsToday` API·DB·Android 계약을 연결했다.
 - 기존 기본 주문 수보다 높아졌던 중간 구현을 되돌려 1단계 `1/1/2`부터 5단계 `8/4/12`까지 매수·전체 상한을 보존했다. 일일 최대손실은 위험 감소 SELL만 예외로 한다.
-- AI route를 모든 structured feature에서 공통 MCP → direct API → OpenRouter 순서로 통일하고 strict JSON 검증·availability-only fallback·MCP initialize/session/종료 경계를 추가했다. 폐기 설정 별칭을 제거했다.
-- 검증: 격리 PostgreSQL 집중 스위트 **388 passed**, formatter 뒤 position manager **10 passed**, 변경 범위 `ruff`·`ty` 통과, `alembic heads`는 `20260829_kasset_strategy_promotion` 단일 head다. Android는 **277 tests / 0 failures**와 assemble 성공. 추가 AI routing 집중 테스트 **39 passed**.
+- AI route를 기능별로 분리했다. 뉴스·공시·저비용 분석은 direct API → OpenRouter, 복잡 review는 MCP → direct API → OpenRouter를 사용하며 strict JSON 검증·availability-only fallback·MCP initialize/session/종료 경계를 적용한다. 429 fallback과 최종 provider 영속 기록은 집중 감사에서 남은 결함으로 확인했다.
+- 검증: 격리 PostgreSQL 집중 스위트 **388 passed**, formatter 뒤 position manager **10 passed**, 변경 범위 `ruff`·`ty` 통과, `alembic heads`는 `20260829_kasset_strategy_promotion` 단일 head다. Android는 **277 tests / 0 failures**와 assemble 성공. 현재 통합본 AI routing 집중 테스트 **43 passed**.
 - 독립 `checker` 최초 REWORK의 F2~F6과 SELL 손실 gate를 교정했다. F1 “US 추천 소멸”은 producer가 BUY와 recommendation ID를 유지하고 Android가 리스크 차단으로 표시함을 코드·테스트로 반증했다. 같은 checker 최종 판정은 `FINAL: PASS`다.
 - S24+에 최신 APK를 설치했고 새 화면·입력은 정상이다. 운영 Core 미배포로 신규 설정 PUT만 422 fail-closed임을 확인했다.
 - 커밋·push: Core/API 계약 `39319729`, Android/API 계약 `66a739b4`. 운영 배포·provider 실호출은 하지 않았다.
@@ -53,7 +53,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 ## 다음 세션이 바로 할 일
 1. 사용자 승인 후 `39319729`와 Alembic head `20260829_kasset_strategy_promotion`을 운영 배포한다. 적용 전 DB backup과 현재 head를 확인한다.
 2. 배포 직후 S24+에서 추천 시장과 custom BUY/SELL 한도의 저장 왕복·프리셋 복원을 확인한다.
-3. 실제 MCP initialize/tools-call/SSE/세션 종료와 direct API/OpenRouter를 소량 호출해 fallback·429 fail-closed를 확인한다.
+3. 실제 MCP initialize/tools-call/SSE/세션 종료와 direct API/OpenRouter를 소량 호출해 routing을 확인한다. 현재 fail-closed인 429를 availability fallback으로 바꿀지 확정하고, 최종 provider/model 영속 감사 정보를 보강한다.
 4. 운영 `kr_candles_1d`·`us_candles_1d`에서 후보별 252봉을 확인한다. 부족하면 데이터를 보강하고 minimum을 임의로 낮추지 않는다.
 5. backtest evidence hash·threshold를 독립 검수한 뒤 strategy promotion을 명시적으로 등록·승격하는 운영 경로를 만든다. 자동 seed하지 않는다.
 6. KRX 개장 중 APPROVAL 추천→승인→PAPER fill/reconcile을 검증한 뒤, AUTO_PAPER는 승격 후 소액으로 중복 주문·손실 정지·kill switch·청산을 확인한다.
