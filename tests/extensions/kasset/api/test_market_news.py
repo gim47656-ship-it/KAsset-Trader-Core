@@ -20,6 +20,7 @@ from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.models.news import NewsArticle
+from app.models.symbol_news_relevance import SymbolNewsRelevance
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +42,7 @@ def _article(
     prefix: str,
     slug: str,
     title: str,
-    symbol: str,
+    symbol: str | None,
     market: str = "kr",
     feed_source: str | None,
     published_at: datetime | None,
@@ -77,6 +78,24 @@ async def market_news_client(
     symbol = f"{int(prefix[:8], 16) % 1_000_000:06d}"
     other_symbol = f"{(int(symbol) + 1) % 1_000_000:06d}"
     published_at = datetime(2026, 8, 29, 0, 0)
+    pending_candidate = _article(
+        prefix=prefix,
+        slug="pending-candidate",
+        title="후보 뉴스",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2026, 8, 28, 10, 0),
+        source="Google News",
+    )
+    excluded_candidate = _article(
+        prefix=prefix,
+        slug="excluded-candidate",
+        title="제외 후보 뉴스",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2026, 8, 28, 11, 0),
+        source="Google News",
+    )
     rows = [
         _article(
             prefix=prefix,
@@ -134,8 +153,36 @@ async def market_news_client(
             published_at=published_at,
             source="Finnhub",
         ),
+        pending_candidate,
+        excluded_candidate,
     ]
     db_session.add_all(rows)
+    await db_session.flush()
+    link_time = datetime(2026, 8, 29, 2, 0)
+    db_session.add_all(
+        [
+            SymbolNewsRelevance(
+                article_id=pending_candidate.id,
+                market="kr",
+                symbol=symbol,
+                feed_source="google_news",
+                first_seen_at=link_time,
+                status="pending",
+                created_at=link_time,
+                updated_at=link_time,
+            ),
+            SymbolNewsRelevance(
+                article_id=excluded_candidate.id,
+                market="kr",
+                symbol=symbol,
+                feed_source="google_news",
+                first_seen_at=link_time,
+                status="excluded",
+                created_at=link_time,
+                updated_at=link_time,
+            ),
+        ]
+    )
     await db_session.commit()
 
     app = FastAPI()
@@ -152,7 +199,7 @@ async def market_news_client(
     seed = _NewsSeed(
         symbol=symbol,
         same_time_titles=frozenset({"동시각 공시", "동시각 뉴스"}),
-        news_titles=frozenset({"동시각 뉴스", "이전 뉴스"}),
+        news_titles=frozenset({"동시각 뉴스", "이전 뉴스", "후보 뉴스"}),
         disclosure_titles=frozenset({"동시각 공시", "시각 없는 공시"}),
         null_title="시각 없는 공시",
         kst_title="동시각 공시",

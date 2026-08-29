@@ -9,7 +9,7 @@ import hmac
 import struct
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import and_, desc, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -23,6 +23,7 @@ from app.extensions.kasset.api.schemas import (
     MarketNewsResponse,
 )
 from app.models.news import NewsArticle
+from app.models.symbol_news_relevance import SymbolNewsRelevance
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 
 DEFAULT_LIMIT = 20
@@ -161,7 +162,25 @@ async def list_market_news(
     if normalized_market is not None:
         statement = statement.where(NewsArticle.market == normalized_market)
     if normalized_symbol is not None:
-        statement = statement.where(NewsArticle.stock_symbol == normalized_symbol)
+        relevance_conditions = [
+            SymbolNewsRelevance.article_id == NewsArticle.id,
+            SymbolNewsRelevance.symbol == normalized_symbol,
+            SymbolNewsRelevance.status != "excluded",
+        ]
+        relevance_conditions.append(
+            SymbolNewsRelevance.market
+            == (
+                normalized_market
+                if normalized_market is not None
+                else NewsArticle.market
+            )
+        )
+        statement = statement.where(
+            or_(
+                NewsArticle.stock_symbol == normalized_symbol,
+                exists().where(*relevance_conditions),
+            )
+        )
     if kind == "disclosure":
         statement = statement.where(
             NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
