@@ -1,8 +1,7 @@
-"""KAsset PAPER recommendation automation schedule declaration.
+"""KAsset AUTO_PAPER execution schedule declaration.
 
-The sweep is fail-closed: with ``AI_PAPER_AUTO_EXECUTION_ENABLED`` false the
-task is a metadata-only no-op, so keeping it on the schedule is safe for
-deployments that have not opted in.
+The sweep is fail-closed: ``AI_PAPER_AUTO_EXECUTION_ENABLED`` is default-off,
+and every owner policy plus kill switch is re-read before PAPER submission.
 """
 
 from __future__ import annotations

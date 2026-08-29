@@ -99,7 +99,20 @@ from app.extensions.kasset.api.toss_market_data import (
 )
 from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.market_pipeline import _market_route
+from app.extensions.kasset.automation.policy import (
+    AITradingLimits,
+    AITradingPolicyService,
+    AITradingSnapshot,
+    OperatingMode,
+)
 from app.models.trading import UserRole
+from app.schemas.ai_recommendations import (
+    AITradingSettings,
+    AITradingStateResponse,
+    AITradingStateUpdate,
+    AITradingUsageResponse,
+    PaperOrderResult,
+)
 from app.services.brokers.toss.market_calendar import (
     TossKrMarketDay,
     TossSessionWindow,
@@ -884,6 +897,99 @@ async def update_risk_policy(
         max_symbol_ratio=request.max_symbol_ratio,
     )
     return await risk_policy(session, db)
+
+
+def _ai_trading_state_response(
+    snapshot: AITradingSnapshot,
+) -> AITradingStateResponse:
+    limits = snapshot.limits
+    usage = snapshot.usage
+    return AITradingStateResponse(
+        mode=snapshot.mode.value,
+        paper=True,
+        tradingMode="PAPER",
+        settings=AITradingSettings(
+            operatingBudget=limits.operating_budget,
+            conservativeDailyGoal=limits.conservative_daily_goal,
+            dailyMaxLoss=limits.daily_max_loss,
+            maxBuysPerDay=limits.max_buys_per_day,
+            maxOrdersPerDay=limits.max_orders_per_day,
+            maxSymbolAllocation=limits.max_symbol_allocation,
+            maxConcurrentHoldings=limits.max_concurrent_holdings,
+            sameSymbolReentryLimit=limits.same_symbol_reentry_limit,
+            killSwitch=limits.kill_switch,
+            currency=limits.currency,
+        ),
+        usage=AITradingUsageResponse(
+            realizedPnlToday=usage.realized_pnl_today,
+            realizedLossToday=usage.realized_loss_today,
+            buysToday=usage.buys_today,
+            ordersToday=usage.orders_today,
+            concurrentHoldings=usage.concurrent_holdings,
+            budgetUsed=usage.budget_used,
+        ),
+        killSwitch=snapshot.kill_switch,
+        updatedAt=snapshot.updated_at,
+        executions=[
+            PaperOrderResult(
+                id=item.id,
+                recommendationId=item.recommendation_id,
+                market=item.market,
+                symbol=item.symbol,
+                name=item.name,
+                side=item.side,
+                quantity=format(item.quantity, "f"),
+                price=format(item.price, "f") if item.price is not None else None,
+                currency=item.currency,
+                status=item.status,
+                at=item.at,
+                rejectReason=item.reject_reason,
+            )
+            for item in snapshot.executions
+        ],
+    )
+
+
+@router.get("/ai/trading/state", response_model=AITradingStateResponse)
+async def ai_trading_state(
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AITradingStateResponse:
+    snapshot = await AITradingPolicyService().get_snapshot(
+        db,
+        session.user.id,
+        now=datetime.now(UTC),
+    )
+    return _ai_trading_state_response(snapshot)
+
+
+@router.put("/ai/trading/state", response_model=AITradingStateResponse)
+async def update_ai_trading_state(
+    request: AITradingStateUpdate,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AITradingStateResponse:
+    _require_trader(session)
+    values = request.settings
+    snapshot = await AITradingPolicyService().put_snapshot(
+        db,
+        session.user.id,
+        mode=OperatingMode(request.mode),
+        limits=AITradingLimits(
+            operating_budget=values.operating_budget,
+            conservative_daily_goal=values.conservative_daily_goal,
+            daily_max_loss=values.daily_max_loss,
+            max_buys_per_day=values.max_buys_per_day,
+            max_orders_per_day=values.max_orders_per_day,
+            max_symbol_allocation=values.max_symbol_allocation,
+            max_concurrent_holdings=values.max_concurrent_holdings,
+            same_symbol_reentry_limit=values.same_symbol_reentry_limit,
+            kill_switch=values.kill_switch,
+            currency=values.currency,
+        ),
+        now=datetime.now(UTC),
+    )
+    return _ai_trading_state_response(snapshot)
 
 
 @router.get("/ai/status", response_model=AiStatus)

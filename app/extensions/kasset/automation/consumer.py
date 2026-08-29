@@ -94,7 +94,13 @@ class PaperAutomationConsumer:
                 f"preview_failed:{type(exc).__name__}",
             )
         if assessment.decision != "APPROVED":
-            return await self._finish_failure(claim, current, "risk_preview_rejected")
+            codes = ",".join(
+                str(getattr(reason, "code", "UNKNOWN")) for reason in assessment.reasons
+            )
+            detail = (
+                f"risk_preview_rejected:{codes}" if codes else "risk_preview_rejected"
+            )
+            return await self._finish_failure(claim, current, detail)
 
         # Opt-in, owner mode, and the global switch are mutable. Re-read them
         # after preview so a revoked permission cannot race into submit.

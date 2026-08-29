@@ -26,7 +26,15 @@ from app.extensions.kasset.automation.contracts import (
 )
 from app.extensions.kasset.automation.producer import (
     RecommendationProducer,
+    WeightedEnsembleDecision,
+    compose_weighted_ensemble,
     external_evidence_from_mapping,
+)
+from app.extensions.kasset.automation.regime import (
+    MarketRegime,
+    RegimeAssessment,
+    assess_market_regime,
+    weights_for_regime,
 )
 from app.extensions.kasset.automation.strategies import (
     STRATEGIES,
@@ -46,6 +54,7 @@ __all__ = [
     "ExecutionSafetyGate",
     "ExternalEvidence",
     "MeanReversionStrategy",
+    "MarketRegime",
     "MomentumStrategy",
     "OwnerExecutionPolicy",
     "PaperAutomationConsumer",
@@ -53,6 +62,7 @@ __all__ = [
     "PaperOrderFacade",
     "PriceBar",
     "RecommendationDraft",
+    "RegimeAssessment",
     "RecommendationProducer",
     "RecommendationPersistence",
     "RecommendationService",
@@ -61,7 +71,11 @@ __all__ = [
     "StrategyName",
     "StrategyResult",
     "VolatilityTrendStrategy",
+    "WeightedEnsembleDecision",
+    "assess_market_regime",
+    "compose_weighted_ensemble",
     "external_evidence_from_mapping",
     "run_all_backtests",
     "run_backtest",
+    "weights_for_regime",
 ]

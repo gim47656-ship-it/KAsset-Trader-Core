@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
+from typing import TYPE_CHECKING
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extensions.kasset.models import AndroidPaperOrder
 from app.models.ai_recommendations import (
     AIRecommendation,
     RecommendationAction,
@@ -16,6 +20,9 @@ from app.models.ai_recommendations import (
     TerminalRecommendationDecision,
 )
 from app.services.ai_recommendations.repository import AIRecommendationRepository
+
+if TYPE_CHECKING:
+    from app.extensions.kasset.automation.contracts import RecommendationDraft
 
 
 class AIRecommendationServiceError(Exception):
@@ -52,6 +59,86 @@ class AIRecommendationService:
         self._session = session
         self._repository = AIRecommendationRepository(session)
         self._clock = clock
+
+    async def create_recommendation(
+        self,
+        *,
+        owner_user_id: str,
+        draft: RecommendationDraft,
+    ) -> AIRecommendation:
+        try:
+            owner_id = int(owner_user_id)
+        except (TypeError, ValueError) as exc:
+            raise RecommendationValidationError("owner_user_id_invalid") from exc
+        if str(owner_id) != owner_user_id.strip() or owner_id <= 0:
+            raise RecommendationValidationError("owner_user_id_invalid")
+        row = AIRecommendation(
+            owner_user_id=owner_id,
+            action=draft.action.value,
+            decision=RecommendationDecision.PENDING.value,
+            market=draft.market,
+            symbol=draft.symbol,
+            name=draft.name,
+            currency="KRW" if draft.market == "KRX" else "USD",
+            headline=draft.headline,
+            rationale=list(draft.rationale),
+            risks=list(draft.risks),
+            evidence=[dict(item) for item in draft.evidence],
+            confidence=format(Decimal(draft.confidence), "f"),
+            reference_price=(
+                format(Decimal(draft.reference_price), "f")
+                if draft.reference_price is not None
+                else None
+            ),
+            suggested_quantity=(
+                format(Decimal(draft.suggested_quantity), "f")
+                if draft.suggested_quantity is not None
+                else None
+            ),
+            source=draft.source,
+            created_at=draft.created_at,
+            valid_until=draft.valid_until,
+            updated_at=draft.created_at,
+        )
+        self._session.add(row)
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    async def get_recommendation(
+        self,
+        owner_user_id: int,
+        recommendation_id: str,
+    ) -> AIRecommendation:
+        row = await self._repository.get(owner_user_id, recommendation_id)
+        if row is None:
+            raise RecommendationNotFoundError(recommendation_id)
+        return row
+
+    async def load_paper_orders(
+        self,
+        recommendations: list[AIRecommendation],
+    ) -> dict[str, AndroidPaperOrder]:
+        order_ids = [
+            row.paper_order_id
+            for row in recommendations
+            if row.paper_order_id is not None
+        ]
+        if not order_ids:
+            return {}
+        orders = list(
+            (
+                await self._session.scalars(
+                    select(AndroidPaperOrder).where(AndroidPaperOrder.id.in_(order_ids))
+                )
+            ).all()
+        )
+        by_id = {order.id: order for order in orders}
+        return {
+            row.id: by_id[row.paper_order_id]
+            for row in recommendations
+            if row.paper_order_id in by_id
+        }
 
     async def list_recommendations(
         self,
@@ -116,15 +203,43 @@ class AIRecommendationService:
             return current
         raise RecommendationStateConflictError(recommendation_id)
 
+    async def authorize_next_for_auto_execution(
+        self,
+        owner_user_id: int,
+        *,
+        now: datetime,
+    ) -> AIRecommendation | None:
+        decided_at = self._normalized_now(now)
+        row = await self._repository.next_pending_actionable(owner_user_id, decided_at)
+        if row is None:
+            return None
+        self._validate_approval(row, now=decided_at)
+        resolved = await self._repository.resolve_pending(
+            owner_user_id,
+            recommendation_id=row.id,
+            decision=RecommendationDecision.APPROVED,
+            decided_at=decided_at,
+        )
+        if resolved is None:
+            await self._session.rollback()
+            return None
+        await self._session.commit()
+        return resolved
+
     async def claim_for_paper_execution(
         self,
         owner_user_id: int,
         now: datetime,
+        *,
+        recommendation_id: str | None = None,
+        automation_only: bool = False,
     ) -> AIRecommendation | None:
         claimed_at = self._normalized_now(now)
         row = await self._repository.claim_for_paper_execution(
             owner_user_id,
             claimed_at,
+            recommendation_id=recommendation_id,
+            automation_only=automation_only,
         )
         if row is None:
             await self._session.rollback()

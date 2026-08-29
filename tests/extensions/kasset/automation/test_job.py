@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -11,12 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
 from app.core.config import settings
-from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.automation import job
 from app.extensions.kasset.automation.job import (
     OwnerScopedRecommendationService,
     RuntimeStateSafetyGate,
     run_paper_automation_once,
+)
+from app.extensions.kasset.automation.policy import (
+    AITradingLimits,
+    AITradingPolicyService,
+    OperatingMode,
 )
 from app.models.ai_recommendations import AIRecommendation
 from app.models.trading import User, UserRole
@@ -38,6 +43,7 @@ def _approved_recommendation(owner_user_id: int) -> AIRecommendation:
         risks=[],
         evidence=[],
         suggested_quantity="1",
+        source="kasset-automation",
         created_at=_NOW - timedelta(minutes=5),
         valid_until=_NOW + timedelta(hours=1),
         decided_at=_NOW - timedelta(minutes=1),
@@ -58,6 +64,21 @@ async def _seed_owner(db_session: AsyncSession) -> tuple[int, str]:
     await db_session.commit()
     await db_session.refresh(user)
     return user.id, username
+
+
+async def _set_auto_policy(
+    db_session: AsyncSession,
+    owner_user_id: int,
+    *,
+    kill_switch: bool = False,
+) -> None:
+    await AITradingPolicyService().put_snapshot(
+        db_session,
+        owner_user_id,
+        mode=OperatingMode.AUTO_PAPER,
+        limits=replace(AITradingLimits(), kill_switch=kill_switch),
+        now=_NOW,
+    )
 
 
 async def _cleanup_owner(db_session: AsyncSession, username: str) -> None:
@@ -107,7 +128,7 @@ async def test_enabled_sweep_is_blocked_by_the_owner_kill_switch(
     try:
         db_session.add(recommendation)
         await db_session.commit()
-        await runtime_state.set_user_kill_switch(db_session, owner_id, enabled=True)
+        await _set_auto_policy(db_session, owner_id, kill_switch=True)
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
 
         report = await run_paper_automation_once(now=_NOW)
@@ -153,8 +174,9 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
             ]
         )
         await db_session.commit()
+        await _set_auto_policy(db_session, owner_a_id)
+        await _set_auto_policy(db_session, owner_b_id, kill_switch=True)
         # Owner B never reaches the claim stage: the kill switch blocks first.
-        await runtime_state.set_user_kill_switch(db_session, owner_b_id, enabled=True)
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
 
         async def _broken_claim(self: object, owner: str, now: datetime) -> None:
@@ -193,6 +215,7 @@ async def test_gate_and_service_adapters_bridge_integer_ownership(
     try:
         db_session.add(recommendation)
         await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
 
         gate = RuntimeStateSafetyGate(db_session)

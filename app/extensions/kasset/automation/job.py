@@ -8,39 +8,44 @@ TaskIQ (or any other) scheduler can run one bounded automation sweep.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
-from typing import Any, cast
+from decimal import Decimal, InvalidOperation
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper_orders import paper_orders
-from app.extensions.kasset.api.paper_schemas import OrderRequest, RiskAssessment
-from app.extensions.kasset.api.runtime_state import runtime_state
+from app.extensions.kasset.api.paper_schemas import (
+    OrderRequest,
+    RiskAssessment,
+    RiskReason,
+)
 from app.extensions.kasset.automation.consumer import PaperAutomationConsumer
 from app.extensions.kasset.automation.contracts import (
     OwnerExecutionPolicy,
     PaperExecutionClaim,
     PaperExecutionOutcome,
 )
+from app.extensions.kasset.automation.policy import (
+    AITradingPolicyService,
+    OperatingMode,
+)
 from app.models.ai_recommendations import AIRecommendation, RecommendationDecision
 from app.services.ai_recommendations.service import AIRecommendationService
 
 
 class RuntimeStateSafetyGate:
-    """Owner execution policy sourced from persisted runtime state.
+    """Resolve the persisted operating mode again at every execution boundary."""
 
-    Any engaged kill switch (global or owner) reports as the global switch:
-    the consumer only needs to know that execution is forbidden right now.
-    Opt-in is the deliberate operator-level ``AI_PAPER_AUTO_EXECUTION_ENABLED``
-    flag; there is no per-owner automation opt-in in Phase 1.
-    """
-
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, *, automatic: bool = True) -> None:
         self._db = db
+        self._automatic = automatic
 
     async def get_policy(
         self,
@@ -48,31 +53,59 @@ class RuntimeStateSafetyGate:
         owner_user_id: str,
         now: datetime,
     ) -> OwnerExecutionPolicy:
-        owner_id = int(owner_user_id)
-        state = await runtime_state.get(self._db, owner_id)
-        global_state = await runtime_state.get_global(self._db)
+        snapshot = await AITradingPolicyService().get_snapshot(
+            self._db,
+            int(owner_user_id),
+            now=now,
+            execution_limit=0,
+        )
+        required_mode = (
+            OperatingMode.AUTO_PAPER if self._automatic else OperatingMode.APPROVAL
+        )
+        enabled = snapshot.mode == required_mode
+        if self._automatic:
+            enabled = enabled and settings.AI_PAPER_AUTO_EXECUTION_ENABLED
         return OwnerExecutionPolicy(
             owner_user_id=owner_user_id,
-            paper_automation_enabled=settings.AI_PAPER_AUTO_EXECUTION_ENABLED,
-            global_kill_switch_enabled=(
-                global_state.kill_switch_enabled or state.kill_switch_enabled
-            ),
-            trading_mode=cast(Any, str(state.trading_mode).strip().upper()),
+            paper_automation_enabled=enabled,
+            global_kill_switch_enabled=snapshot.kill_switch,
+            trading_mode="PAPER",
         )
 
 
 class OwnerScopedRecommendationService:
     """String-owner facade over the integer-owner recommendation service."""
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        *,
+        recommendation_id: str | None = None,
+    ) -> None:
         self._service = AIRecommendationService(db)
+        self._recommendation_id = recommendation_id
+
+    async def authorize_next_for_auto_execution(
+        self,
+        owner_user_id: str,
+        now: datetime,
+    ) -> None:
+        await self._service.authorize_next_for_auto_execution(
+            int(owner_user_id),
+            now=now,
+        )
 
     async def claim_for_paper_execution(
         self,
         owner_user_id: str,
         now: datetime,
     ) -> PaperExecutionClaim | None:
-        row = await self._service.claim_for_paper_execution(int(owner_user_id), now)
+        row = await self._service.claim_for_paper_execution(
+            int(owner_user_id),
+            now,
+            recommendation_id=self._recommendation_id,
+            automation_only=True,
+        )
         if row is None:
             return None
         return PaperExecutionClaim(
@@ -116,7 +149,10 @@ class OwnerScopedRecommendationService:
 
 
 class OwnerScopedPaperOrders:
-    """String-owner facade over the shared PAPER order facade."""
+    """Apply KAsset Hard Risk, then delegate only to the shared PAPER facade."""
+
+    def __init__(self, *, now: datetime | None = None) -> None:
+        self._now = (now or datetime.now(UTC)).replace(microsecond=0)
 
     async def preview(
         self,
@@ -124,7 +160,34 @@ class OwnerScopedPaperOrders:
         owner_user_id: str,
         request: OrderRequest,
     ) -> RiskAssessment:
-        return await paper_orders.preview(db, int(owner_user_id), request)
+        base = await paper_orders.preview(db, int(owner_user_id), request)
+        hard_risk = await self._hard_risk(
+            db,
+            owner_user_id,
+            request,
+            reference_price=base.reference_price,
+            base_reasons=base.reasons,
+        )
+        failed = [
+            RiskReason(code=check.rule, message=check.detail)
+            for check in hard_risk.checks
+            if not check.passed
+        ]
+        if not hard_risk.passed and not failed:
+            failed.append(
+                RiskReason(
+                    code="KILL_SWITCH",
+                    message=hard_risk.blocked_reason or "Hard Risk 차단",
+                )
+            )
+        return RiskAssessment(
+            decision="APPROVED" if hard_risk.passed else "REJECTED",
+            reasons=failed,
+            estimated_amount=base.estimated_amount,
+            estimated_fee=base.estimated_fee,
+            reference_price=base.reference_price,
+            currency=base.currency,
+        )
 
     async def submit(
         self,
@@ -132,7 +195,63 @@ class OwnerScopedPaperOrders:
         owner_user_id: str,
         request: OrderRequest,
     ) -> tuple[object, bool]:
+        base = await paper_orders.preview(db, int(owner_user_id), request)
+        hard_risk = await self._hard_risk(
+            db,
+            owner_user_id,
+            request,
+            reference_price=base.reference_price,
+            base_reasons=base.reasons,
+        )
+        if not hard_risk.passed:
+            raise MobileApiError(
+                409,
+                "HARD_RISK_REJECTED",
+                "Hard Risk 재검증에서 PAPER 주문이 차단되었습니다.",
+                {
+                    "blockedReason": hard_risk.blocked_reason,
+                    "checks": [check.as_evidence() for check in hard_risk.checks],
+                },
+            )
         return await paper_orders.submit(db, int(owner_user_id), request)
+
+    async def _hard_risk(
+        self,
+        db: AsyncSession,
+        owner_user_id: str,
+        request: OrderRequest,
+        *,
+        reference_price: str | None,
+        base_reasons: Sequence[RiskReason],
+    ):
+        recommendation_id = _recommendation_id_from_client_order(
+            request.client_order_id
+        )
+        recommendation = await AIRecommendationService(db).get_recommendation(
+            int(owner_user_id),
+            recommendation_id,
+        )
+        try:
+            price = Decimal(
+                reference_price
+                if reference_price is not None
+                else str(recommendation.reference_price)
+            )
+            confidence = Decimal(str(recommendation.confidence))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("recommendation numeric evidence is invalid") from exc
+        return await AITradingPolicyService().evaluate_hard_risk(
+            db,
+            int(owner_user_id),
+            action=request.side,
+            market=request.market,
+            symbol=request.symbol,
+            quantity=request.quantity,
+            reference_price=price,
+            ai_confidence=confidence,
+            now=self._now,
+            base_risk_reasons=base_reasons,
+        )
 
 
 async def _claimable_owner_ids(db: AsyncSession, now: datetime) -> list[int]:
@@ -140,13 +259,28 @@ async def _claimable_owner_ids(db: AsyncSession, now: datetime) -> list[int]:
         select(AIRecommendation.owner_user_id)
         .distinct()
         .where(
-            AIRecommendation.decision == RecommendationDecision.APPROVED,
+            AIRecommendation.decision.in_(
+                (
+                    RecommendationDecision.PENDING,
+                    RecommendationDecision.APPROVED,
+                )
+            ),
+            AIRecommendation.action.in_(("BUY", "SELL")),
             AIRecommendation.paper_execution_status.is_(None),
             AIRecommendation.valid_until > now,
+            AIRecommendation.source == "kasset-automation",
         )
         .order_by(AIRecommendation.owner_user_id)
     )
     return [int(owner_id) for (owner_id,) in rows.all()]
+
+
+def _recommendation_id_from_client_order(client_order_id: str | None) -> str:
+    value = str(client_order_id or "")
+    prefix = "ai-rec:"
+    if not value.startswith(prefix) or not value[len(prefix) :].strip():
+        raise ValueError("AI PAPER order requires a recommendation clientOrderId")
+    return value[len(prefix) :]
 
 
 def _session() -> AbstractAsyncContextManager[AsyncSession]:
@@ -178,14 +312,31 @@ async def run_paper_automation_once(
     for owner_id in owner_ids:
         try:
             async with _session() as db:
-                consumer = PaperAutomationConsumer(
-                    owner_user_id=str(owner_id),
-                    safety_gate=RuntimeStateSafetyGate(db),
-                    recommendation_service=OwnerScopedRecommendationService(db),
-                    paper_orders=OwnerScopedPaperOrders(),
-                    db=db,
+                snapshot = await AITradingPolicyService().get_snapshot(
+                    db,
+                    owner_id,
+                    now=current,
+                    execution_limit=0,
                 )
-                outcome = await consumer.run_once(now=current)
+                if snapshot.mode != OperatingMode.AUTO_PAPER:
+                    outcome = PaperExecutionOutcome(
+                        status="BLOCKED",
+                        reason="auto_paper_mode_required",
+                    )
+                else:
+                    recommendation_service = OwnerScopedRecommendationService(db)
+                    await recommendation_service.authorize_next_for_auto_execution(
+                        str(owner_id),
+                        current,
+                    )
+                    consumer = PaperAutomationConsumer(
+                        owner_user_id=str(owner_id),
+                        safety_gate=RuntimeStateSafetyGate(db, automatic=True),
+                        recommendation_service=recommendation_service,
+                        paper_orders=OwnerScopedPaperOrders(now=current),
+                        db=db,
+                    )
+                    outcome = await consumer.run_once(now=current)
         except Exception as exc:  # one owner's failure must not stop the sweep
             outcome = PaperExecutionOutcome(
                 status="FAILED",
@@ -203,9 +354,33 @@ async def run_paper_automation_once(
     return {"enabled": True, "owners": len(owner_ids), "outcomes": outcomes}
 
 
+async def run_approved_recommendation_once(
+    owner_user_id: int,
+    recommendation_id: str,
+    *,
+    now: datetime | None = None,
+) -> PaperExecutionOutcome:
+    """Synchronously execute one explicit APPROVAL decision in PAPER only."""
+
+    current = (now or datetime.now(UTC)).replace(microsecond=0)
+    async with _session() as db:
+        consumer = PaperAutomationConsumer(
+            owner_user_id=str(owner_user_id),
+            safety_gate=RuntimeStateSafetyGate(db, automatic=False),
+            recommendation_service=OwnerScopedRecommendationService(
+                db,
+                recommendation_id=recommendation_id,
+            ),
+            paper_orders=OwnerScopedPaperOrders(now=current),
+            db=db,
+        )
+        return await consumer.run_once(now=current)
+
+
 __all__ = [
     "OwnerScopedPaperOrders",
     "OwnerScopedRecommendationService",
     "RuntimeStateSafetyGate",
     "run_paper_automation_once",
+    "run_approved_recommendation_once",
 ]

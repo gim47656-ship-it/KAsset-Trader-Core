@@ -396,28 +396,31 @@ def test_market_event_task_is_registered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_market_event_task_is_database_free(
+async def test_market_event_task_delegates_to_canonical_vertical_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.config import settings
     from app.tasks import kasset_market_events_tasks
 
-    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", False)
+    expected = {
+        "enabled": True,
+        "owners": [{"ownerUserId": 101, "created": 2}],
+        "created": 2,
+    }
+    calls = 0
 
-    def forbidden_session() -> None:
-        raise AssertionError("disabled task must not open a database session")
+    async def fake_run() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return expected
 
     monkeypatch.setattr(
         kasset_market_events_tasks,
-        "AsyncSessionLocal",
-        forbidden_session,
+        "run_ai_recommendation_cycle_once",
+        fake_run,
     )
-    assert await kasset_market_events_tasks.kasset_market_events_run() == {
-        "enabled": False,
-        "owner_user_id": None,
-        "scanned": 0,
-        "results": [],
-    }
+
+    assert await kasset_market_events_tasks.kasset_market_events_run() is expected
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -473,239 +476,6 @@ async def test_watchlist_candle_sync_isolates_per_symbol_failures(
     }
 
 
-@pytest.mark.asyncio
-async def test_market_event_task_reports_when_no_active_trader_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from contextlib import asynccontextmanager
-
-    from app.core.config import settings
-    from app.tasks import kasset_market_events_tasks
-
-    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
-
-    class _Scalars:
-        def all(self) -> list[int]:
-            return []
-
-    class _FakeSession:
-        async def scalars(self, _query: object) -> _Scalars:
-            return _Scalars()
-
-    @asynccontextmanager
-    async def _fake_session():
-        yield _FakeSession()
-
-    monkeypatch.setattr(kasset_market_events_tasks, "_session", _fake_session)
-
-    assert await kasset_market_events_tasks.kasset_market_events_run() == {
-        "enabled": True,
-        "owners": [],
-        "scanned": 0,
-        "skipped": "trader_not_found",
-    }
-
-
-@pytest.mark.asyncio
-async def test_market_event_task_scans_each_traders_own_watchlist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from contextlib import asynccontextmanager
-
-    from app.core.config import settings
-    from app.extensions.kasset.ai import factory
-    from app.models.trading import InstrumentType
-    from app.tasks import kasset_market_events_tasks
-
-    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
-
-    class _Scalars:
-        def all(self) -> list[int]:
-            return [101, 202]
-
-    class _FakeSession:
-        async def scalars(self, _query: object) -> _Scalars:
-            return _Scalars()
-
-    @asynccontextmanager
-    async def _fake_session():
-        yield _FakeSession()
-
-    async def _fake_watch_items(
-        _session: object,
-        owner_user_id: int,
-    ) -> list[tuple[str, InstrumentType, str | None]]:
-        return {
-            101: [("005930", InstrumentType.equity_kr, "KRX")],
-            202: [("AAPL", InstrumentType.equity_us, "NASD")],
-        }[owner_user_id]
-
-    calls: list[tuple[int, str, str]] = []
-
-    class _FakePipeline:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        async def run_symbol_scan(
-            self,
-            owner_user_id: int,
-            market: str,
-            symbol: str,
-        ) -> dict[str, object]:
-            calls.append((owner_user_id, market, symbol))
-            return {"skipped": "no_events"}
-
-    monkeypatch.setattr(kasset_market_events_tasks, "_session", _fake_session)
-    monkeypatch.setattr(
-        kasset_market_events_tasks,
-        "_active_watch_items",
-        _fake_watch_items,
-    )
-    monkeypatch.setattr(
-        kasset_market_events_tasks,
-        "MarketEventPipeline",
-        _FakePipeline,
-    )
-    monkeypatch.setattr(factory, "build_model_router", lambda: object())
-
-    outcome = await kasset_market_events_tasks.kasset_market_events_run()
-
-    assert calls == [(101, "KRX", "005930"), (202, "NASD", "AAPL")]
-    assert outcome == {
-        "enabled": True,
-        "owners": [
-            {
-                "ownerUserId": 101,
-                "scanned": 1,
-                "results": [
-                    {
-                        "symbol": "005930",
-                        "market": "KRX",
-                        "skipped": "no_events",
-                    }
-                ],
-            },
-            {
-                "ownerUserId": 202,
-                "scanned": 1,
-                "results": [
-                    {
-                        "symbol": "AAPL",
-                        "market": "NASD",
-                        "skipped": "no_events",
-                    }
-                ],
-            },
-        ],
-        "scanned": 2,
-    }
-
-
-@pytest.mark.asyncio
-async def test_market_event_task_continues_after_one_owner_scan_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from contextlib import asynccontextmanager
-
-    from app.core.config import settings
-    from app.extensions.kasset.ai import factory
-    from app.models.trading import InstrumentType
-    from app.tasks import kasset_market_events_tasks
-
-    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
-
-    class _Scalars:
-        def all(self) -> list[int]:
-            return [101, 202]
-
-    class _FakeSession:
-        async def scalars(self, _query: object) -> _Scalars:
-            return _Scalars()
-
-    @asynccontextmanager
-    async def _fake_session():
-        yield _FakeSession()
-
-    async def _fake_watch_items(
-        _session: object,
-        owner_user_id: int,
-    ) -> list[tuple[str, InstrumentType, str | None]]:
-        return [
-            (
-                "005930" if owner_user_id == 101 else "AAPL",
-                (
-                    InstrumentType.equity_kr
-                    if owner_user_id == 101
-                    else InstrumentType.equity_us
-                ),
-                "KRX" if owner_user_id == 101 else "NASD",
-            )
-        ]
-
-    calls: list[int] = []
-
-    class _FakePipeline:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        async def run_symbol_scan(
-            self,
-            owner_user_id: int,
-            market: str,
-            symbol: str,
-        ) -> dict[str, object]:
-            calls.append(owner_user_id)
-            if owner_user_id == 101:
-                raise RuntimeError("owner A failed")
-            return {"skipped": "no_events"}
-
-    monkeypatch.setattr(kasset_market_events_tasks, "_session", _fake_session)
-    monkeypatch.setattr(
-        kasset_market_events_tasks,
-        "_active_watch_items",
-        _fake_watch_items,
-    )
-    monkeypatch.setattr(
-        kasset_market_events_tasks,
-        "MarketEventPipeline",
-        _FakePipeline,
-    )
-    monkeypatch.setattr(factory, "build_model_router", lambda: object())
-
-    outcome = await kasset_market_events_tasks.kasset_market_events_run()
-
-    assert calls == [101, 202]
-    assert outcome == {
-        "enabled": True,
-        "owners": [
-            {
-                "ownerUserId": 101,
-                "scanned": 1,
-                "results": [
-                    {
-                        "symbol": "005930",
-                        "market": "KRX",
-                        "skipped": "scan_failed",
-                        "errorClass": "RuntimeError",
-                    }
-                ],
-            },
-            {
-                "ownerUserId": 202,
-                "scanned": 1,
-                "results": [
-                    {
-                        "symbol": "AAPL",
-                        "market": "NASD",
-                        "skipped": "no_events",
-                    }
-                ],
-            },
-        ],
-        "scanned": 2,
-    }
-
-
 def test_market_route_maps_kr_alternate_venue_to_ntx_partition() -> None:
     from app.extensions.kasset.automation.market_pipeline import _market_route
 
@@ -715,83 +485,3 @@ def test_market_route_maps_kr_alternate_venue_to_ntx_partition() -> None:
     assert _market_route("KRX") == (MarketKey.KR, "KRX", "KRX")
     with pytest.raises(ValueError):
         _market_route("LSE")
-
-
-@pytest.mark.asyncio
-async def test_unsupported_market_skips_symbol_without_aborting_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from contextlib import asynccontextmanager
-
-    from app.core.config import settings
-    from app.extensions.kasset.ai import factory
-    from app.models.trading import InstrumentType
-    from app.tasks import kasset_market_events_tasks
-
-    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
-
-    class _Scalars:
-        def all(self) -> list[int]:
-            return [101]
-
-    class _FakeSession:
-        async def scalars(self, _query: object) -> _Scalars:
-            return _Scalars()
-
-    @asynccontextmanager
-    async def _fake_session():
-        yield _FakeSession()
-
-    async def _fake_watch_items(
-        _session: object, _owner: int
-    ) -> list[tuple[str, InstrumentType, str | None]]:
-        return [
-            ("BAD", InstrumentType.equity_kr, "LSE"),
-            ("005930", InstrumentType.equity_kr, "KRX"),
-        ]
-
-    calls: list[str] = []
-
-    class _FakePipeline:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        async def run_symbol_scan(
-            self, owner_user_id: int, market: str, symbol: str
-        ) -> dict[str, object]:
-            calls.append(symbol)
-            if market == "LSE":
-                raise ValueError("unsupported market")
-            return {"skipped": "no_events"}
-
-    monkeypatch.setattr(kasset_market_events_tasks, "_session", _fake_session)
-    monkeypatch.setattr(
-        kasset_market_events_tasks, "_active_watch_items", _fake_watch_items
-    )
-    monkeypatch.setattr(
-        kasset_market_events_tasks, "MarketEventPipeline", _FakePipeline
-    )
-    monkeypatch.setattr(factory, "build_model_router", lambda: object())
-
-    outcome = await kasset_market_events_tasks.kasset_market_events_run()
-
-    assert calls == ["BAD", "005930"]
-    assert outcome["scanned"] == 2
-    assert outcome["owners"] == [
-        {
-            "ownerUserId": 101,
-            "scanned": 2,
-            "results": [
-                {
-                    "symbol": "BAD",
-                    "market": "LSE",
-                    "skipped": "unsupported_market",
-                },
-                {
-                    "symbol": "005930",
-                    "market": "KRX",
-                    "skipped": "no_events",
-                },
-            ],
-        }
-    ]

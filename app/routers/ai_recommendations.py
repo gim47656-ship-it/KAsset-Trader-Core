@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.extensions.kasset.automation.job import run_approved_recommendation_once
 from app.models.trading import User, UserRole
 from app.routers.dependencies import get_authenticated_user
 from app.schemas.ai_recommendations import (
@@ -17,6 +18,7 @@ from app.schemas.ai_recommendations import (
     RecommendationListResponse,
     RecommendationResponse,
     RecommendationStatusGroup,
+    build_recommendation_response,
 )
 from app.services.ai_recommendations import (
     AIRecommendationService,
@@ -44,6 +46,13 @@ def _service(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AIRecommendationService:
     return AIRecommendationService(db)
+
+
+def _supports_paper_execution(row: object) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("kind") == "ai_vertical_slice"
+        for item in (getattr(row, "evidence", None) or [])
+    )
 
 
 def _error_response(
@@ -121,6 +130,25 @@ async def _parse_decision_body(
 @router.get(
     "",
     response_model=RecommendationListResponse,
+    response_model_exclude={
+        "recommendations": {
+            "__all__": {
+                "status",
+                "regime",
+                "regime_detail",
+                "strategy_votes",
+                "ai_rationale",
+                "event_evidence",
+                "entry_price",
+                "stop_price",
+                "target_price",
+                "ranking",
+                "portfolio",
+                "hard_risk",
+                "paper_order",
+            }
+        }
+    },
     responses={
         400: {
             "model": RecommendationErrorEnvelope,
@@ -142,16 +170,58 @@ async def list_recommendations(
         status=cast(RecommendationStatusGroup, status_group),
         limit=limit,
     )
+    paper_orders = await service.load_paper_orders(recommendations)
     return RecommendationListResponse(
         recommendations=[
-            RecommendationResponse.model_validate(row) for row in recommendations
+            build_recommendation_response(
+                row,
+                paper_order=paper_orders.get(row.id),
+            )
+            for row in recommendations
         ]
+    )
+
+
+@router.get(
+    "/{recommendation_id}",
+    response_model=RecommendationResponse,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
+    responses={
+        404: {
+            "model": RecommendationErrorEnvelope,
+            "description": "Recommendation not found",
+        }
+    },
+)
+async def get_recommendation(
+    recommendation_id: str,
+    current_user: Annotated[User, Depends(get_authenticated_user)],
+    service: Annotated[AIRecommendationService, Depends(_service)],
+) -> RecommendationResponse | JSONResponse:
+    try:
+        row = await service.get_recommendation(
+            current_user.id,
+            recommendation_id,
+        )
+    except RecommendationNotFoundError:
+        return _error_response(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="NOT_FOUND",
+            message="추천을 찾을 수 없습니다.",
+        )
+    paper_orders = await service.load_paper_orders([row])
+    return build_recommendation_response(
+        row,
+        paper_order=paper_orders.get(row.id),
     )
 
 
 @router.post(
     "/{recommendation_id}/decision",
     response_model=RecommendationResponse,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
     responses={
         400: {
             "model": RecommendationErrorEnvelope,
@@ -221,7 +291,20 @@ async def decide_recommendation(
             ),
             details={"reason": exc.reason},
         )
-    return RecommendationResponse.model_validate(row)
+    if parsed.decision == "APPROVED" and _supports_paper_execution(row):
+        await run_approved_recommendation_once(
+            current_user.id,
+            recommendation_id,
+        )
+        row = await service.get_recommendation(
+            current_user.id,
+            recommendation_id,
+        )
+    paper_orders = await service.load_paper_orders([row])
+    return build_recommendation_response(
+        row,
+        paper_order=paper_orders.get(row.id),
+    )
 
 
 __all__ = ["router"]

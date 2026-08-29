@@ -31,6 +31,7 @@ _EXACT_PATHS = frozenset(
         "/api/v1/risk/policy",
         "/api/v1/ai/status",
         "/api/v1/ai/briefing",
+        "/api/v1/ai/trading/state",
         "/api/v1/watchlist",
     }
 )

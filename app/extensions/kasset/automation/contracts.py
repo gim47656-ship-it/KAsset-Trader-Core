@@ -109,6 +109,7 @@ class RecommendationDraft:
     action: Action
     market: Literal["KRX", "US"]
     symbol: str
+    name: str | None
     headline: str
     rationale: tuple[str, ...]
     risks: tuple[str, ...]

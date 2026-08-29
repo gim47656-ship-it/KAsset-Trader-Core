@@ -532,6 +532,101 @@ async def test_concurrent_different_decisions_have_one_winner(
 
 
 @pytest.mark.asyncio
+async def test_detail_exposes_android_vertical_slice_evidence(
+    db_session: AsyncSession,
+) -> None:
+    row = _recommendation("vertical-detail")
+    row.evidence.append(
+        {
+            "kind": "ai_vertical_slice",
+            "regime": "TRENDING_UP",
+            "regimeDetail": "상승 추세",
+            "strategyVotes": [
+                {
+                    "strategy": strategy,
+                    "vote": "BUY",
+                    "weight": "0.250000",
+                    "score": "0.200000",
+                }
+                for strategy in (
+                    "MOMENTUM",
+                    "MEAN_REVERSION",
+                    "BREAKOUT",
+                    "VOLATILITY_TREND",
+                )
+            ],
+            "aiRationale": ["뉴스와 공시를 함께 확인했습니다."],
+            "eventEvidence": [
+                {
+                    "kind": "DISCLOSURE",
+                    "title": "분기보고서",
+                    "source": "DART",
+                    "publishedAt": "2026-08-27T00:30:00Z",
+                    "summary": "실적 개선",
+                }
+            ],
+            "entryPrice": "71500",
+            "stopPrice": "70000",
+            "targetPrice": "74500",
+            "ranking": {
+                "score": "0.82",
+                "position": 1,
+                "total": 60,
+                "note": "상위 후보",
+            },
+            "portfolio": {
+                "targetWeight": "0.20",
+                "targetQuantity": "10",
+                "cashAfter": "9285000",
+                "note": "운영 한도 내",
+            },
+            "hardRisk": {
+                "passed": True,
+                "checks": [
+                    {"rule": rule, "passed": True, "detail": "통과"}
+                    for rule in (
+                        "DAILY_MAX_LOSS",
+                        "BUDGET",
+                        "POSITION",
+                        "ORDER_COUNT",
+                        "AI",
+                        "DAILY_GOAL",
+                    )
+                ],
+                "blockedReason": None,
+            },
+        }
+    )
+    await _seed(db_session, row)
+
+    response = await _request(
+        _app(db_session),
+        "GET",
+        "/api/v1/ai/recommendations/vertical-detail",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PENDING"
+    assert body["regime"] == "TRENDING_UP"
+    assert [vote["strategy"] for vote in body["strategyVotes"]] == [
+        "MOMENTUM",
+        "MEAN_REVERSION",
+        "BREAKOUT",
+        "VOLATILITY_TREND",
+    ]
+    assert body["eventEvidence"][0]["kind"] == "DISCLOSURE"
+    assert [check["rule"] for check in body["hardRisk"]["checks"]] == [
+        "DAILY_MAX_LOSS",
+        "BUDGET",
+        "POSITION",
+        "ORDER_COUNT",
+        "AI",
+        "DAILY_GOAL",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_router_requires_authentication(db_session: AsyncSession) -> None:
     app = _app(db_session, authenticated=False)
 
@@ -573,6 +668,7 @@ def test_main_registers_exact_recommendation_paths() -> None:
         if hasattr(route, "path")
     }
     assert "GET" in methods_by_path["/api/v1/ai/recommendations"]
+    assert "GET" in methods_by_path["/api/v1/ai/recommendations/{recommendation_id}"]
     assert (
         "POST"
         in methods_by_path["/api/v1/ai/recommendations/{recommendation_id}/decision"]

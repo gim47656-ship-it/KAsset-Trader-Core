@@ -105,6 +105,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/risk/policy": {"get", "put"},
         "/api/v1/ai/status": {"get"},
         "/api/v1/ai/briefing": {"get"},
+        "/api/v1/ai/trading/state": {"get", "put"},
         "/api/v1/watchlist": {"get", "post"},
         "/api/v1/watchlist/{symbol}": {"delete"},
     }

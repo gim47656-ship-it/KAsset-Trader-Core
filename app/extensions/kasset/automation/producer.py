@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, cast
@@ -156,6 +157,81 @@ def external_evidence_from_mapping(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class WeightedEnsembleDecision:
+    action: Action
+    score: Decimal
+    confidence: Decimal
+    agreeing: tuple[StrategyResult, ...]
+    votes: tuple[Mapping[str, object], ...]
+
+
+def compose_weighted_ensemble(
+    strategy_results: Sequence[StrategyResult],
+    weights: Mapping[StrategyName, Decimal],
+) -> WeightedEnsembleDecision:
+    """Combine all four existing strategies without reimplementing any signal."""
+
+    normalized: dict[StrategyName, Decimal] = {}
+    total = Decimal("0")
+    for name in StrategyName:
+        raw = weights.get(name, Decimal("0"))
+        value = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+        if not value.is_finite() or value < 0:
+            raise ValueError(f"invalid strategy weight: {name.value}")
+        normalized[name] = value
+        total += value
+    if total <= 0:
+        raise ValueError("strategy weights must have a positive sum")
+    normalized = {name: value / total for name, value in normalized.items()}
+
+    by_name = {result.strategy: result for result in strategy_results}
+    score = Decimal("0")
+    votes: list[Mapping[str, object]] = []
+    for name in StrategyName:
+        result = by_name.get(name)
+        if result is None:
+            continue
+        direction = {
+            Action.BUY: Decimal("1"),
+            Action.SELL: Decimal("-1"),
+            Action.HOLD: Decimal("0"),
+        }[result.action]
+        contribution = direction * result.confidence * normalized[name]
+        score += contribution
+        votes.append(
+            {
+                "strategy": name.name,
+                "vote": result.action.value,
+                "weight": str(normalized[name].quantize(Decimal("0.000001"))),
+                "score": str(contribution.quantize(Decimal("0.000001"))),
+            }
+        )
+
+    buy_results = tuple(
+        result for result in strategy_results if result.action == Action.BUY
+    )
+    sell_results = tuple(
+        result for result in strategy_results if result.action == Action.SELL
+    )
+    action = Action.HOLD
+    agreeing: tuple[StrategyResult, ...] = ()
+    if score >= Decimal("0.25") and len(buy_results) >= 2:
+        action, agreeing = Action.BUY, buy_results
+    elif score <= Decimal("-0.25") and len(sell_results) >= 2:
+        action, agreeing = Action.SELL, sell_results
+    confidence = (
+        min(Decimal("1"), abs(score)) if action != Action.HOLD else Decimal("0")
+    )
+    return WeightedEnsembleDecision(
+        action=action,
+        score=score.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN),
+        confidence=confidence.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN),
+        agreeing=agreeing,
+        votes=tuple(votes),
+    )
+
+
 class RecommendationProducer:
     """Synthesizes advisory facts and delegates the only write to an adapter."""
 
@@ -180,6 +256,14 @@ class RecommendationProducer:
         external_evidence: ExternalEvidence | Mapping[str, object],
         suggested_quantity: Decimal | str | None,
         now: datetime,
+        name: str | None = None,
+        regime: str = "RANGING",
+        regime_detail: str = "",
+        strategy_weights: Mapping[StrategyName, Decimal] | None = None,
+        event_evidence: Sequence[Mapping[str, object]] = (),
+        ranking: Mapping[str, object] | None = None,
+        portfolio: Mapping[str, object] | None = None,
+        hard_risk: Mapping[str, object] | None = None,
     ) -> object:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
         normalized_symbol = symbol.strip().upper()
@@ -240,30 +324,14 @@ class RecommendationProducer:
                 + ",".join(sorted(item.value for item in missing))
             )
         strategy_input_valid = not rejected_reasons
-
-        buy_results = [
-            result for result in valid_results.values() if result.action == Action.BUY
-        ]
-        sell_results = [
-            result for result in valid_results.values() if result.action == Action.SELL
-        ]
-        candidate = Action.HOLD
-        agreeing: list[StrategyResult] = []
-        if len(buy_results) >= 2 and len(buy_results) > len(sell_results):
-            candidate, agreeing = Action.BUY, buy_results
-        elif len(sell_results) >= 2 and len(sell_results) > len(buy_results):
-            candidate, agreeing = Action.SELL, sell_results
+        weights = strategy_weights or {name: Decimal("0.25") for name in StrategyName}
+        ensemble = compose_weighted_ensemble(tuple(valid_results.values()), weights)
+        candidate = ensemble.action if strategy_input_valid else Action.HOLD
+        agreeing = ensemble.agreeing if strategy_input_valid else ()
 
         confidence = Decimal("0")
-        if (
-            candidate != Action.HOLD
-            and external.action == candidate
-            and strategy_input_valid
-        ):
-            strategy_confidence = sum(
-                (result.confidence for result in agreeing), Decimal("0")
-            ) / Decimal(len(agreeing))
-            confidence = min(strategy_confidence, external.confidence)
+        if candidate != Action.HOLD and external.action == candidate:
+            confidence = min(ensemble.confidence, external.confidence)
             if confidence < Decimal("0.50"):
                 rejected_reasons.append("combined confidence is below the action floor")
                 candidate = Action.HOLD
@@ -284,6 +352,8 @@ class RecommendationProducer:
             confidence = Decimal("0")
 
         reference_price = self._reference_price(agreeing)
+        stop_price = self._level(agreeing, "stop")
+        target_price = self._level(agreeing, "target")
         strategy_valid_until = min(
             (result.valid_until.astimezone(UTC) for result in valid_results.values()),
             default=current,
@@ -294,21 +364,41 @@ class RecommendationProducer:
             confidence = Decimal("0")
             valid_until = current
 
+        normalized_hard_risk = dict(
+            hard_risk
+            or {
+                "passed": True,
+                "checks": [],
+                "blockedReason": None,
+            }
+        )
+        if normalized_hard_risk.get("passed") is False:
+            blocked_reason = str(
+                normalized_hard_risk.get("blockedReason") or "HARD_RISK_REJECTED"
+            )
+            rejected_reasons.append(f"hard risk blocked: {blocked_reason}")
+
         vote_summary = ", ".join(
             f"{name.value}={valid_results[name].action.value}"
             for name in sorted(valid_results, key=lambda item: item.value)
         )
         rationale = [f"Deterministic strategy votes: {vote_summary or 'none'}."]
         rationale.extend(external.rationale)
+        vote_by_strategy = {str(vote["strategy"]): vote for vote in ensemble.votes}
         evidence: list[Mapping[str, object]] = []
         for result in valid_results.values():
+            vote = vote_by_strategy.get(result.strategy.value, {})
             evidence.append(
                 {
+                    "title": f"{result.strategy.value} strategy vote",
+                    "source": "kasset_strategy",
                     "kind": "strategy",
                     "strategy": result.strategy.value,
                     "version": result.version,
                     "action": result.action.value,
                     "confidence": str(result.confidence),
+                    "weight": vote.get("weight"),
+                    "score": vote.get("score"),
                     "entry": str(result.entry) if result.entry is not None else None,
                     "stop": str(result.stop) if result.stop is not None else None,
                     "target": str(result.target) if result.target is not None else None,
@@ -325,14 +415,53 @@ class RecommendationProducer:
                     ],
                 }
             )
-        evidence.extend(external.evidence)
+        evidence.append(
+            {
+                "title": "AI trading vertical-slice review evidence",
+                "source": external.source,
+                "kind": "ai_vertical_slice",
+                "regime": regime,
+                "regimeDetail": regime_detail,
+                "strategyVotes": list(ensemble.votes),
+                "aiRationale": list(external.rationale),
+                "aiEvidence": [dict(item) for item in external.evidence],
+                "eventEvidence": [dict(item) for item in event_evidence],
+                "entryPrice": str(reference_price)
+                if reference_price is not None
+                else None,
+                "stopPrice": str(stop_price) if stop_price is not None else None,
+                "targetPrice": str(target_price) if target_price is not None else None,
+                "ranking": dict(
+                    ranking
+                    or {
+                        "score": str(abs(ensemble.score)),
+                        "position": 1,
+                        "total": 1,
+                        "note": "single recommendation",
+                    }
+                ),
+                "portfolio": dict(
+                    portfolio
+                    or {
+                        "targetWeight": None,
+                        "targetQuantity": str(quantity)
+                        if quantity is not None
+                        else None,
+                        "cashAfter": None,
+                        "note": "portfolio evidence unavailable",
+                    }
+                ),
+                "hardRisk": normalized_hard_risk,
+            }
+        )
 
         draft = RecommendationDraft(
             owner_user_id=self._owner_user_id,
             action=candidate,
             market=typed_market,
             symbol=normalized_symbol,
-            headline=f"{normalized_symbol} {candidate.value} deterministic consensus",
+            name=name.strip()[:200] if name and name.strip() else None,
+            headline=f"{normalized_symbol} {candidate.value} dynamic ensemble",
             rationale=tuple(rationale),
             risks=tuple(rejected_reasons),
             evidence=tuple(evidence),
@@ -423,5 +552,26 @@ class RecommendationProducer:
             return None
         return entries[len(entries) // 2]
 
+    @staticmethod
+    def _level(
+        results: Sequence[StrategyResult],
+        field_name: str,
+    ) -> Decimal | None:
+        levels = sorted(
+            value
+            for result in results
+            if (value := getattr(result, field_name, None)) is not None
+            and value.is_finite()
+            and value > 0
+        )
+        if not levels:
+            return None
+        return levels[len(levels) // 2]
 
-__all__ = ["RecommendationProducer", "external_evidence_from_mapping"]
+
+__all__ = [
+    "RecommendationProducer",
+    "WeightedEnsembleDecision",
+    "compose_weighted_ensemble",
+    "external_evidence_from_mapping",
+]
