@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from app.extensions.kasset.automation.candidate_ranker import CandidateMetadata
 from app.extensions.kasset.automation.contracts import Action, PriceBar
@@ -15,6 +18,25 @@ from app.extensions.kasset.automation.portfolio_backtest import (
     run_portfolio_backtest,
     run_portfolio_diagnostics,
     run_walk_forward,
+)
+from app.extensions.kasset.automation.promotion_evidence import (
+    PortfolioEvidenceSource,
+    PromotionEvidenceBuildError,
+    build_promotion_raw_payload,
+    derive_metrics_from_stored_payload,
+    derive_promotion_metrics,
+)
+from app.extensions.kasset.automation.strategy_artifact import (
+    PROMOTION_EVIDENCE_SCHEMA_VERSION,
+    StrategyArtifactManifest,
+)
+from app.extensions.kasset.automation.strategy_promotion import (
+    DEFAULT_PROMOTION_THRESHOLDS,
+)
+from app.services.daily_candles.readiness import (
+    BenchmarkCoverage,
+    DailyCandlesReadiness,
+    MarketReadiness,
 )
 
 _START = datetime(2025, 1, 1, tzinfo=UTC)
@@ -104,9 +126,7 @@ def _config(*, costs: bool = True) -> PortfolioBacktestConfig:
     )
 
 
-def _run(
-    bars: tuple[PriceBar, ...], *, costs: bool = True
-):
+def _run(bars: tuple[PriceBar, ...], *, costs: bool = True):
     candidate = _candidate()
     return run_portfolio_backtest(
         (candidate,),
@@ -215,9 +235,7 @@ def test_drawdown_and_expectancy_are_derived_from_observed_paths() -> None:
 
     assert result.trade_count == len(result.trades)
     assert result.trade_count >= 1
-    assert result.max_drawdown == max(
-        point.drawdown for point in result.equity_curve
-    )
+    assert result.max_drawdown == max(point.drawdown for point in result.equity_curve)
     expected = (
         sum((trade.net_pnl for trade in result.trades), start=Decimal("0"))
         / Decimal(result.trade_count)
@@ -285,8 +303,7 @@ def test_diagnostics_run_each_symbol_removal_counterfactual() -> None:
     )
 
     assert {
-        (item.removed_market, item.removed_symbol)
-        for item in result.symbol_removal
+        (item.removed_market, item.removed_symbol) for item in result.symbol_removal
     } == {("US", "ALPHA"), ("US", "BETA")}
 
 
@@ -317,12 +334,10 @@ def test_walk_forward_returns_separate_rolling_train_and_test_folds() -> None:
     for fold in result.folds:
         assert fold.train_end_at < fold.test_start_at <= fold.test_end_at
         assert all(
-            signal.signal_at >= fold.train_end_at
-            for signal in fold.test_result.signals
+            signal.signal_at >= fold.train_end_at for signal in fold.test_result.signals
         )
         assert all(
-            signal.execution_at is None
-            or signal.execution_at >= fold.test_start_at
+            signal.execution_at is None or signal.execution_at >= fold.test_start_at
             for signal in fold.test_result.signals
         )
     assert result.determinism_hash
@@ -350,10 +365,205 @@ def test_kr_and_us_mapping_never_exceeds_the_position_cap() -> None:
         },
     )
 
-    assert all(
-        point.market_value >= Decimal("0") for point in result.equity_curve
-    )
+    assert all(point.market_value >= Decimal("0") for point in result.equity_curve)
     assert len(result.open_positions) <= 1
-    assert any(
-        signal.reason == "max_positions_reached" for signal in result.signals
+    assert any(signal.reason == "max_positions_reached" for signal in result.signals)
+
+
+def _ready_market(market: str) -> MarketReadiness:
+    benchmark = BenchmarkCoverage(
+        market=market,  # type: ignore[arg-type]
+        symbol="KOSPI" if market == "kr" else "SPY",
+        start=_START,
+        end=_START + timedelta(days=329),
+        count=330,
+        source="kis",
+        sources=("kis",),
+        status="available",
     )
+    return MarketReadiness(
+        market=market,  # type: ignore[arg-type]
+        total_symbol_count=10,
+        active_symbol_count=9,
+        inactive_symbol_count=1,
+        symbols_with_exactly_251_bars=0,
+        symbols_with_at_least_252_bars=9,
+        eligible_symbol_count=9,
+        stale_bar_count=0,
+        future_bar_count=0,
+        duplicate_timestamp_count=0,
+        ohlc_anomaly_count=0,
+        missing_expected_trading_day_count=0,
+        calendar_status="available",
+        corporate_action_status="clear",
+        list_date_covered_symbol_count=10,
+        delist_date_covered_inactive_count=1,
+        point_in_time_available=True,
+        inactive_with_candles_count=1,
+        delisted_symbol_count=1,
+        delisted_with_candles_count=1,
+        includes_delisted=True,
+        fallback_only=False,
+        benchmark=benchmark,
+        blockers=(),
+        reasons=(),
+    )
+
+
+def _readiness() -> DailyCandlesReadiness:
+    return DailyCandlesReadiness(
+        as_of=_START + timedelta(days=329),
+        required_history_bars=252,
+        markets=(_ready_market("kr"), _ready_market("us")),
+        promotion_ready=True,
+        blockers=(),
+        reasons=(),
+    )
+
+
+def _thresholds() -> dict[str, object]:
+    value = DEFAULT_PROMOTION_THRESHOLDS
+    return {
+        "minTotalReturn": str(value.min_total_return),
+        "maxDrawdown": str(value.max_drawdown),
+        "minWinRate": str(value.min_win_rate),
+        "minExpectancy": str(value.min_expectancy),
+        "minExcessReturn": str(value.min_excess_return),
+        "minTradeCount": value.min_trade_count,
+        "minWalkForwardFolds": value.min_walk_forward_folds,
+        "minWalkForwardPassRate": str(value.min_walk_forward_pass_rate),
+        "requireDataQualityEvidence": value.require_data_quality_evidence,
+        "requireSurvivorshipEvidence": value.require_survivorship_evidence,
+        "requireDeterministic": value.require_deterministic,
+    }
+
+
+def _stored_evidence_payload() -> tuple[dict[str, object], object]:
+    bars = _bars(count=330)
+    kr_bars = _bars(count=330, scale=Decimal("10"))
+    candidate = _candidate()
+    kr_candidate = _candidate("005930", "KR")
+    candidates = (candidate, kr_candidate)
+    bars_by_candidate = {
+        candidate.key: bars,
+        kr_candidate.key: kr_bars,
+    }
+    benchmarks = {
+        "US": _benchmark(bars),
+        "KR": _benchmark(kr_bars),
+    }
+    config = _config()
+    universe = UniverseEvidence(
+        source="daily_candles_readiness",
+        point_in_time_membership=True,
+        includes_delisted=True,
+        as_of=bars[-1].timestamp,
+    )
+    diagnostics = run_portfolio_diagnostics(
+        candidates,
+        bars_by_candidate,
+        config=config,
+        benchmark_bars_by_market=benchmarks,
+        universe_evidence=universe,
+    )
+    walk_config = WalkForwardConfig(train_bars=260, test_bars=20, step_bars=20)
+    walk = run_walk_forward(
+        candidates,
+        bars_by_candidate,
+        config=config,
+        walk_forward=walk_config,
+        benchmark_bars_by_market=benchmarks,
+        universe_evidence=universe,
+    )
+    readiness = _readiness()
+    metrics = derive_promotion_metrics(diagnostics, walk, readiness)
+    source = PortfolioEvidenceSource(
+        as_of=readiness.as_of,
+        readiness=readiness,
+        candidates=candidates,
+        bars_by_candidate=bars_by_candidate,
+        benchmark_bars_by_market=benchmarks,
+        selected_universe=(
+            {
+                "market": "KR",
+                "symbol": "005930",
+                "isActive": False,
+                "listingStatus": "delisted",
+                "delistDate": "2025-12-31",
+                "loadedBarCount": 330,
+                "sources": ["kis"],
+            },
+            {
+                "market": "US",
+                "symbol": "ALPHA",
+                "isActive": False,
+                "listingStatus": "delisted",
+                "delistDate": "2025-12-31",
+                "loadedBarCount": 330,
+                "sources": ["kis"],
+            },
+        ),
+        dataset_content_hash="d" * 64,
+        period_start=bars[0].timestamp,
+        period_end=bars[-1].timestamp,
+    )
+    artifact = StrategyArtifactManifest(
+        schema_version="kasset.strategy-artifact.v1",
+        strategy_key=config.strategy_key,
+        strategy_version=config.strategy_version,
+        fingerprint="a" * 64,
+        source_commit="b" * 40,
+        code_files=(),
+        effective_config={},
+    )
+    raw = build_promotion_raw_payload(
+        artifact=artifact,
+        source=source,
+        config=config,
+        walk_config=walk_config,
+        diagnostics=diagnostics,
+        walk_forward=walk,
+        metrics=metrics,
+        thresholds=_thresholds(),
+    )
+    assert raw["schemaVersion"] == PROMOTION_EVIDENCE_SCHEMA_VERSION
+    return raw, metrics
+
+
+def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
+    raw, expected = _stored_evidence_payload()
+
+    derived = derive_metrics_from_stored_payload(raw)
+
+    assert derived.as_snapshot() == expected.as_snapshot()
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("data", "eligible252Counts", "kr"), 0),
+        (("validation", "fallbackOnly"), True),
+        (("validation", "pointInTimeProven"), False),
+        (("validation", "delistedIncluded"), False),
+        (("validation", "benchmarkProven"), False),
+        (("benchmarks", "us", "status"), "unavailable"),
+        (("benchmarks", "us", "fallbackOnly"), True),
+        (("strategy", "sourceCommit"), "not-a-commit"),
+        (("data", "selectedUniverse"), []),
+        (("portfolioDiagnostics", "symbolRemoval"), []),
+        (("walkForward", "folds"), []),
+    ],
+)
+def test_stored_evidence_fails_closed_when_required_proof_is_missing(
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    raw, _metrics = _stored_evidence_payload()
+    tampered = copy.deepcopy(raw)
+    target = tampered
+    for key in path[:-1]:
+        target = target[key]  # type: ignore[assignment,index]
+    target[path[-1]] = value
+
+    with pytest.raises(PromotionEvidenceBuildError):
+        derive_metrics_from_stored_payload(tampered)

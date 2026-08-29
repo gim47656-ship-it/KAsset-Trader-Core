@@ -3,10 +3,22 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.extensions.kasset.automation import (
+    strategy_promotion_service as promotion_service,
+)
+from app.extensions.kasset.automation.strategy_artifact import (
+    PROMOTION_EVIDENCE_SCHEMA_VERSION,
+    STRATEGY_CODE_PATHS,
+    StrategyArtifactManifest,
+    StrategyCodeFile,
+    fingerprint_strategy_artifact,
+)
 from app.extensions.kasset.automation.strategy_promotion import (
     IllegalPromotionTransition,
     PromotionEvidence,
@@ -23,6 +35,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
     transition_promotion,
 )
 from app.extensions.kasset.automation.strategy_promotion_service import (
+    PromotionCandidateTrustError,
     StrategyPromotionService,
 )
 from app.models.ai_recommendations import AIRecommendation
@@ -249,11 +262,14 @@ def test_global_paper_gate_isolated_by_exact_version_and_suspension() -> None:
         at=_NOW + timedelta(minutes=3),
         evidence=(_evidence("SUSPEND"),),
     )
-    assert paper_approval_for(
-        (suspended,),
-        strategy_key=suspended.strategy_key,
-        version=suspended.version,
-    ).approved is False
+    assert (
+        paper_approval_for(
+            (suspended,),
+            strategy_key=suspended.strategy_key,
+            version=suspended.version,
+        ).approved
+        is False
+    )
 
 
 def test_optional_boolean_threshold_does_not_reject_stronger_evidence() -> None:
@@ -276,6 +292,31 @@ class _PromotionDb:
         return self.row
 
 
+class _MutablePromotionDb:
+    def __init__(self) -> None:
+        self.row: object | None = None
+        self.commit_count = 0
+
+    async def scalar(self, _statement: object) -> object | None:
+        return self.row
+
+    def add(self, row: object) -> None:
+        self.row = row
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+
+
+def _trusted_approved() -> StrategyPromotion:
+    return replace(
+        _approved("1.0.0"),
+        promotion_candidate_id=7,
+        strategy_artifact_fingerprint="a" * 64,
+        source_commit="b" * 40,
+        evidence_schema_version=PROMOTION_EVIDENCE_SCHEMA_VERSION,
+    )
+
+
 def _promotion_row(promotion: StrategyPromotion) -> SimpleNamespace:
     return SimpleNamespace(
         strategy_key=promotion.strategy_key,
@@ -283,6 +324,10 @@ def _promotion_row(promotion: StrategyPromotion) -> SimpleNamespace:
         state=promotion.state.value,
         metrics=promotion.metrics_snapshot(),
         metrics_hash=promotion.metrics_hash,
+        promotion_candidate_id=promotion.promotion_candidate_id,
+        strategy_artifact_fingerprint=promotion.strategy_artifact_fingerprint,
+        source_commit=promotion.source_commit,
+        evidence_schema_version=promotion.evidence_schema_version,
         threshold_evaluation=(
             promotion.threshold_evaluation.as_evidence()
             if promotion.threshold_evaluation is not None
@@ -296,16 +341,19 @@ def _promotion_row(promotion: StrategyPromotion) -> SimpleNamespace:
         updated_at=promotion.updated_at,
     )
 
+
 def _recommendation(
     owner_user_id: int,
     *,
     version: str = "1.0.0",
+    fingerprint: str = "a" * 64,
     duplicate_identity: bool = False,
 ) -> AIRecommendation:
     identity = {
         "kind": "strategy_promotion",
         "strategyKey": "qullamaggie_breakout_portfolio",
         "version": version,
+        "artifactFingerprint": fingerprint,
     }
     evidence = [identity, dict(identity)] if duplicate_identity else [identity]
     return AIRecommendation(
@@ -324,47 +372,178 @@ def _recommendation(
     )
 
 
+def _trust() -> promotion_service._CandidateTrust:
+    approved = _trusted_approved()
+    return promotion_service._CandidateTrust(
+        candidate=SimpleNamespace(id=7),
+        run=SimpleNamespace(id=9),
+        experiment=SimpleNamespace(
+            strategy_key=approved.strategy_key,
+            strategy_version=approved.version,
+        ),
+        metrics=_passing_metrics(),
+        artifact_fingerprint="a" * 64,
+        source_commit="b" * 40,
+        evidence_schema_version=PROMOTION_EVIDENCE_SCHEMA_VERSION,
+    )
+
+
 @pytest.mark.asyncio
-async def test_persisted_gate_is_owner_independent_but_version_exact() -> None:
-    approved = _approved("1.0.0")
+async def test_service_approval_uses_persisted_candidate_trust_snapshot() -> None:
+    db = _MutablePromotionDb()
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+    service._candidate_trust = AsyncMock(return_value=_trust())  # type: ignore[method-assign]
+
+    draft = await service.create_draft(
+        7,
+        at=_NOW,
+        operator_reason="검증 후보 등록",
+    )
+    approved = await service.approve_candidate(
+        7,
+        at=_NOW + timedelta(minutes=1),
+        operator_reason="PAPER 승인 검토 완료",
+    )
+
+    assert draft.promotion_candidate_id == 7
+    assert approved.state == PromotionState.PAPER_APPROVED
+    assert approved.metrics_snapshot() == _passing_metrics().as_snapshot()
+    assert approved.strategy_artifact_fingerprint == "a" * 64
+    assert db.commit_count == 2
+
+
+@pytest.mark.asyncio
+async def test_auto_paper_requires_recommendation_promotion_runtime_fingerprint_equality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = StrategyPromotionService(  # type: ignore[arg-type]
-        _PromotionDb(_promotion_row(approved))
+        _PromotionDb(_promotion_row(_trusted_approved()))
+    )
+    service._candidate_trust = AsyncMock(return_value=_trust())  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        promotion_service,
+        "current_strategy_artifact",
+        lambda: SimpleNamespace(fingerprint="a" * 64),
     )
 
     owner_a = await service.approval_for_recommendation(_recommendation(11))
     owner_b = await service.approval_for_recommendation(_recommendation(22))
-    wrong_version = await service.approval_for_recommendation(
-        _recommendation(11, version="2.0.0")
+    wrong_recommendation = await service.approval_for_recommendation(
+        _recommendation(11, fingerprint="c" * 64)
     )
+    monkeypatch.setattr(
+        promotion_service,
+        "current_strategy_artifact",
+        lambda: SimpleNamespace(fingerprint="d" * 64),
+    )
+    runtime_drift = await service.approval_for_recommendation(_recommendation(11))
 
     assert owner_a.approved is True
     assert owner_b.approved is True
-    assert wrong_version.approved is False
+    assert wrong_recommendation.reason == (
+        "recommendation_promotion_fingerprint_mismatch"
+    )
+    assert runtime_drift.reason == "promotion_runtime_fingerprint_mismatch"
 
 
 @pytest.mark.asyncio
-async def test_persisted_gate_rejects_duplicate_or_tampered_identity() -> None:
-    approved = _approved("1.0.0")
-    service = StrategyPromotionService(  # type: ignore[arg-type]
-        _PromotionDb(_promotion_row(approved))
+async def test_persisted_gate_rejects_legacy_duplicate_malformed_and_invalid_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        promotion_service,
+        "current_strategy_artifact",
+        lambda: SimpleNamespace(fingerprint="a" * 64),
     )
-
-    duplicate = await service.approval_for_recommendation(
+    trusted = StrategyPromotionService(  # type: ignore[arg-type]
+        _PromotionDb(_promotion_row(_trusted_approved()))
+    )
+    trusted._candidate_trust = AsyncMock(return_value=_trust())  # type: ignore[method-assign]
+    duplicate = await trusted.approval_for_recommendation(
         _recommendation(11, duplicate_identity=True)
     )
-    tampered_row = _promotion_row(approved)
+    malformed_identity = _recommendation(11)
+    malformed_identity.evidence[0]["artifactFingerprint"] = 1
+    malformed = await trusted.approval_for_recommendation(malformed_identity)
+
+    legacy = StrategyPromotionService(  # type: ignore[arg-type]
+        _PromotionDb(_promotion_row(_approved()))
+    )
+    legacy_decision = await legacy.approval_for_recommendation(_recommendation(11))
+
+    tampered_row = _promotion_row(_trusted_approved())
     assert isinstance(tampered_row.threshold_evaluation, dict)
     tampered_row.threshold_evaluation["passed"] = False
-    malformed_identity = _recommendation(11)
-    malformed_identity.evidence[0]["version"] = 1
-    malformed = await service.approval_for_recommendation(malformed_identity)
     tampered = await StrategyPromotionService(  # type: ignore[arg-type]
         _PromotionDb(tampered_row)
     ).approval_for_recommendation(_recommendation(11))
 
-    assert duplicate.approved is False
+    invalid_chain = StrategyPromotionService(  # type: ignore[arg-type]
+        _PromotionDb(_promotion_row(_trusted_approved()))
+    )
+    invalid_chain._candidate_trust = AsyncMock(  # type: ignore[method-assign]
+        side_effect=PromotionCandidateTrustError(
+            "candidate_run_experiment_hash_mismatch"
+        )
+    )
+    chain_decision = await invalid_chain.approval_for_recommendation(
+        _recommendation(11)
+    )
+
     assert duplicate.reason == "recommendation_strategy_identity_invalid"
-    assert tampered.approved is False
-    assert malformed.approved is False
     assert malformed.reason == "recommendation_strategy_identity_invalid"
+    assert legacy_decision.reason == "legacy_promotion_evidence_missing"
     assert tampered.reason == "strategy_promotion_record_invalid"
+    assert chain_decision.reason == "strategy_promotion_record_invalid"
+
+
+def test_artifact_fingerprint_tracks_strategy_code_and_config_not_commit_or_ops() -> (
+    None
+):
+    files = (StrategyCodeFile(path=STRATEGY_CODE_PATHS[0], sha256="1" * 64),)
+    baseline = fingerprint_strategy_artifact(
+        code_files=files,
+        effective_config={"strategyVersion": "1.0.0", "risk": Decimal("0.01")},
+    )
+    code_drift = fingerprint_strategy_artifact(
+        code_files=(StrategyCodeFile(path=STRATEGY_CODE_PATHS[0], sha256="2" * 64),),
+        effective_config={"strategyVersion": "1.0.0", "risk": Decimal("0.01")},
+    )
+    config_drift = fingerprint_strategy_artifact(
+        code_files=files,
+        effective_config={"strategyVersion": "1.0.0", "risk": Decimal("0.02")},
+    )
+    first = StrategyArtifactManifest(
+        schema_version="kasset.strategy-artifact.v1",
+        strategy_key="strategy",
+        strategy_version="1.0.0",
+        fingerprint=baseline,
+        source_commit="a" * 40,
+        code_files=files,
+        effective_config={},
+    )
+    docs_only_commit = replace(first, source_commit="b" * 40)
+
+    assert baseline != code_drift
+    assert baseline != config_drift
+    assert first.fingerprint == docs_only_commit.fingerprint
+    assert all(
+        not path.startswith(("docs/", "tests/", "frontend/", "alembic/", "scripts/"))
+        for path in STRATEGY_CODE_PATHS
+    )
+
+
+def test_promotion_trust_migration_is_linear_and_has_no_fake_backfill() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "20260830_kasset_promotion_trust.py"
+    )
+    migration = migration_path.read_text(encoding="utf-8")
+
+    assert 'revision = "20260830_kasset_promotion_trust"' in migration
+    assert 'down_revision = "20260830_kasset_position_cycles"' in migration
+    assert '"promotion_candidate_id"' in migration
+    assert '"strategy_artifact_fingerprint"' in migration
+    assert "UPDATE review.kasset_strategy_promotions" not in migration

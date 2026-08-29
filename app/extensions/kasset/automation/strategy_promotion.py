@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -14,7 +15,6 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 DEFAULT_PAPER_STRATEGY_KEY = "qullamaggie_breakout_portfolio"
 DEFAULT_PAPER_STRATEGY_VERSION = "1.0.0"
-
 
 
 class PromotionState(StrEnum):
@@ -224,6 +224,10 @@ class StrategyPromotion:
     metrics_hash: str | None
     threshold_evaluation: ThresholdEvaluation | None
     evidence: tuple[PromotionEvidence, ...]
+    promotion_candidate_id: int | None
+    strategy_artifact_fingerprint: str | None
+    source_commit: str | None
+    evidence_schema_version: str | None
     approved_at: datetime | None
     suspended_at: datetime | None
     retired_at: datetime | None
@@ -238,6 +242,36 @@ class StrategyPromotion:
         object.__setattr__(self, "strategy_key", strategy_key)
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "state", PromotionState(self.state))
+        trust_bundle = (
+            self.promotion_candidate_id,
+            self.strategy_artifact_fingerprint,
+            self.source_commit,
+            self.evidence_schema_version,
+        )
+        if any(value is not None for value in trust_bundle) and not all(
+            value is not None for value in trust_bundle
+        ):
+            raise ValueError("promotion candidate trust bundle must be complete")
+        if self.promotion_candidate_id is not None:
+            if (
+                type(self.promotion_candidate_id) is not int
+                or self.promotion_candidate_id < 1
+            ):
+                raise ValueError("promotion_candidate_id must be a positive integer")
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", str(self.strategy_artifact_fingerprint)
+            ):
+                raise ValueError(
+                    "strategy_artifact_fingerprint must be lowercase 64-hex"
+                )
+            if not re.fullmatch(
+                r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(self.source_commit)
+            ):
+                raise ValueError("source_commit must be a full lowercase Git object id")
+            evidence_schema = str(self.evidence_schema_version).strip()
+            if not evidence_schema:
+                raise ValueError("evidence_schema_version is required")
+            object.__setattr__(self, "evidence_schema_version", evidence_schema)
         for field_name in (
             "approved_at",
             "suspended_at",
@@ -274,6 +308,10 @@ class StrategyPromotion:
                 if self.threshold_evaluation is not None
                 else None
             ),
+            "promotionCandidateId": self.promotion_candidate_id,
+            "strategyArtifactFingerprint": self.strategy_artifact_fingerprint,
+            "sourceCommit": self.source_commit,
+            "evidenceSchemaVersion": self.evidence_schema_version,
             "evidence": [item.as_evidence() for item in self.evidence],
             "approvedAt": _timestamp_text(self.approved_at),
             "suspendedAt": _timestamp_text(self.suspended_at),
@@ -291,6 +329,9 @@ class PaperApprovalDecision:
     state: PromotionState | None
     metrics_hash: str | None
     reason: str
+    promotion_fingerprint: str | None = None
+    recommendation_fingerprint: str | None = None
+    runtime_fingerprint: str | None = None
 
 
 class IllegalPromotionTransition(ValueError):
@@ -329,6 +370,10 @@ def create_draft(
     *,
     at: datetime,
     evidence: Sequence[PromotionEvidence] = (),
+    promotion_candidate_id: int | None = None,
+    strategy_artifact_fingerprint: str | None = None,
+    source_commit: str | None = None,
+    evidence_schema_version: str | None = None,
 ) -> StrategyPromotion:
     timestamp = _utc(at, "at")
     return StrategyPromotion(
@@ -339,6 +384,10 @@ def create_draft(
         metrics_hash=None,
         threshold_evaluation=None,
         evidence=tuple(evidence),
+        promotion_candidate_id=promotion_candidate_id,
+        strategy_artifact_fingerprint=strategy_artifact_fingerprint,
+        source_commit=source_commit,
+        evidence_schema_version=evidence_schema_version,
         approved_at=None,
         suspended_at=None,
         retired_at=None,
@@ -364,9 +413,7 @@ def evaluate_thresholds(
             "<=",
             thresholds.max_drawdown,
         ),
-        _numeric_check(
-            "win_rate", metrics.win_rate, ">=", thresholds.min_win_rate
-        ),
+        _numeric_check("win_rate", metrics.win_rate, ">=", thresholds.min_win_rate),
         _numeric_check(
             "expectancy", metrics.expectancy, ">=", thresholds.min_expectancy
         ),
@@ -376,9 +423,7 @@ def evaluate_thresholds(
             ">=",
             thresholds.min_excess_return,
         ),
-        _integer_check(
-            "trade_count", metrics.trade_count, thresholds.min_trade_count
-        ),
+        _integer_check("trade_count", metrics.trade_count, thresholds.min_trade_count),
         _integer_check(
             "walk_forward_folds",
             metrics.walk_forward_folds,
@@ -426,7 +471,10 @@ def transition_promotion(
 ) -> StrategyPromotion:
     """Apply one monotonic transition to the exact strategy/version identity."""
 
-    if strategy_key.strip() != current.strategy_key or version.strip() != current.version:
+    if (
+        strategy_key.strip() != current.strategy_key
+        or version.strip() != current.version
+    ):
         raise PromotionIdentityMismatch(
             "a promotion transition cannot change strategy_key or version"
         )
@@ -546,7 +594,10 @@ def paper_approval_for(
         version=normalized_version,
         state=promotion.state,
         metrics_hash=promotion.metrics_hash,
-        reason="paper_approved" if approved else f"state_{promotion.state.value.lower()}",
+        promotion_fingerprint=promotion.strategy_artifact_fingerprint,
+        reason="paper_approved"
+        if approved
+        else f"state_{promotion.state.value.lower()}",
     )
 
 
@@ -585,9 +636,7 @@ def _validate_state_invariants(promotion: StrategyPromotion) -> None:
 
     if promotion.threshold_evaluation is not None:
         if promotion.threshold_evaluation.metrics_hash != promotion.metrics_hash:
-            raise ValueError(
-                "threshold evaluation does not match the metrics snapshot"
-            )
+            raise ValueError("threshold evaluation does not match the metrics snapshot")
         if (
             promotion.state
             in {PromotionState.PAPER_APPROVED, PromotionState.PAPER_SUSPENDED}
@@ -645,7 +694,10 @@ def _validate_state_invariants(promotion: StrategyPromotion) -> None:
         ),
         promotion.created_at,
     )
-    if latest_lifecycle < promotion.created_at or promotion.updated_at < latest_lifecycle:
+    if (
+        latest_lifecycle < promotion.created_at
+        or promotion.updated_at < latest_lifecycle
+    ):
         raise ValueError("lifecycle timestamps must be monotonic")
 
 

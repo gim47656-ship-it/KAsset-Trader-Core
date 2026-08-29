@@ -468,6 +468,25 @@ class KAssetStrategyPromotion(Base):
             name="ck_kasset_strategy_promotion_hash_format",
         ),
         CheckConstraint(
+            "strategy_artifact_fingerprint IS NULL "
+            "OR strategy_artifact_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_kasset_strategy_promotion_artifact_fingerprint",
+        ),
+        CheckConstraint(
+            "source_commit IS NULL OR source_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'",
+            name="ck_kasset_strategy_promotion_source_commit",
+        ),
+        CheckConstraint(
+            "evidence_schema_version IS NULL OR btrim(evidence_schema_version) <> ''",
+            name="ck_kasset_strategy_promotion_evidence_schema",
+        ),
+        CheckConstraint(
+            "num_nonnulls(promotion_candidate_id, "
+            "strategy_artifact_fingerprint, source_commit, "
+            "evidence_schema_version) IN (0, 4)",
+            name="ck_kasset_strategy_promotion_trust_bundle",
+        ),
+        CheckConstraint(
             "(state = 'DRAFT' AND metrics = '{}'::jsonb AND metrics_hash IS NULL)"
             " OR (state IN ('BACKTESTED','PAPER_APPROVED','PAPER_SUSPENDED')"
             " AND metrics <> '{}'::jsonb AND metrics_hash IS NOT NULL)"
@@ -525,6 +544,12 @@ class KAssetStrategyPromotion(Base):
             "state",
             "updated_at",
         ),
+        Index(
+            "ix_kasset_strategy_promotion_candidate",
+            "promotion_candidate_id",
+            unique=True,
+            postgresql_where=text("promotion_candidate_id IS NOT NULL"),
+        ),
         {"schema": "review"},
     )
 
@@ -544,6 +569,17 @@ class KAssetStrategyPromotion(Base):
         server_default=text("'{}'::jsonb"),
     )
     metrics_hash: Mapped[str | None] = mapped_column(Text)
+    promotion_candidate_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "research.promotion_candidates.id",
+            name="fk_kasset_strategy_promotion_candidate",
+            ondelete="RESTRICT",
+        ),
+    )
+    strategy_artifact_fingerprint: Mapped[str | None] = mapped_column(Text)
+    source_commit: Mapped[str | None] = mapped_column(Text)
+    evidence_schema_version: Mapped[str | None] = mapped_column(Text)
     threshold_evaluation: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     evidence: Mapped[list[dict[str, object]]] = mapped_column(
         JSONB,

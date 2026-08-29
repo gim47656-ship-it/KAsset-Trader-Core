@@ -1,15 +1,24 @@
-"""Persisted, owner-independent PAPER strategy promotion gate."""
+"""Persisted, research-registry-backed PAPER strategy promotion gate."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, DecimalException
+from decimal import DecimalException
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extensions.kasset.automation.promotion_evidence import (
+    PromotionEvidenceBuildError,
+    derive_metrics_from_stored_payload,
+)
+from app.extensions.kasset.automation.strategy_artifact import (
+    PROMOTION_EVIDENCE_SCHEMA_VERSION,
+    current_strategy_artifact,
+)
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
     PaperApprovalDecision,
@@ -21,25 +30,59 @@ from app.extensions.kasset.automation.strategy_promotion import (
     ThresholdCheck,
     ThresholdEvaluation,
     create_draft,
+    evaluate_thresholds,
     paper_approval_for,
     transition_promotion,
 )
 from app.extensions.kasset.models import KAssetStrategyPromotion
 from app.models.ai_recommendations import AIRecommendation
+from app.models.research_backtest import (
+    ResearchBacktestRun,
+    ResearchPromotionCandidate,
+    ResearchStrategyExperiment,
+)
+from app.services.research_canonical_hash import (
+    IDENTITY_COMPONENTS,
+    canonical_sha256,
+    compute_identity_hashes_from_ast,
+    derive_experiment_id,
+)
+
+
+class PromotionCandidateTrustError(ValueError):
+    """A candidate/run/experiment chain is missing, malformed, or divergent."""
 
 
 @dataclass(frozen=True, slots=True)
 class RecommendationStrategyIdentity:
     strategy_key: str
     version: str
+    artifact_fingerprint: str
 
     def __post_init__(self) -> None:
         strategy_key = self.strategy_key.strip()
         version = self.version.strip()
+        fingerprint = self.artifact_fingerprint.strip()
         if not strategy_key or not version:
             raise ValueError("strategy_key and version are required")
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
+        ):
+            raise ValueError("artifact_fingerprint must be lowercase 64-hex")
         object.__setattr__(self, "strategy_key", strategy_key)
         object.__setattr__(self, "version", version)
+        object.__setattr__(self, "artifact_fingerprint", fingerprint)
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateTrust:
+    candidate: ResearchPromotionCandidate
+    run: ResearchBacktestRun
+    experiment: ResearchStrategyExperiment
+    metrics: PromotionMetrics
+    artifact_fingerprint: str
+    source_commit: str
+    evidence_schema_version: str
 
 
 def recommendation_strategy_identity(
@@ -51,13 +94,17 @@ def recommendation_strategy_identity(
             continue
         strategy_key = item.get("strategyKey")
         version = item.get("version")
-        if not isinstance(strategy_key, str) or not isinstance(version, str):
+        fingerprint = item.get("artifactFingerprint")
+        if not all(
+            isinstance(value, str) for value in (strategy_key, version, fingerprint)
+        ):
             return None
         try:
             matches.append(
                 RecommendationStrategyIdentity(
-                    strategy_key=strategy_key,
-                    version=version,
+                    strategy_key=cast(str, strategy_key),
+                    version=cast(str, version),
+                    artifact_fingerprint=cast(str, fingerprint),
                 )
             )
         except ValueError:
@@ -74,11 +121,11 @@ def _metrics_from_snapshot(raw: object) -> PromotionMetrics | None:
     if not isinstance(hashes, Sequence) or isinstance(hashes, (str, bytes)):
         raise ValueError("promotion backtestHashes must be an array")
     metrics = PromotionMetrics(
-        total_return=Decimal(str(raw["totalReturn"])),
-        max_drawdown=Decimal(str(raw["maxDrawdown"])),
-        win_rate=Decimal(str(raw["winRate"])),
-        expectancy=Decimal(str(raw["expectancy"])),
-        excess_return=Decimal(str(raw["excessReturn"])),
+        total_return=str(raw["totalReturn"]),
+        max_drawdown=str(raw["maxDrawdown"]),
+        win_rate=str(raw["winRate"]),
+        expectancy=str(raw["expectancy"]),
+        excess_return=str(raw["excessReturn"]),
         trade_count=raw["tradeCount"],  # type: ignore[arg-type]
         walk_forward_folds=raw["walkForwardFolds"],  # type: ignore[arg-type]
         walk_forward_passed_folds=raw["walkForwardPassedFolds"],  # type: ignore[arg-type]
@@ -88,9 +135,8 @@ def _metrics_from_snapshot(raw: object) -> PromotionMetrics | None:
         backtest_hashes=tuple(str(value) for value in hashes),
     )
     stored_pass_rate = raw.get("walkForwardPassRate")
-    if (
-        stored_pass_rate is not None
-        and Decimal(str(stored_pass_rate)) != metrics.walk_forward_pass_rate
+    if stored_pass_rate is not None and str(metrics.walk_forward_pass_rate) != str(
+        stored_pass_rate
     ):
         raise ValueError("stored walk-forward pass rate is inconsistent")
     return metrics
@@ -120,7 +166,7 @@ def _threshold_from_snapshot(raw: object) -> ThresholdEvaluation | None:
                 observed=values[1],
                 comparator=values[2],
                 required=values[3],
-                passed=item["passed"],  # type: ignore[arg-type]
+                passed=cast(bool, item["passed"]),
             )
         )
     metrics_hash = str(raw.get("metricsHash", ""))
@@ -170,6 +216,10 @@ def _promotion_from_row(row: KAssetStrategyPromotion) -> StrategyPromotion:
         metrics_hash=row.metrics_hash,
         threshold_evaluation=_threshold_from_snapshot(row.threshold_evaluation),
         evidence=_promotion_evidence(row.evidence),
+        promotion_candidate_id=row.promotion_candidate_id,
+        strategy_artifact_fingerprint=row.strategy_artifact_fingerprint,
+        source_commit=row.source_commit,
+        evidence_schema_version=row.evidence_schema_version,
         approved_at=row.approved_at,
         suspended_at=row.suspended_at,
         retired_at=row.retired_at,
@@ -198,7 +248,7 @@ def _apply_promotion(
 
 
 class StrategyPromotionService:
-    """Persist promotion transitions and resolve AUTO_PAPER eligibility."""
+    """Persist transitions and resolve AUTO_PAPER from immutable registry evidence."""
 
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
@@ -210,30 +260,59 @@ class StrategyPromotionService:
         *,
         for_update: bool = False,
     ) -> StrategyPromotion | None:
-        statement = select(KAssetStrategyPromotion).where(
-            KAssetStrategyPromotion.strategy_key == strategy_key.strip(),
-            KAssetStrategyPromotion.version == version.strip(),
+        row = await self._promotion_row(
+            strategy_key=strategy_key,
+            version=version,
+            for_update=for_update,
         )
-        if for_update:
-            statement = statement.with_for_update()
-        row = await self._db.scalar(statement)
         return _promotion_from_row(row) if row is not None else None
+
+    async def list_status(self) -> tuple[StrategyPromotion, ...]:
+        rows = (
+            await self._db.scalars(
+                select(KAssetStrategyPromotion).order_by(
+                    KAssetStrategyPromotion.updated_at.desc(),
+                    KAssetStrategyPromotion.id.desc(),
+                )
+            )
+        ).all()
+        return tuple(_promotion_from_row(row) for row in rows)
 
     async def create_draft(
         self,
-        strategy_key: str,
-        version: str,
+        candidate_id: int,
         *,
         at: datetime,
-        evidence: Sequence[PromotionEvidence] = (),
+        operator_reason: str,
     ) -> StrategyPromotion:
-        if await self.get(strategy_key, version, for_update=True) is not None:
+        reason = _operator_reason(operator_reason)
+        trust = await self._candidate_trust(candidate_id)
+        if (
+            await self._promotion_row(
+                strategy_key=trust.experiment.strategy_key,
+                version=trust.experiment.strategy_version,
+                for_update=True,
+            )
+            is not None
+        ):
             raise ValueError("strategy/version promotion already exists")
+        evidence = (
+            _candidate_evidence(trust),
+            PromotionEvidence(
+                code="OPERATOR_DRAFT_REASON",
+                detail=reason,
+                reference=f"candidate:{candidate_id}",
+            ),
+        )
         promotion = create_draft(
-            strategy_key,
-            version,
+            trust.experiment.strategy_key,
+            trust.experiment.strategy_version,
             at=at,
             evidence=evidence,
+            promotion_candidate_id=trust.candidate.id,
+            strategy_artifact_fingerprint=trust.artifact_fingerprint,
+            source_commit=trust.source_commit,
+            evidence_schema_version=trust.evidence_schema_version,
         )
         row = KAssetStrategyPromotion(
             strategy_key=promotion.strategy_key,
@@ -241,6 +320,10 @@ class StrategyPromotionService:
             state=promotion.state.value,
             metrics={},
             metrics_hash=None,
+            promotion_candidate_id=trust.candidate.id,
+            strategy_artifact_fingerprint=trust.artifact_fingerprint,
+            source_commit=trust.source_commit,
+            evidence_schema_version=trust.evidence_schema_version,
             threshold_evaluation=None,
             evidence=[item.as_evidence() for item in promotion.evidence],
             approved_at=None,
@@ -253,6 +336,60 @@ class StrategyPromotionService:
         await self._db.commit()
         return promotion
 
+    async def approve_candidate(
+        self,
+        candidate_id: int,
+        *,
+        at: datetime,
+        operator_reason: str,
+        thresholds: PromotionThresholds = DEFAULT_PROMOTION_THRESHOLDS,
+    ) -> StrategyPromotion:
+        reason = _operator_reason(operator_reason)
+        trust = await self._candidate_trust(candidate_id)
+        row = await self._db.scalar(
+            select(KAssetStrategyPromotion)
+            .where(KAssetStrategyPromotion.promotion_candidate_id == candidate_id)
+            .with_for_update()
+        )
+        if row is None:
+            raise ValueError("promotion draft for candidate is not registered")
+        current = _promotion_from_row(row)
+        _verify_promotion_trust(current, trust)
+        if current.state == PromotionState.DRAFT:
+            current = transition_promotion(
+                current,
+                PromotionState.BACKTESTED,
+                strategy_key=current.strategy_key,
+                version=current.version,
+                at=at,
+                metrics=trust.metrics,
+                evidence=(
+                    PromotionEvidence(
+                        code="PERSISTED_BACKTEST_CANDIDATE",
+                        detail="Metrics derived from the locked research candidate chain.",
+                        reference=f"candidate:{candidate_id}",
+                    ),
+                ),
+            )
+        approval = transition_promotion(
+            current,
+            PromotionState.PAPER_APPROVED,
+            strategy_key=current.strategy_key,
+            version=current.version,
+            at=at,
+            thresholds=thresholds,
+            evidence=(
+                PromotionEvidence(
+                    code="OPERATOR_APPROVAL_REASON",
+                    detail=reason,
+                    reference=f"candidate:{candidate_id}",
+                ),
+            ),
+        )
+        _apply_promotion(row, approval)
+        await self._db.commit()
+        return approval
+
     async def transition(
         self,
         strategy_key: str,
@@ -260,30 +397,41 @@ class StrategyPromotionService:
         target: PromotionState | str,
         *,
         at: datetime,
-        metrics: PromotionMetrics | None = None,
-        thresholds: PromotionThresholds = DEFAULT_PROMOTION_THRESHOLDS,
-        evidence: Sequence[PromotionEvidence] = (),
+        operator_reason: str,
     ) -> StrategyPromotion:
-        statement = (
-            select(KAssetStrategyPromotion)
-            .where(
-                KAssetStrategyPromotion.strategy_key == strategy_key.strip(),
-                KAssetStrategyPromotion.version == version.strip(),
-            )
-            .with_for_update()
+        """Apply suspend/retire only; metrics can never enter through this API."""
+
+        target_state = PromotionState(target)
+        if target_state not in {
+            PromotionState.PAPER_SUSPENDED,
+            PromotionState.RETIRED,
+        }:
+            raise ValueError("BACKTESTED/PAPER_APPROVED require a persisted candidate")
+        row = await self._promotion_row(
+            strategy_key=strategy_key,
+            version=version,
+            for_update=True,
         )
-        row = await self._db.scalar(statement)
         if row is None:
             raise ValueError("strategy/version promotion is not registered")
+        current = _promotion_from_row(row)
+        if current.promotion_candidate_id is None:
+            raise PromotionCandidateTrustError("legacy_promotion_evidence_missing")
+        trust = await self._candidate_trust(current.promotion_candidate_id)
+        _verify_promotion_trust(current, trust)
         promotion = transition_promotion(
-            _promotion_from_row(row),
-            target,
+            current,
+            target_state,
             strategy_key=strategy_key,
             version=version,
             at=at,
-            metrics=metrics,
-            thresholds=thresholds,
-            evidence=evidence,
+            evidence=(
+                PromotionEvidence(
+                    code=f"OPERATOR_{target_state.value}_REASON",
+                    detail=_operator_reason(operator_reason),
+                    reference=f"candidate:{trust.candidate.id}",
+                ),
+            ),
         )
         _apply_promotion(row, promotion)
         await self._db.commit()
@@ -296,24 +444,75 @@ class StrategyPromotionService:
         for_update: bool = False,
     ) -> PaperApprovalDecision:
         try:
-            promotion = await self.get(
-                identity.strategy_key,
-                identity.version,
-                for_update=for_update,
-            )
-        except (DecimalException, KeyError, TypeError, ValueError):
-            return PaperApprovalDecision(
-                approved=False,
+            row = await self._promotion_row(
                 strategy_key=identity.strategy_key,
                 version=identity.version,
-                state=None,
-                metrics_hash=None,
-                reason="strategy_promotion_record_invalid",
+                for_update=for_update,
             )
-        return paper_approval_for(
-            (promotion,) if promotion is not None else (),
+            if row is None:
+                return _decision(identity, reason="strategy_version_not_registered")
+            promotion = _promotion_from_row(row)
+            if promotion.promotion_candidate_id is None:
+                return _decision(
+                    identity,
+                    promotion=promotion,
+                    reason="legacy_promotion_evidence_missing",
+                )
+            trust = await self._candidate_trust(promotion.promotion_candidate_id)
+            _verify_promotion_trust(promotion, trust)
+        except (
+            DecimalException,
+            KeyError,
+            PromotionCandidateTrustError,
+            PromotionEvidenceBuildError,
+            TypeError,
+            ValueError,
+        ):
+            return _decision(identity, reason="strategy_promotion_record_invalid")
+
+        state_decision = paper_approval_for(
+            (promotion,),
             strategy_key=identity.strategy_key,
             version=identity.version,
+        )
+        if not state_decision.approved:
+            return _decision(
+                identity,
+                promotion=promotion,
+                reason=state_decision.reason,
+            )
+        try:
+            runtime_fingerprint = current_strategy_artifact().fingerprint
+        except (OSError, TypeError, ValueError):
+            return _decision(
+                identity,
+                promotion=promotion,
+                reason="runtime_strategy_artifact_unavailable",
+            )
+        if identity.artifact_fingerprint != promotion.strategy_artifact_fingerprint:
+            return _decision(
+                identity,
+                promotion=promotion,
+                runtime_fingerprint=runtime_fingerprint,
+                reason="recommendation_promotion_fingerprint_mismatch",
+            )
+        if promotion.strategy_artifact_fingerprint != runtime_fingerprint:
+            return _decision(
+                identity,
+                promotion=promotion,
+                runtime_fingerprint=runtime_fingerprint,
+                reason="promotion_runtime_fingerprint_mismatch",
+            )
+        return PaperApprovalDecision(
+            approved=True,
+            strategy_key=identity.strategy_key,
+            version=identity.version,
+            state=promotion.state,
+            metrics_hash=promotion.metrics_hash,
+            reason="paper_approved",
+            promotion_fingerprint=promotion.strategy_artifact_fingerprint,
+            recommendation_fingerprint=identity.artifact_fingerprint,
+            runtime_fingerprint=runtime_fingerprint,
         )
 
     async def approval_for_recommendation(
@@ -334,7 +533,181 @@ class StrategyPromotionService:
             )
         return await self.approval_for_identity(identity, for_update=for_update)
 
+    async def _promotion_row(
+        self,
+        *,
+        strategy_key: str,
+        version: str,
+        for_update: bool,
+    ) -> KAssetStrategyPromotion | None:
+        statement = select(KAssetStrategyPromotion).where(
+            KAssetStrategyPromotion.strategy_key == strategy_key.strip(),
+            KAssetStrategyPromotion.version == version.strip(),
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return await self._db.scalar(statement)
+
+    async def _candidate_trust(self, candidate_id: int) -> _CandidateTrust:
+        if type(candidate_id) is not int or candidate_id < 1:
+            raise PromotionCandidateTrustError("candidate_id_invalid")
+        result = await self._db.execute(
+            select(
+                ResearchPromotionCandidate,
+                ResearchBacktestRun,
+                ResearchStrategyExperiment,
+            )
+            .join(
+                ResearchBacktestRun,
+                ResearchBacktestRun.id == ResearchPromotionCandidate.backtest_run_id,
+            )
+            .join(
+                ResearchStrategyExperiment,
+                ResearchStrategyExperiment.id
+                == ResearchBacktestRun.strategy_experiment_id,
+            )
+            .where(ResearchPromotionCandidate.id == candidate_id)
+            .with_for_update()
+        )
+        joined = result.one_or_none()
+        if joined is None:
+            raise PromotionCandidateTrustError("promotion_candidate_missing")
+        candidate, run, experiment = joined
+        _verify_experiment(experiment)
+        raw = run.raw_payload
+        if type(raw) is not dict:
+            raise PromotionCandidateTrustError("backtest_raw_payload_missing")
+        payload_hash = canonical_sha256(raw)
+        if (
+            run.trial_status != "completed"
+            or run.strategy_experiment_id != experiment.id
+            or run.artifact_hash != payload_hash
+        ):
+            raise PromotionCandidateTrustError("backtest_run_hash_mismatch")
+        metrics = derive_metrics_from_stored_payload(raw)
+        strategy = cast(Mapping[str, object], raw["strategy"])
+        fingerprint = str(strategy["artifactFingerprint"])
+        source_commit = str(strategy["sourceCommit"])
+        schema_version = str(raw["schemaVersion"])
+        if (
+            run.gate_artifact_hash != fingerprint
+            or experiment.strategy_key != strategy["key"]
+            or experiment.strategy_version != strategy["version"]
+            or candidate.backtest_run_id != run.id
+            or candidate.experiment_id != experiment.experiment_id
+            or candidate.run_config_hash != experiment.frozen_config_hash
+            or candidate.run_data_hash != experiment.dataset_manifest_hash
+            or canonical_sha256(candidate.metrics)
+            != canonical_sha256(metrics.as_snapshot())
+            or canonical_sha256(candidate.thresholds)
+            != canonical_sha256(raw.get("promotionThresholds"))
+        ):
+            raise PromotionCandidateTrustError("candidate_run_experiment_hash_mismatch")
+        evaluation = evaluate_thresholds(metrics)
+        expected_status = "eligible" if evaluation.passed else "non_promotable"
+        expected_reason = (
+            "thresholds_passed"
+            if evaluation.passed
+            else f"threshold_failed:{evaluation.failed_metrics[0]}"
+        )
+        if (
+            candidate.status != expected_status
+            or candidate.reason_code != expected_reason
+        ):
+            raise PromotionCandidateTrustError("candidate_evaluation_mismatch")
+        if schema_version != PROMOTION_EVIDENCE_SCHEMA_VERSION:
+            raise PromotionCandidateTrustError("evidence_schema_version_mismatch")
+        return _CandidateTrust(
+            candidate=candidate,
+            run=run,
+            experiment=experiment,
+            metrics=metrics,
+            artifact_fingerprint=fingerprint,
+            source_commit=source_commit,
+            evidence_schema_version=schema_version,
+        )
+
+
+def _verify_experiment(experiment: ResearchStrategyExperiment) -> None:
+    if type(experiment.manifest) is not dict:
+        raise PromotionCandidateTrustError("experiment_manifest_missing")
+    try:
+        component_hashes = compute_identity_hashes_from_ast(experiment.manifest)
+    except (TypeError, ValueError) as exc:
+        raise PromotionCandidateTrustError("experiment_manifest_invalid") from exc
+    if any(
+        getattr(experiment, f"{component}_hash")
+        != component_hashes[f"{component}_hash"]
+        for component in IDENTITY_COMPONENTS
+    ):
+        raise PromotionCandidateTrustError("experiment_component_hash_mismatch")
+    expected_id = derive_experiment_id(
+        experiment.strategy_key,
+        experiment.strategy_version,
+        component_hashes,
+    )
+    if expected_id != experiment.experiment_id:
+        raise PromotionCandidateTrustError("experiment_id_hash_mismatch")
+
+
+def _verify_promotion_trust(
+    promotion: StrategyPromotion,
+    trust: _CandidateTrust,
+) -> None:
+    if (
+        promotion.promotion_candidate_id != trust.candidate.id
+        or promotion.strategy_key != trust.experiment.strategy_key
+        or promotion.version != trust.experiment.strategy_version
+        or promotion.strategy_artifact_fingerprint != trust.artifact_fingerprint
+        or promotion.source_commit != trust.source_commit
+        or promotion.evidence_schema_version != trust.evidence_schema_version
+    ):
+        raise PromotionCandidateTrustError("promotion_candidate_identity_mismatch")
+    if promotion.metrics is not None and canonical_sha256(
+        promotion.metrics.as_snapshot()
+    ) != canonical_sha256(trust.metrics.as_snapshot()):
+        raise PromotionCandidateTrustError("promotion_metrics_mismatch")
+
+
+def _candidate_evidence(trust: _CandidateTrust) -> PromotionEvidence:
+    return PromotionEvidence(
+        code="RESEARCH_PROMOTION_CANDIDATE",
+        detail="Locked candidate, run, experiment, and canonical hashes verified.",
+        reference=f"candidate:{trust.candidate.id};run:{trust.run.id}",
+    )
+
+
+def _operator_reason(value: str) -> str:
+    reason = value.strip()
+    if not reason:
+        raise ValueError("operator_reason is required")
+    return reason
+
+
+def _decision(
+    identity: RecommendationStrategyIdentity,
+    *,
+    reason: str,
+    promotion: StrategyPromotion | None = None,
+    runtime_fingerprint: str | None = None,
+) -> PaperApprovalDecision:
+    return PaperApprovalDecision(
+        approved=False,
+        strategy_key=identity.strategy_key,
+        version=identity.version,
+        state=promotion.state if promotion is not None else None,
+        metrics_hash=promotion.metrics_hash if promotion is not None else None,
+        reason=reason,
+        promotion_fingerprint=(
+            promotion.strategy_artifact_fingerprint if promotion is not None else None
+        ),
+        recommendation_fingerprint=identity.artifact_fingerprint,
+        runtime_fingerprint=runtime_fingerprint,
+    )
+
+
 __all__ = [
+    "PromotionCandidateTrustError",
     "RecommendationStrategyIdentity",
     "StrategyPromotionService",
     "recommendation_strategy_identity",
