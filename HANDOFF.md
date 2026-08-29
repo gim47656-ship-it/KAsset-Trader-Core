@@ -1,5 +1,5 @@
 # HANDOFF — KAsset Trader Core
-갱신: 2026-08-29 (AI PAPER vertical 운영 배포·historical smoke·독립검수 완료)
+갱신: 2026-08-29 (AI PAPER 운영 배포·historical smoke·S24+ 실기기 검수 완료)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset Trader Core는 스크리너, 시세·뉴스·DART, 전략, AI 분석, PAPER/LIVE 주문 원장과 Android API를 제공한다. 현재 목표는 **PAPER에서 사용자가 검수 가능한 실제 AI 추천과 자동운용**이다. 일일 목표를 이유로 거래를 만들거나 Hard Risk를 AI가 우회하면 안 된다.
@@ -35,7 +35,7 @@ Existing Screeners → 50–100 candidates
 - **실제 검수 가능 추천**: `rec-2098fc28-4d1d-4af1-85c6-e7f2a8e961ab`, `003550`, BUY. Momentum BUY 0.95, MeanReversion HOLD, Breakout HOLD, VolatilityTrend BUY 0.95; regime weights 0.15/0.20/0.25/0.40; entry 114,700, stop 106,492.857143, target 131,114.285714; AI `gpt-5.6-sol`, confidence 0.64, bullish/bearish 64/36, risk HIGH; ranking 1/100, portfolio targetWeight 0.20, quantity 17.
 - **AUTO_PAPER fail-closed 확인**: historical AUTO run이 위 추천을 claim하고 실행 직전 risk preview를 다시 계산했다. 현재/주말 PAPER 제약에서 `REJECTED`, `risk_preview_rejected:POSITION`, execution 0건으로 종료됐다. 추천은 `APPROVED/FAILED` 이력으로 남아 상세 API에서 검수 가능하다. 억지 주문이나 우회는 없었다.
 - **운영 상태 복원**: API state는 APPROVAL/PAPER, budget 1,000,000 KRW, daily goal 5,000, max daily loss 10,000, max buys/orders 1, max allocation 20%, max holdings 2, max reentry 1, kill switch false다. `AI_PAPER_AUTO_EXECUTION_ENABLED=True`이나 사용자 mode가 APPROVAL이므로 자동 claim하지 않는다.
-- **market event/공시**: `KASSET_MARKET_EVENTS_ENABLED=True`; SEC/DART AI backfill 11/11과 API 응답까지 완료했다. 실기기 Android 확인만 ADB offline으로 차단됐다.
+- **market event/공시 실기기 검수 완료**: `KASSET_MARKET_EVENTS_ENABLED=True`; SEC/DART AI backfill 11/11과 API 응답을 확인했다. S24+에서 NVDA SEC EDGAR 10-Q·8-K·Form 4의 한국어 AI 요약이 실제 공시 탭에 표시됐다.
 - **후속 한계**: watchlist가 빈 owner는 `and ordered` guard 때문에 live tvscreener bootstrap을 못 한다. USD owner의 US 후보·일봉 hydration이 없다. strategy-level evidence의 weight/score가 enum name/value mismatch로 null일 수 있으나 상위 `strategyVotes`는 정상이다. 구 `MarketEventPipeline` dead code가 남았다. `load_paper_orders`는 owner-sourced recommendation ID를 쓰지만 명시 owner 술어가 없다.
 
 Skill·외부 탐색 정책:
@@ -51,6 +51,7 @@ Skill·외부 탐색 정책:
 - focused validation: AI 관련 91 passed, ranking 회귀 1 passed, changed-path `ruff check` 통과. Android 전체 `:app:testDebugUnitTest :app:assembleDebug`도 BUILD SUCCESSFUL(44 tasks).
 - 광범위 Core suite: 24,196 passed, 90 failed, 43 errors, 45 skipped, exit 1. 실패는 기존/환경 범위이며 이번 focused AI suite는 green이다. 이 숫자를 전체 통과로 표현하면 안 된다.
 - final Diff와 검증 증거를 독립 `checker`가 1회 검수했고 `FINAL: PASS`, `OWNER: MAIN`으로 판정했다. 위 2개 MEDIUM(빈 watchlist, USD)과 3개 LOW(evidence key, dead pipeline, owner 술어)는 비차단 후속으로 `ACCEPTED`했다.
+- S24+에서 APPROVAL/AUTO_PAPER 전환과 `003550` 상세의 `risk_preview_rejected:POSITION`, ATR 진입·손절·목표, 전략 동적 가중치를 확인했다. 검수 후 APPROVAL과 Android 자동 회전(`accelerometer_rotation=1`)을 복원했다.
 
 ## 다음 세션이 바로 할 일
 1. KRX 개장 중 APPROVAL 추천을 새로 생성하고 사용자 승인 → PAPER order → fill/reconcile까지 한 건을 실시간 시세로 확인한다. 이어 AUTO_PAPER 한 건을 별도 소액 한도로 확인한다.
@@ -58,10 +59,10 @@ Skill·외부 탐색 정책:
 3. USD owner용 US screener와 daily candle hydration을 구현하거나 설정 UI에서 KRW-only 제한을 명시한다.
 4. `StrategyVoteEvidence` weight/score key를 enum value 기준으로 고치고 payload 회귀 테스트를 추가한다.
 5. dead `MarketEventPipeline`을 clean cutover로 제거하고 `load_paper_orders`에 명시 owner predicate를 추가한다.
-6. Android S24+가 다시 온라인이면 AI픽 상세와 공시 backfill을 시각 검수하고 `adb -s 100.90.45.34:39259 shell cmd window user-rotation free`로 회전을 복원한다.
-7. PAPER 결과의 비용 포함 수익률·MDD·일일 손실·중복 주문을 충분히 검증한 뒤에만 사용자의 별도 승인으로 LIVE를 검토한다.
+6. PAPER 결과의 비용 포함 수익률·MDD·일일 손실·중복 주문을 충분히 검증한 뒤에만 사용자의 별도 승인으로 LIVE를 검토한다.
 
 ## 세션 이력
+- 2026-08-29: S24+에서 AI 두 모드·Hard Risk 상세와 NVDA SEC 공시 한국어 AI 요약을 실기기 검수하고 APPROVAL/자동 회전을 복원했다.
 - 2026-08-29: AI PAPER vertical 배포, live 100후보 hydration, historical 실제 추천과 AUTO fail-closed 검증. `e94ae620`, `237ab131`.
 - 2026-08-29: 지수 quote timestamp, SEC/DART AI 요약, market news keyset, 운영 backfill 11/11.
 - 2026-08-29: 기간별 candle interval·session cutover, news/disclosure 파이프라인과 Android 연동.
