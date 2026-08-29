@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -74,6 +75,38 @@ class ReviewedCandidate:
     score: Decimal
 
 
+async def _load_live_kr_candidates() -> tuple[TradingCandidate, ...]:
+    from app.services.invest_kr_fundamentals_snapshots.provider import (
+        TvScreenerKrFundamentalsProvider,
+    )
+
+    rows = await TvScreenerKrFundamentalsProvider(timeout=30).fetch_rows(
+        limit=_CANDIDATE_LIMIT
+    )
+    ordered = sorted(
+        rows,
+        key=lambda row: (row.price or Decimal("0")) * (row.volume or Decimal("0")),
+        reverse=True,
+    )
+    candidates: list[TradingCandidate] = []
+    seen: set[str] = set()
+    for row in ordered:
+        symbol = str(row.symbol).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        name = str(row.name or "").strip()
+        candidates.append(
+            TradingCandidate(
+                symbol=symbol,
+                market="KRX",
+                name=name if name and name != symbol else None,
+                source="tvscreener_kr",
+            )
+        )
+    return tuple(candidates)
+
+
 class AIRecommendationVerticalSlice:
     """Run one owner through existing candles, strategies, AI, and persistence."""
 
@@ -83,11 +116,15 @@ class AIRecommendationVerticalSlice:
         ai_router: OpenAiModelRouter,
         *,
         now: datetime,
+        live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] | None = None,
     ) -> None:
         self._db = db
         self._ai_router = ai_router
         self._now = _aware_utc(now)
         self._policy = AITradingPolicyService()
+        self._live_candidates_cache = (
+            live_candidates_cache if live_candidates_cache is not None else {}
+        )
 
     async def run_owner(self, owner_user_id: int) -> dict[str, object]:
         if await self._cooldown_active(owner_user_id):
@@ -115,6 +152,11 @@ class AIRecommendationVerticalSlice:
                 "candidateCount": 0,
                 "recommendationIds": [],
             }
+        candle_sync = (
+            await self._sync_missing_kr_candles(candidates)
+            if snapshot.limits.currency == "KRW"
+            else {"requested": 0, "synced": 0, "failed": 0}
+        )
 
         market_key = MarketKey.KR if snapshot.limits.currency == "KRW" else MarketKey.US
         bars_by_symbol = await DailyCandlesRepository(
@@ -162,7 +204,7 @@ class AIRecommendationVerticalSlice:
             reverse=True,
         )
         recommendation_ids: list[str] = []
-        total = len(candidates)
+        total = len(evaluated)
         for position, item in enumerate(reviewed[:_RECOMMENDATION_LIMIT], start=1):
             row = await self._persist_recommendation(
                 owner_user_id,
@@ -178,16 +220,17 @@ class AIRecommendationVerticalSlice:
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
             "candidateCount": len(candidates),
-            "candidateTargetMet": len(candidates) >= _MIN_CANDIDATE_TARGET,
+            "candidateTargetMet": len(evaluated) >= _MIN_CANDIDATE_TARGET,
             "strategyEvaluatedCount": len(evaluated),
             "aiReviewedCount": len(reviewed),
             "aiFailureCount": ai_failures,
+            "candleSync": candle_sync,
             "regime": regime.regime.value,
             "recommendationIds": recommendation_ids,
         }
-        if len(candidates) < _MIN_CANDIDATE_TARGET:
+        if len(evaluated) < _MIN_CANDIDATE_TARGET:
             result["dataPrerequisite"] = (
-                "latest screener snapshot contains fewer than 50 usable symbols"
+                "fewer than 50 screener candidates have usable daily candles"
             )
         if not actionable:
             result["skipped"] = "no_dynamic_ensemble_signal"
@@ -247,7 +290,68 @@ class AIRecommendationVerticalSlice:
                     )
                 if len(ordered) >= _CANDIDATE_LIMIT:
                     break
+        if market == "kr" and ordered and len(ordered) < _MIN_CANDIDATE_TARGET:
+            live = self._live_candidates_cache.get(market)
+            if live is None:
+                live = await _load_live_kr_candidates()
+                self._live_candidates_cache[market] = live
+            for candidate in live:
+                ordered.setdefault(candidate.symbol, candidate)
+                if len(ordered) >= _CANDIDATE_LIMIT:
+                    break
+
         return list(ordered.values())[:_CANDIDATE_LIMIT]
+
+    async def _sync_missing_kr_candles(
+        self,
+        candidates: Sequence[TradingCandidate],
+    ) -> dict[str, int]:
+        repository = DailyCandlesRepository(session=self._db)
+        existing = await repository.fetch_recent_batch(
+            market=MarketKey.KR,
+            symbols=[candidate.symbol for candidate in candidates],
+            partition="KRX",
+            count=20,
+        )
+        missing = [
+            candidate
+            for candidate in candidates
+            if len(existing.get(candidate.symbol, ())) < 20
+        ]
+        if not missing:
+            return {"requested": 0, "synced": 0, "failed": 0}
+
+        from app.services.daily_candles.converters import frame_to_rows
+        from app.services.market_data.toss_ohlcv import fetch_daily_toss_frame
+
+        semaphore = asyncio.Semaphore(6)
+
+        async def fetch(candidate: TradingCandidate):
+            async with semaphore:
+                try:
+                    frame = await fetch_daily_toss_frame(
+                        symbol=candidate.symbol,
+                        count=60,
+                    )
+                    return candidate.symbol, frame, None
+                except Exception as exc:  # noqa: BLE001 - bounded per-symbol failure
+                    return candidate.symbol, None, type(exc).__name__
+
+        fetched = await asyncio.gather(*(fetch(candidate) for candidate in missing))
+        synced = 0
+        failed = 0
+        for symbol, frame, error in fetched:
+            if error is not None or frame is None:
+                failed += 1
+                continue
+            rows = frame_to_rows(frame, symbol=symbol, partition="KRX", source="toss")
+            if len(rows) < 20:
+                failed += 1
+                continue
+            await repository.upsert_rows(market=MarketKey.KR, rows=rows)
+            synced += 1
+        await self._db.commit()
+        return {"requested": len(missing), "synced": synced, "failed": failed}
 
     def _evaluate_candidates(
         self,
@@ -258,6 +362,8 @@ class AIRecommendationVerticalSlice:
         evaluated: list[EvaluatedCandidate] = []
         for candidate in candidates:
             bars = bars_by_symbol.get(candidate.symbol, ())
+            if len(bars) < 20:
+                continue
             results = tuple(
                 strategy.evaluate(
                     bars,
@@ -422,6 +528,7 @@ class AIRecommendationVerticalSlice:
             ranking={
                 "score": str(item.score),
                 "position": position,
+                "total": total,
                 "note": (
                     f"{candidate.source} 후보 {total}개 중 dynamic ensemble, "
                     f"AI, news/DART event score {item.event_score}로 "
@@ -516,6 +623,7 @@ async def run_ai_recommendation_cycle_once(
             "candidateCount": 0,
             "skipped": "ai_unavailable",
         }
+    live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] = {}
     async with _session() as db:
         owner_ids = list(
             (
@@ -536,6 +644,7 @@ async def run_ai_recommendation_cycle_once(
                     db,
                     ai_router,
                     now=current,
+                    live_candidates_cache=live_candidates_cache,
                 ).run_owner(owner_id)
         except Exception as exc:
             result = {
