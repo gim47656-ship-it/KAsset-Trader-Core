@@ -187,9 +187,7 @@ class AITradingLimits:
             ),
         )
         object.__setattr__(self, "risk_per_trade_rate", preset.risk_per_trade_rate)
-        object.__setattr__(
-            self, "max_symbol_allocation", preset.max_symbol_allocation
-        )
+        object.__setattr__(self, "max_symbol_allocation", preset.max_symbol_allocation)
         object.__setattr__(
             self, "max_concurrent_holdings", preset.max_concurrent_holdings
         )
@@ -216,23 +214,13 @@ class AITradingLimits:
             maximum=max_custom_sells,
             default=preset.max_sells_per_day,
         )
-        object.__setattr__(
-            self, "custom_max_buys_per_day", custom_max_buys_per_day
-        )
-        object.__setattr__(
-            self, "custom_max_sells_per_day", custom_max_sells_per_day
-        )
+        object.__setattr__(self, "custom_max_buys_per_day", custom_max_buys_per_day)
+        object.__setattr__(self, "custom_max_sells_per_day", custom_max_sells_per_day)
         object.__setattr__(self, "max_buys_per_day", effective_buys)
         object.__setattr__(self, "max_sells_per_day", effective_sells)
-        object.__setattr__(
-            self, "max_orders_per_day", effective_buys + effective_sells
-        )
-        object.__setattr__(
-            self, "max_custom_buys_per_day", max_custom_buys
-        )
-        object.__setattr__(
-            self, "max_custom_sells_per_day", max_custom_sells
-        )
+        object.__setattr__(self, "max_orders_per_day", effective_buys + effective_sells)
+        object.__setattr__(self, "max_custom_buys_per_day", max_custom_buys)
+        object.__setattr__(self, "max_custom_sells_per_day", max_custom_sells)
         object.__setattr__(
             self,
             "max_custom_orders_per_day",
@@ -249,11 +237,7 @@ class AITradingLimits:
 
     @property
     def max_daily_loss_amount(self) -> Decimal:
-        return (
-            self.operating_budget
-            * self.max_daily_loss_rate_pct
-            / Decimal("100")
-        )
+        return self.operating_budget * self.max_daily_loss_rate_pct / Decimal("100")
 
     @property
     def max_symbol_allocation_pct(self) -> Decimal:
@@ -544,9 +528,7 @@ class AITradingPolicyService:
                     PaperPosition.quantity > 0,
                 )
             )
-        current_quantity = (
-            position.quantity if position is not None else Decimal("0")
-        )
+        current_quantity = position.quantity if position is not None else Decimal("0")
         current_invested = (
             position.total_invested if position is not None else Decimal("0")
         )
@@ -592,9 +574,7 @@ class AITradingPolicyService:
             caps = ",".join(cap.value for cap in sizing.limiting_caps)
             note = f"Deterministic ATR risk sizing; limitingCaps={caps}."
         else:
-            reasons = ",".join(
-                reason.code.value for reason in sizing.zero_reasons
-            )
+            reasons = ",".join(reason.code.value for reason in sizing.zero_reasons)
             note = f"Deterministic position sizing returned zero; reasons={reasons}."
         return PortfolioPlan(
             target_weight=target_weight,
@@ -695,19 +675,12 @@ class AITradingPolicyService:
             )
         )
         side_count_passed = (
-            (
-                is_buy
-                and usage.buys_today < limits.max_buys_per_day
-                and same_symbol_buys < limits.same_symbol_reentry_limit
-            )
-            or (
-                action == "SELL"
-                and usage.sells_today < limits.max_sells_per_day
-            )
-        )
+            is_buy
+            and usage.buys_today < limits.max_buys_per_day
+            and same_symbol_buys < limits.same_symbol_reentry_limit
+        ) or (action == "SELL" and usage.sells_today < limits.max_sells_per_day)
         order_count_passed = (
-            usage.orders_today < limits.max_orders_per_day
-            and side_count_passed
+            usage.orders_today < limits.max_orders_per_day and side_count_passed
         )
         checks = [
             HardRiskCheck(
@@ -903,9 +876,7 @@ def _decode_setting(value: object) -> tuple[OperatingMode, AITradingLimits]:
         max_daily_loss_rate_pct=loss_rate,
         custom_max_buys_per_day=raw.get("custom_max_buys_per_day"),
         custom_max_sells_per_day=raw.get("custom_max_sells_per_day"),
-        kill_switch=_strict_bool(
-            raw.get("kill_switch", False), "kill_switch"
-        ),
+        kill_switch=_strict_bool(raw.get("kill_switch", False), "kill_switch"),
         currency=currency,  # type: ignore[arg-type]
     )
     return mode, limits
@@ -997,9 +968,7 @@ def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
             minimum=Decimal("0.0000001"),
             maximum=Decimal("1"),
         )
-        components.append(
-            (allocation, "max_symbol_allocation", Decimal("0.05"))
-        )
+        components.append((allocation, "max_symbol_allocation", Decimal("0.05")))
     for key in (
         "max_concurrent_holdings",
         "max_buys_per_day",
@@ -1023,9 +992,7 @@ def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
                 * Decimal("100")
                 / budget
             )
-            components.append(
-                (target_rate, "daily_target_rate_pct", Decimal("0.1"))
-            )
+            components.append((target_rate, "daily_target_rate_pct", Decimal("0.1")))
         if "daily_max_loss" in raw:
             loss_rate = (
                 _percentage(
@@ -1037,9 +1004,7 @@ def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
                 * Decimal("100")
                 / budget
             )
-            components.append(
-                (loss_rate, "max_daily_loss_rate_pct", Decimal("0.5"))
-            )
+            components.append((loss_rate, "max_daily_loss_rate_pct", Decimal("0.5")))
 
     if not components:
         return _DEFAULT_RISK_LEVEL

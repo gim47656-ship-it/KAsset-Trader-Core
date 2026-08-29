@@ -124,9 +124,7 @@ async def test_disclosure_upsert_fills_later_listed_symbol_without_overwrite(
         db_session,
         [_disclosure_item(url, "유상증자결정", stock_symbol="005930")],
     )
-    stored = await db_session.scalar(
-        select(NewsArticle).where(NewsArticle.url == url)
-    )
+    stored = await db_session.scalar(select(NewsArticle).where(NewsArticle.url == url))
 
     assert counts.updated == 1
     assert stored is not None

@@ -518,19 +518,14 @@ async def upsert_disclosures(
         url in existing_by_url
         and (
             existing_by_url[url][:2] != normalized[:2]
-            or (
-                existing_by_url[url][2] is None
-                and normalized[2] is not None
-            )
+            or (existing_by_url[url][2] is None and normalized[2] is not None)
         )
         for url, normalized in normalized_by_url.items()
     )
     unchanged = len(urls) - inserted - updated
 
     for offset in range(0, len(article_values), _DISCLOSURE_UPSERT_CHUNK_SIZE):
-        article_chunk = article_values[
-            offset : offset + _DISCLOSURE_UPSERT_CHUNK_SIZE
-        ]
+        article_chunk = article_values[offset : offset + _DISCLOSURE_UPSERT_CHUNK_SIZE]
         insert_stmt = pg_insert(NewsArticle).values(article_chunk)
         excluded = insert_stmt.excluded
         await db.execute(

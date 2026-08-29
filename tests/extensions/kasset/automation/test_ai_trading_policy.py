@@ -106,9 +106,7 @@ def test_risk_level_uses_single_preset_for_all_hidden_limits(
     assert limits.max_orders_per_day == orders
     assert limits.max_custom_buys_per_day == max_custom_buys
     assert limits.max_custom_sells_per_day == max_custom_sells
-    assert (
-        limits.max_custom_orders_per_day == max_custom_buys + max_custom_sells
-    )
+    assert limits.max_custom_orders_per_day == max_custom_buys + max_custom_sells
     assert limits.same_symbol_reentry_limit == reentry
     assert limits.min_ai_confidence == Decimal("0.50")
 
@@ -124,6 +122,7 @@ def test_default_limits_are_stable_level_two() -> None:
     assert defaults.max_buys_per_day == 2
     assert defaults.max_sells_per_day == 1
     assert defaults.max_orders_per_day == 3
+
 
 @pytest.mark.parametrize(
     ("field", "value"),
@@ -554,9 +553,7 @@ async def test_order_count_gate_separates_buy_sell_and_total_limits(
         now=_NOW,
     )
 
-    order_count = next(
-        check for check in result.checks if check.rule == "ORDER_COUNT"
-    )
+    order_count = next(check for check in result.checks if check.rule == "ORDER_COUNT")
     assert order_count.passed is expected
     assert "buysToday=" in order_count.detail
     assert "sellsToday=" in order_count.detail

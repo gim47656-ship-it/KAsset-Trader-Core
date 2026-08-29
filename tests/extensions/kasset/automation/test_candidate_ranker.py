@@ -100,9 +100,7 @@ def _result_for(
         (metadata,),
         {
             key: bars
-            or _bars(
-                base=Decimal("2000") if market == "KR" else Decimal("100")
-            )
+            or _bars(base=Decimal("2000") if market == "KR" else Decimal("100"))
         },
         as_of=_NOW,
         allowed_markets=frozenset({market}),
@@ -188,19 +186,23 @@ def test_overextension_and_abnormal_volume_hangover_reduce_score() -> None:
 
 def test_benchmark_relative_strength_is_used_when_supplied() -> None:
     metadata = _metadata("AAA")
-    result = CandidateRanker().rank(
-        (metadata,),
-        {metadata.key: _bars()},
-        as_of=_NOW,
-        benchmark_returns_60={
-            "US": BenchmarkReturn(
-                market="US",
-                return_60=Decimal("0.01"),
-                data_as_of=_NOW - timedelta(hours=1),
-            )
-        },
-        allowed_markets=frozenset({"US"}),
-    ).ranked[0]
+    result = (
+        CandidateRanker()
+        .rank(
+            (metadata,),
+            {metadata.key: _bars()},
+            as_of=_NOW,
+            benchmark_returns_60={
+                "US": BenchmarkReturn(
+                    market="US",
+                    return_60=Decimal("0.01"),
+                    data_as_of=_NOW - timedelta(hours=1),
+                )
+            },
+            allowed_markets=frozenset({"US"}),
+        )
+        .ranked[0]
+    )
 
     source = next(
         item for item in result.evidence if item.code == "relative_strength_source"
@@ -217,19 +219,23 @@ def test_benchmark_relative_strength_is_used_when_supplied() -> None:
 
 def test_future_benchmark_is_ignored_without_lookahead() -> None:
     metadata = _metadata("AAA")
-    result = CandidateRanker().rank(
-        (metadata,),
-        {metadata.key: _bars()},
-        as_of=_NOW,
-        allowed_markets=frozenset({"US"}),
-        benchmark_returns_60={
-            "US": BenchmarkReturn(
-                market="US",
-                return_60=Decimal("9"),
-                data_as_of=_NOW + timedelta(seconds=1),
-            )
-        },
-    ).ranked[0]
+    result = (
+        CandidateRanker()
+        .rank(
+            (metadata,),
+            {metadata.key: _bars()},
+            as_of=_NOW,
+            allowed_markets=frozenset({"US"}),
+            benchmark_returns_60={
+                "US": BenchmarkReturn(
+                    market="US",
+                    return_60=Decimal("9"),
+                    data_as_of=_NOW + timedelta(seconds=1),
+                )
+            },
+        )
+        .ranked[0]
+    )
 
     source = next(
         item for item in result.evidence if item.code == "relative_strength_source"

@@ -88,11 +88,7 @@ async def test_signed_google_article_page_decodes_provider_before_fetch() -> Non
     google_url = "https://news.google.com/rss/articles/AU_yqLsigned-token"
     provider_url = "https://publisher.example/markets/decoded-story"
     decoded_payload = json.dumps(["garturlres", provider_url])
-    batch_body = (
-        ")]}'\n\n"
-        + json.dumps([["wrb.fr", "Fbv4je", decoded_payload]])
-        + "\n"
-    )
+    batch_body = ")]}'\n\n" + json.dumps([["wrb.fr", "Fbv4je", decoded_payload]]) + "\n"
 
     async def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, str(request.url)))

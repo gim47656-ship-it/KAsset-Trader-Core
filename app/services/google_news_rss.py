@@ -120,7 +120,6 @@ def build_symbol_query(*, market: str, name: str) -> str:
     return normalized
 
 
-
 def _published_at(value: str | None) -> datetime | None:
     if not value or not value.strip():
         return None

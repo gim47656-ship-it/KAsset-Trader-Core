@@ -291,7 +291,9 @@ async def test_single_index_missing_completed_cutoff_degrades_only_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live = AsyncMock(side_effect=AssertionError("live current must not be used"))
-    completed = AsyncMock(side_effect=AssertionError("no cutoff must not fetch current"))
+    completed = AsyncMock(
+        side_effect=AssertionError("no cutoff must not fetch current")
+    )
     history_rows = [{"date": "2026-08-28", "close": 6500.0}]
     history = AsyncMock(return_value=history_rows)
     monkeypatch.setattr(handler, "_fetch_index_us_current", live)

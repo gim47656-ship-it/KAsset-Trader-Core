@@ -155,6 +155,7 @@ async def handle_get_market_index(
 
         try:
             if meta["source"] == "naver":
+
                 async def load_kr_current() -> dict[str, Any]:
                     if completed_as_of_by_market is None:
                         return await _fetch_index_kr_current(
@@ -171,9 +172,7 @@ async def handle_get_market_index(
 
                 current_data, history = await asyncio.gather(
                     load_kr_current(),
-                    _fetch_index_kr_history(
-                        meta["naver_code"], capped_count, period
-                    ),
+                    _fetch_index_kr_history(meta["naver_code"], capped_count, period),
                 )
                 if completed_as_of_by_market is None:
                     current_data = _tag_kr_index_data_state(current_data)

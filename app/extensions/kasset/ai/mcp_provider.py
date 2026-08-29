@@ -82,9 +82,10 @@ class McpStructuredJsonClient:
         session_id: str | None = None
         session_headers: dict[str, str] | None = None
         try:
-            async with asyncio.timeout(self._timeout_seconds), httpx.AsyncClient(
-                timeout=self._timeout_seconds
-            ) as client:
+            async with (
+                asyncio.timeout(self._timeout_seconds),
+                httpx.AsyncClient(timeout=self._timeout_seconds) as client,
+            ):
                 initialize_id = uuid4().hex
                 initialize, initialize_response = await self._post_request(
                     client,
@@ -165,9 +166,7 @@ class McpStructuredJsonClient:
             ) from exc
         except Exception as exc:
             status_code = self._http_status_from_exception(exc)
-            if status_code is not None and (
-                status_code == 429 or status_code >= 500
-            ):
+            if status_code is not None and (status_code == 429 or status_code >= 500):
                 raise AiProviderUnavailable(
                     f"MCP provider unavailable: HTTP {status_code}"
                 ) from exc
@@ -176,8 +175,7 @@ class McpStructuredJsonClient:
                     f"MCP provider rejected the analysis request: HTTP {status_code}"
                 ) from exc
             raise ValueError(
-                f"MCP provider failed during session negotiation: "
-                f"{type(exc).__name__}"
+                f"MCP provider failed during session negotiation: {type(exc).__name__}"
             ) from exc
         finally:
             if session_id is not None and session_headers is not None:
@@ -227,9 +225,7 @@ class McpStructuredJsonClient:
                 f"MCP provider unavailable during {phase}: HTTP {status_code}"
             )
         if not response.is_success:
-            raise ValueError(
-                f"MCP provider rejected {phase}: HTTP {status_code}"
-            )
+            raise ValueError(f"MCP provider rejected {phase}: HTTP {status_code}")
 
     @staticmethod
     def _tool_payload(envelope: dict[str, object]) -> dict[str, object]:

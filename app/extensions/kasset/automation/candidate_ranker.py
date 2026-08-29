@@ -144,9 +144,7 @@ class CandidateMetadata:
         if market not in _SUPPORTED_MARKETS:
             raise ValueError("candidate market must be KR or US")
         sources = tuple(
-            dict.fromkeys(
-                value.strip() for value in self.sources if value.strip()
-            )
+            dict.fromkeys(value.strip() for value in self.sources if value.strip())
         )
         if not sources:
             raise ValueError("at least one candidate source is required")
@@ -469,9 +467,8 @@ class CandidateRanker:
         prior_high = max(highs[-40:-20])
         recent_low = min(lows[-20:])
         prior_low = min(lows[-40:-20])
-        higher_high_low = (
-            (Decimal("0.5") if recent_high > prior_high else _ZERO)
-            + (Decimal("0.5") if recent_low > prior_low else _ZERO)
+        higher_high_low = (Decimal("0.5") if recent_high > prior_high else _ZERO) + (
+            Decimal("0.5") if recent_low > prior_low else _ZERO
         )
 
         recent_atr = _mean(true_ranges[-14:])
@@ -503,9 +500,7 @@ class CandidateRanker:
                 (recent_volume / baseline_volume - _ONE) / Decimal("1.50")
             )
         weekly_trend, weekly_count = _weekly_trend(bounded, metadata.market)
-        liquidity = _clamp_unit(
-            (turnover / minimum_turnover - _ONE) / Decimal("9")
-        )
+        liquidity = _clamp_unit((turnover / minimum_turnover - _ONE) / Decimal("9"))
 
         breakout_line = max(highs[-21:-1])
         current_atr = max(recent_atr, Decimal("0.000001"))
@@ -689,8 +684,7 @@ class CandidateRanker:
                 score=_quantize(item.volume_hangover),
                 weight=self.config.volume_hangover_penalty_weight,
                 deduction=_quantize(
-                    item.volume_hangover
-                    * self.config.volume_hangover_penalty_weight
+                    item.volume_hangover * self.config.volume_hangover_penalty_weight
                 ),
             ),
         )
@@ -803,6 +797,7 @@ def _normalized_benchmarks(
         normalized[key] = value.return_60
     return normalized
 
+
 def _cross_sectional_strength(
     candidates: Sequence[_PreparedCandidate],
 ) -> dict[CandidateKey, Decimal]:
@@ -887,12 +882,8 @@ def _weekly_trend(
     spread_score = _clamp_unit(
         (closes[-1] / moving_average - Decimal("0.95")) / Decimal("0.20")
     )
-    return_4_week = (
-        closes[-1] / closes[-5] - _ONE if len(closes) >= 5 else _ZERO
-    )
-    return_score = _clamp_unit(
-        (return_4_week + Decimal("0.10")) / Decimal("0.30")
-    )
+    return_4_week = closes[-1] / closes[-5] - _ONE if len(closes) >= 5 else _ZERO
+    return_score = _clamp_unit((return_4_week + Decimal("0.10")) / Decimal("0.30"))
     return (spread_score + return_score) / Decimal("2"), len(closes)
 
 
@@ -972,10 +963,7 @@ def _timestamp_text(value: datetime | None) -> str | None:
     if value is None:
         return None
     return (
-        value.astimezone(UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
+        value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
 
 

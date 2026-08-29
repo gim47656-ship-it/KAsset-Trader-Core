@@ -460,6 +460,7 @@ async def test_every_disclosure_provider_maps_to_disclosure_kind(
     assert disclosure_titles == {"미국 공시"}
     assert news_titles == {"다른 시장 뉴스"}
 
+
 @pytest.mark.asyncio
 async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
     market_news_client: tuple[httpx.AsyncClient, _NewsSeed],
@@ -567,9 +568,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
             "/api/v1/market/news",
             params={"market": "KRX", "kind": "disclosure", "limit": 50},
         )
-        global_titles = {
-            item["title"] for item in global_response.json()["items"]
-        }
+        global_titles = {item["title"] for item in global_response.json()["items"]}
         assert important.title in global_titles
         assert routine.title in global_titles
         assert low_information.title not in global_titles
@@ -580,14 +579,13 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
             params={"market": "KRX", "kind": "news", "limit": 2},
         )
         assert global_news.status_code == 200
-        assert [
-            item["title"] for item in global_news.json()["items"]
-        ] == [analyzed_news.title, title_only_news.title]
+        assert [item["title"] for item in global_news.json()["items"]] == [
+            analyzed_news.title,
+            title_only_news.title,
+        ]
 
         symbol_response = await _page(client, seed, kind="disclosure", limit=20)
-        symbol_titles = {
-            item["title"] for item in symbol_response.json()["items"]
-        }
+        symbol_titles = {item["title"] for item in symbol_response.json()["items"]}
         assert low_information.title in symbol_titles
     finally:
         await db_session.rollback()

@@ -137,9 +137,7 @@ async def _summarize_after_ingest(
         ),
         reverse=True,
     )
-    candidate_urls = [
-        item.url for item in eligible[:AUTO_SUMMARY_CANDIDATE_LIMIT]
-    ]
+    candidate_urls = [item.url for item in eligible[:AUTO_SUMMARY_CANDIDATE_LIMIT]]
     try:
         result = await summarize_ingested_disclosures(db, candidate_urls)
     except Exception:

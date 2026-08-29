@@ -320,9 +320,7 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert body["indicators"][1]["value"] == "4.68"
     assert body["indicators"][5]["key"] == "KR_BOND_10Y"
     assert body["indicators"][5]["value"] == "4.25"
-    indicator_values = {
-        item["key"]: item["value"] for item in body["indicators"]
-    }
+    indicator_values = {item["key"]: item["value"] for item in body["indicators"]}
     assert indicator_values["US10Y"] == "4.68"
     assert indicator_values["WTI"] == "82.69"
     assert indicator_values["BTC"] == "109807000"
@@ -520,9 +518,7 @@ async def test_us_completed_batch_stays_unavailable_without_actual_completed_ses
             "Close": [26000.0, float("nan"), float("nan"), 26100.0],
             "Volume": [1000.0, float("nan"), float("nan"), 300.0],
         },
-        index=pd.to_datetime(
-            ["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]
-        ),
+        index=pd.to_datetime(["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]),
     )
     calls = 0
 
@@ -578,8 +574,6 @@ def test_us_completed_selector_rejects_previous_session_beyond_day_cap(
     assert selected.empty
     assert selected_as_of is None
     assert stale_fallback is False
-
-
 
 
 @pytest.mark.asyncio
@@ -639,9 +633,7 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
         }
         return {
             "indices": [
-                completed_rows[symbol]
-                for symbol in symbols
-                if symbol in completed_rows
+                completed_rows[symbol] for symbol in symbols if symbol in completed_rows
             ]
         }
 
@@ -654,9 +646,7 @@ async def test_weekend_overview_and_detail_share_latest_completed_bar(
     ) -> dict[str, Any]:
         assert (period, count) == ("day", 5)
         market = "KRX" if symbol == "KOSPI" else "US"
-        expected_end = (
-            _KR_COMPLETED_END if market == "KRX" else _US_COMPLETED_END
-        )
+        expected_end = _KR_COMPLETED_END if market == "KRX" else _US_COMPLETED_END
         if completed_as_of_by_market is None:
             live_row = dict(completed_rows[symbol])
             if symbol == "KOSPI":

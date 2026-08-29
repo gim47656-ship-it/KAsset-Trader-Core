@@ -131,9 +131,7 @@ _AVAILABLE_ROUTINES: tuple[AvailableRoutine, ...] = (
     ),
 )
 
-QuoteBatchLoader = Callable[
-    [AsyncSession, str, Sequence[str]], Awaitable[list[Quote]]
-]
+QuoteBatchLoader = Callable[[AsyncSession, str, Sequence[str]], Awaitable[list[Quote]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,9 +262,7 @@ class DailyRoutineService:
         now: datetime | None = None,
     ) -> DailyRoutineResponse:
         instant = _current_instant(now)
-        selection = await self._load_effective_selection(
-            db, owner_user_id, now=instant
-        )
+        selection = await self._load_effective_selection(db, owner_user_id, now=instant)
         alerts = await self._alerts_for_selection(
             db, owner_user_id, selection=selection, now=instant
         )
@@ -354,9 +350,7 @@ class DailyRoutineService:
         """Return today's effective alerts without changing any runtime state."""
 
         instant = _current_instant(now)
-        selection = await self._load_effective_selection(
-            db, owner_user_id, now=instant
-        )
+        selection = await self._load_effective_selection(db, owner_user_id, now=instant)
         return await self._alerts_for_selection(
             db, owner_user_id, selection=selection, now=instant
         )
@@ -388,9 +382,7 @@ class DailyRoutineService:
             )
         return _EffectiveSelection(
             routine_date=today,
-            inherited_from=(
-                None if row.routine_date == today else row.routine_date
-            ),
+            inherited_from=(None if row.routine_date == today else row.routine_date),
             enabled_routines=_canonical_routines(row.enabled_routines),
             recommendation_market_scope=_canonical_market_scope(
                 row.recommendation_market_scope
@@ -648,8 +640,7 @@ class DailyRoutineService:
             relevance_conditions.extend((*title_conditions, summary_condition))
         if "GLOBAL_FINANCIAL_NEWS" in enabled:
             relevance_conditions.extend(
-                NewsArticle.source.ilike(f"%{term}%")
-                for term in _SOURCE_SQL_TERMS
+                NewsArticle.source.ilike(f"%{term}%") for term in _SOURCE_SQL_TERMS
             )
             relevance_conditions.extend(
                 NewsArticle.source.ilike(term) for term in _SOURCE_SQL_EXACT
@@ -674,9 +665,7 @@ class DailyRoutineService:
                 )
             ).all()
         )
-        summaries = await self._load_validated_summaries(
-            db, [row.id for row in rows]
-        )
+        summaries = await self._load_validated_summaries(db, [row.id for row in rows])
 
         counts: dict[RoutineKey, int] = {
             "RAPID_RISE": 0,
@@ -698,9 +687,8 @@ class DailyRoutineService:
             kind: RoutineKey | None = None
             if "TRUMP_POLICY" in enabled and _matches_policy_topic(evidence_text):
                 kind = "TRUMP_POLICY"
-            elif (
-                "GLOBAL_FINANCIAL_NEWS" in enabled
-                and _is_allowed_financial_source(row.source)
+            elif "GLOBAL_FINANCIAL_NEWS" in enabled and _is_allowed_financial_source(
+                row.source
             ):
                 kind = "GLOBAL_FINANCIAL_NEWS"
             if kind is None or counts[kind] >= _NEWS_ALERT_LIMIT_PER_KIND:

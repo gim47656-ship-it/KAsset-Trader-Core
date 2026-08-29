@@ -337,6 +337,4 @@ async def test_portfolio_plan_sell_uses_actual_paper_holding_without_atr() -> No
 
     assert plan.target_quantity == Decimal("2.3456")
     assert plan.position_sizing is not None
-    assert plan.position_sizing.limiting_caps == (
-        PositionSizeCapCode.PAPER_HOLDING,
-    )
+    assert plan.position_sizing.limiting_caps == (PositionSizeCapCode.PAPER_HOLDING,)

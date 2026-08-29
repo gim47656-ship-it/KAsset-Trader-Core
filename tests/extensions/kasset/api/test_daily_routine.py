@@ -351,8 +351,7 @@ async def test_watchlist_price_alerts_include_exact_five_percent_boundaries_and_
     assert all(alert.occurred_at == quote_time for alert in first.alerts)
     assert all(alert.source == "TOSS_OPENAPI" for alert in first.alerts)
     assert all(
-        alert.summary is not None
-        and "AFTER_MARKET 형성 중 시세" in alert.summary
+        alert.summary is not None and "AFTER_MARKET 형성 중 시세" in alert.summary
         for alert in first.alerts
     )
 
@@ -383,7 +382,9 @@ def _news_article(
     )
 
 
-def _analysis(article_id: int, *, summary: str, created_at: datetime) -> NewsAnalysisResult:
+def _analysis(
+    article_id: int, *, summary: str, created_at: datetime
+) -> NewsAnalysisResult:
     return NewsAnalysisResult(
         article_id=article_id,
         model_name="validated-test-model",
@@ -498,7 +499,11 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
                 created_at=wall_now,
             ),
             _analysis(
-                next(article.id for article in articles if article.title == "Markets await a decision"),
+                next(
+                    article.id
+                    for article in articles
+                    if article.title == "Markets await a decision"
+                ),
                 summary="연준 정책 결정이 원문에 명시되었습니다.",
                 created_at=wall_now,
             ),
@@ -529,11 +534,12 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
     global_alerts = [
         alert for alert in response.alerts if alert.kind == "GLOBAL_FINANCIAL_NEWS"
     ]
-    trump_alerts = [
-        alert for alert in response.alerts if alert.kind == "TRUMP_POLICY"
-    ]
+    trump_alerts = [alert for alert in response.alerts if alert.kind == "TRUMP_POLICY"]
     assert len(global_alerts) == 10
-    assert sum(alert.headline == "Duplicate market bulletin" for alert in global_alerts) == 1
+    assert (
+        sum(alert.headline == "Duplicate market bulletin" for alert in global_alerts)
+        == 1
+    )
     title_only = next(
         alert for alert in global_alerts if alert.headline == "CNBC market bulletin"
     )

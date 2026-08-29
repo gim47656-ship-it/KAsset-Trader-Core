@@ -549,9 +549,7 @@ async def _fetch_indices_us_current_batch(
 
     loop = asyncio.get_running_loop()
     yf_tickers = list(
-        dict.fromkeys(
-            yf_ticker for _symbol, _name, yf_ticker in definitions
-        )
+        dict.fromkeys(yf_ticker for _symbol, _name, yf_ticker in definitions)
     )
 
     def download() -> pd.DataFrame:
@@ -597,9 +595,7 @@ async def _fetch_indices_us_current_batch(
             )
         elif "close" in ticker_frame.columns:
             selected_by_symbol[symbol] = (
-                ticker_frame.loc[ticker_frame["close"].notna()]
-                .sort_index()
-                .tail(2),
+                ticker_frame.loc[ticker_frame["close"].notna()].sort_index().tail(2),
                 None,
                 False,
             )

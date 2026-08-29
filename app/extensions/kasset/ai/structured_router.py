@@ -111,7 +111,9 @@ class AvailabilityRoutedJsonClient:
                 f"every provider in {self._name} is unavailable: "
                 + "; ".join(unavailable_reasons)
             )
-        raise AiProviderUnavailable(f"{self._name} is not configured: no provider models")
+        raise AiProviderUnavailable(
+            f"{self._name} is not configured: no provider models"
+        )
 
 
 __all__ = [

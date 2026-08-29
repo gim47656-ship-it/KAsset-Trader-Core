@@ -386,9 +386,7 @@ async def test_dart_batch_prioritizes_listed_material_disclosure(
     db_session,
 ) -> None:
     suffix = uuid.uuid4().hex
-    important_url = (
-        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828{suffix[:6]}"
-    )
+    important_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828{suffix[:6]}"
     low_value_url = (
         f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829{suffix[6:12]}"
     )

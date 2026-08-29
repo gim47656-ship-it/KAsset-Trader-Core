@@ -265,9 +265,7 @@ async def list_market_news(
             NewsArticle.feed_source.is_(None),
             NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
         )
-        has_analysis = exists().where(
-            NewsAnalysisResult.article_id == NewsArticle.id
-        )
+        has_analysis = exists().where(NewsAnalysisResult.article_id == NewsArticle.id)
         curation_rank = case(
             (and_(is_dart, important_dart), 0),
             (and_(is_disclosure, NewsArticle.summary.is_not(None)), 0),
@@ -325,8 +323,7 @@ async def list_market_news(
                     or_(
                         NewsArticle.article_published_at < cursor_published_at,
                         and_(
-                            NewsArticle.article_published_at
-                            == cursor_published_at,
+                            NewsArticle.article_published_at == cursor_published_at,
                             NewsArticle.id < cursor_id,
                         ),
                     ),

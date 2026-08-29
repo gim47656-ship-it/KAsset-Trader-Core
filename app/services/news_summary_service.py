@@ -110,9 +110,7 @@ class NewsSummaryInput:
     @property
     def source_text(self) -> str:
         return "\n".join(
-            value
-            for value in (self.title, self.source, self.body)
-            if value
+            value for value in (self.title, self.source, self.body) if value
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -212,7 +210,11 @@ def _summary_input_for(article: NewsArticle) -> NewsSummaryInput | None:
             article_content=None,
             raw_excerpt=excerpt,
         )
-    if not title or _HANGUL_RE.search(title) is not None or _LATIN_RE.search(title) is None:
+    if (
+        not title
+        or _HANGUL_RE.search(title) is not None
+        or _LATIN_RE.search(title) is None
+    ):
         return None
     return NewsSummaryInput(
         title=title,
@@ -537,7 +539,9 @@ async def _run_batch(
             if news_input is None:
                 skipped_ids.append(article_id)
                 processed += 1
-                logger.info("일반 뉴스 요약 입력 부족으로 스킵: article_id=%d", article_id)
+                logger.info(
+                    "일반 뉴스 요약 입력 부족으로 스킵: article_id=%d", article_id
+                )
                 await db.rollback()
                 continue
             if attempted >= batch_size:
@@ -623,7 +627,9 @@ async def summarize_pending_news(
     """미요약 일반 뉴스를 제한 batch로 처리하며 각 행을 독립 커밋한다."""
 
     _validate_scope(batch_size, market, feed_source)
-    effective_generator = generator if generator is not None else build_news_summary_generator()
+    effective_generator = (
+        generator if generator is not None else build_news_summary_generator()
+    )
     if effective_generator is None:
         return NewsSummaryBatchResult(
             status="unconfigured",
@@ -649,9 +655,7 @@ async def summarize_ingested_news(
 ) -> NewsSummaryBatchResult:
     """한 수집 회차의 최신 일반 뉴스만 비용 상한 안에서 자동 요약한다."""
 
-    bounded_urls = tuple(dict.fromkeys(article_urls))[
-        :AUTO_SUMMARY_CANDIDATE_LIMIT
-    ]
+    bounded_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_CANDIDATE_LIMIT]
     return await summarize_pending_news(
         db,
         batch_size=AUTO_SUMMARY_BATCH_SIZE,

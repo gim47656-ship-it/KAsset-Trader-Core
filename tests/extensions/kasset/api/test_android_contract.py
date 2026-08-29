@@ -169,9 +169,7 @@ def test_ai_briefing_returns_authenticated_unavailable_empty_contract() -> None:
 def test_ai_briefing_mobile_auth_survives_upstream_middleware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authenticate = AsyncMock(
-        return_value=SimpleNamespace(user=SimpleNamespace(id=101))
-    )
+    authenticate = AsyncMock(return_value=SimpleNamespace(user=SimpleNamespace(id=101)))
     monkeypatch.setattr(mobile_auth, "authenticate", authenticate)
 
     with _full_middleware_client() as client:

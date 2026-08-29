@@ -541,15 +541,9 @@ def run_portfolio_backtest(
 
     final_equity = state.equity_curve[-1].equity
     total_return = _q(final_equity / config.initial_cash - _ONE)
-    max_drawdown = max(
-        (point.drawdown for point in state.equity_curve), default=_ZERO
-    )
+    max_drawdown = max((point.drawdown for point in state.equity_curve), default=_ZERO)
     wins = sum(trade.net_pnl > _ZERO for trade in state.trades)
-    win_rate = (
-        _q(Decimal(wins) / Decimal(len(state.trades)))
-        if state.trades
-        else _ZERO
-    )
+    win_rate = _q(Decimal(wins) / Decimal(len(state.trades))) if state.trades else _ZERO
     expectancy = (
         _q(
             sum((trade.net_pnl for trade in state.trades), start=_ZERO)
@@ -564,9 +558,7 @@ def run_portfolio_backtest(
         end_at=final_timestamp,
     )
     excess_return = (
-        _q(total_return - benchmark_return)
-        if benchmark_return is not None
-        else None
+        _q(total_return - benchmark_return) if benchmark_return is not None else None
     )
     open_positions = tuple(
         PortfolioOpenPosition(
@@ -648,13 +640,9 @@ def run_walk_forward(
     folds: list[WalkForwardFold] = []
     fold_start = 0
     while fold_start + required <= len(timestamps):
-        train_times = timestamps[
-            fold_start : fold_start + walk_forward.train_bars
-        ]
+        train_times = timestamps[fold_start : fold_start + walk_forward.train_bars]
         test_times = timestamps[
-            fold_start
-            + walk_forward.train_bars : fold_start
-            + required
+            fold_start + walk_forward.train_bars : fold_start + required
         ]
         train_start, train_end = train_times[0], train_times[-1]
         test_start, test_end = test_times[0], test_times[-1]
@@ -776,15 +764,11 @@ def run_portfolio_diagnostics(
         )
 
     baseline = run(metadata, bars_by_candidate, config)
-    average_equity = (
-        sum((point.equity for point in baseline.equity_curve), start=_ZERO)
-        / Decimal(len(baseline.equity_curve))
-    )
+    average_equity = sum(
+        (point.equity for point in baseline.equity_curve), start=_ZERO
+    ) / Decimal(len(baseline.equity_curve))
     entry_turnover = sum(
-        (
-            trade.entry_price * trade.quantity
-            for trade in baseline.trades
-        ),
+        (trade.entry_price * trade.quantity for trade in baseline.trades),
         start=sum(
             (
                 position.entry_price * position.quantity
@@ -834,9 +818,7 @@ def run_portfolio_diagnostics(
     }
     trades_by_regime: dict[MarketRegime, list[PortfolioTrade]] = defaultdict(list)
     for trade in baseline.trades:
-        regime = entry_regimes.get(
-            (trade.market, trade.symbol, trade.entry_signal_at)
-        )
+        regime = entry_regimes.get((trade.market, trade.symbol, trade.entry_signal_at))
         if regime is not None:
             trades_by_regime[regime].append(trade)
     regime_performance = tuple(
@@ -845,8 +827,7 @@ def run_portfolio_diagnostics(
             min(trade.entry_at for trade in trades),
             max(trade.exit_at for trade in trades),
             config.initial_cash,
-            config.initial_cash
-            + sum((trade.net_pnl for trade in trades), start=_ZERO),
+            config.initial_cash + sum((trade.net_pnl for trade in trades), start=_ZERO),
             trades,
         )
         for regime, trades in sorted(
@@ -950,16 +931,10 @@ def _performance_slice(
         start_at=start_at,
         end_at=end_at,
         total_return=_q(
-            ending_equity / starting_equity - _ONE
-            if starting_equity > _ZERO
-            else _ZERO
+            ending_equity / starting_equity - _ONE if starting_equity > _ZERO else _ZERO
         ),
         trade_count=trade_count,
-        win_rate=(
-            _q(Decimal(wins) / Decimal(trade_count))
-            if trade_count
-            else _ZERO
-        ),
+        win_rate=(_q(Decimal(wins) / Decimal(trade_count)) if trade_count else _ZERO),
         net_pnl=_q(sum((trade.net_pnl for trade in trades), start=_ZERO)),
     )
 
@@ -1026,7 +1001,9 @@ def _normalize_bars(
     normalized: list[PriceBar] = []
     previous: datetime | None = None
     for raw_bar in bars:
-        timestamp = utc_datetime(raw_bar.timestamp, field_name=f"{field_name}.timestamp")
+        timestamp = utc_datetime(
+            raw_bar.timestamp, field_name=f"{field_name}.timestamp"
+        )
         if previous is not None and timestamp <= previous:
             raise ValueError(f"{field_name} timestamps must be strictly increasing")
         previous = timestamp
@@ -1350,8 +1327,7 @@ def _execute_pending_exits(
             order
             for key, order in state.pending_exits.items()
             if key in opens
-            and opens[key].timestamp
-            > state.signals[order.signal_index].signal_at
+            and opens[key].timestamp > state.signals[order.signal_index].signal_at
             and opens[key].observed_bar_count
             >= state.signals[order.signal_index].observed_bar_count
             + config.execution_delay_bars
@@ -1440,7 +1416,10 @@ def _execute_pending_exits(
 
 def _record_equity(state: _RunState, timestamp: datetime) -> None:
     market_value = sum(
-        (position.quantity * position.last_close for position in state.positions.values()),
+        (
+            position.quantity * position.last_close
+            for position in state.positions.values()
+        ),
         start=_ZERO,
     )
     equity = state.cash + market_value
@@ -1560,7 +1539,9 @@ def _build_evidence(
         ),
         BacktestEvidence(
             code="BENCHMARK",
-            value=(str(benchmark_return) if benchmark_return is not None else "missing"),
+            value=(
+                str(benchmark_return) if benchmark_return is not None else "missing"
+            ),
             detail=(
                 "Portfolio benchmark return is the equal-weighted mean of supplied "
                 "market benchmark returns; missing benchmarks leave excess return null."
@@ -1589,9 +1570,7 @@ def _execution_market(market: MarketKey) -> ExecutionMarket:
     return "KRX" if market == "KR" else "US"
 
 
-def _median_level(
-    results: Sequence[StrategyResult], field_name: str
-) -> Decimal | None:
+def _median_level(results: Sequence[StrategyResult], field_name: str) -> Decimal | None:
     values = sorted(
         value
         for result in results

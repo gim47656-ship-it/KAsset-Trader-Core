@@ -52,9 +52,7 @@ ARTICLE_MIN_TEXT_CHARS = 160
 _ARTICLE_USER_AGENT = "KAsset-Trader-Core news-ingestion/1.0"
 _ARTICLE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _GOOGLE_NEWS_HOST = "news.google.com"
-_GOOGLE_NEWS_BATCH_URL = (
-    "https://news.google.com/_/DotsSplashUi/data/batchexecute"
-)
+_GOOGLE_NEWS_BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
 _GOOGLE_NEWS_BATCH_RPC = "Fbv4je"
 _PAYWALL_RE = re.compile(
     r"(?:subscribe|sign in|register)\s+to\s+continue|"
@@ -83,6 +81,7 @@ class _CollectedFeeds:
 
 
 type ClientOrNone = GoogleNewsHttpClient | None
+
 
 class NewsArticleFetchError(RuntimeError):
     """기사 원문을 안전 경계 안에서 확보하지 못했음을 나타낸다."""
@@ -142,7 +141,9 @@ async def _assert_public_article_target(url: str, resolver: HostResolver) -> str
         if any(not ipaddress.ip_address(address).is_global for address in addresses):
             raise NewsArticleFetchError("article host resolves to a non-public address")
     except ValueError as exc:
-        raise NewsArticleFetchError("article host DNS returned an invalid address") from exc
+        raise NewsArticleFetchError(
+            "article host DNS returned an invalid address"
+        ) from exc
     return host
 
 
@@ -440,9 +441,7 @@ class GoogleNewsArticleFetcher:
                     rules = robotparser.RobotFileParser()
                     rules.set_url(robots_url)
                     rules.parse(
-                        b"".join(chunks)
-                        .decode("utf-8", errors="replace")
-                        .splitlines()
+                        b"".join(chunks).decode("utf-8", errors="replace").splitlines()
                     )
             finally:
                 await response.aclose()
@@ -665,11 +664,7 @@ async def _enrich_collected_articles(
         return collected
     fetched = dict(await asyncio.gather(*(enrich(item) for item in candidates)))
     enriched_items = {
-        url: (
-            replace(item, article_content=fetched[url])
-            if fetched.get(url)
-            else item
-        )
+        url: (replace(item, article_content=fetched[url]) if fetched.get(url) else item)
         for url, item in collected.articles_by_url.items()
     }
     return replace(collected, articles_by_url=enriched_items)

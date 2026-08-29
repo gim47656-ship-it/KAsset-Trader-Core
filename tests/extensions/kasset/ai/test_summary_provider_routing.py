@@ -56,9 +56,7 @@ def _response(payload: dict[str, object]) -> httpx.Response:
             "output": [
                 {
                     "type": "message",
-                    "content": [
-                        {"type": "output_text", "text": json.dumps(payload)}
-                    ],
+                    "content": [{"type": "output_text", "text": json.dumps(payload)}],
                 }
             ]
         },
@@ -174,9 +172,7 @@ async def test_news_summary_falls_back_direct_to_openrouter_and_audits_model(
     assert generated.model_name == "z-ai/glm-5.3-flash"
     assert len(direct.requests) == 1
     assert len(openrouter.requests) == 1
-    assert json.loads(openrouter.requests[0].content)["model"] == (
-        "z-ai/glm-5.3-flash"
-    )
+    assert json.loads(openrouter.requests[0].content)["model"] == ("z-ai/glm-5.3-flash")
     assert "reasoning" not in json.loads(openrouter.requests[0].content)
 
 
@@ -191,8 +187,7 @@ async def test_disclosure_summary_falls_back_direct_to_openrouter(
             _response(
                 {
                     "summary": (
-                        "테스트상장사가 공급 계약을 체결했다. "
-                        "계약 상대방은 샘플회사다."
+                        "테스트상장사가 공급 계약을 체결했다. 계약 상대방은 샘플회사다."
                     )
                 }
             )
@@ -214,9 +209,7 @@ async def test_disclosure_summary_falls_back_direct_to_openrouter(
         )
     )
 
-    assert summary == (
-        "테스트상장사가 공급 계약을 체결했다. 계약 상대방은 샘플회사다."
-    )
+    assert summary == ("테스트상장사가 공급 계약을 체결했다. 계약 상대방은 샘플회사다.")
     assert len(direct.requests) == 1
     assert len(openrouter.requests) == 1
 
@@ -356,8 +349,7 @@ async def test_summary_safety_validation_does_not_fallback(
             _response(
                 {
                     "summary": (
-                        "테스트 기업 매수를 추천한다. "
-                        "회사는 공급 확대 계획을 밝혔다."
+                        "테스트 기업 매수를 추천한다. 회사는 공급 확대 계획을 밝혔다."
                     ),
                     "sentiment": "positive",
                     "confidence": 75,

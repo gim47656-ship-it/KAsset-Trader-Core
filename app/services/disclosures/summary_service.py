@@ -179,9 +179,8 @@ def _duplicates_title(sentence: str, title: str) -> bool:
 
 def _correction_comparison_required(body: str) -> bool:
     body_key = re.sub(r"\s+", "", body)
-    return (
-        ("정정전" in body_key or "변경전" in body_key)
-        and ("정정후" in body_key or "변경후" in body_key)
+    return ("정정전" in body_key or "변경전" in body_key) and (
+        "정정후" in body_key or "변경후" in body_key
     )
 
 
@@ -541,9 +540,7 @@ async def summarize_ingested_disclosures(
     article_urls: Sequence[str],
 ) -> DisclosureSummaryBatchResult:
     """한 수집 회차의 최신 공시만 비용 상한 안에서 자동 요약한다."""
-    bounded_urls = tuple(dict.fromkeys(article_urls))[
-        :AUTO_SUMMARY_CANDIDATE_LIMIT
-    ]
+    bounded_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_CANDIDATE_LIMIT]
     return await summarize_pending_disclosures(
         db,
         batch_size=AUTO_SUMMARY_BATCH_SIZE,

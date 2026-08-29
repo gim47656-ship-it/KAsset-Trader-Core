@@ -37,9 +37,7 @@ _DART_LANDING_PATH = "/dsaf001/main.do"
 _DART_VIEWER_PATH = "/report/viewer.do"
 _DART_USER_AGENT = "KAsset-Trader-Core disclosure-summary/1.0"
 _OPENDART_DOCUMENT_URL = "https://opendart.fss.or.kr/api/document.xml"
-_DART_DOCUMENT_EXTENSIONS = frozenset(
-    {".htm", ".html", ".txt", ".xhtml", ".xml"}
-)
+_DART_DOCUMENT_EXTENSIONS = frozenset({".htm", ".html", ".txt", ".xhtml", ".xml"})
 _OPENDART_ERROR_MESSAGES = {
     "010": "unregistered API key",
     "011": "unavailable API key",
@@ -342,11 +340,12 @@ def _dart_receipt_number(landing: _FetchedHtml) -> str:
         urlsplit(landing.url).query,
         keep_blank_values=True,
     ).get("rcpNo", ())
-    if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
-        raise DisclosureContentError(
-            "DART landing URL must contain one numeric rcpNo"
-        )
-    return values[0]
+    if len(values) != 1:
+        raise DisclosureContentError("DART landing URL must contain one numeric rcpNo")
+    receipt_number = next(iter(values))
+    if re.fullmatch(r"[0-9]+", receipt_number) is None:
+        raise DisclosureContentError("DART landing URL must contain one numeric rcpNo")
+    return receipt_number
 
 
 async def _read_bounded_document_response(response: httpx.Response) -> bytes:
@@ -500,7 +499,7 @@ def _decode_document_member(payload: bytes) -> str:
         return payload.decode("utf-16", errors="replace")
 
     declaration = re.search(
-        br"(?:encoding|charset)\s*=\s*[\"']?\s*([A-Za-z0-9._-]+)",
+        rb"(?:encoding|charset)\s*=\s*[\"']?\s*([A-Za-z0-9._-]+)",
         payload[:1024],
         re.IGNORECASE,
     )
@@ -519,9 +518,7 @@ def _decode_document_member(payload: bytes) -> str:
         if encoding is not None:
             encodings.append(encoding)
     encodings.extend(
-        encoding
-        for encoding in ("utf-8", "cp949")
-        if encoding not in encodings
+        encoding for encoding in ("utf-8", "cp949") if encoding not in encodings
     )
     for encoding in encodings:
         try:
@@ -579,9 +576,7 @@ def _zip_member_count(payload: bytes) -> int:
                     or entries_on_disk != total_entries
                     or central_directory_offset + central_directory_size != offset
                 ):
-                    raise DisclosureContentError(
-                        "OpenDART document ZIP is invalid"
-                    )
+                    raise DisclosureContentError("OpenDART document ZIP is invalid")
 
                 cursor = central_directory_offset
                 parsed_entries = 0
@@ -590,9 +585,7 @@ def _zip_member_count(payload: bytes) -> int:
                         cursor + 46 > offset
                         or payload[cursor : cursor + 4] != b"PK\x01\x02"
                     ):
-                        raise DisclosureContentError(
-                            "OpenDART document ZIP is invalid"
-                        )
+                        raise DisclosureContentError("OpenDART document ZIP is invalid")
                     variable_length = sum(
                         int.from_bytes(
                             payload[cursor + start : cursor + start + 2],
@@ -607,18 +600,14 @@ def _zip_member_count(payload: bytes) -> int:
                             "OpenDART document ZIP has too many members"
                         )
                 if cursor != offset or parsed_entries != total_entries:
-                    raise DisclosureContentError(
-                        "OpenDART document ZIP is invalid"
-                    )
+                    raise DisclosureContentError("OpenDART document ZIP is invalid")
                 return total_entries
         search_end = offset
     raise DisclosureContentError("OpenDART document ZIP is invalid")
 
 
 def _disclosure_text_score(text: str) -> int:
-    correction_hits = sum(
-        text.count(marker) for marker in _CORRECTION_TEXT_MARKERS
-    )
+    correction_hits = sum(text.count(marker) for marker in _CORRECTION_TEXT_MARKERS)
     material_hits = sum(text.count(marker) for marker in _MATERIAL_TEXT_MARKERS)
     numeric_rows = sum(
         1
@@ -630,14 +619,10 @@ def _disclosure_text_score(text: str) -> int:
 
 def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
     if not payload.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
-        raise DisclosureContentError(
-            "OpenDART document response is not a ZIP archive"
-        )
+        raise DisclosureContentError("OpenDART document response is not a ZIP archive")
     declared_members = _zip_member_count(payload)
     if declared_members > DART_DOCUMENT_MAX_MEMBERS:
-        raise DisclosureContentError(
-            "OpenDART document ZIP has too many members"
-        )
+        raise DisclosureContentError("OpenDART document ZIP has too many members")
     try:
         archive = zipfile.ZipFile(io.BytesIO(payload))
         infos = archive.infolist()
@@ -645,13 +630,8 @@ def _extract_opendart_document_text(payload: bytes, *, max_chars: int) -> str:
         raise DisclosureContentError("OpenDART document ZIP is invalid") from exc
 
     with archive:
-        if (
-            len(infos) != declared_members
-            or len(infos) > DART_DOCUMENT_MAX_MEMBERS
-        ):
-            raise DisclosureContentError(
-                "OpenDART document ZIP has too many members"
-            )
+        if len(infos) != declared_members or len(infos) > DART_DOCUMENT_MAX_MEMBERS:
+            raise DisclosureContentError("OpenDART document ZIP has too many members")
         total_uncompressed = sum(info.file_size for info in infos)
         if total_uncompressed > DART_DOCUMENT_MAX_UNCOMPRESSED_BYTES:
             raise DisclosureContentError(
@@ -742,14 +722,10 @@ def _prioritized_disclosure_lines(lines: list[str]) -> list[str]:
     for index, line in enumerate(unique_lines):
         if any(marker in line for marker in _CORRECTION_TEXT_MARKERS):
             correction_hits.append(index)
-            context.update(
-                range(max(0, index - 1), min(len(unique_lines), index + 2))
-            )
+            context.update(range(max(0, index - 1), min(len(unique_lines), index + 2)))
         if any(marker in line for marker in _MATERIAL_TEXT_MARKERS):
             material_hits.append(index)
-            context.update(
-                range(max(0, index - 1), min(len(unique_lines), index + 2))
-            )
+            context.update(range(max(0, index - 1), min(len(unique_lines), index + 2)))
     direct_hits = set(correction_hits) | set(material_hits)
     priority = [
         *dict.fromkeys(correction_hits),
@@ -763,11 +739,7 @@ def _prioritized_disclosure_lines(lines: list[str]) -> list[str]:
     priority_set = set(priority)
     return [
         *(unique_lines[index] for index in priority),
-        *(
-            line
-            for index, line in enumerate(unique_lines)
-            if index not in priority_set
-        ),
+        *(line for index, line in enumerate(unique_lines) if index not in priority_set),
     ]
 
 

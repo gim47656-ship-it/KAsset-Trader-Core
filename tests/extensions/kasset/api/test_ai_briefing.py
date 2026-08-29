@@ -79,7 +79,6 @@ class _FakeResult:
     def first(self) -> Any | None:
         return self._rows[0] if self._rows else None
 
-
     def scalar_one(self) -> Any:
         if len(self._rows) != 1:
             raise RuntimeError("expected exactly one fake row")
@@ -109,9 +108,7 @@ class _FakeSession:
     async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any | None:
         return (await self.execute(statement, *args, **kwargs)).first()
 
-    async def scalars(
-        self, statement: Any, *args: Any, **kwargs: Any
-    ) -> _FakeResult:
+    async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> _FakeResult:
         return (await self.execute(statement, *args, **kwargs)).scalars()
 
 
@@ -278,7 +275,6 @@ def test_empty_stores_return_http_200_with_truthful_empty_state() -> None:
     )
     assert body["briefing"]["id"] is None
     assert body["briefing"]["dataStatus"] == "unknown"
-
 
 
 def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(

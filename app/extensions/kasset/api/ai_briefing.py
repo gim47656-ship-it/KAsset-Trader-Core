@@ -459,9 +459,7 @@ async def build_mobile_ai_briefing(
 
     return AiBriefingResponse(
         status=(
-            "available"
-            if (news.items or research.items or routine_alerts)
-            else "empty"
+            "available" if (news.items or research.items or routine_alerts) else "empty"
         ),
         as_of=iso_z(instant),
         news=news,

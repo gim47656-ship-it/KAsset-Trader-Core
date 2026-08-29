@@ -323,12 +323,8 @@ class _AITradingSettingsFields(BaseModel):
 
     risk_level: int = Field(ge=1, le=5, strict=True, alias="riskLevel")
     operating_budget: Decimal = Field(gt=0, alias="operatingBudget")
-    daily_target_rate_pct: Decimal = Field(
-        ge=0, le=10, alias="dailyTargetRatePct"
-    )
-    max_daily_loss_rate_pct: Decimal = Field(
-        ge=0, le=20, alias="maxDailyLossRatePct"
-    )
+    daily_target_rate_pct: Decimal = Field(ge=0, le=10, alias="dailyTargetRatePct")
+    max_daily_loss_rate_pct: Decimal = Field(ge=0, le=20, alias="maxDailyLossRatePct")
     kill_switch: bool = Field(alias="killSwitch")
     currency: Literal["KRW", "USD"]
     custom_max_buys_per_day: int | None = Field(
@@ -370,9 +366,7 @@ class AITradingDerivedLimits(BaseModel):
     max_custom_sells_per_day: int = Field(ge=1, alias="maxCustomSellsPerDay")
     max_custom_orders_per_day: int = Field(ge=2, alias="maxCustomOrdersPerDay")
     risk_per_trade_rate: Decimal = Field(ge=0, le=1, alias="riskPerTradeRate")
-    same_symbol_reentry_limit: int = Field(
-        ge=0, alias="sameSymbolReentryLimit"
-    )
+    same_symbol_reentry_limit: int = Field(ge=0, alias="sameSymbolReentryLimit")
     min_ai_confidence: Decimal = Field(ge=0, le=1, alias="minAiConfidence")
 
     @field_serializer(

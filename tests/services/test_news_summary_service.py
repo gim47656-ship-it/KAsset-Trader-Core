@@ -151,8 +151,7 @@ async def test_openai_generator_translates_foreign_title_when_body_is_missing() 
 @pytest.mark.asyncio
 async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
     raw_copy = (
-        "회사는 신규 제품 출시 계획을 발표했다. "
-        "출시 일정은 시장 상황에 따라 정해진다."
+        "회사는 신규 제품 출시 계획을 발표했다. 출시 일정은 시장 상황에 따라 정해진다."
     )
     copy_generator = OpenAiNewsSummaryGenerator(
         FakeResponsesClient(
@@ -200,7 +199,9 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_generator_rejects_template_language_and_multi_sentence_title_fallback() -> None:
+async def test_generator_rejects_template_language_and_multi_sentence_title_fallback() -> (
+    None
+):
     body_news = NewsSummaryInput(
         title="삼성전자 공급 계약 체결",
         source="Example Wire",
@@ -322,9 +323,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     assert first.skipped_insufficient == 1
     assert first.failed == 1
     stored = await db_session.scalar(
-        select(NewsAnalysisResult).where(
-            NewsAnalysisResult.article_id == success_id
-        )
+        select(NewsAnalysisResult).where(NewsAnalysisResult.article_id == success_id)
     )
     assert stored is not None
     assert stored.summary == (

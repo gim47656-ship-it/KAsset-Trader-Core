@@ -262,9 +262,7 @@ async def test_dart_landing_without_viewer_uses_opendart_document_zip(
 ) -> None:
     api_key = "test-opendart-secret"
     monkeypatch.setattr(settings, "opendart_api_key", api_key)
-    landing_url = (
-        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
-    )
+    landing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
     document = (
         '<?xml version="1.0" encoding="EUC-KR"?>'
         "<DOCUMENT><TITLE>주요사항보고서</TITLE>"
@@ -294,9 +292,7 @@ async def test_dart_landing_without_viewer_uses_opendart_document_zip(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        text = await DisclosureTextFetcher(client, max_text_chars=80).fetch(
-            landing_url
-        )
+        text = await DisclosureTextFetcher(client, max_text_chars=80).fetch(landing_url)
 
     assert "대규모 한국어 공급 계약" in text
     assert "계약 금액과 이행 기간" in text
@@ -306,15 +302,14 @@ async def test_dart_landing_without_viewer_uses_opendart_document_zip(
         ("opendart.fss.or.kr", "/api/document.xml"),
     ]
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_dart_zip_prioritizes_correction_table_before_long_noise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "opendart_api_key", "test-opendart-secret")
-    landing_url = (
-        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829009999"
-    )
+    landing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260829009999"
     noise = "반복 안내 문구와 서식 설명 " * 600
     document = (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -376,9 +371,7 @@ async def test_dart_document_fallback_maps_api_error_without_secret(
             request=request,
         )
 
-    landing_url = (
-        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
-    )
+    landing_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(DisclosureContentError, match=r"status 013") as exc_info:
             await DisclosureTextFetcher(client).fetch(landing_url)
@@ -424,9 +417,7 @@ async def test_dart_document_fallback_rejects_invalid_or_oversized_response(
             request=request,
         )
 
-    landing_url = (
-        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
-    )
+    landing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(DisclosureContentError, match=error_match):
             await DisclosureTextFetcher(client).fetch(landing_url)
@@ -448,9 +439,7 @@ async def test_dart_document_fallback_rejects_unsafe_zip_member_path(
             return httpx.Response(200, text="<html>no viewer</html>", request=request)
         return httpx.Response(200, content=unsafe_zip, request=request)
 
-    landing_url = (
-        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
-    )
+    landing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(DisclosureContentError, match="unsafe member path"):
             await DisclosureTextFetcher(client).fetch(landing_url)
@@ -506,9 +495,7 @@ async def test_dart_document_fallback_does_not_follow_redirect(
             request=request,
         )
 
-    landing_url = (
-        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
-    )
+    landing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260828001916"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(DisclosureContentError, match="redirects are not allowed"):
             await DisclosureTextFetcher(client).fetch(landing_url)

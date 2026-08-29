@@ -88,9 +88,7 @@ class PositionSizingConfig:
         ):
             value = getattr(self, field_name)
             if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
-                raise ValueError(
-                    f"{field_name} must be a nonnegative finite Decimal"
-                )
+                raise ValueError(f"{field_name} must be a nonnegative finite Decimal")
         for field_name in (
             "max_average_volume_participation",
             "max_average_turnover_participation",
@@ -349,7 +347,10 @@ def _buy_reasons(
                 "strategy stop must be a positive finite Decimal",
             )
         )
-    elif _is_finite_decimal(request.entry_price) and request.strategy_stop >= request.entry_price:
+    elif (
+        _is_finite_decimal(request.entry_price)
+        and request.strategy_stop >= request.entry_price
+    ):
         reasons.append(
             _reason(
                 PositionSizingZeroCode.INVERTED_STOP,
@@ -533,7 +534,9 @@ def _calculate_buy(
     multiplier = config.regime_multiplier(regime)
     risk_per_unit = entry - stop
     try:
-        risk_budget = request.operating_budget * request.risk_per_trade_rate * multiplier
+        risk_budget = (
+            request.operating_budget * request.risk_per_trade_rate * multiplier
+        )
         remaining_symbol_notional = max(
             _ZERO,
             request.operating_budget * request.max_symbol_allocation
@@ -543,7 +546,9 @@ def _calculate_buy(
             _ZERO, request.operating_budget - request.budget_used
         )
         caps = [
-            PositionSizeCap(PositionSizeCapCode.RISK_BUDGET, risk_budget / risk_per_unit),
+            PositionSizeCap(
+                PositionSizeCapCode.RISK_BUDGET, risk_budget / risk_per_unit
+            ),
             PositionSizeCap(
                 PositionSizeCapCode.SYMBOL_ALLOCATION,
                 remaining_symbol_notional / entry,
@@ -559,8 +564,7 @@ def _calculate_buy(
             (
                 PositionSizeCap(
                     PositionSizeCapCode.AVERAGE_VOLUME,
-                    request.average_volume
-                    * config.max_average_volume_participation,
+                    request.average_volume * config.max_average_volume_participation,
                 ),
                 PositionSizeCap(
                     PositionSizeCapCode.AVERAGE_TURNOVER,
