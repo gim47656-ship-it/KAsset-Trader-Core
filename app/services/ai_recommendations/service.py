@@ -52,6 +52,7 @@ def _utc_now() -> datetime:
 class AIRecommendationService:
     MAX_LIMIT = 100
     PAPER_EXECUTION_LEASE = timedelta(minutes=5)
+    PAPER_EXECUTION_MAX_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -264,6 +265,16 @@ class AIRecommendationService:
         )
         if row is None:
             await self._session.rollback()
+            return None
+        if row.paper_execution_attempt_count >= self.PAPER_EXECUTION_MAX_ATTEMPTS:
+            row.paper_execution_status = RecommendationExecutionStatus.FAILED
+            row.paper_execution_token = None
+            row.paper_execution_lease_expires_at = None
+            row.paper_execution_completed_at = claimed_at
+            row.paper_order_id = None
+            row.paper_execution_error = "paper_execution_attempt_limit_exceeded"
+            row.updated_at = claimed_at
+            await self._session.commit()
             return None
         row.paper_execution_status = RecommendationExecutionStatus.CLAIMED
         row.paper_execution_token = uuid4().hex
