@@ -1,8 +1,28 @@
 # HANDOFF — KAsset-Trader-Core
 
-갱신: 2026-08-29 심야 (`range=1D` 분봉 서빙 배포·마이그레이션 테스트 프라이밍·shard exact-cover·CI 전체 초록)
+갱신: 2026-08-29 심야 (기간별 캔들·뉴스/공시 배포 후 Google News 운영 수집 확인)
 
-## 이번 세션에서 한 일 (2026-08-29 심야)
+## 이번 세션에서 한 일 (2026-08-29 심야, 후속 확인)
+
+- 운영 서버 `/opt/kasset-trader-core`는 `e2c31eac`이고 working tree가 깨끗하다.
+  `api/db/redis/mcp`는 healthy, `worker/scheduler/caddy`는 running이다.
+- Google News RSS 수집을 운영 DB에 실제 실행했다.
+
+```text
+KR  005930       → status=success, inserted=100, skipped=8,  symbol_count=1
+US  NVDA, GOOGL  → status=success, inserted=199, skipped=3, symbol_count=2
+```
+
+- 로컬에는 커밋 `e2c31eac`에서 빠진 수집기 서비스 테스트 3개가 untracked로 남아 있다:
+  `tests/services/test_{dart_disclosure,google_news_rss,sec_edgar}_ingestion.py`.
+  운영 이미지 기반 임시 테스트 컨테이너에서 재검증을 시도했으나 프로젝트
+  `ROB-1880 socket guard`가 Docker DB 주소 연결을 `ExternalSocketBlocked`로 차단했다.
+  같은 실패가 2회 반복되어 중단했다. 테스트 assertion 실패가 아니라 환경 차단이지만,
+  fresh 통과 증거가 없으므로 이 3파일은 커밋하지 않고 보존했다.
+- 로컬의 기존 `.tmp-tools/`와 `.smoke-out/rob179-feed-research-evidence.json` 변경도
+  이번 범위가 아니므로 그대로 뒀다.
+
+## 직전 세션에서 한 일 (2026-08-29 심야)
 
 ### 0. 요약 — CI가 처음으로 전 잡 초록이 됐고, `1일` 분봉이 운영에 붙었다
 
