@@ -11,7 +11,9 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
+    Integer,
     Text,
     UniqueConstraint,
 )
@@ -101,26 +103,46 @@ class AIRecommendation(Base):
         ),
         CheckConstraint(
             "(paper_execution_status IS NULL "
+            "AND paper_execution_token IS NULL "
             "AND paper_execution_claimed_at IS NULL "
+            "AND paper_execution_lease_expires_at IS NULL "
+            "AND paper_execution_attempt_count = 0 "
             "AND paper_execution_completed_at IS NULL "
             "AND paper_order_id IS NULL "
             "AND paper_execution_error IS NULL) OR "
             "(paper_execution_status = 'CLAIMED' "
+            "AND length(btrim(paper_execution_token)) > 0 "
             "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_lease_expires_at > paper_execution_claimed_at "
+            "AND paper_execution_attempt_count > 0 "
             "AND paper_execution_completed_at IS NULL "
             "AND paper_order_id IS NULL "
             "AND paper_execution_error IS NULL) OR "
             "(paper_execution_status = 'SUCCEEDED' "
+            "AND paper_execution_token IS NULL "
             "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_lease_expires_at IS NULL "
+            "AND paper_execution_attempt_count > 0 "
             "AND paper_execution_completed_at IS NOT NULL "
             "AND paper_order_id IS NOT NULL "
             "AND paper_execution_error IS NULL) OR "
             "(paper_execution_status = 'FAILED' "
+            "AND paper_execution_token IS NULL "
             "AND paper_execution_claimed_at IS NOT NULL "
+            "AND paper_execution_lease_expires_at IS NULL "
+            "AND paper_execution_attempt_count > 0 "
             "AND paper_execution_completed_at IS NOT NULL "
             "AND paper_order_id IS NULL "
             "AND length(btrim(paper_execution_error)) > 0)",
             name="paper_execution_coherent",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "paper_order_id"],
+            [
+                "kasset_android_paper_orders.owner_user_id",
+                "kasset_android_paper_orders.id",
+            ],
+            name="fk_ai_recommendation_owner_paper_order",
         ),
         UniqueConstraint(
             "owner_user_id",
@@ -196,9 +218,20 @@ class AIRecommendation(Base):
         nullable=True,
     )
     paper_execution_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    paper_execution_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     paper_execution_claimed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,
+    )
+    paper_execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    paper_execution_attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
     paper_execution_completed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),

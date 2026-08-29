@@ -20,7 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 
 from app.models.base import Base
 from app.models.trading import InstrumentType
@@ -110,6 +110,13 @@ class PaperTrade(Base):
         CheckConstraint("currency IN ('KRW','USD')", name="paper_trades_currency"),
         Index("ix_paper_trades_account_symbol", "account_id", "symbol"),
         Index("ix_paper_trades_account_executed_at", "account_id", "executed_at"),
+        Index(
+            "uq_paper_trades_account_correlation",
+            "account_id",
+            "correlation_id",
+            unique=True,
+            postgresql_where=text("correlation_id IS NOT NULL"),
+        ),
         {"schema": "paper"},
     )
 

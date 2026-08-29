@@ -111,12 +111,16 @@ class PaperOrderFacade:
         if not request.client_order_id:
             raise MobileApiError(422, "VALIDATION_ERROR", "clientOrderId가 필요합니다.")
         async with self._transition_lock:
-            existing = await self._by_client_id(
+            existing = await self.get_by_client_order_id(
                 db, owner_user_id, request.client_order_id
             )
             if existing is not None:
                 return (
-                    await self.envelope(db, owner_user_id, existing, replay=True),
+                    await self._reconcile_existing(
+                        db,
+                        owner_user_id,
+                        existing,
+                    ),
                     True,
                 )
 
@@ -161,13 +165,17 @@ class PaperOrderFacade:
                 await db.commit()
             except IntegrityError:
                 await db.rollback()
-                existing = await self._by_client_id(
+                existing = await self.get_by_client_order_id(
                     db, owner_user_id, request.client_order_id
                 )
                 if existing is None:
                     raise
                 return (
-                    await self.envelope(db, owner_user_id, existing, replay=True),
+                    await self._reconcile_existing(
+                        db,
+                        owner_user_id,
+                        existing,
+                    ),
                     True,
                 )
             await db.refresh(order)
@@ -185,8 +193,16 @@ class PaperOrderFacade:
                     False,
                 )
 
-            await self._fill(db, owner_user_id, order, market_price)
-            return await self.envelope(db, owner_user_id, order, risk=risk), False
+            filled_order = await self._fill(db, owner_user_id, order, market_price)
+            return (
+                await self.envelope(
+                    db,
+                    owner_user_id,
+                    filled_order or order,
+                    risk=risk,
+                ),
+                False,
+            )
 
     async def cancel(
         self,
@@ -276,17 +292,42 @@ class PaperOrderFacade:
                     await db.refresh(order)
                 else:
                     await db.commit()
-                    await self._fill(
+                    filled_order = await self._fill(
                         db,
                         owner_user_id,
                         order,
                         Decimal(quote.price),
                         fill_quantity=remaining,
                     )
+                    if filled_order is not None:
+                        order = filled_order
             else:
                 await db.commit()
                 await db.refresh(order)
             return await self.envelope(db, owner_user_id, order, risk=risk)
+
+    async def get_by_client_order_id(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        client_order_id: str,
+    ) -> AndroidPaperOrder | None:
+        result = await db.execute(
+            select(AndroidPaperOrder).where(
+                AndroidPaperOrder.owner_user_id == owner_user_id,
+                AndroidPaperOrder.client_order_id == client_order_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def reconcile(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        order: AndroidPaperOrder,
+    ) -> OrderEnvelope:
+        async with self._transition_lock:
+            return await self._reconcile_existing(db, owner_user_id, order)
 
     async def get(
         self,
@@ -389,9 +430,24 @@ class PaperOrderFacade:
         market_price: Decimal,
         *,
         fill_quantity: Decimal | None = None,
-    ) -> None:
+    ) -> AndroidPaperOrder:
         self._assert_owned(order, owner_user_id)
+        order_id = order.id
+        account_id = order.paper_account_id
         prior_filled = Decimal(order.filled_quantity)
+        correlation_id = (
+            order_id
+            if prior_filled == 0
+            else f"{order_id}:fill:{format(prior_filled, 'f')}"
+        )
+        existing_trade = await self._trade_by_correlation(
+            db,
+            account_id,
+            correlation_id,
+        )
+        if existing_trade is not None:
+            return await self._apply_trade_metadata(db, order, existing_trade)
+
         execution_quantity = (
             fill_quantity
             if fill_quantity is not None
@@ -400,15 +456,26 @@ class PaperOrderFacade:
         service = PaperTradingService(db)
         try:
             await service.execute_order(
-                account_id=order.paper_account_id,
+                account_id=account_id,
                 symbol=order.symbol,
                 side=order.side.lower(),
                 order_type=("market" if order.order_type == "MARKET" else "limit"),
                 quantity=execution_quantity,
                 price=(market_price if order.order_type == "LIMIT" else None),
                 reason="KAsset Android PAPER",
-                correlation_id=order.id,
+                correlation_id=correlation_id,
             )
+        except IntegrityError:
+            await db.rollback()
+            trade = await self._trade_by_correlation(
+                db,
+                account_id,
+                correlation_id,
+            )
+            if trade is None:
+                raise
+            order = await self.get(db, owner_user_id, order_id)
+            return await self._apply_trade_metadata(db, order, trade)
         except ValueError as err:
             order.status = "REJECTED"
             order.reject_reason = "PAPER 주문 조건을 충족하지 못했습니다."
@@ -416,21 +483,48 @@ class PaperOrderFacade:
             raise MobileApiError(
                 409, "BROKER_ERROR", "PAPER 주문을 실행하지 못했습니다."
             ) from err
-        result = await db.execute(
-            select(PaperTrade).where(
-                PaperTrade.account_id == order.paper_account_id,
-                PaperTrade.correlation_id == order.id,
-            )
-        )
-        trade = result.scalar_one_or_none()
+
+        trade = await self._trade_by_correlation(db, account_id, correlation_id)
         if trade is None:
-            order.status = "REJECTED"
-            order.reject_reason = "PAPER 체결 기록을 확인하지 못했습니다."
-            await db.commit()
             raise MobileApiError(
                 500, "BROKER_ERROR", "PAPER 체결 결과를 확인하지 못했습니다."
             )
+        return await self._apply_trade_metadata(db, order, trade)
+
+    @staticmethod
+    async def _trade_by_correlation(
+        db: AsyncSession,
+        account_id: int,
+        correlation_id: str,
+    ) -> PaperTrade | None:
+        result = await db.execute(
+            select(PaperTrade).where(
+                PaperTrade.account_id == account_id,
+                PaperTrade.correlation_id == correlation_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def _apply_trade_metadata(
+        db: AsyncSession,
+        order: AndroidPaperOrder,
+        trade: PaperTrade,
+    ) -> AndroidPaperOrder:
+        if order.paper_trade_id == trade.id and order.status in {
+            "FILLED",
+            "PARTIALLY_FILLED",
+        }:
+            return order
+        prior_filled = Decimal(order.filled_quantity)
+        execution_quantity = Decimal(trade.quantity)
         total_filled = prior_filled + execution_quantity
+        if total_filled > Decimal(order.quantity):
+            raise MobileApiError(
+                500,
+                "BROKER_ERROR",
+                "PAPER 체결 수량이 주문 수량을 초과했습니다.",
+            )
         previous_average = order.average_fill_price
         order.status = (
             "FILLED" if total_filled == Decimal(order.quantity) else "PARTIALLY_FILLED"
@@ -446,8 +540,10 @@ class PaperOrderFacade:
             else trade.price
         )
         order.paper_trade_id = trade.id
+        order.reject_reason = None
         await db.commit()
         await db.refresh(order)
+        return order
 
     async def _fill_for_order(
         self,
@@ -480,19 +576,47 @@ class PaperOrderFacade:
             filled_at=iso_z(trade.executed_at),
         )
 
-    async def _by_client_id(
+    async def _reconcile_existing(
         self,
         db: AsyncSession,
         owner_user_id: int,
-        client_order_id: str,
-    ) -> AndroidPaperOrder | None:
-        result = await db.execute(
-            select(AndroidPaperOrder).where(
-                AndroidPaperOrder.owner_user_id == owner_user_id,
-                AndroidPaperOrder.client_order_id == client_order_id,
+        order: AndroidPaperOrder,
+    ) -> OrderEnvelope:
+        self._assert_owned(order, owner_user_id)
+        if order.status == "PENDING":
+            trade = await self._trade_by_correlation(
+                db,
+                order.paper_account_id,
+                order.id,
             )
-        )
-        return result.scalar_one_or_none()
+            if trade is not None:
+                order = await self._apply_trade_metadata(db, order, trade)
+            else:
+                quote = await paper_account_adapter.quote(
+                    db,
+                    market=order.market,
+                    symbol=order.symbol,
+                )
+                market_price = Decimal(quote.price)
+                crosses = order.order_type == "MARKET" or self._crosses(
+                    order.side,
+                    order.limit_price,
+                    market_price,
+                )
+                if crosses:
+                    filled_order = await self._fill(
+                        db,
+                        owner_user_id,
+                        order,
+                        market_price,
+                    )
+                    if filled_order is not None:
+                        order = filled_order
+                else:
+                    order.status = "OPEN"
+                    await db.commit()
+                    await db.refresh(order)
+        return await self.envelope(db, owner_user_id, order, replay=True)
 
     @staticmethod
     def serialize_order(order: AndroidPaperOrder) -> Order:

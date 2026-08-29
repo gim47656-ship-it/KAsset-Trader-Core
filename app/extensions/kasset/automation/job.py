@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -39,8 +39,24 @@ from app.extensions.kasset.automation.policy import (
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
 )
-from app.models.ai_recommendations import AIRecommendation, RecommendationDecision
+from app.models.ai_recommendations import (
+    AIRecommendation,
+    RecommendationDecision,
+    RecommendationExecutionStatus,
+)
 from app.services.ai_recommendations.service import AIRecommendationService
+
+
+def _is_reclaimable_execution_claim(
+    recommendation: AIRecommendation,
+    now: datetime,
+) -> bool:
+    lease_expires_at = recommendation.paper_execution_lease_expires_at
+    return bool(
+        recommendation.paper_execution_status == RecommendationExecutionStatus.CLAIMED
+        and lease_expires_at is not None
+        and lease_expires_at <= now
+    )
 
 
 class RuntimeStateSafetyGate:
@@ -84,15 +100,16 @@ class RuntimeStateSafetyGate:
                     AIRecommendation,
                     self._recommendation_id,
                 )
-                enabled = (
-                    recommendation is not None
-                    and recommendation.owner_user_id == int(owner_user_id)
-                    and (
+                if recommendation is None or recommendation.owner_user_id != int(
+                    owner_user_id
+                ):
+                    enabled = False
+                elif not _is_reclaimable_execution_claim(recommendation, now):
+                    enabled = (
                         await StrategyPromotionService(
                             self._db
                         ).approval_for_recommendation(recommendation)
                     ).approved
-                )
         return OwnerExecutionPolicy(
             owner_user_id=owner_user_id,
             paper_automation_enabled=enabled,
@@ -122,28 +139,35 @@ class OwnerScopedRecommendationService:
         now: datetime,
     ) -> str | None:
         owner_id = int(owner_user_id)
-        base = (
-            select(AIRecommendation)
-            .where(
-                AIRecommendation.owner_user_id == owner_id,
-                AIRecommendation.action.in_(("BUY", "SELL")),
-                AIRecommendation.valid_until > now,
-                AIRecommendation.paper_execution_status.is_(None),
-                AIRecommendation.source == "kasset-automation",
-            )
-            .limit(100)
+        base = select(AIRecommendation).where(
+            AIRecommendation.owner_user_id == owner_id,
+            AIRecommendation.action.in_(("BUY", "SELL")),
+            AIRecommendation.source == "kasset-automation",
         )
         approved_rows = list(
             (
                 await self._db.scalars(
                     base.where(
-                        AIRecommendation.decision
-                        == RecommendationDecision.APPROVED
-                    ).order_by(
+                        AIRecommendation.decision == RecommendationDecision.APPROVED,
+                        or_(
+                            and_(
+                                AIRecommendation.paper_execution_status.is_(None),
+                                AIRecommendation.valid_until > now,
+                            ),
+                            and_(
+                                AIRecommendation.paper_execution_status
+                                == RecommendationExecutionStatus.CLAIMED,
+                                AIRecommendation.paper_execution_lease_expires_at
+                                <= now,
+                            ),
+                        ),
+                    )
+                    .order_by(
                         AIRecommendation.decided_at,
                         AIRecommendation.created_at,
                         AIRecommendation.id,
                     )
+                    .limit(100)
                 )
             ).all()
         )
@@ -151,17 +175,23 @@ class OwnerScopedRecommendationService:
             (
                 await self._db.scalars(
                     base.where(
-                        AIRecommendation.decision
-                        == RecommendationDecision.PENDING
-                    ).order_by(
+                        AIRecommendation.decision == RecommendationDecision.PENDING,
+                        AIRecommendation.paper_execution_status.is_(None),
+                        AIRecommendation.valid_until > now,
+                    )
+                    .order_by(
                         AIRecommendation.created_at,
                         AIRecommendation.id,
                     )
+                    .limit(100)
                 )
             ).all()
         )
         promotion_service = StrategyPromotionService(self._db)
         for row in (*approved_rows, *pending_rows):
+            if _is_reclaimable_execution_claim(row, now):
+                self._recommendation_id = row.id
+                return row.id
             approval = await promotion_service.approval_for_recommendation(row)
             if not approval.approved:
                 continue
@@ -187,10 +217,11 @@ class OwnerScopedRecommendationService:
                 AIRecommendation,
                 self._recommendation_id,
             )
+            if candidate is None or candidate.owner_user_id != int(owner_user_id):
+                return None
             if (
-                candidate is None
-                or candidate.owner_user_id != int(owner_user_id)
-                or not (
+                not _is_reclaimable_execution_claim(candidate, now)
+                and not (
                     await StrategyPromotionService(
                         self._db
                     ).approval_for_recommendation(candidate)
@@ -205,9 +236,21 @@ class OwnerScopedRecommendationService:
         )
         if row is None:
             return None
+        if (
+            not row.paper_execution_token
+            or row.paper_execution_claimed_at is None
+            or row.paper_execution_lease_expires_at is None
+            or row.paper_execution_attempt_count < 1
+            or row.valid_until is None
+        ):
+            raise RuntimeError("claimed recommendation is missing lease metadata")
         return PaperExecutionClaim(
             id=row.id,
             owner_user_id=str(row.owner_user_id),
+            paper_execution_token=row.paper_execution_token,
+            paper_execution_claimed_at=row.paper_execution_claimed_at,
+            paper_execution_lease_expires_at=row.paper_execution_lease_expires_at,
+            paper_execution_attempt_count=row.paper_execution_attempt_count,
             decision=row.decision,
             action=row.action,
             market=row.market,
@@ -220,12 +263,30 @@ class OwnerScopedRecommendationService:
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         paper_order_id: str,
         now: datetime,
     ) -> None:
         await self._service.complete_paper_execution(
             int(owner_user_id),
             recommendation_id,
+            claim_token,
+            paper_order_id,
+            now,
+        )
+
+    async def reconcile_paper_execution_completion(
+        self,
+        owner_user_id: str,
+        recommendation_id: str,
+        claim_token: str,
+        paper_order_id: str,
+        now: datetime,
+    ) -> bool:
+        return await self._service.reconcile_paper_execution_completion(
+            int(owner_user_id),
+            recommendation_id,
+            claim_token,
             paper_order_id,
             now,
         )
@@ -234,12 +295,14 @@ class OwnerScopedRecommendationService:
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         error: str,
         now: datetime,
     ) -> None:
         await self._service.fail_paper_execution(
             int(owner_user_id),
             recommendation_id,
+            claim_token,
             error,
             now,
         )
@@ -292,6 +355,30 @@ class OwnerScopedPaperOrders:
             currency=base.currency,
         )
 
+    async def get_by_client_order_id(
+        self,
+        db: AsyncSession,
+        owner_user_id: str,
+        client_order_id: str,
+    ) -> object | None:
+        return await paper_orders.get_by_client_order_id(
+            db,
+            int(owner_user_id),
+            client_order_id,
+        )
+
+    async def reconcile(
+        self,
+        db: AsyncSession,
+        owner_user_id: str,
+        order: object,
+    ) -> object:
+        return await paper_orders.reconcile(
+            db,
+            int(owner_user_id),
+            order,
+        )
+
     async def submit(
         self,
         db: AsyncSession,
@@ -335,9 +422,9 @@ class OwnerScopedPaperOrders:
             recommendation_id,
         )
         if self._require_promotion:
-            promotion = await StrategyPromotionService(
-                db
-            ).approval_for_recommendation(recommendation, for_update=True)
+            promotion = await StrategyPromotionService(db).approval_for_recommendation(
+                recommendation, for_update=True
+            )
             if not promotion.approved:
                 raise MobileApiError(
                     409,
@@ -389,8 +476,18 @@ async def _claimable_owner_ids(db: AsyncSession, now: datetime) -> list[int]:
                 )
             ),
             AIRecommendation.action.in_(("BUY", "SELL")),
-            AIRecommendation.paper_execution_status.is_(None),
-            AIRecommendation.valid_until > now,
+            or_(
+                and_(
+                    AIRecommendation.paper_execution_status.is_(None),
+                    AIRecommendation.valid_until > now,
+                ),
+                and_(
+                    AIRecommendation.decision == RecommendationDecision.APPROVED,
+                    AIRecommendation.paper_execution_status
+                    == RecommendationExecutionStatus.CLAIMED,
+                    AIRecommendation.paper_execution_lease_expires_at <= now,
+                ),
+            ),
             AIRecommendation.source == "kasset-automation",
         )
         .order_by(AIRecommendation.owner_user_id)

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +51,7 @@ def _utc_now() -> datetime:
 
 class AIRecommendationService:
     MAX_LIMIT = 100
+    PAPER_EXECUTION_LEASE = timedelta(minutes=5)
 
     def __init__(
         self,
@@ -120,25 +122,30 @@ class AIRecommendationService:
         self,
         recommendations: list[AIRecommendation],
     ) -> dict[str, AndroidPaperOrder]:
-        order_ids = [
-            row.paper_order_id
+        order_keys = [
+            (row.owner_user_id, row.paper_order_id)
             for row in recommendations
             if row.paper_order_id is not None
         ]
-        if not order_ids:
+        if not order_keys:
             return {}
         orders = list(
             (
                 await self._session.scalars(
-                    select(AndroidPaperOrder).where(AndroidPaperOrder.id.in_(order_ids))
+                    select(AndroidPaperOrder).where(
+                        tuple_(
+                            AndroidPaperOrder.owner_user_id,
+                            AndroidPaperOrder.id,
+                        ).in_(order_keys)
+                    )
                 )
             ).all()
         )
-        by_id = {order.id: order for order in orders}
+        by_key = {(order.owner_user_id, order.id): order for order in orders}
         return {
-            row.id: by_id[row.paper_order_id]
+            row.id: by_key[(row.owner_user_id, row.paper_order_id)]
             for row in recommendations
-            if row.paper_order_id in by_id
+            if (row.owner_user_id, row.paper_order_id) in by_key
         }
 
     async def load_symbol_names(
@@ -240,7 +247,6 @@ class AIRecommendationService:
             return current
         raise RecommendationStateConflictError(recommendation_id)
 
-
     async def claim_for_paper_execution(
         self,
         owner_user_id: int,
@@ -260,7 +266,13 @@ class AIRecommendationService:
             await self._session.rollback()
             return None
         row.paper_execution_status = RecommendationExecutionStatus.CLAIMED
+        row.paper_execution_token = uuid4().hex
         row.paper_execution_claimed_at = claimed_at
+        row.paper_execution_lease_expires_at = claimed_at + self.PAPER_EXECUTION_LEASE
+        row.paper_execution_attempt_count += 1
+        row.paper_execution_completed_at = None
+        row.paper_order_id = None
+        row.paper_execution_error = None
         row.updated_at = claimed_at
         await self._session.commit()
         await self._session.refresh(row)
@@ -270,67 +282,141 @@ class AIRecommendationService:
         self,
         owner_user_id: int,
         recommendation_id: str,
+        claim_token: str,
         paper_order_id: str,
         now: datetime,
     ) -> AIRecommendation:
+        normalized_token = self._normalized_claim_token(claim_token)
         normalized_order_id = paper_order_id.strip()
         if not normalized_order_id:
             raise RecommendationValidationError("paper_order_id_required")
-        completed_at = self._normalized_now(now)
-        row = await self._repository.get(
+        await self._validated_completion_order(
             owner_user_id,
             recommendation_id,
-            for_update=True,
+            normalized_order_id,
+        )
+        completed_at = self._normalized_now(now)
+        row = await self._repository.complete_paper_execution(
+            owner_user_id,
+            recommendation_id=recommendation_id,
+            claim_token=normalized_token,
+            paper_order_id=normalized_order_id,
+            completed_at=completed_at,
         )
         if row is None:
-            raise RecommendationNotFoundError(recommendation_id)
-        if row.paper_execution_status == RecommendationExecutionStatus.SUCCEEDED:
-            if row.paper_order_id == normalized_order_id:
-                await self._session.commit()
-                return row
+            await self._session.rollback()
+            current = await self._repository.get(owner_user_id, recommendation_id)
+            if current is None:
+                raise RecommendationNotFoundError(recommendation_id)
             raise RecommendationStateConflictError(recommendation_id)
-        if row.paper_execution_status != RecommendationExecutionStatus.CLAIMED:
-            raise RecommendationStateConflictError(recommendation_id)
-        row.paper_execution_status = RecommendationExecutionStatus.SUCCEEDED
-        row.paper_execution_completed_at = completed_at
-        row.paper_order_id = normalized_order_id
-        row.paper_execution_error = None
-        row.updated_at = completed_at
         await self._session.commit()
         await self._session.refresh(row)
         return row
+
+    async def reconcile_paper_execution_completion(
+        self,
+        owner_user_id: int,
+        recommendation_id: str,
+        claim_token: str,
+        paper_order_id: str,
+        now: datetime,
+    ) -> bool:
+        """Confirm an ambiguous completion commit, or retry its token CAS."""
+
+        normalized_token = self._normalized_claim_token(claim_token)
+        normalized_order_id = paper_order_id.strip()
+        if not normalized_order_id:
+            raise RecommendationValidationError("paper_order_id_required")
+        await self._session.rollback()
+        await self._validated_completion_order(
+            owner_user_id,
+            recommendation_id,
+            normalized_order_id,
+        )
+        current = await self._repository.get(owner_user_id, recommendation_id)
+        if current is None:
+            raise RecommendationNotFoundError(recommendation_id)
+        if current.paper_execution_status == RecommendationExecutionStatus.SUCCEEDED:
+            return current.paper_order_id == normalized_order_id
+        if (
+            current.paper_execution_status != RecommendationExecutionStatus.CLAIMED
+            or current.paper_execution_token != normalized_token
+        ):
+            return False
+        completed_at = self._normalized_now(now)
+        completed = await self._repository.complete_paper_execution(
+            owner_user_id,
+            recommendation_id=recommendation_id,
+            claim_token=normalized_token,
+            paper_order_id=normalized_order_id,
+            completed_at=completed_at,
+        )
+        if completed is None:
+            await self._session.rollback()
+            current = await self._repository.get(owner_user_id, recommendation_id)
+            return bool(
+                current is not None
+                and current.paper_execution_status
+                == RecommendationExecutionStatus.SUCCEEDED
+                and current.paper_order_id == normalized_order_id
+            )
+        await self._session.commit()
+        return True
 
     async def fail_paper_execution(
         self,
         owner_user_id: int,
         recommendation_id: str,
+        claim_token: str,
         error: str,
         now: datetime,
     ) -> AIRecommendation:
+        normalized_token = self._normalized_claim_token(claim_token)
         normalized_error = error.strip()[:1000]
         if not normalized_error:
             raise RecommendationValidationError("paper_execution_error_required")
         completed_at = self._normalized_now(now)
-        row = await self._repository.get(
+        row = await self._repository.fail_paper_execution(
             owner_user_id,
-            recommendation_id,
-            for_update=True,
+            recommendation_id=recommendation_id,
+            claim_token=normalized_token,
+            error=normalized_error,
+            completed_at=completed_at,
         )
         if row is None:
-            raise RecommendationNotFoundError(recommendation_id)
-        if row.paper_execution_status == RecommendationExecutionStatus.FAILED:
-            await self._session.commit()
-            return row
-        if row.paper_execution_status != RecommendationExecutionStatus.CLAIMED:
+            await self._session.rollback()
+            current = await self._repository.get(owner_user_id, recommendation_id)
+            if current is None:
+                raise RecommendationNotFoundError(recommendation_id)
             raise RecommendationStateConflictError(recommendation_id)
-        row.paper_execution_status = RecommendationExecutionStatus.FAILED
-        row.paper_execution_completed_at = completed_at
-        row.paper_order_id = None
-        row.paper_execution_error = normalized_error
-        row.updated_at = completed_at
         await self._session.commit()
         await self._session.refresh(row)
         return row
+
+    async def _validated_completion_order(
+        self,
+        owner_user_id: int,
+        recommendation_id: str,
+        paper_order_id: str,
+    ) -> AndroidPaperOrder:
+        expected_client_order_id = f"ai-rec:{recommendation_id}"
+        order = await self._session.scalar(
+            select(AndroidPaperOrder).where(
+                AndroidPaperOrder.owner_user_id == owner_user_id,
+                AndroidPaperOrder.id == paper_order_id,
+                AndroidPaperOrder.client_order_id == expected_client_order_id,
+            )
+        )
+        if order is None:
+            raise RecommendationStateConflictError(recommendation_id)
+        return order
+
+    @staticmethod
+    def _normalized_claim_token(value: str) -> str:
+        token = value.strip()
+        if not token:
+            raise RecommendationValidationError("paper_execution_token_required")
+        return token
 
     @staticmethod
     def _validate_approval(row: AIRecommendation, *, now: datetime) -> None:

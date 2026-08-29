@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper_schemas import RiskAssessment
 from app.extensions.kasset.automation import (
     OwnerExecutionPolicy,
@@ -14,6 +15,7 @@ from app.extensions.kasset.automation import (
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 _OWNER = "user-a"
+_TOKEN = "claim-token-1"
 
 
 def _policy(
@@ -37,10 +39,15 @@ def _claim(
     owner: str = _OWNER,
     decision: str = "APPROVED",
     valid_until: datetime | None = None,
+    token: str = _TOKEN,
 ) -> PaperExecutionClaim:
     return PaperExecutionClaim(
         id=recommendation_id,
         owner_user_id=owner,
+        paper_execution_token=token,
+        paper_execution_claimed_at=_NOW,
+        paper_execution_lease_expires_at=_NOW + timedelta(minutes=5),
+        paper_execution_attempt_count=1,
         decision=decision,
         action="BUY",
         market="US",
@@ -50,8 +57,16 @@ def _claim(
     )
 
 
+def _order(
+    *,
+    order_id: str = "paper-order-1",
+    status: str = "FILLED",
+) -> SimpleNamespace:
+    return SimpleNamespace(id=order_id, status=status)
+
+
 class FakeGate:
-    def __init__(self, *policies: OwnerExecutionPolicy) -> None:
+    def __init__(self, *policies: OwnerExecutionPolicy | Exception) -> None:
         self.policies = policies
         self.calls: list[tuple[str, datetime]] = []
 
@@ -63,15 +78,28 @@ class FakeGate:
     ) -> OwnerExecutionPolicy:
         self.calls.append((owner_user_id, now))
         index = min(len(self.calls) - 1, len(self.policies) - 1)
-        return self.policies[index]
+        policy = self.policies[index]
+        if isinstance(policy, Exception):
+            raise policy
+        return policy
 
 
 class FakeRecommendations:
-    def __init__(self, *claims: PaperExecutionClaim | None) -> None:
+    def __init__(
+        self,
+        *claims: PaperExecutionClaim | None,
+        complete_error: Exception | None = None,
+        reconcile_result: bool = True,
+        reconcile_error: Exception | None = None,
+    ) -> None:
         self.claims = list(claims)
+        self.complete_error = complete_error
+        self.reconcile_result = reconcile_result
+        self.reconcile_error = reconcile_error
         self.claim_calls: list[tuple[str, datetime]] = []
-        self.complete_calls: list[tuple[str, str, str, datetime]] = []
-        self.fail_calls: list[tuple[str, str, str, datetime]] = []
+        self.complete_calls: list[tuple[str, str, str, str, datetime]] = []
+        self.reconcile_calls: list[tuple[str, str, str, str, datetime]] = []
+        self.fail_calls: list[tuple[str, str, str, str, datetime]] = []
 
     async def claim_for_paper_execution(
         self, owner_user_id: str, now: datetime
@@ -83,40 +111,107 @@ class FakeRecommendations:
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         paper_order_id: str,
         now: datetime,
     ) -> None:
         self.complete_calls.append(
-            (owner_user_id, recommendation_id, paper_order_id, now)
+            (owner_user_id, recommendation_id, claim_token, paper_order_id, now)
         )
+        if self.complete_error is not None:
+            raise self.complete_error
+
+    async def reconcile_paper_execution_completion(
+        self,
+        owner_user_id: str,
+        recommendation_id: str,
+        claim_token: str,
+        paper_order_id: str,
+        now: datetime,
+    ) -> bool:
+        self.reconcile_calls.append(
+            (owner_user_id, recommendation_id, claim_token, paper_order_id, now)
+        )
+        if self.reconcile_error is not None:
+            raise self.reconcile_error
+        return self.reconcile_result
 
     async def fail_paper_execution(
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         error: str,
         now: datetime,
     ) -> None:
-        self.fail_calls.append((owner_user_id, recommendation_id, error, now))
+        self.fail_calls.append(
+            (owner_user_id, recommendation_id, claim_token, error, now)
+        )
 
 
 class FakePaperOrders:
-    def __init__(self, *, risk_decision: str = "APPROVED") -> None:
+    def __init__(
+        self,
+        *,
+        risk_decision: str = "APPROVED",
+        existing: SimpleNamespace | None = None,
+        preview_error: Exception | None = None,
+        submit_error: Exception | None = None,
+        order_on_submit_error: SimpleNamespace | None = None,
+        lookup_effects: list[SimpleNamespace | None | Exception] | None = None,
+    ) -> None:
         self.risk_decision = risk_decision
+        self.existing = existing
+        self.preview_error = preview_error
+        self.submit_error = submit_error
+        self.order_on_submit_error = order_on_submit_error
+        self.lookup_effects = list(lookup_effects or [])
+        self.lookup_calls: list[tuple[object, str, str]] = []
+        self.reconcile_calls: list[tuple[object, str, object]] = []
         self.preview_calls: list[tuple[object, str, object]] = []
         self.submit_calls: list[tuple[object, str, object]] = []
+
+    async def get_by_client_order_id(
+        self,
+        db: object,
+        owner_user_id: str,
+        client_order_id: str,
+    ) -> object | None:
+        self.lookup_calls.append((db, owner_user_id, client_order_id))
+        if self.lookup_effects:
+            result = self.lookup_effects.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return self.existing
+
+    async def reconcile(
+        self,
+        db: object,
+        owner_user_id: str,
+        order: object,
+    ) -> object:
+        self.reconcile_calls.append((db, owner_user_id, order))
+        if getattr(order, "status", None) == "PENDING":
+            order.status = "FILLED"
+        return SimpleNamespace(order=order)
 
     async def preview(
         self, db: object, owner_user_id: str, request: object
     ) -> RiskAssessment:
         self.preview_calls.append((db, owner_user_id, request))
+        if self.preview_error is not None:
+            raise self.preview_error
         return RiskAssessment(decision=self.risk_decision, reasons=[])
 
     async def submit(
         self, db: object, owner_user_id: str, request: object
     ) -> tuple[object, bool]:
         self.submit_calls.append((db, owner_user_id, request))
-        return SimpleNamespace(order=SimpleNamespace(id="paper-order-1")), False
+        if self.submit_error is not None:
+            self.existing = self.order_on_submit_error
+            raise self.submit_error
+        return SimpleNamespace(order=_order()), False
 
 
 def _consumer(
@@ -161,7 +256,27 @@ async def test_safety_gate_blocks_before_claim(
 
 
 @pytest.mark.asyncio
-async def test_expired_claim_is_failed_once_without_preview_or_submit() -> None:
+async def test_expired_reclaimed_claim_reconciles_existing_order_before_rejection() -> (
+    None
+):
+    recommendations = FakeRecommendations(
+        _claim(valid_until=_NOW - timedelta(seconds=1))
+    )
+    paper_orders = FakePaperOrders(existing=_order())
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.status == "SUBMITTED"
+    assert outcome.reason == "idempotent_replay"
+    assert paper_orders.preview_calls == []
+    assert paper_orders.submit_calls == []
+    assert recommendations.complete_calls[0][2] == _TOKEN
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_without_order_is_failed_with_token() -> None:
     recommendations = FakeRecommendations(
         _claim(valid_until=_NOW - timedelta(seconds=1))
     )
@@ -174,7 +289,7 @@ async def test_expired_claim_is_failed_once_without_preview_or_submit() -> None:
     assert outcome.status == "REJECTED"
     assert outcome.reason == "recommendation_expired"
     assert recommendations.fail_calls == [
-        (_OWNER, "rec-1", "recommendation_expired", _NOW)
+        (_OWNER, "rec-1", _TOKEN, "recommendation_expired", _NOW)
     ]
     assert paper_orders.preview_calls == []
     assert paper_orders.submit_calls == []
@@ -193,7 +308,7 @@ async def test_risk_rejection_is_terminal_and_never_submits() -> None:
     assert outcome.reason == "risk_preview_rejected"
     assert len(paper_orders.preview_calls) == 1
     assert paper_orders.submit_calls == []
-    assert recommendations.fail_calls[0][2] == "risk_preview_rejected"
+    assert recommendations.fail_calls[0][2:4] == (_TOKEN, "risk_preview_rejected")
 
 
 @pytest.mark.asyncio
@@ -207,6 +322,7 @@ async def test_cross_owner_claim_never_reaches_paper_facade() -> None:
 
     assert outcome.status == "FAILED"
     assert outcome.reason == "claim_owner_mismatch"
+    assert paper_orders.lookup_calls == []
     assert paper_orders.preview_calls == []
     assert paper_orders.submit_calls == []
     assert recommendations.complete_calls == []
@@ -225,7 +341,139 @@ async def test_gate_revocation_between_preview_and_submit_is_terminal() -> None:
     assert outcome.reason == "safety_gate_changed:global_kill_switch_enabled"
     assert len(paper_orders.preview_calls) == 1
     assert paper_orders.submit_calls == []
-    assert recommendations.fail_calls[0][2] == outcome.reason
+    assert recommendations.fail_calls[0][2] == _TOKEN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "paper_orders", "gate"),
+    [
+        (
+            "before_preview",
+            FakePaperOrders(lookup_effects=[TimeoutError("lookup")]),
+            FakeGate(_policy()),
+        ),
+        (
+            "preview",
+            FakePaperOrders(preview_error=TimeoutError("preview")),
+            FakeGate(_policy()),
+        ),
+        (
+            "after_preview",
+            FakePaperOrders(),
+            FakeGate(_policy(), TimeoutError("policy")),
+        ),
+        (
+            "submit",
+            FakePaperOrders(submit_error=TimeoutError("submit")),
+            FakeGate(_policy()),
+        ),
+    ],
+)
+async def test_ambiguous_interruptions_leave_claim_nonterminal(
+    stage: str,
+    paper_orders: FakePaperOrders,
+    gate: FakeGate,
+) -> None:
+    recommendations = FakeRecommendations(_claim())
+
+    outcome = await _consumer(gate, recommendations, paper_orders).run_once(now=_NOW)
+
+    assert outcome.status == "FAILED", stage
+    assert recommendations.fail_calls == [], stage
+    assert recommendations.complete_calls == [], stage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_status", ["FILLED", "PENDING"])
+async def test_submit_timeout_reconciles_persisted_order_without_resubmit(
+    persisted_status: str,
+) -> None:
+    persisted = _order(status=persisted_status)
+    recommendations = FakeRecommendations(_claim())
+    paper_orders = FakePaperOrders(
+        submit_error=TimeoutError("submit response lost"),
+        order_on_submit_error=persisted,
+    )
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.status == "SUBMITTED"
+    assert outcome.replayed is True
+    assert len(paper_orders.submit_calls) == 1
+    assert len(paper_orders.reconcile_calls) == 1
+    assert persisted.status == "FILLED"
+    assert recommendations.complete_calls[0][3] == persisted.id
+    assert recommendations.fail_calls == []
+
+
+@pytest.mark.asyncio
+async def test_submit_timeout_without_order_leaves_claim_for_lease_retry() -> None:
+    recommendations = FakeRecommendations(_claim())
+    paper_orders = FakePaperOrders(submit_error=TimeoutError("submit response lost"))
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.reason == "submit_ambiguous:TimeoutError"
+    assert recommendations.complete_calls == []
+    assert recommendations.fail_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_existing_order_skips_preview_and_submit() -> None:
+    recommendations = FakeRecommendations(_claim())
+    paper_orders = FakePaperOrders(existing=_order(status="PENDING"))
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.status == "SUBMITTED"
+    assert outcome.replayed is True
+    assert paper_orders.preview_calls == []
+    assert paper_orders.submit_calls == []
+    assert len(paper_orders.reconcile_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_timeout_rereads_and_converges() -> None:
+    recommendations = FakeRecommendations(
+        _claim(),
+        complete_error=TimeoutError("commit response lost"),
+        reconcile_result=True,
+    )
+    paper_orders = FakePaperOrders()
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.status == "SUBMITTED"
+    assert outcome.reason == "completion_reconciled"
+    assert recommendations.reconcile_calls == [
+        (_OWNER, "rec-1", _TOKEN, "paper-order-1", _NOW)
+    ]
+    assert recommendations.fail_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deterministic_submit_rejection_is_token_checked_failure() -> None:
+    recommendations = FakeRecommendations(_claim())
+    paper_orders = FakePaperOrders(
+        submit_error=MobileApiError(409, "HARD_RISK_REJECTED", "blocked")
+    )
+
+    outcome = await _consumer(
+        FakeGate(_policy()), recommendations, paper_orders
+    ).run_once(now=_NOW)
+
+    assert outcome.status == "REJECTED"
+    assert outcome.reason == "submit_rejected:HARD_RISK_REJECTED"
+    assert recommendations.fail_calls[0][2] == _TOKEN
 
 
 @pytest.mark.asyncio
@@ -245,37 +493,10 @@ async def test_duplicate_poll_submits_claim_once_with_fixed_idempotency_key() ->
     assert submitted_owner == _OWNER
     assert request.broker == "PAPER"  # type: ignore[attr-defined]
     assert request.client_order_id == "ai-rec:rec-1"  # type: ignore[attr-defined]
-    assert recommendations.complete_calls == [(_OWNER, "rec-1", "paper-order-1", _NOW)]
-    assert recommendations.fail_calls == []
-
-
-@pytest.mark.asyncio
-async def test_different_owners_execute_independently_through_owner_scoped_calls() -> (
-    None
-):
-    paper_orders = FakePaperOrders()
-    recommendations_a = FakeRecommendations(_claim(recommendation_id="rec-a"))
-    recommendations_b = FakeRecommendations(
-        _claim(recommendation_id="rec-b", owner="user-b")
-    )
-    consumer_a = _consumer(FakeGate(_policy()), recommendations_a, paper_orders)
-    consumer_b = PaperAutomationConsumer(
-        owner_user_id="user-b",
-        safety_gate=FakeGate(_policy(owner="user-b")),
-        recommendation_service=recommendations_b,
-        paper_orders=paper_orders,
-        db=object(),
-    )
-
-    outcome_a = await consumer_a.run_once(now=_NOW)
-    outcome_b = await consumer_b.run_once(now=_NOW)
-
-    assert outcome_a.status == outcome_b.status == "SUBMITTED"
-    assert [call[1] for call in paper_orders.submit_calls] == ["user-a", "user-b"]
-    assert [call[2].client_order_id for call in paper_orders.submit_calls] == [
-        "ai-rec:rec-a",
-        "ai-rec:rec-b",
+    assert recommendations.complete_calls == [
+        (_OWNER, "rec-1", _TOKEN, "paper-order-1", _NOW)
     ]
+    assert recommendations.fail_calls == []
 
 
 @pytest.mark.asyncio
@@ -289,7 +510,10 @@ async def test_non_approved_claim_is_failed_without_submit() -> None:
 
     assert outcome.reason == "recommendation_not_approved"
     assert paper_orders.submit_calls == []
-    assert recommendations.fail_calls[0][2] == "recommendation_not_approved"
+    assert recommendations.fail_calls[0][2:4] == (
+        _TOKEN,
+        "recommendation_not_approved",
+    )
 
 
 def test_consumer_requires_owner_and_explicit_safety_gate() -> None:

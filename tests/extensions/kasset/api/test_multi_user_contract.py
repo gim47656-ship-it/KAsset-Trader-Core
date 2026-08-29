@@ -31,6 +31,7 @@ from app.models.trading import User, UserRole
 from app.services.ai_recommendations import (
     AIRecommendationService,
     RecommendationNotFoundError,
+    RecommendationStateConflictError,
 )
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
@@ -273,6 +274,7 @@ async def test_same_client_order_id_is_independent_and_foreign_order_is_hidden(
     two_owners: list[User],
 ) -> None:
     owner_a, owner_b = two_owners
+    owner_a_id, owner_b_id = owner_a.id, owner_b.id
     accounts = [
         PaperAccount(
             name=f"KAsset order isolation {uuid4().hex}",
@@ -285,6 +287,7 @@ async def test_same_client_order_id_is_independent_and_foreign_order_is_hidden(
     ]
     db_session.add_all(accounts)
     await db_session.flush()
+    account_ids = [account.id for account in accounts]
     db_session.add_all(
         [
             AndroidPaperAccount(
@@ -315,24 +318,29 @@ async def test_same_client_order_id_is_independent_and_foreign_order_is_hidden(
         )
         for owner, account in zip(two_owners, accounts, strict=True)
     ]
+    order_ids = [order.id for order in orders]
     db_session.add_all(orders)
     await db_session.commit()
 
     assert (
-        await paper_orders._by_client_id(db_session, owner_a.id, shared_client_id)
-    ).id == orders[0].id
+        await paper_orders.get_by_client_order_id(
+            db_session, owner_a_id, shared_client_id
+        )
+    ).id == order_ids[0]
     assert (
-        await paper_orders._by_client_id(db_session, owner_b.id, shared_client_id)
-    ).id == orders[1].id
+        await paper_orders.get_by_client_order_id(
+            db_session, owner_b_id, shared_client_id
+        )
+    ).id == order_ids[1]
     with pytest.raises(MobileApiError) as hidden:
-        await paper_orders.get(db_session, owner_b.id, orders[0].id)
+        await paper_orders.get(db_session, owner_b_id, order_ids[0])
     assert hidden.value.status_code == 404
 
     with pytest.raises(MobileApiError) as hidden_account:
         await paper_account_adapter.resolve_account(
             db_session,
-            owner_b.id,
-            paper_account_adapter.account_id(accounts[0]),
+            owner_b_id,
+            f"PAPER-{account_ids[0]}",
         )
     assert hidden_account.value.status_code == 404
 
@@ -420,17 +428,40 @@ async def test_recommendation_decision_is_owner_scoped_and_has_no_order_side_eff
 
 
 @pytest.mark.asyncio
-async def test_paper_execution_claim_is_once_per_owner_and_completion_is_terminal(
+async def test_paper_execution_claim_lease_fences_stale_and_foreign_workers(
     db_session: AsyncSession,
     two_owners: list[User],
 ) -> None:
-    # Service commits/rollbacks expire every instance in this session, and an
-    # expired attribute read on an async session raises MissingGreenlet, so
-    # keep plain ids instead of touching ORM instances between service calls.
     owner_a_id, owner_b_id = (owner.id for owner in two_owners)
     recommendation_ids = [
         f"claim-{owner_id}-{uuid4().hex}" for owner_id in (owner_a_id, owner_b_id)
     ]
+    accounts = [
+        PaperAccount(
+            name=f"KAsset claim lease {uuid4().hex}",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("10000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+        for _ in range(2)
+    ]
+    db_session.add_all(accounts)
+    await db_session.flush()
+    account_ids = [account.id for account in accounts]
+    db_session.add_all(
+        [
+            AndroidPaperAccount(
+                owner_user_id=owner_id,
+                paper_account_id=account_id,
+            )
+            for owner_id, account_id in zip(
+                (owner_a_id, owner_b_id),
+                account_ids,
+                strict=True,
+            )
+        ]
+    )
     recommendations = [
         _recommendation(
             owner_id,
@@ -442,43 +473,168 @@ async def test_paper_execution_claim_is_once_per_owner_and_completion_is_termina
             (owner_a_id, owner_b_id), recommendation_ids, strict=True
         )
     ]
+    recommendations[0].valid_until = _NOW + timedelta(minutes=1)
     db_session.add_all(recommendations)
     await db_session.commit()
     service = AIRecommendationService(db_session)
 
-    claimed_a = await service.claim_for_paper_execution(owner_a_id, _NOW)
-    assert claimed_a is not None
-    claimed_a_id = claimed_a.id
-    assert claimed_a_id == recommendation_ids[0]
-    assert await service.claim_for_paper_execution(owner_a_id, _NOW) is None
+    first_a = await service.claim_for_paper_execution(owner_a_id, _NOW)
+    assert first_a is not None
+    first_a_token = str(first_a.paper_execution_token)
+    assert first_a.id == recommendation_ids[0]
+    assert first_a_token
+    assert first_a.paper_execution_claimed_at == _NOW
+    assert (
+        first_a.paper_execution_lease_expires_at == _NOW + service.PAPER_EXECUTION_LEASE
+    )
+    assert first_a.paper_execution_attempt_count == 1
+    assert (
+        await service.claim_for_paper_execution(
+            owner_a_id,
+            _NOW + service.PAPER_EXECUTION_LEASE - timedelta(seconds=1),
+        )
+        is None
+    )
+    assert (
+        await service.claim_for_paper_execution(
+            owner_b_id,
+            _NOW,
+            recommendation_id=recommendation_ids[0],
+        )
+        is None
+    )
 
     claimed_b = await service.claim_for_paper_execution(owner_b_id, _NOW)
     assert claimed_b is not None
-    claimed_b_id = claimed_b.id
-    assert claimed_b_id == recommendation_ids[1]
+    claimed_b_token = str(claimed_b.paper_execution_token)
+
+    reclaimed_a = await service.claim_for_paper_execution(
+        owner_a_id,
+        _NOW + service.PAPER_EXECUTION_LEASE,
+    )
+    assert reclaimed_a is not None
+    reclaimed_a_token = str(reclaimed_a.paper_execution_token)
+    assert reclaimed_a.id == recommendation_ids[0]
+    assert reclaimed_a_token != first_a_token
+    assert reclaimed_a.paper_execution_attempt_count == 2
+
+    orders = [
+        AndroidPaperOrder(
+            id=f"paper-order-{owner_id}-{uuid4().hex}",
+            owner_user_id=owner_id,
+            client_order_id=f"ai-rec:{recommendation_id}",
+            paper_account_id=account_id,
+            broker_order_id=f"paper-broker-{uuid4().hex}",
+            market="KRX",
+            symbol="005930",
+            currency="KRW",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            status="FILLED",
+            filled_quantity=Decimal("1"),
+            average_fill_price=Decimal("70000"),
+        )
+        for owner_id, recommendation_id, account_id in zip(
+            (owner_a_id, owner_b_id),
+            recommendation_ids,
+            account_ids,
+            strict=True,
+        )
+    ]
+    wrong_link = AndroidPaperOrder(
+        id=f"paper-order-wrong-{uuid4().hex}",
+        owner_user_id=owner_a_id,
+        client_order_id=f"ai-rec:not-{recommendation_ids[0]}",
+        paper_account_id=account_ids[0],
+        broker_order_id=f"paper-broker-{uuid4().hex}",
+        market="KRX",
+        symbol="005930",
+        currency="KRW",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        status="FILLED",
+        filled_quantity=Decimal("1"),
+        average_fill_price=Decimal("70000"),
+    )
+    order_ids = [order.id for order in orders]
+    wrong_link_id = wrong_link.id
+    db_session.add_all([*orders, wrong_link])
+    await db_session.commit()
+
+    with pytest.raises(RecommendationStateConflictError):
+        await service.complete_paper_execution(
+            owner_a_id,
+            recommendation_ids[0],
+            first_a_token,
+            order_ids[0],
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
+    with pytest.raises(RecommendationStateConflictError):
+        await service.fail_paper_execution(
+            owner_a_id,
+            recommendation_ids[0],
+            first_a_token,
+            "stale worker",
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
+    with pytest.raises(RecommendationStateConflictError):
+        await service.complete_paper_execution(
+            owner_b_id,
+            recommendation_ids[0],
+            reclaimed_a_token,
+            order_ids[0],
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
+    with pytest.raises(RecommendationStateConflictError):
+        await service.complete_paper_execution(
+            owner_a_id,
+            recommendation_ids[0],
+            reclaimed_a_token,
+            wrong_link_id,
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
 
     completed = await service.complete_paper_execution(
         owner_a_id,
-        claimed_a_id,
-        "paper-order-a",
-        _NOW,
+        recommendation_ids[0],
+        reclaimed_a_token,
+        order_ids[0],
+        _NOW + service.PAPER_EXECUTION_LEASE,
     )
     assert completed.paper_execution_status == "SUCCEEDED"
-    same = await service.complete_paper_execution(
-        owner_a_id,
-        claimed_a_id,
-        "paper-order-a",
-        _NOW,
+    assert completed.paper_execution_token is None
+    assert completed.paper_execution_lease_expires_at is None
+    assert (
+        await service.reconcile_paper_execution_completion(
+            owner_a_id,
+            recommendation_ids[0],
+            reclaimed_a_token,
+            order_ids[0],
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
+        is True
     )
-    assert same.paper_order_id == "paper-order-a"
+    with pytest.raises(RecommendationStateConflictError):
+        await service.complete_paper_execution(
+            owner_a_id,
+            recommendation_ids[0],
+            reclaimed_a_token,
+            order_ids[0],
+            _NOW + service.PAPER_EXECUTION_LEASE,
+        )
 
     failed = await service.fail_paper_execution(
         owner_b_id,
-        claimed_b_id,
+        recommendation_ids[1],
+        claimed_b_token,
         "risk rejected",
         _NOW,
     )
     assert failed.paper_execution_status == "FAILED"
+    assert failed.paper_execution_token is None
+    assert failed.paper_execution_lease_expires_at is None
     assert await service.claim_for_paper_execution(owner_b_id, _NOW) is None
 
 

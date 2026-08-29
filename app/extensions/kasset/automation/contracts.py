@@ -153,6 +153,10 @@ class ExecutionSafetyGate(Protocol):
 class ClaimedRecommendation(Protocol):
     id: str
     owner_user_id: str
+    paper_execution_token: str
+    paper_execution_claimed_at: datetime
+    paper_execution_lease_expires_at: datetime
+    paper_execution_attempt_count: int
     decision: str
     action: str
     market: str
@@ -167,6 +171,10 @@ class PaperExecutionClaim:
 
     id: str
     owner_user_id: str
+    paper_execution_token: str
+    paper_execution_claimed_at: datetime
+    paper_execution_lease_expires_at: datetime
+    paper_execution_attempt_count: int
     decision: str
     action: str
     market: str
@@ -187,14 +195,25 @@ class RecommendationService(Protocol):
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         paper_order_id: str,
         now: datetime,
     ) -> None: ...
+
+    async def reconcile_paper_execution_completion(
+        self,
+        owner_user_id: str,
+        recommendation_id: str,
+        claim_token: str,
+        paper_order_id: str,
+        now: datetime,
+    ) -> bool: ...
 
     async def fail_paper_execution(
         self,
         owner_user_id: str,
         recommendation_id: str,
+        claim_token: str,
         error: str,
         now: datetime,
     ) -> None: ...
@@ -208,6 +227,20 @@ class PaperOrderFacade(Protocol):
         owner_user_id: str,
         request: OrderRequest,
     ) -> RiskAssessment: ...
+
+    async def get_by_client_order_id(
+        self,
+        db: Any,
+        owner_user_id: str,
+        client_order_id: str,
+    ) -> object | None: ...
+
+    async def reconcile(
+        self,
+        db: Any,
+        owner_user_id: str,
+        order: object,
+    ) -> object: ...
 
     async def submit(
         self,

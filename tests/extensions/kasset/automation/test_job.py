@@ -182,6 +182,7 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
         await _set_auto_policy(db_session, owner_b_id, kill_switch=True)
         # Owner B never reaches the claim stage: the kill switch blocks first.
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
         async def _approved_promotion(
             self: object,
             recommendation: AIRecommendation,
@@ -200,7 +201,6 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
             "approval_for_recommendation",
             _approved_promotion,
         )
-
 
         async def _broken_claim(self: object, owner: str, now: datetime) -> None:
             raise RuntimeError("transient claim failure")
@@ -287,11 +287,16 @@ async def test_gate_and_service_adapters_bridge_integer_ownership(
         assert claim.id == recommendation_id
         assert claim.owner_user_id == str(owner_id)
         assert claim.decision == "APPROVED"
+        assert claim.paper_execution_token
+        assert claim.paper_execution_claimed_at == _NOW
+        assert claim.paper_execution_lease_expires_at > _NOW
+        assert claim.paper_execution_attempt_count == 1
 
-        await service.complete_paper_execution(
+        await service.fail_paper_execution(
             str(owner_id),
             recommendation_id,
-            "paper-order-job",
+            claim.paper_execution_token,
+            "adapter-test-rejection",
             _NOW,
         )
         stored = await db_session.scalar(
@@ -299,6 +304,61 @@ async def test_gate_and_service_adapters_bridge_integer_ownership(
                 AIRecommendation.id == recommendation_id
             )
         )
-        assert stored == "SUCCEEDED"
+        assert stored == "FAILED"
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_is_selected_for_reconciliation(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    recommendation.paper_execution_status = "CLAIMED"
+    recommendation.paper_execution_token = "expired-token"
+    recommendation.paper_execution_claimed_at = _NOW - timedelta(minutes=10)
+    recommendation.paper_execution_lease_expires_at = _NOW - timedelta(minutes=5)
+    recommendation.paper_execution_attempt_count = 1
+
+    async def _approved_promotion(
+        self: object,
+        candidate: AIRecommendation,
+    ) -> PaperApprovalDecision:
+        assert candidate.id == recommendation_id
+        return PaperApprovalDecision(
+            approved=True,
+            strategy_key="qullamaggie_breakout_portfolio",
+            version="1.0.0",
+            state=None,
+            metrics_hash="a" * 64,
+            reason="paper_approved",
+        )
+
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        monkeypatch.setattr(
+            StrategyPromotionService,
+            "approval_for_recommendation",
+            _approved_promotion,
+        )
+        service = OwnerScopedRecommendationService(
+            db_session,
+            require_promotion=True,
+        )
+
+        selected = await service.authorize_next_for_auto_execution(
+            str(owner_id),
+            _NOW,
+        )
+        assert selected == recommendation_id
+        reclaimed = await service.claim_for_paper_execution(str(owner_id), _NOW)
+        assert reclaimed is not None
+        assert reclaimed.id == recommendation_id
+        assert reclaimed.paper_execution_token != "expired-token"
+        assert reclaimed.paper_execution_attempt_count == 2
     finally:
         await _cleanup_owner(db_session, username)

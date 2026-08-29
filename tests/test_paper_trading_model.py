@@ -103,6 +103,22 @@ class TestPaperTradeModel:
         assert PaperTrade.__table_args__[-1] == {"schema": "paper"}
         assert PaperTrade.__tablename__ == "paper_trades"
 
+    def test_correlation_id_is_unique_per_account_when_present(self) -> None:
+        index = next(
+            item
+            for item in PaperTrade.__table__.indexes
+            if item.name == "uq_paper_trades_account_correlation"
+        )
+        assert index.unique is True
+        assert [column.name for column in index.columns] == [
+            "account_id",
+            "correlation_id",
+        ]
+        assert (
+            str(index.dialect_options["postgresql"]["where"])
+            == "correlation_id IS NOT NULL"
+        )
+
 
 def test_paper_daily_snapshot_constructor() -> None:
     from datetime import date

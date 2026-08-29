@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ai_recommendations import (
     AIRecommendation,
     RecommendationDecision,
+    RecommendationExecutionStatus,
     RecommendationStatusGroup,
     TerminalRecommendationDecision,
 )
@@ -111,8 +112,17 @@ class AIRecommendationRepository:
         statement = select(AIRecommendation).where(
             AIRecommendation.owner_user_id == owner_user_id,
             AIRecommendation.decision == RecommendationDecision.APPROVED,
-            AIRecommendation.valid_until > now,
-            AIRecommendation.paper_execution_status.is_(None),
+            or_(
+                and_(
+                    AIRecommendation.paper_execution_status.is_(None),
+                    AIRecommendation.valid_until > now,
+                ),
+                and_(
+                    AIRecommendation.paper_execution_status
+                    == RecommendationExecutionStatus.CLAIMED,
+                    AIRecommendation.paper_execution_lease_expires_at <= now,
+                ),
+            ),
         )
         if automation_only:
             statement = statement.where(AIRecommendation.source == "kasset-automation")
@@ -128,6 +138,78 @@ class AIRecommendationRepository:
             .with_for_update(skip_locked=True)
         )
         return (await self._session.scalars(statement)).one_or_none()
+
+    async def complete_paper_execution(
+        self,
+        owner_user_id: int,
+        *,
+        recommendation_id: str,
+        claim_token: str,
+        paper_order_id: str,
+        completed_at: datetime,
+    ) -> AIRecommendation | None:
+        statement = (
+            update(AIRecommendation)
+            .where(
+                AIRecommendation.owner_user_id == owner_user_id,
+                AIRecommendation.id == recommendation_id,
+                AIRecommendation.paper_execution_status
+                == RecommendationExecutionStatus.CLAIMED,
+                AIRecommendation.paper_execution_token == claim_token,
+            )
+            .values(
+                paper_execution_status=RecommendationExecutionStatus.SUCCEEDED,
+                paper_execution_token=None,
+                paper_execution_lease_expires_at=None,
+                paper_execution_completed_at=completed_at,
+                paper_order_id=paper_order_id,
+                paper_execution_error=None,
+                updated_at=completed_at,
+            )
+            .returning(AIRecommendation)
+        )
+        return (
+            await self._session.scalars(
+                statement,
+                execution_options={"populate_existing": True},
+            )
+        ).one_or_none()
+
+    async def fail_paper_execution(
+        self,
+        owner_user_id: int,
+        *,
+        recommendation_id: str,
+        claim_token: str,
+        error: str,
+        completed_at: datetime,
+    ) -> AIRecommendation | None:
+        statement = (
+            update(AIRecommendation)
+            .where(
+                AIRecommendation.owner_user_id == owner_user_id,
+                AIRecommendation.id == recommendation_id,
+                AIRecommendation.paper_execution_status
+                == RecommendationExecutionStatus.CLAIMED,
+                AIRecommendation.paper_execution_token == claim_token,
+            )
+            .values(
+                paper_execution_status=RecommendationExecutionStatus.FAILED,
+                paper_execution_token=None,
+                paper_execution_lease_expires_at=None,
+                paper_execution_completed_at=completed_at,
+                paper_order_id=None,
+                paper_execution_error=error,
+                updated_at=completed_at,
+            )
+            .returning(AIRecommendation)
+        )
+        return (
+            await self._session.scalars(
+                statement,
+                execution_options={"populate_existing": True},
+            )
+        ).one_or_none()
 
     async def next_pending_actionable(
         self,
