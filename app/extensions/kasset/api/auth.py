@@ -163,7 +163,9 @@ class MobileAuthService:
             raise self._invalid_google_token()
         google_sub = self._claim(payload, "sub")
 
-        user = await db.scalar(select(User).where(User.google_sub == google_sub))
+        user = await db.scalar(
+            select(User).where(User.google_sub == google_sub).with_for_update()
+        )
         if user is None:
             email = await self._available_google_email(db, payload.get("email"))
             user = User(
@@ -181,7 +183,7 @@ class MobileAuthService:
             except IntegrityError as err:
                 await db.rollback()
                 user = await db.scalar(
-                    select(User).where(User.google_sub == google_sub)
+                    select(User).where(User.google_sub == google_sub).with_for_update()
                 )
                 if user is None:
                     raise MobileApiError(

@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -165,6 +166,12 @@ class PasswordResetToken(Base):
             "ix_password_reset_tokens_user_created_at",
             "user_id",
             "created_at",
+        ),
+        Index(
+            "uq_password_reset_tokens_user_active",
+            "user_id",
+            unique=True,
+            postgresql_where=text("used_at IS NULL"),
         ),
     )
 

@@ -635,7 +635,9 @@ async def google_login(
     if not isinstance(google_sub, str) or not google_sub:
         return _rejected("missing_sub")
 
-    result = await db.execute(select(User).where(User.google_sub == google_sub))
+    result = await db.execute(
+        select(User).where(User.google_sub == google_sub).with_for_update()
+    )
     user = result.scalar_one_or_none()
     if user is None:
         return _rejected("unknown_google_sub")
