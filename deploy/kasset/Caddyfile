@@ -35,6 +35,8 @@ http:// {
 
 # Shared HTTPS application surface for the public sslip origin and the
 # optional MagicDNS origin.
+# This snippet runs in Caddy's host network and depends on the API loopback
+# publish in docker-compose.kasset.yml (`127.0.0.1:8000:8000`).
 (kasset_https_app) {
 	encode zstd gzip
 

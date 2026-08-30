@@ -266,13 +266,21 @@ async def test_password_email_uses_fragment_not_query(
 def test_legacy_smtp_tls_requires_explicit_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(settings, "AUTH_SMTP_ALLOW_LEGACY_TLS", False)
+    strict_context = password_recovery._smtp_ssl_context()
+
+    assert not strict_context.options & ssl.OP_LEGACY_SERVER_CONNECT
+    assert strict_context.verify_mode is ssl.CERT_REQUIRED
+    assert strict_context.check_hostname
+
     monkeypatch.setattr(settings, "AUTH_SMTP_ALLOW_LEGACY_TLS", True)
-
     with pytest.warns(DeprecationWarning):
-        context = password_recovery._smtp_ssl_context()
+        legacy_context = password_recovery._smtp_ssl_context()
 
-    assert context.minimum_version is ssl.TLSVersion.TLSv1
-    assert context.options & ssl.OP_LEGACY_SERVER_CONNECT
+    assert legacy_context.minimum_version is ssl.TLSVersion.TLSv1
+    assert legacy_context.options & ssl.OP_LEGACY_SERVER_CONNECT
+    assert legacy_context.verify_mode is ssl.CERT_REQUIRED
+    assert legacy_context.check_hostname
 
 
 def test_recovery_pages_are_csrf_protected_and_fragment_safe(auth_test_client) -> None:

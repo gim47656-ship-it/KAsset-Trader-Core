@@ -61,6 +61,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Caddy runs in host networking and reaches this loopback publish directly;
+    # keep it aligned with deploy/kasset/Caddyfile's 127.0.0.1:8000 upstream.
     ports:
       - "127.0.0.1:8000:8000"
     logging: *default-logging

@@ -8,9 +8,9 @@ Naver 전용 서비스 종속은 없다.
 ## 1. 현재 구조
 
 ```text
-인터넷 ──> Cloudflare Tunnel(api.hsps-portal.xyz) ──> cloudflared ──> api:8000
+인터넷 ──> Cloudflare Tunnel(api.hsps-portal.xyz) ──> cloudflared ──> 127.0.0.1:8000
            (public/mobile 전용; production API가 /admin*·/web-auth*를 403 차단)
-허용된 tailnet/사무실 IP ──> Caddy ──[공유 edge key 덮어쓰기]──> api:8000
+허용된 tailnet/사무실 IP ──> host-network Caddy ──[공유 edge key 덮어쓰기]──> 127.0.0.1:8000
 
 docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ db          timescale/timescaledb-ha:pg17  (volume postgres_data)
@@ -19,12 +19,18 @@ docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ worker      taskiq worker  app.tasks.kasset_market_events_tasks
 ├─ scheduler   taskiq scheduler (캔들 수집 매시 :05, 스캔 매시 :10, KST 평일 9-16시)
 ├─ mcp         analysis_readonly MCP :8768 (127.0.0.1, 토큰 인증)
-├─ caddy       허용 IP 관리자 ingress + X-KAsset-Admin-Edge-Key 주입
+├─ caddy       host network에서 실제 peer IP를 보존하는 관리자 ingress + edge key 주입
 ├─ cloudflared 공개 public/mobile API 터널(별도 관리 시; 관리자 ingress 아님)
 └─ migration   alembic upgrade head (profile: migration, 수동 1회성)
 
 환경변수 항목은 `.env.kasset.example`이 기준이다(키 이름 전수 + 주석).
 ```
+
+Caddy는 의도적으로 host network를 사용한다. Tailscale userspace forwarding을 Docker
+bridge의 published port로 받으면 실제 `100.64.0.0/10` 또는 `fd7a:115c:a1e0::/48` peer가
+bridge gateway `172.18.0.1`로 SNAT되어 정상 관리자도 403이 된다. bridge subnet을 allowlist에
+추가하면 같은 bridge를 쓰는 public connector까지 신뢰하는 우회가 되므로 금지한다. Caddy는
+host network에서 실제 peer를 검사하고 API의 `127.0.0.1:8000` publish로 proxy한다.
 
 - Risk Manager/주문 검증: `POST /api/v1/orders/preview`와 주문 제출 경로의 Risk Engine은
   api 컨테이너 내부 코드다. 인프라 이전으로 바뀌지 않으며 건드리지 않는다.
@@ -113,7 +119,7 @@ docker logs kasset-trader-caddy-1                  # 기동 오류 없음(키 �
 
 1. Cloudflare One > Networks > Tunnels > **Create tunnel** (Remote-managed, 이름 `kasset-trader`).
 2. 발급된 커넥터 토큰을 `.env.kasset`의 `TUNNEL_TOKEN`에 넣는다(커밋 금지).
-3. Public hostname의 `http://api:8000` 연결은 public/mobile API 전용으로만 쓴다.
+3. Public hostname은 호스트의 `http://127.0.0.1:8000` 연결을 public/mobile API 전용으로만 쓴다.
    production API는 edge key가 없는 `/admin*`와 `/web-auth*`를 항상 `403`으로 거부하므로
    이 direct tunnel은 로그인·복구·관리자 ingress가 아니다.
 4. 별도 관리 중인 cloudflared를 기동하면 존의 CNAME이 터널로 연결된다.
@@ -433,7 +439,7 @@ host-agnostic `http://` site block에서 같은 관리자 guard를 먼저 실행
 `https://175-45-201-51.sslip.io/health`는 200이다. Tunnel 복구는 이 변경의 범위 밖이고,
 530은 관리자 경계가 차단했다는 증거가 아니다.
 
-Tunnel을 복구해 connector를 `api:8000`으로 직접 보내는 경우에도 그 경로는 public/mobile
+Tunnel을 복구해 connector를 `127.0.0.1:8000`으로 직접 보내는 경우에도 그 경로는 public/mobile
 API 전용이다. cloudflared 설정이나 Cloudflare Transform Rule에
 `X-KAsset-Admin-Edge-Key`를 넣어서는 안 된다. 공개 edge가 키를 주입하면 모든 인터넷
 사용자에게 관리자 ingress 증명이 붙어 경계가 사라진다. direct tunnel 요청은 production
