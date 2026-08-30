@@ -55,14 +55,14 @@ class TestUpsertRows:
     @pytest.mark.asyncio
     async def test_upsert_groups_payload_per_table_config(self):
         session = MagicMock()
-        session.execute = AsyncMock()
+        session.execute = AsyncMock(return_value=SimpleNamespace(rowcount=-1))
         repo = DailyCandlesRepository(session=session)
 
         rows = [
             _row("AAPL", "NASD", datetime(2026, 5, 14, tzinfo=UTC), 150.0),
             _row("MSFT", "NASD", datetime(2026, 5, 14, tzinfo=UTC), 400.0),
         ]
-        await repo.upsert_rows(market=MarketKey.US, rows=rows)
+        result = await repo.upsert_rows(market=MarketKey.US, rows=rows)
 
         assert session.execute.await_count == 1
         args, kwargs = session.execute.await_args
@@ -72,6 +72,7 @@ class TestUpsertRows:
         assert all(p["exchange"] == "NASD" for p in payload)
         assert all(p["source"] == "kis" for p in payload)
         assert all("adj_close" in p for p in payload)
+        assert result == 2
 
     @pytest.mark.asyncio
     async def test_upsert_skips_when_empty(self):
@@ -89,7 +90,7 @@ class TestUpsertUsAdjustedClose:
     @pytest.mark.asyncio
     async def test_conflict_updates_only_adj_close_and_is_idempotent(self):
         session = MagicMock()
-        session.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
+        session.execute = AsyncMock(return_value=SimpleNamespace(rowcount=-1))
         repo = DailyCandlesRepository(session=session)
         yahoo_row = replace(
             _row(

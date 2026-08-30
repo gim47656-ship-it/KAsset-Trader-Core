@@ -201,7 +201,7 @@ async def test_naver_history_paginates_and_deduplicates_by_trading_date() -> Non
     rows = [
         _row(first_day + timedelta(days=index), 2500.0 + index) for index in range(101)
     ]
-    client = _Client([rows[:100], [rows[99], rows[100]]])
+    client = _Client([rows[:60], [rows[59], *rows[60:]]])
 
     frame = await fetch_kr_benchmark_daily(symbol="KOSPI", n=100, client=client)
 
@@ -211,6 +211,20 @@ async def test_naver_history_paginates_and_deduplicates_by_trading_date() -> Non
     ]
     assert [call["params"]["page"] for call in client.calls] == [1, 2]
     assert all(call["params"]["timeframe"] == "day" for call in client.calls)
+    assert all(call["params"]["pageSize"] == 60 for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_naver_history_accepts_index_rows_without_volume() -> None:
+    row = _row(date(2024, 1, 1), 2500.0)
+    row.pop("accumulatedTradingVolume")
+    row.pop("accumulatedTradingValue")
+    client = _Client([[row]])
+
+    frame = await fetch_kr_benchmark_daily(symbol="KOSPI", n=1, client=client)
+
+    assert frame.iloc[0]["volume"] == 0.0
+    assert frame.iloc[0]["value"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -219,11 +233,11 @@ async def test_naver_history_rejects_conflicting_duplicate_date() -> None:
     rows = [
         _row(first_day + timedelta(days=index), 2500.0 + index) for index in range(100)
     ]
-    conflicting = _row(first_day + timedelta(days=99), 9999.0)
+    conflicting = _row(first_day + timedelta(days=59), 9999.0)
     client = _Client(
         [
-            rows,
-            [conflicting, _row(first_day + timedelta(days=100), 2600.0)],
+            rows[:60],
+            [conflicting, *rows[60:], _row(first_day + timedelta(days=100), 2600.0)],
         ]
     )
 

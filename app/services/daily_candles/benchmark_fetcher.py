@@ -17,7 +17,7 @@ _KIS_INDEX_DAILY_TR_ID = "FHPUP02120000"
 _KIS_INDEX_CODE_BY_SYMBOL = {"KOSPI": "0001"}
 _KIS_INDEX_MAX_PAGES = 20
 _NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{symbol}/price"
-_NAVER_PAGE_SIZE = 100
+_NAVER_PAGE_SIZE = 60
 _NAVER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 _SUPPORTED_KR_BENCHMARKS = frozenset({"KOSPI"})
 
@@ -92,8 +92,13 @@ def _parse_naver_row(item: object) -> dict[str, object]:
     high_value = _finite_number(item.get("highPrice"), field="highPrice")
     low_value = _finite_number(item.get("lowPrice"), field="lowPrice")
     close_value = _finite_number(item.get("closePrice"), field="closePrice")
-    volume = _finite_number(
-        item.get("accumulatedTradingVolume"), field="accumulatedTradingVolume"
+    raw_volume = item.get("accumulatedTradingVolume")
+    # Naver 지수 일봉은 주식 일봉과 달리 거래량을 생략한다. 지수 OHLC의
+    # 결측으로 오인하지 않도록 저장 스키마의 unavailable sentinel인 0을 쓴다.
+    volume = (
+        _finite_number(raw_volume, field="accumulatedTradingVolume")
+        if raw_volume is not None
+        else 0.0
     )
     if min(open_value, high_value, low_value, close_value) <= 0:
         raise ValueError("Naver 벤치마크 OHLC 값은 양수여야 합니다")

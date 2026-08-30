@@ -198,7 +198,8 @@ class DailyCandlesRepository:
             "_RowcountResult",
             cast(object, await self._session.execute(upsert_sql, payload)),
         )
-        return max(int(result.rowcount or 0), 0)
+        rowcount = int(result.rowcount) if result.rowcount is not None else -1
+        return len(payload) if rowcount < 0 else rowcount
 
     async def upsert_us_adjusted_close(self, *, rows: list[DailyCandleRow]) -> int:
         """Insert Yahoo rows or update only ``adj_close`` on existing US rows.
@@ -246,7 +247,8 @@ class DailyCandlesRepository:
             "_RowcountResult",
             cast(object, await self._session.execute(sql, payload)),
         )
-        return max(int(result.rowcount or 0), 0)
+        rowcount = int(result.rowcount) if result.rowcount is not None else -1
+        return len(payload) if rowcount < 0 else rowcount
 
     async def resolve_crypto_instrument_ids(
         self, *, symbols: list[str], partition: str
