@@ -317,6 +317,23 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 text("ALTER TABLE instruments DROP COLUMN aliases")
             )
             await connection.execute(text("DROP TABLE symbol_master"))
+            # KR lifecycle evidence and persisted research cohorts are also
+            # introduced after this boundary.
+            for table in (
+                "kasset_research_cohort_members",
+                "kasset_research_cohorts",
+                "kasset_corporate_action_fetch_coverage",
+                "kr_corporate_action_evidence",
+                "kr_stock_lifecycle_observations",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
+            await connection.execute(
+                text(
+                    "ALTER TABLE kr_symbol_universe "
+                    "DROP COLUMN std_pdno, "
+                    "ALTER COLUMN listing_status TYPE VARCHAR(20)"
+                )
+            )
             # News translation fields are post-boundary additive columns too.
             # Remove the current-head shape so its migration can add them.
             await connection.execute(
