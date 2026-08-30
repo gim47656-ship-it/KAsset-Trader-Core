@@ -1,5 +1,5 @@
 # HANDOFF — KAsset Trader Core
-갱신: 2026-08-30 (재부팅 중단 뒤 운영 DB migration·Core 배포·NH PLUG 캐시 이관 복구)
+갱신: 2026-08-30 (재부팅 복구·운영 DB migration·Docker runtime 패키징 교정)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, PAPER/LIVE 주문 원장과 Android API를 제공한다. 현재 목표는 **PAPER에서 재현 가능한 추천·승격·주문·청산을 충분히 검증한 뒤 별도 승인으로 LIVE를 검토**하는 것이다. 일일 목표를 이유로 거래를 만들거나, 불완전한 이력·기업행동·PIT 근거를 실제 backtest 증거처럼 취급하거나, AI가 Hard Risk를 우회하면 안 된다.
@@ -13,7 +13,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 5. LIVE 주문은 별도 사용자 승인 전까지 열지 않는다.
 
 ## 전체 진행 상태
-- **운영 배포 완료**: Naver 운영 Core는 commit/image `1e0c19c3`로 API·MCP·worker·scheduler를 동일 배포했다. API와 MCP는 healthy, worker와 scheduler는 running이며 재시작 횟수는 모두 0이다.
+- **운영 배포 완료**: Naver 운영 Core는 commit/image `f3359102`로 API·MCP·worker·scheduler를 동일 배포했다. API와 MCP는 healthy, worker와 scheduler는 task import 후 정상 기동했고 재시작 횟수는 모두 0이다.
 - **운영 DB head 적용 완료**: `20260830_news_translation`이 `news_analysis_results`에 nullable `translated_title`, `translated_excerpt` 두 열을 추가했다. 기존 35행은 보존됐고 번역값 null이 정상이다.
 - **NH PLUG 캐시 무발급 이관 완료**: `/opt/kasset-nhplug/token_cache.json`의 owner/base/만료를 내용 출력 없이 검증한 뒤 owner fingerprint 파일로 원자 이동했다. 파일 크기·mtime이 유지돼 신규 OAuth 발급은 없었고 mode는 `0600`이다.
 - **뉴스 번역 운영 wire 확인 완료**: 인증된 `/api/v1/market/news`와 `/api/v1/ai/daily-routine`이 `translatedTitle`/`translatedExcerpt` 키를 반환한다. 실제 번역값 생성은 신규 영문 뉴스 분석 전까지 미검증이다.
@@ -23,19 +23,20 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 ## 이번 세션에서 한 일
 - 로컬 PC 재부팅으로 끊긴 운영 작업을 재조사했다. 운영 서버와 PostgreSQL은 재부팅되지 않았고, 사고 직후 revision은 `20260830_kr_lifecycle_ca`, 대상 열 0개, `news_analysis_results` 35행, 대기 lock 0개여서 partial DDL이 없음을 확인했다.
 - migration 전 full custom dump `/root/backups/kasset-daily/kasset-20260830T042232Z.dump.gz`를 새로 만들고 `gzip -t`와 `pg_restore -l`로 검사했다. 크기 4,381,905 bytes, SHA-256 `0faa24707ad969f8286082111487b2af6b41f2ab3d508a39d81604cd278908a8`.
-- 원격 working tree를 detached `1e0c19c3`으로 고정하고 `kasset-trader-core:1e0c19c3` 이미지를 빌드했다.
+- 원격 working tree를 최신 배포 commit으로 고정하고 운영 이미지를 빌드했다. 최초 `1e0c19c3` 배포 뒤 worker/scheduler 로그에서 이미지에 `research_contracts`가 빠진 패키징 결함을 발견해 `Dockerfile.api`가 `research_contracts/`와 `research/`를 포함하도록 고치고 `f3359102`로 재배포했다.
 - PostgreSQL transactional DDL로 `20260830_kr_lifecycle_ca -> 20260830_news_translation`을 적용하고 API·MCP·worker·scheduler를 새 이미지로 재생성했다.
 - 유효기간이 77,580초 남은 legacy NH PLUG 캐시를 실 OAuth 호출 없이 owner 파일로 이관했다. legacy 파일은 사라지고 owner 파일 1개만 남았다.
+- 독립 checker의 MAJOR 1건을 `ACCEPTED`했다. migration round-trip fixture가 current metadata의 post-boundary shape를 충분히 제거하지 않아 `DuplicateColumn`이 날 수 있었다. 번역 열 2개와 KR lifecycle의 5개 테이블, `std_pdno`, `listing_status`를 boundary shape로 되돌리도록 교정했다.
 
 검증:
 
 - 운영 postcheck: revision `20260830_news_translation`; 두 신규 열은 `text`, nullable `YES`; 기존 35행 유지; 번역 non-null 0; 대기 lock 0.
-- 컨테이너: API/MCP healthy, worker/scheduler running, image `1e0c19c3`, restart count 0.
+- 컨테이너: API/MCP healthy, worker/scheduler는 task module import와 `Listening started`/`Startup completed` 확인, image `f3359102`, restart count 0.
 - 공개 `https://175-45-201-51.sslip.io/health`: HTTP 200, `{"status":"ok"}`.
 - 인증된 `GET /api/v1/market/news?limit=1`: HTTP 200, 1건, 두 번역 키 존재.
 - 인증된 `GET /api/v1/ai/daily-routine`: HTTP 200, alert 1건, 두 번역 키 존재.
 - NH PLUG owner cache: legacy 없음, owner 파일 1개, mode `0600`, 기존 size/mtime 유지.
-- 구현 시점 집중 검증 108건과 `ruff`/`ty`는 이전 세션에서 통과했다. 운영 restore·downgrade와 실 NH OAuth POST는 비파괴 원칙상 실행하지 않았다.
+- 구현 시점 집중 검증 108건과 `ruff`/`ty`는 이전 세션에서 통과했다. checker MAJOR 교정 파일은 `ruff check`·`ruff format --check` 통과. GitHub CI run `33293071691`의 `migration (PostgreSQL 15)` round-trip job이 성공했다. 운영 restore·downgrade와 실 NH OAuth POST는 비파괴 원칙상 실행하지 않았다.
 
 ## 다음 세션이 바로 할 일
 1. 실제 영문 Reuters 등 신규 분석에서 번역 제목·발췌와 summary가 저장되고 두 KAsset API에 노출되는지 확인한다. 기존 row의 null은 정상이다.
@@ -43,7 +44,7 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 3. KIS HTTP 403, SCCO 2026-08-10, 신규 상장 `0126Z0`/`SPCX`, KRX APPROVAL→PAPER fill/reconcile, XKRX drift 경보는 기존 미종결 상태를 유지한다.
 
 ## 세션 이력
-- 2026-08-30: 재부팅 중단 상태 확인, 운영 DB backup/migration, Core `1e0c19c3` 배포, NH PLUG 캐시 무발급 이관 완료.
+- 2026-08-30: 재부팅 복구, 운영 DB backup/migration, Core `f3359102` 배포, NH PLUG 캐시 무발급 이관, Docker runtime 패키징 교정.
 - 2026-08-30: 영문 뉴스 번역 제목/발췌, KAsset API 연결, NH PLUG owner cache·process lock 구현; readiness PIT 미종결 재판정.
 - 2026-08-30: 운영 migration, KR/US 100종목 cohort·일봉·benchmark 적재, calendar/Yahoo 복구와 readiness 실측.
 - 2026-08-30: PAPER promotion evidence/CLI, artifact fingerprint, position cycle, claim lease, AI shadow, migration CI gate 완료.
