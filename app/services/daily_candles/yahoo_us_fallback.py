@@ -168,9 +168,12 @@ async def fetch_us_daily_yahoo_fallback(
         else:
             ts = ts.tz_convert(UTC)
         volume = _finite(record.get("volume")) or 0.0
-        open_value = _finite(record.get("open")) or close
-        high_value = _finite(record.get("high")) or close
-        low_value = _finite(record.get("low")) or close
+        open_value = _finite(record.get("open"))
+        high_value = _finite(record.get("high"))
+        low_value = _finite(record.get("low"))
+        open_value = close if open_value is None else open_value
+        high_value = close if high_value is None else high_value
+        low_value = close if low_value is None else low_value
         out.append(
             YahooFallbackRow(
                 time_utc=ts.to_pydatetime(),

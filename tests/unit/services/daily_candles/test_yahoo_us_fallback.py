@@ -60,6 +60,28 @@ class TestFetchUsDailyYahooFallback:
         assert all(r.adj_close is None for r in rows)
 
     @pytest.mark.asyncio
+    async def test_preserves_zero_ohlc_for_readiness_validation(self):
+        sample = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-05-01"]),
+                "open": [0.0],
+                "high": [101.0],
+                "low": [0.0],
+                "close": [100.0],
+                "adj_close": [99.0],
+                "volume": [1000],
+            }
+        )
+        with patch(
+            "app.services.brokers.yahoo.client.fetch_ohlcv",
+            new=AsyncMock(return_value=sample),
+        ):
+            rows = await fetch_us_daily_yahoo_fallback(symbol="X", n=1)
+
+        assert rows[0].open == 0.0
+        assert rows[0].low == 0.0
+
+    @pytest.mark.asyncio
     async def test_recovers_exact_completed_terminal_row_from_validated_metadata(self):
         sample = pd.DataFrame(
             {
