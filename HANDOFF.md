@@ -1,85 +1,69 @@
 # HANDOFF — KAsset Trader Core
-갱신: 2026-08-30 (PAPER 자동화 신뢰경계·배포 lineage·benchmark window 보강 완료)
+갱신: 2026-08-30 (운영 DB migration·KR/US 100종목 일봉·기준지수 적재 및 fail-closed readiness 배포)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
-KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, PAPER/LIVE 주문 원장과 Android API를 제공한다. 현재 목표는 **PAPER에서 재현 가능한 추천·승격·주문·청산을 충분히 검증한 뒤 별도 승인으로 LIVE를 검토**하는 것이다. 일일 목표를 이유로 거래를 만들거나 AI가 Hard Risk를 우회하면 안 된다.
+KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, PAPER/LIVE 주문 원장과 Android API를 제공한다. 현재 목표는 **PAPER에서 재현 가능한 추천·승격·주문·청산을 충분히 검증한 뒤 별도 승인으로 LIVE를 검토**하는 것이다. 일일 목표를 이유로 거래를 만들거나, 불완전한 이력·기업행동·PIT 근거를 실제 backtest 증거처럼 취급하거나, AI가 Hard Risk를 우회하면 안 된다.
 
 정본 운용 계약:
 
 1. **APPROVAL**: 추천 → 사용자 승인 → PAPER 주문.
 2. **AUTO_PAPER**: persisted backtest candidate, exact strategy/version `PAPER_APPROVED`, 동일 strategy artifact fingerprint, submit 직전 Hard Risk·Kill Switch·owner scope 재검증을 모두 통과한 PAPER 주문만 자동 실행한다.
 3. AI는 후보 factor·수량·stop·exit·backtest metrics를 만들거나 덮어쓰지 않는다. 추천 설명·검토만 담당한다.
-4. LIVE 주문 경로·운영 배포·운영 migration은 별도 사용자 승인 전까지 열지 않는다.
+4. 데이터 readiness는 252개 완료 세션, benchmark, PIT cohort, 상장·폐지와 기업행동 근거를 모두 fail-closed로 평가한다. minimum을 낮추거나 현재 universe를 과거 universe로 가장하지 않는다.
+5. LIVE 주문은 별도 사용자 승인 전까지 열지 않는다.
 
 ## 전체 진행 상태
-- **코드 완료**: persisted promotion evidence CLI, immutable strategy artifact fingerprint, 실제 `PaperPosition`에 결합된 position cycle, claim lease/fencing과 불명확 submit reconciliation, 일봉 readiness/benchmark evidence를 구현했다.
-- **Promotion fail-closed**: 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry만 신뢰한다. CLI로 raw metrics를 주입할 수 없고 candidate ID와 운영자 사유만 받는다. evidence 부족·fallback-only benchmark·선택 시장/평가 window 불일치·fingerprint 불일치는 승격/주문을 막는다.
-- **현재 데이터 readiness 미충족**: 마지막 read-only 운영 감사에서 KR은 100종목×60봉, US는 0종목이며 252봉 충족 종목은 0이었다. 기준을 낮추거나 가짜 backtest로 승인하지 않았다.
-- **Position lifecycle 완료**: 신규 BUY 체결가·추천 ATR/stop으로 fresh cycle을 만들고 `paper_position_id`, market, opened/closed 시각, strategy identity/fingerprint를 보존한다. 전량 청산은 soft-close하고 같은 종목 재진입은 과거 trailing/partial 상태를 재사용하지 않는다.
-- **Claim 복구 완료**: `CLAIMED|SUCCEEDED|FAILED`와 token/lease/attempt count를 사용한다. 만료 claim만 회수하고 stale worker 완료 쓰기를 거부한다. `ai-rec:{recommendation_id}`로 기존 주문을 먼저 조회하며, 불명확 submit은 즉시 재전송하지 않는다. 3회 attempt 초과 시 같은 client order가 있으면 `SUCCEEDED`로 결합하고 없을 때만 `FAILED`로 종결한다.
-- **AI shadow 완료**: 최종 선택되어 저장된 recommendation에 exact provider/tier/model ID, normalized input hash, validated response, confidence, 선택 사유를 secret-free evidence로 남긴다. 통계 범위는 `persisted final selections only`다.
-- **429 보강 완료**: direct/MCP provider의 429는 availability fallback으로 처리하고 나머지 4xx·refusal·schema·safety 오류는 fail-closed한다.
-- **CI gate 완료**: 4개 고정 shard가 모든 non-live test 파일을 정확히 한 번 포함한다. `Test` workflow는 `workflow_dispatch`와 PostgreSQL 15에서 ROB-849 경계를 재구성한 뒤 후속 전체 migration을 downgrade/upgrade하는 전용 job을 가진다.
-- **운영 미배포**: `20260830_kasset_position_cycles → 20260830_kasset_promotion_trust → 20260830_kasset_claim_lease` migration을 운영 DB에 적용하지 않았고 scheduler/LIVE 경로를 변경하지 않았다.
-- **실기기 검증 보류**: Android 계약 회귀 unit test는 통과했지만 사용자가 아침에 할 실물기기 확인은 남아 있다.
+- **운영 배포 완료**: 운영 이미지 source ref는 `dc012816`, public `/health`는 `{"status":"ok"}`다. Alembic은 `20260830_kr_lifecycle_ca (head)`까지 적용됐다.
+- **운영 백업 완료**: `/root/backups/kasset-daily/kasset-20260829T222212Z.dump.gz`, SHA-256 `e4eecec8da3261eea98887f9da38f00ee189e0379922638baeda4b9a29e4da00`.
+- **운영 cohort 고정**: KR `67f1059ab7e3a370ab5b9dd89ec3991ad4860d7e4560004674b4f02dda917547`, US `fd27bf6f66e9f73f0f725e2284969c69425c0d804f74f20a4e537788c86a3d02`; 각각 active 100종목이다. US TQQQ/SOXL은 강제 연속성 멤버이며 readiness/promotion 표본에서는 제외된다.
+- **일봉 적재 완료**: KR 99/100종목이 252봉 이상이고 신규 상장 `0126Z0`은 187봉이다. US 99/100종목이 252봉 이상이고 신규 상장 `SPCX`는 54봉이다. KOSPI와 SPY benchmark는 각각 400봉이다.
+- **캘린더·OHLC 결함 제거**: stale XKRX의 2025-12-31, 2026-06-03, 2026-07-17, 2026-08-17, 2026-12-31 오분류를 shared calendar에서 교정했다. Yahoo 완료봉은 exact session/previous/current gate를 유지하고 metadata 가격 반올림만 상대 허용오차로 처리한다.
+- **최종 운영 readiness**: KR은 거래일 누락 0, OHLC 이상 0, eligible 99다. US는 OHLC 이상 0, eligible 98이며 `SCCO`의 Yahoo 원천 2026-08-10 1봉 누락이 남아 있다. 양 시장 모두 신규 상장 history, 기업행동·상장폐지 PIT 근거, forward-only cohort, fallback-only source 때문에 promotion은 계속 차단된다.
+- **PIT/기업행동 차단**: 운영 KIS token 발급이 HTTP 403이다. 알려진 현재 종목만으로 과거 상장폐지 universe를 복원할 수 없고 KRX licensed archive 자격도 없어, 검증되지 않은 데이터를 생성하지 않았다.
+- **PAPER 자동화 신뢰경계 완료**: immutable strategy fingerprint, position cycle, claim lease/fencing, ambiguous submit reconciliation, selected AI shadow, benchmark window와 fold coverage를 구현했다.
 
 ## 이번 세션에서 한 일
-- `scripts/kasset_paper_ops.py`에 `readiness`, `backtest-build`, `promotion-status`, `promotion-draft`, `promotion-approve`, `promotion-suspend`, `promotion-retire`를 추가했다. 실제 주문·migration·scheduler 활성화는 하지 않는다.
-- strategy-influencing code와 유효 설정, evidence schema version을 canonical fingerprint로 묶었다. Git SHA는 source lineage로 별도 저장하며 문서·UI·테스트 변경은 fingerprint에서 제외한다.
-- recommendation 생성, promotion 승인, AUTO_PAPER submit 경계의 fingerprint를 3중 비교한다. 변경된 코드에 과거 승격을 재사용할 수 없다.
-- position 상태를 실제 PAPER 보유 cycle에 결합하고 부분 매도·전량 청산·재진입·재시작 reconcile·owner/account/market 격리를 추가했다.
-- claim lease/token CAS, 만료 회수, owner-scoped client ID 조회, account별 correlation ID 유일성, 불명확 submit 복구를 추가했다. 별도 `PREVIEWED/SUBMITTING/UNKNOWN/RECONCILING` 상태와 heartbeat 열은 같은 사실의 중복 표현이라 만들지 않았다.
-- DB 일봉 readiness에서 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate action 상태, PIT/상장폐지 근거, KOSPI/SPY benchmark 범위를 계산한다.
-- 선택된 recommendation의 AI route metadata와 validated verdict를 `ai_shadow` evidence에 보존하고 read-only 통계를 추가했다. 선택되지 않아 durable row가 없는 후보를 저장했다고 꾸미지 않는다.
-- GitHub Actions에 PostgreSQL 15 migration round-trip job을 추가하고 stale fixture-only test manifest entry를 제거했다.
-- Alembic 기본 `version_num VARCHAR(32)`에 맞게 미배포 KAsset revision ID 2개를 단축하고 실제 PostgreSQL round-trip에서 후속 migration 전체를 검증했다.
-- 기존 CI formatter/type gate에서 드러난 KAsset 관련 포맷 drift와 DART receipt number 타입 narrowing을 정리했다.
-- 배포 이미지의 source lineage는 유효 `GITHUB_SHA` → `/app/.build-vcs-ref` → 개발환경 `git rev-parse` 순으로 읽는다. 배포 이미지에 `git`/`.git`이 없어도 artifact를 만들며 lineage는 fingerprint에 섞지 않는다.
-- promotion evidence schema를 v2로 올리고 baseline benchmark 시장 집합과 평가 시작/종료 window가 선택 시장·포트폴리오 기록 구간 전체를 덮지 않으면 승격을 차단한다.
-- position exit 추천도 entry와 동일한 strategy key/version/artifact fingerprint를 보존한다. 한 번도 기록되지 않던 `entry_order_id` 컬럼/FK는 미배포 migration과 모델에서 제거했다.
-- promotion 운영자 경로의 row lock 순서를 promotion row → research chain으로 통일했다. PAPER claim은 3회로 제한하되 attempt 소진 직전 기존 `ai-rec:{recommendation_id}` 주문을 다시 결합한다.
+- 운영 DB를 gzip dump로 백업하고 clone migration round-trip 뒤 운영 head까지 migration했다.
+- Toss 최신 시가총액으로 KR/US 100종목 immutable cohort를 만들고, KR/US 일봉과 KOSPI/SPY benchmark를 최대 400봉 적재했다.
+- `kasset_research_cohorts`, cohort members, KR lifecycle/corporate-action coverage schema와 fail-closed readiness를 추가했다.
+- completed expected session, duplicate/future/stale/OHLC, adjusted-close, benchmark, lifecycle/PIT/corporate-action/fallback 근거를 시장별로 계산한다.
+- XKRX stale 휴장일을 shared session calendar로 수렴시켜 watcher, session API, KIS cache, KR sync, daily read, screener, forecast가 같은 세션 계약을 사용하게 했다.
+- Yahoo terminal NaN 완료봉은 provider metadata의 exact 정규장 종료, 직전 raw/adjusted close, current price, day bounds가 모두 결박될 때만 복구한다. BRK.A 실측 metadata 반올림은 `rel_tol=1e-6, abs_tol=0.01`로 처리하고 OHLC를 내부 정합 상태로 정규화했다.
+- 홈 지수 API는 완료된 일봉을 제공한다. 운영 smoke에서 SPX -0.25%, NASDAQ -0.52%, RUT -1.39%, SOX -3.47%였고 DJI는 원천 부재를 fail-closed로 표시했다. SPX 1주 상세는 2026-08-24~08-28 일봉 5개, 마지막 close 7711.76이었다.
 
 검증:
 
-- KAsset automation/AI/API/PostgreSQL 집중 스위트: **391 passed**.
-- CI workflow·shard exact-cover 계약: **93 passed**.
-- Promotion/fingerprint/CLI 집중 스위트: **40 passed**.
-- DART content fetcher 회귀: **20 passed**.
-- `ruff check app/ tests/ research/ scripts/` 및 `ruff format --check ...`: 통과.
-- `ty check app/ --error-on-warning`: 통과.
-- `alembic heads`: `20260830_kasset_claim_lease (head)` 단일 head.
-- Android `:app:testDebugUnitTest`: `BUILD SUCCESSFUL`.
-- 실제 PostgreSQL 15에서 ROB-849 경계 재구성 → 이전 revision downgrade → current head upgrade → 재다운그레이드 → 재업그레이드와 단일 head 확인이 통과했다. 과거 TimescaleDB 연속 집계 migration은 이 KAsset 전용 회귀 job의 검증 범위가 아니며 수정하지 않았다.
-- 최종 reviewer finding 보강 범위(Promotion artifact/baseline·fold benchmark, position exit identity, claim cap/reconciliation, 실제 PostgreSQL migration round-trip): **70 passed + 재검수 보강 40 passed**.
+- 데이터/candle/session/readiness PostgreSQL 집중 스위트: **250 passed**.
+- 최종 휴장·Yahoo·readiness 회귀: **48 passed**, 추가 2026-06-03 휴장 회귀 **43 passed**.
+- `ruff format --check app/ tests/ research/ scripts/`, `ruff check ...`, `ty check app`: 통과.
+- 전체 `pytest -q` 수집은 Windows의 기존 `fcntl` 부재와 frozen research source hash 때문에 실패했다. 이번 KAsset 변경과 무관하며 같은 실패를 반복하지 않았다.
+- 운영 `/app/.build-vcs-ref`: `dc012816`; public health 통과.
+- 운영 BRK.A 재백필: 400봉 upsert, Yahoo fallback, OHLC normalization 성공.
+- 최종 운영 readiness: KR missing 0/anomaly 0/99 eligible, US missing 1/anomaly 0/98 eligible.
+- 독립 checker: `FINAL: PASS / OWNER: CHECKER`, blocker 0, major 0.
 
 주요 커밋:
 
-- `60825851` CI shard manifest
-- `72093187` AI 429 fallback
-- `92276eef` position cycle lifecycle
-- `76d52b2f` data readiness/benchmark
-- `1008d998` immutable strategy fingerprint
-- `06f92737` promotion evidence/CLI
-- `3b6383eb` claim lease/reconciliation
-- `d0259e08` selected recommendation AI shadow
-- `c38f7c15` PostgreSQL 15 migration CI gate
-- `8706709c` repository format/type gate 정리
-- `bb42b91a` deployment lineage·benchmark window promotion trust
-- `bbb045b8` position exit strategy provenance·dead entry-order 제거
-- `5a8adf26` PAPER claim attempt 상한
-- `38e405b3` walk-forward fold benchmark coverage·promotion lock order
-- `fab97a9b` attempt 소진 전 기존 PAPER 주문 reconciliation
+- `edf50e13` 초기 fail-closed readiness
+- `abb506d7` immutable cohorts와 benchmark
+- `5b2784a8` 강제 멤버 제외·fail-closed 보강
+- `003b3ed4` benchmark pagination·row count
+- `b6e2b4e9` Yahoo 완료봉 복구
+- `297eb39f` zero OHLC readiness
+- `9f743b82` shared session calendar·Yahoo OHLC 정합
+- `a1b600c0` 잔여 연말휴장·가격 반올림 보강
+- `dc012816` 2026 지방선거 KRX 휴장 보강
 
 ## 다음 세션이 바로 할 일
-1. 아침에 S24+에서 기존 APPROVAL/AUTO_PAPER 화면과 설정 저장을 확인한다. Core 운영 미배포 상태의 422는 구 계약 차단이며 앱 오류 처리 확인용이다.
-2. 운영 배포 승인을 받기 전에는 migration/backfill/scheduler를 실행하지 않는다. 승인 시 DB backup·현재 Alembic head를 확인하고, `review.ai_recommendations`의 고아 `(owner_user_id, paper_order_id)`와 `paper.paper_trades`의 중복 `(account_id, correlation_id)`를 read-only probe로 각각 0건 확인한 뒤 migration을 적용한다.
-3. 운영 일봉을 KR/US 각각 252봉 이상과 PIT·상장폐지·benchmark 근거까지 보강한다. minimum을 낮추지 않는다.
-4. readiness가 통과한 뒤 `backtest-build`로 persisted candidate를 만들고 evidence/hash를 검수한 다음에만 `promotion-approve`를 실행한다.
+1. KIS HTTP 403을 계정/허용 IP/앱 권한에서 해결하고, KRX 또는 라이선스된 PIT archive 자격을 확보한 뒤 상장폐지·기업행동 coverage를 다시 적재한다. 현재 데이터를 과거 PIT라고 승격하지 않는다.
+2. `SCCO` 2026-08-10 일봉은 신뢰할 수 있는 2차 원천으로만 보강한다. 인접 봉 복제나 보간은 금지한다.
+3. 신규 상장 `0126Z0`, `SPCX`는 실제 252개 완료 세션이 쌓이기 전까지 insufficient-history를 유지한다.
+4. 현재 forward-paper cohort의 effective date 이후 충분한 기간을 수집해 persisted backtest candidate를 만들고, evidence/hash 검수 뒤에만 `promotion-approve`를 실행한다.
 5. KRX 개장 중 APPROVAL 추천→승인→PAPER fill/reconcile을 검증한다. AUTO_PAPER는 승격 후 소액으로 duplicate submit, claim lease 회수, kill switch, partial/full exit, 재진입을 확인한다.
-6. LIVE, 1m/5m, VWAP, ORB, 시간대 상대거래량, 섹터 최대노출, 계좌 high-watermark, 목표수익 위험축소, Meta Label/Factor Weight는 이번 범위 밖이며 별도 결정 전 변경하지 않는다.
+6. XKRX 공급자 봉과 expected session 집합의 주기적 drift 경보를 추가하고, 2026-12-31은 경과 뒤 실제 공급자 데이터로 재확인한다.
 
 ## 세션 이력
-- 2026-08-30: PAPER promotion evidence/CLI, artifact fingerprint, position cycle, claim lease, readiness/benchmark, AI shadow, migration CI gate 완료.
+- 2026-08-30: 운영 migration, KR/US 100종목 cohort·일봉·benchmark 적재, calendar/Yahoo 복구와 readiness 실측 완료.
+- 2026-08-30: PAPER promotion evidence/CLI, artifact fingerprint, position cycle, claim lease, AI shadow, migration CI gate 완료.
 - 2026-08-29: 결정론적 PAPER 자동화·exact-version 승격 gate, 추천 시장·일일 횟수, AI 공급자·뉴스 경계 완료.
 - 2026-08-29: DART 운영 수집·문서 fallback·일반 뉴스 AI 요약·5단계 PAPER 정책 완료.
-- 2026-08-29: 기간별 candle/session cutover, 뉴스/공시 파이프라인과 Android 연동.
