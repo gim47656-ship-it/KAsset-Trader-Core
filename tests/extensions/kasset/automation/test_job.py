@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
 from app.core.config import settings
+from app.extensions.kasset.api import krx_quotes
+from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.paper_schemas import Quote
 from app.extensions.kasset.api.runtime_state import runtime_state
+from app.extensions.kasset.api.toss_market_data import TOSS_QUOTE_SOURCE
 from app.extensions.kasset.automation import job
 from app.extensions.kasset.automation.contracts import PROMOTION_BYPASSED_BY_OWNER
 from app.extensions.kasset.automation.job import (
@@ -29,14 +34,24 @@ from app.extensions.kasset.automation.strategy_promotion import PaperApprovalDec
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
 )
+from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
 from app.models.ai_recommendations import AIRecommendation
+from app.models.paper_trading import PaperAccount
 from app.models.trading import User, UserRole
 from app.tasks import TASKIQ_TASK_MODULES, kasset_paper_automation_tasks
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+# 2026-08-31(월) 11:00 KST. 공용 XKRX 캘린더가 정규장으로 확정하는 시각이라
+# 기준 시세 신선도 게이트가 실제로 켜진다. 기존 `_NOW`(21:00 KST)는 장 마감
+# 이후라 그 게이트가 꺼진 상태를 그대로 유지한다.
+_NOW_IN_SESSION = datetime(2026, 8, 31, 2, 0, tzinfo=UTC)
 
 
-def _approved_recommendation(owner_user_id: int) -> AIRecommendation:
+def _approved_recommendation(
+    owner_user_id: int,
+    *,
+    now: datetime = _NOW,
+) -> AIRecommendation:
     return AIRecommendation(
         id=f"rec-job-{uuid4().hex}",
         owner_user_id=owner_user_id,
@@ -50,10 +65,10 @@ def _approved_recommendation(owner_user_id: int) -> AIRecommendation:
         evidence=[],
         suggested_quantity="1",
         source="kasset-automation",
-        created_at=_NOW - timedelta(minutes=5),
-        valid_until=_NOW + timedelta(hours=1),
-        decided_at=_NOW - timedelta(minutes=1),
-        updated_at=_NOW - timedelta(minutes=1),
+        created_at=now - timedelta(minutes=5),
+        valid_until=now + timedelta(hours=1),
+        decided_at=now - timedelta(minutes=1),
+        updated_at=now - timedelta(minutes=1),
     )
 
 
@@ -77,27 +92,65 @@ async def _set_auto_policy(
     owner_user_id: int,
     *,
     kill_switch: bool = False,
+    now: datetime = _NOW,
 ) -> None:
     await AITradingPolicyService().put_snapshot(
         db_session,
         owner_user_id,
         mode=OperatingMode.AUTO_PAPER,
         limits=replace(AITradingLimits(), kill_switch=kill_switch),
-        now=_NOW,
+        now=now,
     )
 
 
 async def _enable_promotion_bypass(
     db_session: AsyncSession,
     owner_user_id: int,
+    *,
+    now: datetime = _NOW,
 ) -> None:
     await AITradingPolicyService().set_promotion_bypass(
         db_session,
         owner_user_id,
         enabled=True,
         reason="모의투자 계좌 완전 자동매매 게이트 개방",
-        now=_NOW,
+        now=now,
     )
+
+
+def _krx_quote(*, source: str, as_of: datetime) -> Quote:
+    """운영과 같은 생성점(`krx_quotes.build_quote`)으로 만든 KRX 기준 시세."""
+    return krx_quotes.build_quote(
+        market="KRX",
+        symbol="005930",
+        name="삼성전자",
+        currency="KRW",
+        price=Decimal("70000"),
+        previous_close=Decimal("69000"),
+        as_of=as_of,
+        source=source,
+    )
+
+
+def _record_quote_for_market(
+    monkeypatch: pytest.MonkeyPatch,
+    result: Quote | Exception,
+) -> list[tuple[str, str]]:
+    """`quote_for_market` 호출을 기록한다.
+
+    게이트(`job`)와 주문 경로(`paper_orders`)가 같은 모듈 속성을 호출 시점에
+    찾으므로, 호출 횟수가 곧 "주문 경로까지 갔는지"의 증거가 된다.
+    """
+    calls: list[tuple[str, str]] = []
+
+    async def _fake(db: object, *, market: str, symbol: str) -> Quote:
+        calls.append((market, symbol))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(krx_quotes, "quote_for_market", _fake)
+    return calls
 
 
 async def _promotion_bypass_snapshot(
@@ -618,3 +671,222 @@ async def test_promotion_bypass_never_reaches_another_owners_recommendation(
     finally:
         await _cleanup_owner(db_session, username_a)
         await _cleanup_owner(db_session, username_b)
+
+
+async def _outcome_for_owner(
+    owner_id: int,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    report = await run_paper_automation_once(now=now)
+    return next(
+        item
+        for item in report["outcomes"]  # type: ignore[union-attr]
+        if item["owner_user_id"] == owner_id
+    )
+
+
+async def _owner_order_count(db_session: AsyncSession, owner_id: int) -> int:
+    return int(
+        await db_session.scalar(
+            select(func.count())
+            .select_from(AndroidPaperOrder)
+            .where(AndroidPaperOrder.owner_user_id == owner_id)
+        )
+        or 0
+    )
+
+
+async def _cleanup_paper_wiring(db_session: AsyncSession, owner_id: int) -> None:
+    """주문 경로까지 간 sweep이 만든 PAPER 주문/계좌 행을 되돌린다."""
+    await db_session.rollback()
+    account_ids = list(
+        await db_session.scalars(
+            select(AndroidPaperAccount.paper_account_id).where(
+                AndroidPaperAccount.owner_user_id == owner_id
+            )
+        )
+    )
+    # `ai_recommendations.paper_order_id`가 주문 행을 참조하므로 추천을 먼저
+    # 지운다.
+    await db_session.execute(
+        delete(AIRecommendation).where(AIRecommendation.owner_user_id == owner_id)
+    )
+    await db_session.execute(
+        delete(AndroidPaperOrder).where(AndroidPaperOrder.owner_user_id == owner_id)
+    )
+    await db_session.execute(
+        delete(AndroidPaperAccount).where(AndroidPaperAccount.owner_user_id == owner_id)
+    )
+    if account_ids:
+        await db_session.execute(
+            delete(PaperAccount).where(PaperAccount.id.in_(account_ids))
+        )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_in_session_stale_reference_quote_blocks_the_unattended_sweep(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정규장 중 기준 시세가 저장 일봉으로 강등되면 주문을 만들지 않는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        calls = _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(
+                source=krx_quotes.CANDLE_QUOTE_SOURCE,
+                # 전 거래일(금요일) 종가.
+                as_of=_NOW_IN_SESSION - timedelta(days=3),
+            ),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == job.STALE_QUOTE_BLOCK_REASON
+        assert outcome["recommendation_id"] == recommendation_id
+        # 시세 조회가 게이트의 1회로 끝났다 = 주문 경로(preview)에 가지 않았다.
+        assert calls == [("KRX", "005930")]
+        assert await _owner_order_count(db_session, owner_id) == 0
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        # 차단은 claim을 태우지 않는다. 시세가 회복되면 다음 sweep이 다시 잡는다.
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_in_session_unresolvable_reference_quote_blocks_fail_closed(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기준 시세를 아예 못 구하면 정규장 중에는 실행하지 않는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        calls = _record_quote_for_market(
+            monkeypatch,
+            MobileApiError(404, "NOT_FOUND", "종목 시세를 찾을 수 없습니다."),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == (
+            f"{job.STALE_QUOTE_UNRESOLVED_REASON}:MobileApiError"
+        )
+        assert calls == [("KRX", "005930")]
+        assert await _owner_order_count(db_session, owner_id) == 0
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_in_session_fresh_reference_quote_still_places_the_order(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """장중에 실시간 시세가 살아 있으면 게이트가 과차단하지 않는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    # Hard Risk가 요구하는 수치 근거. 이게 있어야 주문이 체결까지 간다.
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        calls = _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
+        assert outcome["status"] == "SUBMITTED"
+        assert outcome["reason"] == "submitted"
+        assert outcome["recommendation_id"] == recommendation_id
+        assert await _owner_order_count(db_session, owner_id) == 1
+        # 게이트 1회 + 주문 경로 여러 회. 게이트는 주문 경로를 막지 않았다.
+        assert len(calls) >= 2
+        assert set(calls) == {("KRX", "005930")}
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "SUCCEEDED"
+    finally:
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_after_hours_stale_reference_quote_is_not_blocked(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """장 마감 후 종가는 정상 최신값이라 같은 시세로도 차단되지 않는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
+        await _enable_promotion_bypass(db_session, owner_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        calls = _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=krx_quotes.CANDLE_QUOTE_SOURCE, as_of=_NOW),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW)
+
+        # 장중이면 같은 시세로 BLOCKED가 됐을 조건인데 그대로 체결됐다.
+        assert outcome["status"] == "SUBMITTED"
+        assert not str(outcome["reason"]).startswith("stale_quote")
+        assert outcome["recommendation_id"] == recommendation_id
+        assert await _owner_order_count(db_session, owner_id) == 1
+        assert set(calls) == {("KRX", "005930")}
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "SUCCEEDED"
+    finally:
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)

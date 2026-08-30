@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
@@ -42,6 +43,7 @@ from app.extensions.kasset.automation.policy import (
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
 )
+from app.jobs.watch_market_data import is_market_open
 from app.models.ai_recommendations import (
     AIRecommendation,
     RecommendationDecision,
@@ -62,6 +64,52 @@ def _is_reclaimable_execution_claim(
         and lease_expires_at is not None
         and lease_expires_at <= now
     )
+
+
+# 무인 sweep 전용 기준 시세 신선도 게이트.
+#
+# 정규장 중 실시간 공급자(토스 → NH 공용)가 모두 실패하면
+# ``krx_quotes.quote_for_market()``은 저장 일봉으로 강등되고 그 종가는 전 거래일
+# 값이다. 주문 경로는 ``price``만 읽고 ``source``/``asOf``를 검증하지 않으므로,
+# 사람이 보지 않는 sweep은 추천 판단과 무관한 가격으로 원장에 체결을 남긴다.
+# 장 마감 후에는 같은 종가가 정상 최신값이라 정규장이 열려 있을 때만 차단한다.
+# 수동 경로(`POST /orders`, ``run_approved_recommendation_once``)는 사람이 화면
+# 에서 값을 보고 결정하므로 지금처럼 강등된 시세를 그대로 허용한다.
+STALE_QUOTE_BLOCK_REASON = "stale_quote_fallback"
+STALE_QUOTE_UNRESOLVED_REASON = "stale_quote_unresolved"
+
+# 추천 와이어 시장 → 공용 거래소 캘린더 시장 키. 자동 주문은
+# ``PaperAutomationConsumer``가 KRX/US로만 만든다.
+_CALENDAR_MARKET: dict[str, str] = {"KRX": "kr", "KR": "kr", "US": "us"}
+
+
+async def _stale_quote_block_reason(
+    db: AsyncSession,
+    recommendation_id: str,
+    *,
+    now: datetime,
+) -> str | None:
+    """정규장 중 기준 시세가 저장 일봉으로 강등됐으면 차단 사유를 돌려준다."""
+    recommendation = await db.get(AIRecommendation, recommendation_id)
+    if recommendation is None:
+        return None
+    calendar_market = _CALENDAR_MARKET.get(str(recommendation.market).strip().upper())
+    if calendar_market is None or not is_market_open(calendar_market, now=now):
+        return None
+    try:
+        quote = await krx_quotes.quote_for_market(
+            db,
+            market=recommendation.market,
+            symbol=recommendation.symbol,
+        )
+    except Exception as exc:
+        # 기준 시세를 증명할 수 없으면 실행하지 않는다. 주문 경로도 같은 진입점을
+        # 쓰므로 막지 않아도 체결은 생기지 않지만, 사유를 남겨 원인이 preview
+        # 예외로 뭉개지지 않게 한다.
+        return f"{STALE_QUOTE_UNRESOLVED_REASON}:{type(exc).__name__}"
+    if quote.source == krx_quotes.CANDLE_QUOTE_SOURCE:
+        return STALE_QUOTE_BLOCK_REASON
+    return None
 
 
 class RuntimeStateSafetyGate:
@@ -534,7 +582,9 @@ async def run_paper_automation_once(
 
     Fail-closed by default: with ``AI_PAPER_AUTO_EXECUTION_ENABLED`` false the
     sweep reports itself disabled without touching the database. One owner's
-    failure never aborts the other owners' sweeps.
+    failure never aborts the other owners' sweeps.  During a regular session a
+    degraded reference quote blocks the owner before any order is built; see
+    ``_stale_quote_block_reason``.
     """
 
     current = (now or datetime.now(UTC)).replace(microsecond=0)
@@ -587,6 +637,17 @@ async def run_paper_automation_once(
                             current,
                         )
                     )
+                    # 주문을 만들기 전에 기준 시세 신선도를 검사한다. 후보가
+                    # 없으면 검사할 종목도 없다.
+                    stale_quote_reason = (
+                        None
+                        if recommendation_id is None
+                        else await _stale_quote_block_reason(
+                            db,
+                            recommendation_id,
+                            now=current,
+                        )
+                    )
                     if recommendation_id is None:
                         outcome = PaperExecutionOutcome(
                             status="BLOCKED",
@@ -595,6 +656,19 @@ async def run_paper_automation_once(
                                 if promotion_bypassed
                                 else "strategy_promotion_required"
                             ),
+                        )
+                    elif stale_quote_reason is not None:
+                        logger.warning(
+                            "kasset paper automation blocked on a stale reference "
+                            "quote: owner_user_id=%s recommendation_id=%s reason=%s",
+                            owner_id,
+                            recommendation_id,
+                            stale_quote_reason,
+                        )
+                        outcome = PaperExecutionOutcome(
+                            status="BLOCKED",
+                            reason=stale_quote_reason,
+                            recommendation_id=recommendation_id,
                         )
                     else:
                         consumer = PaperAutomationConsumer(
@@ -660,6 +734,8 @@ async def run_approved_recommendation_once(
 
 
 __all__ = [
+    "STALE_QUOTE_BLOCK_REASON",
+    "STALE_QUOTE_UNRESOLVED_REASON",
     "OwnerScopedPaperOrders",
     "OwnerScopedRecommendationService",
     "RuntimeStateSafetyGate",
