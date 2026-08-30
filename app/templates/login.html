@@ -75,7 +75,9 @@
              data-logo_alignment="left"></div>
         {% endif %}
 
+        {% if not google_client_id %}
         <div class="divider">또는</div>
+        {% endif %}
 
         <div class="register-link">
             계정이 없으신가요? <a href="/web-auth/register">회원가입</a>

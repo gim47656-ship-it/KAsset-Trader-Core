@@ -307,7 +307,12 @@ async def _issue_web_session_response(
     ``get_current_user_from_session`` -- and therefore ``require_admin`` --
     sees exactly one kind of session regardless of how the operator signed in.
     """
-    username_hash = hashlib.sha256(user.username.encode()).hexdigest()[:16]
+    # Google-only accounts may lack a username. Use the stable internal user ID
+    # for correlation instead of putting an email or Google subject in the log.
+    log_identifier = (
+        user.username if user.username is not None else f"user-id:{user.id}"
+    )
+    username_hash = hashlib.sha256(log_identifier.encode()).hexdigest()[:16]
     session_token = create_session_token(user.id)
     session_hash = _hash_session_token(session_token)
 
@@ -539,7 +544,7 @@ async def google_login(
         return _rejected("unknown_google_sub")
 
     if not user.is_active:
-        return _rejected("inactive_user", "비활성화된 계정입니다.")
+        return _rejected("inactive_user")
 
     return await _issue_web_session_response(
         request, user, next_value=next, event_scope="web_google_login"

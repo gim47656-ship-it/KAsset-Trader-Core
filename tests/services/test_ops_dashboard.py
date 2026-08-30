@@ -11,13 +11,10 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import event, text
 
-from app.extensions.kasset.api.schemas import (
-    AiRelayStatus,
-    DatabaseStatus,
-    SystemBrokerStatus,
-    SystemStatus,
-)
+from app.extensions.kasset.models import AndroidRuntimeState
+from app.models.trading import User, UserRole
 from app.services import ops_dashboard
 from app.services.ops_dashboard import (
     OpsContext,
@@ -38,6 +35,7 @@ _NOW = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
 
 # Panels whose SQL must run unchanged against the real schema.
 _SQL_PANELS = (
+    ("system", _system_panel),
     ("ai_usage", _ai_usage_panel),
     ("funnel", _funnel_panel),
     ("paper_portfolio", _paper_portfolio_panel),
@@ -83,16 +81,50 @@ async def test_empty_database_is_idle_not_error(db_session):
     assert panel.metrics[2].hint == "체결 이력 없음"
 
 
-async def test_strategy_panel_names_the_auto_paper_consequence(db_session):
-    """0 promotions is the fact that decides AUTO_PAPER cannot place orders."""
+async def test_strategy_panel_without_bypass_names_auto_paper_block(db_session):
+    """No approval evidence and no bypass means AUTO_PAPER cannot place orders."""
     ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
 
     panel = await _strategy_panel(ctx)
 
     assert panel.status is PanelStatus.IDLE
     assert "PAPER_APPROVED" in panel.summary
-    assert "APPROVAL" in panel.summary
-    assert panel.metrics[0].value == "0"
+    assert "우회 ON 소유자도 0명" in panel.summary
+    assert "자동발주 불가" in panel.summary
+    values = {metric.label: metric.value for metric in panel.metrics}
+    assert values["PAPER_APPROVED"] == "0"
+    assert values["승격 우회 ON 소유자"] == "0"
+
+
+async def test_strategy_panel_warns_when_bypass_allows_unpromoted_orders(db_session):
+    db_session.add(
+        User(
+            id=901,
+            username="ops-bypass-owner",
+            email="ops-bypass-owner@example.com",
+            role=UserRole.trader,
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AndroidRuntimeState(
+            owner_user_id=901,
+            trading_mode="PAPER",
+            kill_switch_enabled=False,
+            promotion_bypass_enabled=True,
+        )
+    )
+    await db_session.flush()
+    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+
+    panel = await _strategy_panel(ctx)
+
+    assert panel.status is PanelStatus.WARN
+    assert "승격 레지스트리 0건" in panel.summary
+    assert "자동발주 가능" in panel.summary
+    assert "PAPER 모드이고 kill switch OFF이면" in panel.summary
+    values = {metric.label: metric.value for metric in panel.metrics}
+    assert values["승격 우회 ON 소유자"] == "1"
 
 
 def _ai_summary(**overrides):
@@ -194,6 +226,49 @@ async def test_ai_panel_with_no_calls_is_idle_with_real_zeros(db_session):
     assert values["비용"] is None
 
 
+async def test_ai_panel_marks_all_unreported_tokens_unmeasured(db_session):
+    summary = _ai_summary(
+        logical_calls=2,
+        attempts=2,
+        success_attempts=2,
+        total_tokens=0,
+        attempts_without_usage=2,
+    )
+    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+
+    with patch.object(
+        ops_dashboard, "summarize_ai_usage", AsyncMock(return_value=summary)
+    ):
+        panel = await _ai_usage_panel(ctx)
+
+    values = {metric.label: metric.value for metric in panel.metrics}
+    hints = {metric.label: metric.hint for metric in panel.metrics}
+    assert values["총 토큰"] is None
+    assert hints["총 토큰"] == "토큰 미제공 2건 제외"
+    from app.core.templates import templates
+
+    html = templates.get_template("admin_ops.html").render(
+        user=None,
+        dashboard=ops_dashboard.OpsDashboard(
+            generated_at=_NOW,
+            panels=(panel,),
+        ),
+        generated_at="2026-08-30 12:00:00 KST",
+        unmeasured_text=ops_dashboard.UNMEASURED_TEXT,
+    )
+    token_card = html.split(
+        '<div class="ops-metric-label">총 토큰</div>',
+        1,
+    )[1].split(
+        '<div class="ops-metric-label">토큰 미제공 시도</div>',
+        1,
+    )[0]
+    assert 'data-measured="false">—</div>' in token_card
+    assert next(
+        metric for metric in panel.metrics if metric.label == "논리 호출"
+    ).hint == ("routed client 호출 수 (모델 티어당 1개, terra→sol escalation은 2회)")
+
+
 async def test_ai_panel_discloses_the_uninstrumented_paths(db_session):
     """0 calls must not read as "AI was not used".
 
@@ -214,77 +289,94 @@ async def test_ai_panel_discloses_the_uninstrumented_paths(db_session):
     assert "AvailabilityRoutedJsonClient" in panel.note
 
 
-async def test_system_panel_reuses_the_android_status_builder(db_session):
-    """The web page and /api/v1/system/status must not diverge."""
-    status = SystemStatus(
-        server_version="9.9.9",
-        server_time="2026-08-30T03:00:00Z",
-        database=DatabaseStatus(status="ok", migration_revision="rev-abc"),
-        trading_mode="PAPER",
-        trading_enabled=True,
-        live_trading_enabled=False,
-        kill_switch_enabled=False,
-        brokers=[
-            SystemBrokerStatus(provider="kis", connected=True, last_verified_at=None)
-        ],
-        ai_relay=AiRelayStatus(configured=False, reachable=False, message="-"),
+async def test_system_panel_reads_grouped_runtime_state_from_real_db(db_session):
+    """A non-admin owner's kill switch must be visible to the viewing admin."""
+    db_session.add_all(
+        [
+            User(
+                id=911,
+                username="ops-trader-owner",
+                email="ops-trader-owner@example.com",
+                role=UserRole.trader,
+            ),
+            User(
+                id=914,
+                username="ops-viewing-admin",
+                email="ops-viewing-admin@example.com",
+                role=UserRole.admin,
+            ),
+        ]
     )
-    builder = AsyncMock(return_value=status)
-    ctx = OpsContext(db=db_session, admin_user_id=42, now=_NOW)
-
-    with patch.object(ops_dashboard, "_build_system_status", builder):
-        panel = await _system_panel(ctx)
-
-    builder.assert_awaited_once_with(db_session, 42)
-    assert panel.status is PanelStatus.OK
-    assert ("migration revision", "rev-abc") in [
-        (metric.label, metric.value) for metric in panel.metrics
-    ]
-    assert panel.rows[0].cells[0] == "kis"
-
-
-async def test_kill_switch_and_live_trading_raise_the_panel_to_warn(db_session):
-    status = SystemStatus(
-        server_version="9.9.9",
-        server_time="2026-08-30T03:00:00Z",
-        database=DatabaseStatus(status="ok", migration_revision=None),
-        trading_mode="LIVE",
-        trading_enabled=True,
-        live_trading_enabled=True,
-        kill_switch_enabled=True,
-        brokers=[],
-        ai_relay=AiRelayStatus(configured=False, reachable=False, message="-"),
+    await db_session.flush()
+    db_session.add(
+        AndroidRuntimeState(
+            owner_user_id=911,
+            trading_mode="PAPER",
+            kill_switch_enabled=True,
+            promotion_bypass_enabled=False,
+        )
     )
-    ctx = OpsContext(db=db_session, admin_user_id=42, now=_NOW)
+    await db_session.flush()
+    ctx = OpsContext(db=db_session, admin_user_id=914, now=_NOW)
 
-    with patch.object(
-        ops_dashboard, "_build_system_status", AsyncMock(return_value=status)
-    ):
-        panel = await _system_panel(ctx)
+    panel = await _system_panel(ctx)
 
+    values = {metric.label: metric.value for metric in panel.metrics}
     assert panel.status is PanelStatus.WARN
-    assert "kill switch ON" in panel.summary
-    assert "LIVE 매매 허용" in panel.summary
-    assert "migration revision 조회 불가" in panel.summary
-
-
-async def test_full_dashboard_renders_every_panel(db_session, no_redis):
-    """End-to-end over the real schema: no panel may report 조회실패."""
-    status = SystemStatus(
-        server_version="9.9.9",
-        server_time="2026-08-30T03:00:00Z",
-        database=DatabaseStatus(status="ok", migration_revision="rev-abc"),
-        trading_mode="PAPER",
-        trading_enabled=True,
-        live_trading_enabled=False,
-        kill_switch_enabled=False,
-        brokers=[],
-        ai_relay=AiRelayStatus(configured=False, reachable=False, message="-"),
+    assert "소유자 kill switch ON 1명" in panel.summary
+    assert values["내 kill switch"] == "OFF"
+    assert values["소유자 kill switch ON"] == "1"
+    assert values["전역 kill switch"] == "OFF"
+    assert any(
+        row.cells[:3] == ("소유자 runtime", "PAPER", "kill switch ON")
+        for row in panel.rows
     )
-    with patch.object(
-        ops_dashboard, "_build_system_status", AsyncMock(return_value=status)
-    ):
-        dashboard = await build_ops_dashboard(db_session, admin_user_id=1, now=_NOW)
+    assert "현재 관리자 id=914 기준" in panel.note
+    assert "소유자 전체 상태 및 전역 상태와 분리" in panel.note
+
+
+async def test_system_panel_distinguishes_execution_master_switches(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(ops_dashboard.settings, "TRADING_ENABLED", True)
+    monkeypatch.setattr(
+        ops_dashboard.settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", False
+    )
+    ctx = OpsContext(db=db_session, admin_user_id=42, now=_NOW)
+
+    panel = await _system_panel(ctx)
+
+    values = {metric.label: metric.value for metric in panel.metrics}
+    assert values["Core 거래 기능 (TRADING_ENABLED)"] == "ON"
+    assert values["PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)"] == "OFF"
+    assert "내 trading mode" in values
+    assert "전역 kill switch" in values
+
+
+async def test_full_dashboard_renders_every_panel_without_committing(
+    db_session, no_redis
+):
+    """A first admin dashboard read must neither commit nor create runtime state."""
+    db_session.add(
+        User(
+            id=921,
+            username="ops-read-only-admin",
+            email="ops-read-only-admin@example.com",
+            role=UserRole.admin,
+        )
+    )
+    await db_session.flush()
+    commit_count = 0
+
+    def record_commit(_session):
+        nonlocal commit_count
+        commit_count += 1
+
+    event.listen(db_session.sync_session, "after_commit", record_commit)
+    try:
+        dashboard = await build_ops_dashboard(db_session, admin_user_id=921, now=_NOW)
+    finally:
+        event.remove(db_session.sync_session, "after_commit", record_commit)
 
     keys = [panel.key for panel in dashboard.panels]
     assert keys == [key for key, _, _ in ops_dashboard.PANEL_BUILDERS]
@@ -295,6 +387,15 @@ async def test_full_dashboard_renders_every_panel(db_session, no_redis):
     }
     assert failures == {}
     assert dashboard.failed_panel_titles == ()
+    assert commit_count == 0
+    runtime_rows = await db_session.execute(
+        text(
+            "SELECT count(*) FROM kasset_android_runtime_state "
+            "WHERE owner_user_id = :owner"
+        ),
+        {"owner": 921},
+    )
+    assert runtime_rows.scalar_one() == 0
 
 
 async def test_template_renders_the_real_dashboard(db_session, no_redis):
@@ -302,21 +403,7 @@ async def test_template_renders_the_real_dashboard(db_session, no_redis):
     from app.core.templates import templates
     from app.services.ops_dashboard import UNMEASURED_TEXT
 
-    status = SystemStatus(
-        server_version="9.9.9",
-        server_time="2026-08-30T03:00:00Z",
-        database=DatabaseStatus(status="ok", migration_revision="rev-abc"),
-        trading_mode="PAPER",
-        trading_enabled=True,
-        live_trading_enabled=False,
-        kill_switch_enabled=False,
-        brokers=[],
-        ai_relay=AiRelayStatus(configured=False, reachable=False, message="-"),
-    )
-    with patch.object(
-        ops_dashboard, "_build_system_status", AsyncMock(return_value=status)
-    ):
-        dashboard = await build_ops_dashboard(db_session, admin_user_id=1, now=_NOW)
+    dashboard = await build_ops_dashboard(db_session, admin_user_id=1, now=_NOW)
 
     html = templates.get_template("admin_ops.html").render(
         user=None,
@@ -336,6 +423,9 @@ async def test_template_renders_the_real_dashboard(db_session, no_redis):
     # The AI panel's standing coverage caveat must reach the page.
     assert 'data-role="panel-note"' in html
     assert "run_skill 계열" in html
+    assert "Core 거래 기능 (TRADING_ENABLED)" in html
+    assert "PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)" in html
+    assert "전역 kill switch" in html
 
 
 async def test_readiness_panel_uses_the_cache_before_measuring(db_session):

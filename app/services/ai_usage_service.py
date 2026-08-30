@@ -23,6 +23,7 @@ the normal case, not a special case.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Iterator, Sequence
@@ -49,6 +50,23 @@ logger = logging.getLogger(__name__)
 #: vCPUs; an unbounded "all time" aggregate is how a dashboard takes the API
 #: down.
 MAX_AI_USAGE_WINDOW = timedelta(days=92)
+
+#: How long the ledger append may hold up the AI call it measures.
+#:
+#: :func:`record_ai_call_attempts` is awaited from the ``finally`` block that
+#: closes every routed AI call, so *every* call — successes included — pays
+#: whatever this write costs. The shared pool is ``pool_size=5 /
+#: max_overflow=10 / pool_timeout=10`` (:func:`app.core.db.build_engine`), so
+#: without a deadline a saturated pool adds ~10s of pure checkout wait to each
+#: AI call before the error is swallowed. Instrumentation that slows the
+#: feature it measures is a worse failure than a missing row.
+#:
+#: Two seconds is the balance point: an order of magnitude above a healthy
+#: INSERT + COMMIT (the whole batch is one statement — single-digit ms local,
+#: tens of ms across an availability zone) yet negligible against the
+#: transport's own budget (``OpenAiModelRouter.timeout_seconds`` defaults to
+#: 60s).
+AI_LEDGER_FLUSH_TIMEOUT_S = 2.0
 
 
 def new_logical_call_id() -> str:
@@ -141,6 +159,67 @@ def report_ai_attempt_usage(
 
 
 @dataclass(frozen=True, slots=True)
+class AiCallAttribution:
+    """Who an AI call was made for, and which product request it belongs to.
+
+    Both fields stay ``None`` when the caller genuinely does not know one.
+    Attributing usage to a guessed owner is worse than leaving the row
+    unattributed, because a wrong owner reads as a fact.
+    """
+
+    owner_user_id: int | None = None
+    correlation_id: str | None = None
+
+
+_ACTIVE_ATTRIBUTION: ContextVar[AiCallAttribution | None] = ContextVar(
+    "ai_call_attribution",
+    default=None,
+)
+
+
+@contextmanager
+def attribute_ai_calls(
+    *,
+    owner_user_id: int | None = None,
+    correlation_id: str | None = None,
+) -> Iterator[AiCallAttribution]:
+    """Attribute every ledger row written under this scope.
+
+    Routing sits between the caller that knows *who* asked and the transport
+    that performs the call, and neither identity belongs in the
+    ``StructuredJsonClient`` signature that every transport implements. A
+    context-scoped slot carries the identity down, mirroring the way
+    :func:`capture_ai_attempt` carries telemetry back up.
+
+    Scopes nest and merge: ``None`` means "inherit", never "clear". The owner
+    is known one level above the correlation id (one owner request drives
+    several analyses), so an inner scope must not erase the outer one. A blank
+    correlation id carries no information and is treated as absent rather than
+    written as ``''``.
+    """
+
+    current = _ACTIVE_ATTRIBUTION.get() or AiCallAttribution()
+    normalized_correlation = correlation_id.strip() if correlation_id else ""
+    merged = AiCallAttribution(
+        owner_user_id=(
+            current.owner_user_id if owner_user_id is None else owner_user_id
+        ),
+        correlation_id=normalized_correlation or current.correlation_id,
+    )
+    token = _ACTIVE_ATTRIBUTION.set(merged)
+    try:
+        yield merged
+    finally:
+        _ACTIVE_ATTRIBUTION.reset(token)
+
+
+def current_ai_call_attribution() -> AiCallAttribution:
+    """The attribution in force, or an all-``None`` one outside every scope."""
+
+    return _ACTIVE_ATTRIBUTION.get() or AiCallAttribution()
+
+
+@dataclass(frozen=True, slots=True)
 class AiCallAttempt:
     """One ``review.ai_call_events`` row, ready to append."""
 
@@ -193,16 +272,35 @@ async def record_ai_call_attempts(attempts: Sequence[AiCallAttempt]) -> bool:
     worse than no instrumentation. Returns whether the rows were committed so
     callers *may* log, not so they may react.
 
+    Bounded by :data:`AI_LEDGER_FLUSH_TIMEOUT_S`, because this runs on the AI
+    call's own critical path: a stalled pool must cost the call a known small
+    delay instead of a full pool-checkout timeout. An expired flush is
+    swallowed like any other ledger failure but logged distinctly — a ledger
+    that goes quiet under load and one that rejects rows need different fixes.
+
     ``asyncio.CancelledError`` is deliberately not swallowed — a cancelled AI
-    call must stay cancelled.
+    call must stay cancelled. :func:`asyncio.timeout` re-raises it untouched
+    when the cancellation came from the caller rather than from our deadline.
     """
 
     if not attempts:
         return False
     try:
-        async with AsyncSessionLocal() as session:
+        async with (
+            asyncio.timeout(AI_LEDGER_FLUSH_TIMEOUT_S),
+            AsyncSessionLocal() as session,
+        ):
             await session.execute(insert(AiCallEvent), [_row(a) for a in attempts])
             await session.commit()
+    except TimeoutError:
+        logger.warning(
+            "AI call ledger append exceeded %.1fs; %d attempt row(s) dropped "
+            "(logical_call_id=%s). The AI call itself is unaffected.",
+            AI_LEDGER_FLUSH_TIMEOUT_S,
+            len(attempts),
+            attempts[0].logical_call_id,
+        )
+        return False
     except Exception:
         logger.warning(
             "AI call ledger append failed; %d attempt row(s) dropped "
@@ -242,14 +340,28 @@ class AiUsageBreakdown:
 class AiUsageSummary:
     """AI usage over ``[since, until)``.
 
-    ``attempts`` and ``logical_calls`` are both exposed on purpose.
-    ``attempts`` alone hides nothing but also flatters nothing — it counts
-    every provider round trip, so fallbacks and tier escalations show up.
-    ``logical_calls`` counts what the product actually asked for. Reporting
-    only one of the two hides either the real spend or the real workload.
+    ``attempts`` and ``logical_calls`` are both exposed on purpose, and
+    neither one is "the number of requests the product made":
 
-    Token sums skip rows that reported no usage; ``attempts_without_usage``
-    counts those rows so a reader never reads "0 tokens" as "no usage".
+    * ``attempts`` counts provider round trips, so availability fallbacks
+      show up rather than hiding inside one number.
+    * ``logical_calls`` counts routed client calls, which is one per model
+      tier. A request that starts on terra and escalates to sol is *two*
+      logical calls: the tier router builds a fresh routed client per tier
+      and each mints its own ``logical_call_id``.
+
+    Collapsing a tier-escalation chain back into a single product request is
+    a row-level question, answered by ``correlation_id`` on
+    ``review.ai_call_events``. It is deliberately not aggregated here: that
+    column is nullable, and its granularity is a caller convention rather
+    than an enforced invariant, so a count over it would be a confident
+    undercount.
+
+    Token sums are per column and skip ``NULL``, so a column reads ``0`` both
+    for genuine zeros and for a window in which nobody reported that column.
+    ``attempts_without_usage`` counts the rows that reported *no* token column
+    at all, and that is what separates "no usage reported" from "zero tokens
+    used".
     """
 
     since: datetime
@@ -432,14 +544,18 @@ async def summarize_ai_usage(
 
 
 __all__ = [
+    "AI_LEDGER_FLUSH_TIMEOUT_S",
     "MAX_AI_USAGE_WINDOW",
     "AiAttemptTelemetry",
     "COST_SOURCE_PROVIDER_REPORTED",
     "AiCallAttempt",
+    "AiCallAttribution",
     "AiCallStatus",
     "AiUsageBreakdown",
     "AiUsageSummary",
+    "attribute_ai_calls",
     "capture_ai_attempt",
+    "current_ai_call_attribution",
     "new_logical_call_id",
     "record_ai_call_attempts",
     "report_ai_attempt_http_status",

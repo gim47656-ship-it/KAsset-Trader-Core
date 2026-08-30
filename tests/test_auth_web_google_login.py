@@ -9,6 +9,7 @@ must stay fail-closed while ``WEB_GOOGLE_OAUTH_CLIENT_ID`` is unset.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -198,6 +199,51 @@ def test_google_login_issues_existing_web_session_cookie(
     assert redis_client.sismember.await_args.args[0] == "user_session:4"
 
 
+def test_google_login_issues_session_for_user_without_username_and_redacts_identifiers(
+    auth_test_client,
+    auth_mock_session,
+    rsa_key_pair,
+    google_enabled,
+    caplog: pytest.LogCaptureFixture,
+):
+    private_key, _ = rsa_key_pair
+    user = _google_user()
+    user.username = None
+    auth_mock_session.execute.return_value = _scalar_result(user)
+    redis_client = _redis_mock()
+
+    with (
+        caplog.at_level("INFO", logger=web_router.__name__),
+        patch("app.auth.web_router.redis.from_url", return_value=redis_client),
+    ):
+        response = auth_test_client.post(
+            "/web-auth/google",
+            data={
+                "credential": _id_token(private_key),
+                "csrftoken": _csrf_token(auth_test_client),
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.cookies.get(SESSION_COOKIE_NAME)
+    assert redis_client.sadd.called
+
+    success_record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "web_google_login_success"
+    )
+    assert success_record.username_hash == hashlib.sha256(b"user-id:4").hexdigest()[:16]
+    security_log = "\n".join(
+        f"{record.getMessage()} {vars(record)}"
+        for record in caplog.records
+        if record.name == web_router.__name__
+    )
+    assert user.email not in security_log
+    assert user.google_sub not in security_log
+
+
 def test_google_login_rejects_unknown_sub_and_creates_no_user(
     auth_test_client, auth_mock_session, rsa_key_pair, google_enabled
 ):
@@ -245,7 +291,11 @@ def test_google_login_rejects_unverified_email_before_touching_the_database(
 
 
 def test_google_login_rejects_inactive_account(
-    auth_test_client, auth_mock_session, rsa_key_pair, google_enabled
+    auth_test_client,
+    auth_mock_session,
+    rsa_key_pair,
+    google_enabled,
+    caplog: pytest.LogCaptureFixture,
 ):
     """Deployment disables the leftover test accounts via is_active."""
     private_key, _ = rsa_key_pair
@@ -254,7 +304,10 @@ def test_google_login_rejects_inactive_account(
     )
     redis_client = _redis_mock()
 
-    with patch("app.auth.web_router.redis.from_url", return_value=redis_client):
+    with (
+        caplog.at_level("WARNING", logger=web_router.__name__),
+        patch("app.auth.web_router.redis.from_url", return_value=redis_client),
+    ):
         response = auth_test_client.post(
             "/web-auth/google",
             data={
@@ -265,9 +318,15 @@ def test_google_login_rejects_inactive_account(
         )
 
     assert response.status_code == 400
-    assert "비활성화된 계정입니다." in response.text
+    assert _REJECTED_TEXT in response.text
     assert SESSION_COOKIE_NAME not in response.cookies
     assert not redis_client.sadd.called
+    failure_record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "web_google_login_failure"
+    )
+    assert failure_record.reason == "inactive_user"
 
 
 @pytest.mark.parametrize(
@@ -341,6 +400,7 @@ def test_login_page_and_google_route_fail_closed_when_unconfigured(
     assert page.status_code == 200
     assert "accounts.google.com/gsi/client" not in page.text
     assert 'action="/web-auth/google"' not in page.text
+    assert page.text.count('<div class="divider">또는</div>') == 1
 
     response = auth_test_client.post(
         "/web-auth/google",
@@ -368,6 +428,7 @@ def test_login_page_offers_google_button_when_configured(
     # The password form must survive next to it.
     assert 'action="/web-auth/login"' in page.text
     assert 'name="password"' in page.text
+    assert page.text.count('<div class="divider">또는</div>') == 1
 
 
 def test_password_login_still_issues_a_session_with_google_enabled(

@@ -9,9 +9,12 @@ Two guarantees are load-bearing here:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import TracebackType
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -20,6 +23,7 @@ from sqlalchemy import delete, select
 from app.extensions.kasset.ai import structured_router
 from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
 from app.extensions.kasset.ai.base import AiProviderUnavailable, ReasoningEffort
+from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
 from app.extensions.kasset.ai.structured_router import (
     AvailabilityRoutedJsonClient,
     StructuredJsonRoute,
@@ -103,6 +107,47 @@ async def _run(client: AvailabilityRoutedJsonClient) -> dict[str, object]:
         reasoning_effort="low",
         schema_name="unit_schema",
         schema=_SCHEMA,
+    )
+
+
+class _HangingSession:
+    """Session double that never finishes its INSERT."""
+
+    def __init__(self) -> None:
+        self.execute_started = asyncio.Event()
+
+    async def __aenter__(self) -> _HangingSession:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    async def execute(self, *args: object, **kwargs: object) -> None:
+        self.execute_started.set()
+        await asyncio.Event().wait()
+
+    async def commit(self) -> None:
+        raise AssertionError("a hanging INSERT must never reach commit")
+
+
+def _recording_attempt(logical_call_id: str) -> AiCallAttempt:
+    started = datetime.now(UTC)
+    return AiCallAttempt(
+        logical_call_id=logical_call_id,
+        attempt_no=1,
+        started_at=started,
+        finished_at=started,
+        latency_ms=0,
+        feature="unit_schema",
+        route_name="unit:terra",
+        provider="direct-api",
+        model_name="m1",
+        status="success",
     )
 
 
@@ -345,6 +390,51 @@ async def test_record_ai_call_attempts_swallows_database_failures(
     )
 
     assert committed is False
+
+
+@pytest.mark.asyncio
+async def test_record_ai_call_attempts_stops_at_short_flush_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _HangingSession()
+    monkeypatch.setattr(ai_usage_service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(ai_usage_service, "AI_LEDGER_FLUSH_TIMEOUT_S", 0.01)
+    loop = asyncio.get_running_loop()
+
+    started = loop.time()
+    with caplog.at_level("WARNING", logger="app.services.ai_usage_service"):
+        committed = await ai_usage_service.record_ai_call_attempts(
+            [_recording_attempt("aic-timeout")]
+        )
+    elapsed = loop.time() - started
+
+    assert committed is False
+    assert session.execute_started.is_set()
+    assert elapsed < 0.5
+    assert any("AI call ledger append exceeded" in r.message for r in caplog.records)
+    assert not any("AI call ledger append failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_record_ai_call_attempts_propagates_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _HangingSession()
+    monkeypatch.setattr(ai_usage_service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(ai_usage_service, "AI_LEDGER_FLUSH_TIMEOUT_S", 60.0)
+    task = asyncio.create_task(
+        ai_usage_service.record_ai_call_attempts(
+            [_recording_attempt("aic-caller-cancelled")]
+        )
+    )
+    await asyncio.wait_for(session.execute_started.wait(), timeout=1.0)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -606,5 +696,148 @@ async def test_attempts_are_committed_without_a_caller_supplied_session(
     finally:
         await db_session.execute(
             delete(AiCallEvent).where(AiCallEvent.route_name == route_name)
+        )
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_attribution_scope_is_committed_to_database(db_session) -> None:
+    route_name = f"ledger-attributed:{uuid4().hex}"
+    correlation_id = f"corr-{uuid4().hex}"
+    owner_user_id = 741_852
+    client = AvailabilityRoutedJsonClient(
+        name=route_name,
+        routes=[
+            StructuredJsonRoute(
+                client=_FakeClient("direct-api", [{"ok": True}]),
+                model="attributed-model",
+            )
+        ],
+    )
+
+    try:
+        with ai_usage_service.attribute_ai_calls(
+            owner_user_id=owner_user_id,
+            correlation_id=correlation_id,
+        ):
+            await _run(client)
+
+        row = await db_session.scalar(
+            select(AiCallEvent).where(AiCallEvent.route_name == route_name)
+        )
+
+        assert row is not None
+        assert row.owner_user_id == owner_user_id
+        assert row.correlation_id == correlation_id
+    finally:
+        await db_session.execute(
+            delete(AiCallEvent).where(AiCallEvent.route_name == route_name)
+        )
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_call_outside_attribution_scope_commits_nulls(db_session) -> None:
+    route_name = f"ledger-unattributed:{uuid4().hex}"
+    client = AvailabilityRoutedJsonClient(
+        name=route_name,
+        routes=[
+            StructuredJsonRoute(
+                client=_FakeClient("direct-api", [{"ok": True}]),
+                model="unattributed-model",
+            )
+        ],
+    )
+
+    try:
+        await _run(client)
+
+        row = await db_session.scalar(
+            select(AiCallEvent).where(AiCallEvent.route_name == route_name)
+        )
+
+        assert row is not None
+        assert row.owner_user_id is None
+        assert row.correlation_id is None
+    finally:
+        await db_session.execute(
+            delete(AiCallEvent).where(AiCallEvent.route_name == route_name)
+        )
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_owner_tier_escalation_commits_shared_correlation(
+    db_session,
+    user,
+) -> None:
+    correlation_id = f"corr-escalation-{uuid4().hex}"
+    tool_name = f"ledger_test_{uuid4().hex}"
+    mcp_client = _FakeClient(
+        "kasset-mcp",
+        [
+            {
+                "action": "BUY",
+                "confidence": 0.9,
+                "risk": "HIGH",
+                "bullish_score": 80,
+                "bearish_score": 20,
+                "escalate": False,
+                "rationale_tags": ["high_risk"],
+            },
+            {
+                "action": "HOLD",
+                "confidence": 0.92,
+                "risk": "LOW",
+                "bullish_score": 55,
+                "bearish_score": 45,
+                "escalate": False,
+                "rationale_tags": ["reviewed"],
+            },
+        ],
+    )
+    mcp_client.tool_name = tool_name
+    model_name = f"tool:{tool_name}"
+    router = OpenAiModelRouter(
+        base_url="https://example.test/v1",
+        api_key=None,
+        luna_model="",
+        terra_model="",
+        sol_model="",
+        mcp_client=mcp_client,
+    )
+
+    try:
+        verdict = await router.analyze_for_owner(
+            db_session,
+            user.id,
+            AnalysisKind.CANDIDATE_REVIEW,
+            {"symbol": "005930"},
+            correlation_id=correlation_id,
+        )
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(AiCallEvent)
+                    .where(AiCallEvent.model_name == model_name)
+                    .order_by(AiCallEvent.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        assert verdict.tier == "sol"
+        assert [row.route_name for row in rows] == [
+            "candidate_review:terra",
+            "critical_review:sol",
+        ]
+        assert {row.owner_user_id for row in rows} == {user.id}
+        assert {row.correlation_id for row in rows} == {correlation_id}
+        assert len({row.logical_call_id for row in rows}) == 2
+    finally:
+        await db_session.execute(
+            delete(AiCallEvent).where(AiCallEvent.model_name == model_name)
         )
         await db_session.commit()

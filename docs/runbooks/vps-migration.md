@@ -157,13 +157,19 @@ Caddy는 `/admin`, `/admin/*`, `/web-auth`, `/web-auth/*`를 일반 catch-all보
 웹 Google 버튼은 `.env.kasset`의 `WEB_GOOGLE_OAUTH_CLIENT_ID`가 비어 있지 않을 때만
 렌더된다. 이 client ID는 브라우저에 노출되는 공개 식별자이며 client secret이 아니다.
 미설정 시 버튼은 숨고 `POST /web-auth/google`은 `503`으로 fail-closed한다.
+`WEB_GOOGLE_OAUTH_CLIENT_ID`는 Android용 `KASSET_GOOGLE_OAUTH_CLIENT_ID`와 반드시 다른
+Google OAuth client로 발급한다. 두 값을 같게 두면 Android용 id_token을 웹 로그인에
+재제출해도 `aud` 불일치로 거부되지 않아 클라이언트 경로 분리가 사라진다.
 
 `KASSET_ADMIN_ALLOWED_IPS`는 공백으로 구분한 IP 또는 CIDR 목록이다. 기본값과 샘플값은
-`100.64.0.0/10` 하나뿐이며, 환경변수가 없거나 빈 값이어도 Compose와 Caddyfile 양쪽의
-기본값 때문에 tailnet 전용으로 동작한다. 사무실 공인 IP는 확인하기 전까지 추가하지 않는다.
+tailnet IPv4 `100.64.0.0/10`과 IPv6 ULA `fd7a:115c:a1e0::/48`이다. 환경변수가 없거나
+빈 값이어도 Compose와 Caddyfile 양쪽의 기본값 때문에 두 tailnet 대역만 허용된다.
+Tailscale 공식 reserved range 표:
+<https://tailscale.com/docs/reference/reserved-ip-addresses>.
+사무실 공인 IP는 확인하기 전까지 추가하지 않는다.
 
 ```dotenv
-KASSET_ADMIN_ALLOWED_IPS=100.64.0.0/10
+KASSET_ADMIN_ALLOWED_IPS="100.64.0.0/10 fd7a:115c:a1e0::/48"
 ```
 
 Caddy의 `{$ENV:default}` 치환은 Caddyfile 파싱 전에 일어나며 공백이 든 값을 여러 token으로
@@ -173,6 +179,21 @@ Caddy의 `{$ENV:default}` 치환은 Caddyfile 파싱 전에 일어나며 공백�
 `X-Forwarded-For` 기반 `client_ip`는 이 경계에 사용하지 않는다. 근거:
 <https://caddyserver.com/docs/caddyfile/matchers#remote-ip>.
 
+#### 현재 web-auth rate limit과 보안 로그의 한계
+
+현재 `slowapi`의 `get_remote_address`는 `request.client.host`를 key로 쓰고, Uvicorn은
+`--proxy-headers` 없이 기동한다. 따라서 Caddy를 경유한 애플리케이션 요청의 peer는 모두
+Caddy 컨테이너 IP 하나다. `/web-auth/login`과 `/web-auth/google`의 각 `5/minute` 제한은
+최종 사용자별이 아니라 **경로별 전역 단일 bucket**이다. allowlist 안의 한 사용자가 분당
+5회를 소모하면 다른 정상 사용자도 해당 경로에서 일시적으로 로그인하지 못한다. 인증 우회는
+아니지만 정상 로그인을 막을 수 있는 가용성 위험이다.
+
+같은 이유로 현재 앱 보안 로그의 `client_ip`도 Caddy 컨테이너 IP로 고정되어 사용자 감사
+근거로 쓸 수 없다. 별도 변경에서 먼저 Caddy가 `X-Forwarded-For`를 연결 peer 값으로
+덮어쓰고, 그 다음 Uvicorn `--proxy-headers`와 신뢰할 proxy 대역을 함께 제한해 켜야 한다.
+둘 중 하나만 먼저 적용하거나 임의의 incoming `X-Forwarded-For`를 신뢰하면 spoofing
+경계가 깨진다. 이번 배포에서는 이 앱 계층 변경을 실행하지 않는다.
+
 사무실 공인 IPv4가 확정되면 서버의 `.env.kasset`에서 기존 tailnet CIDR 뒤에 `/32`로
 추가한다. 아래 명령은 값을 화면에 입력받아 기존 파일을 백업하고 해당 줄만 갱신한다.
 
@@ -181,9 +202,9 @@ cd /opt/kasset-trader-core
 read -r -p "Office public IPv4: " OFFICE_IP
 cp -p .env.kasset .env.kasset.before-admin-office
 if grep -q '^KASSET_ADMIN_ALLOWED_IPS=' .env.kasset; then
-  sed -i "s|^KASSET_ADMIN_ALLOWED_IPS=.*|KASSET_ADMIN_ALLOWED_IPS=100.64.0.0/10 ${OFFICE_IP}/32|" .env.kasset
+  sed -i "s|^KASSET_ADMIN_ALLOWED_IPS=.*|KASSET_ADMIN_ALLOWED_IPS=\"100.64.0.0/10 fd7a:115c:a1e0::/48 ${OFFICE_IP}/32\"|" .env.kasset
 else
-  printf '\nKASSET_ADMIN_ALLOWED_IPS=100.64.0.0/10 %s/32\n' "$OFFICE_IP" >> .env.kasset
+  printf '\nKASSET_ADMIN_ALLOWED_IPS="100.64.0.0/10 fd7a:115c:a1e0::/48 %s/32"\n' "$OFFICE_IP" >> .env.kasset
 fi
 unset OFFICE_IP
 ```

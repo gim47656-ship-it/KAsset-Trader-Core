@@ -16,6 +16,7 @@ from app.extensions.kasset.ai.structured_router import (
     AvailabilityRoutedJsonClient,
     StructuredJsonRoute,
 )
+from app.services.ai_usage_service import attribute_ai_calls
 from app.services.research_canonical_hash import canonical_sha256
 
 
@@ -180,12 +181,13 @@ class OpenAiModelRouter:
         correlation_id: str | None = None,
     ) -> TierVerdict:
         address_instruction = await build_owner_address_instruction(db, owner_user_id)
-        return await self.analyze(
-            kind,
-            payload,
-            correlation_id=correlation_id,
-            address_instruction=address_instruction,
-        )
+        with attribute_ai_calls(owner_user_id=owner_user_id):
+            return await self.analyze(
+                kind,
+                payload,
+                correlation_id=correlation_id,
+                address_instruction=address_instruction,
+            )
 
     async def analyze(
         self,
@@ -307,14 +309,15 @@ class OpenAiModelRouter:
     ) -> TierVerdict:
         request_input = _normalized_request_input(kind, payload)
         input_hash = canonical_sha256(request_input)
-        raw = await client.request_json(
-            model=model,
-            input_payload=request_input,
-            reasoning_effort=_REASONING_EFFORT[kind] if include_reasoning else None,
-            schema_name="kasset_tier_verdict",
-            schema=_TIER_ANALYSIS_SCHEMA,
-            additional_instructions=address_instruction,
-        )
+        with attribute_ai_calls(correlation_id=correlation_id):
+            raw = await client.request_json(
+                model=model,
+                input_payload=request_input,
+                reasoning_effort=_REASONING_EFFORT[kind] if include_reasoning else None,
+                schema_name="kasset_tier_verdict",
+                schema=_TIER_ANALYSIS_SCHEMA,
+                additional_instructions=address_instruction,
+            )
         provider = getattr(raw, "provider_name", None)
         model_id = getattr(raw, "model_name", None)
         if (

@@ -13,7 +13,7 @@
 (admin_guard) {
 	@admin_not_allowed {
 		path /admin /admin/* /web-auth /web-auth/*
-		not remote_ip {$KASSET_ADMIN_ALLOWED_IPS:100.64.0.0/10}
+		not remote_ip {$KASSET_ADMIN_ALLOWED_IPS:100.64.0.0/10 fd7a:115c:a1e0::/48}
 	}
 	respond @admin_not_allowed 403
 }

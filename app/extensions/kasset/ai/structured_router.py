@@ -17,6 +17,7 @@ from app.services.ai_usage_service import (
     AiCallAttempt,
     AiCallStatus,
     capture_ai_attempt,
+    current_ai_call_attribution,
     new_logical_call_id,
     record_ai_call_attempts,
 )
@@ -68,6 +69,7 @@ def _attempt_row(
     """
 
     latency_ms = max(0, round((perf_counter() - started_perf) * 1000))
+    attribution = current_ai_call_attribution()
     return AiCallAttempt(
         logical_call_id=logical_call_id,
         attempt_no=attempt_no,
@@ -81,6 +83,8 @@ def _attempt_row(
         status=status,
         error_type=error_type,
         telemetry=telemetry,
+        owner_user_id=attribution.owner_user_id,
+        correlation_id=attribution.correlation_id,
     )
 
 

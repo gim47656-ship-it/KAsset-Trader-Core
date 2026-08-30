@@ -155,8 +155,8 @@ services:
       # Empty user config expands to an internal Caddy import sentinel, which
       # omits the optional MagicDNS site block without creating a blank address.
       KASSET_TAILNET_DOMAIN: "${KASSET_TAILNET_DOMAIN:-import kasset_tailnet_disabled}"
-      # Space-delimited IP/CIDR list. Unset or empty remains tailnet-only.
-      KASSET_ADMIN_ALLOWED_IPS: ${KASSET_ADMIN_ALLOWED_IPS:-100.64.0.0/10}
+      # Space-delimited IPv4/IPv6 CIDRs. Unset or empty remains tailnet-only.
+      KASSET_ADMIN_ALLOWED_IPS: "${KASSET_ADMIN_ALLOWED_IPS:-100.64.0.0/10 fd7a:115c:a1e0::/48}"
     ports:
       - "80:80"
       - "443:443"

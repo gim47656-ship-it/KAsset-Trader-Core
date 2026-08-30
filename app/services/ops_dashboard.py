@@ -18,16 +18,16 @@ trading stack):
   does not provide (NULL cost, NULL realized P&L, AI usage the provider never
   reported) is also ``None`` — never silently coerced to ``0``.
 
-Query budget for one page load — 24 statements cold, 16 warm::
+Query budget for one page load — 25 statements cold, 17 warm::
 
-    운영 상태          4  alembic_version (5분 캐시) + brokers + runtime_state x2
+    운영 상태          4  alembic_version (5분 캐시) + brokers + 소유자 상태 집계 + 전역 kill switch
     AI 사용량          4  summarize_ai_usage() 합계 + provider/model/feature — 24시간
     자동매매 funnel    2  추천 24시간 / PAPER 주문 24시간
     PAPER 포트폴리오   2  보유 포지션(계좌 한정) / 체결 30일
     체결 대사          1  최근 7일, broker별 1건
     데이터 readiness   7  DailyCandlesReadinessService — Redis 900초 캐시 시 0
     뉴스 파이프라인    2  수집 run 7일 / 기사 24시간
-    전략 승격          2  승격 레지스트리(전량) / 후보 30일
+    전략 승격          3  승격 레지스트리(전량) / 후보 30일 / 승격 우회 소유자
 
 Warm = alembic revision still cached (-1) and readiness served from Redis (-7).
 """
@@ -48,8 +48,10 @@ import redis.asyncio as redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.timezone import KST
-from app.extensions.kasset.api.router import _build_system_status
+from app.extensions.kasset.api.broker_registry import broker_registry
+from app.extensions.kasset.api.router import _applied_migration_revision
 from app.services.ai_usage_service import summarize_ai_usage
 from app.services.daily_candles.readiness import (
     DailyCandlesReadiness,
@@ -255,55 +257,146 @@ async def _rows(
 # --------------------------------------------------------------------------
 
 
-async def _system_panel(ctx: OpsContext) -> OpsPanel:
-    # Reuses the exact builder behind GET /api/v1/system/status so the web
-    # dashboard and the Android client can never disagree about the same fact.
-    status = await _build_system_status(ctx.db, ctx.admin_user_id)
+_OWNER_RUNTIME_SUMMARY_SQL = """/* ops_dashboard:owner_runtime_summary */
+SELECT trading_mode,
+       kill_switch_enabled,
+       count(*) AS owner_count,
+       max(CASE WHEN owner_user_id = :admin_user_id THEN 1 ELSE 0 END)
+           AS includes_viewer
+FROM kasset_android_runtime_state
+GROUP BY trading_mode, kill_switch_enabled
+ORDER BY trading_mode, kill_switch_enabled
+"""
 
-    database_ok = status.database.status == "ok"
-    revision = status.database.migration_revision
+_GLOBAL_RUNTIME_SQL = """/* ops_dashboard:global_runtime */
+SELECT kill_switch_enabled
+FROM kasset_global_runtime_state
+WHERE id = 1
+"""
+
+
+async def _system_panel(ctx: OpsContext) -> OpsPanel:
+    # Unlike runtime_state.get/get_global, these SELECTs do not create default
+    # rows or commit the shared dashboard session. Missing rows use the same
+    # effective defaults (PAPER/OFF) and are disclosed in the panel note.
+    revision = await _applied_migration_revision(ctx.db)
+    registered = await broker_registry.list_brokers(ctx.db, ctx.admin_user_id)
+    owner_states = await _rows(
+        ctx,
+        _OWNER_RUNTIME_SUMMARY_SQL,
+        {"admin_user_id": ctx.admin_user_id},
+    )
+    global_rows = await _rows(ctx, _GLOBAL_RUNTIME_SQL)
+
+    personal_mode = "PAPER"
+    personal_kill_switch = False
+    personal_state_persisted = False
+    owner_total = 0
+    owner_kill_switch_total = 0
+    for row in owner_states:
+        count = int(row["owner_count"])
+        owner_total += count
+        if bool(row["kill_switch_enabled"]):
+            owner_kill_switch_total += count
+        if bool(row["includes_viewer"]):
+            personal_mode = str(row["trading_mode"])
+            personal_kill_switch = bool(row["kill_switch_enabled"])
+            personal_state_persisted = True
+
+    global_kill_switch = bool(global_rows and global_rows[0]["kill_switch_enabled"])
     warnings: list[str] = []
-    if status.kill_switch_enabled:
-        warnings.append("kill switch ON")
-    if not database_ok:
-        warnings.append(f"DB status={status.database.status}")
+    if global_kill_switch:
+        warnings.append("전역 kill switch ON")
+    if owner_kill_switch_total:
+        warnings.append(f"소유자 kill switch ON {owner_kill_switch_total:,}명")
     if revision is None:
         warnings.append("migration revision 조회 불가")
-    if status.live_trading_enabled:
+    if settings.LIVE_TRADING_ENABLED:
         warnings.append("LIVE 매매 허용")
 
+    personal_hint = (
+        f"현재 관리자 id={ctx.admin_user_id} 기준 · 저장된 개인 상태"
+        if personal_state_persisted
+        else f"현재 관리자 id={ctx.admin_user_id} 기준 · 저장 행 없음, 기본값"
+    )
     metrics = (
-        OpsMetric("서버 버전", status.server_version),
-        OpsMetric("서버 시각", status.server_time),
-        OpsMetric("DB", status.database.status),
+        OpsMetric("서버 버전", settings.KASSET_SERVER_VERSION),
+        OpsMetric(
+            "서버 시각",
+            ctx.now.astimezone(UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        ),
+        OpsMetric("DB", "ok"),
         OpsMetric("migration revision", revision, hint="alembic_version"),
-        OpsMetric("trading mode", status.trading_mode),
-        OpsMetric("trading enabled", _flag(status.trading_enabled)),
-        OpsMetric("live trading", _flag(status.live_trading_enabled)),
-        OpsMetric("kill switch", _flag(status.kill_switch_enabled)),
+        OpsMetric("내 trading mode", personal_mode, hint=personal_hint),
+        OpsMetric(
+            "Core 거래 기능 (TRADING_ENABLED)",
+            _flag(settings.TRADING_ENABLED),
+        ),
+        OpsMetric(
+            "실거래 허용 (LIVE_TRADING_ENABLED)",
+            _flag(settings.LIVE_TRADING_ENABLED),
+        ),
+        OpsMetric(
+            "PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)",
+            _flag(settings.AI_PAPER_AUTO_EXECUTION_ENABLED),
+        ),
+        OpsMetric("내 kill switch", _flag(personal_kill_switch), hint=personal_hint),
+        OpsMetric(
+            "소유자 kill switch ON",
+            _count(owner_kill_switch_total),
+            hint=f"runtime state 전체 {owner_total:,}명",
+        ),
+        OpsMetric("전역 kill switch", _flag(global_kill_switch)),
     )
     rows = tuple(
         OpsRow(
             (
+                "소유자 runtime",
+                str(row["trading_mode"]),
+                f"kill switch {_flag(bool(row['kill_switch_enabled']))}",
+                _count(row["owner_count"]),
+            )
+        )
+        for row in owner_states
+    ) + tuple(
+        OpsRow(
+            (
+                "broker",
                 broker.provider,
                 "연결됨" if broker.connected else "미연결",
                 broker.last_verified_at or UNMEASURED_TEXT,
             )
         )
-        for broker in status.brokers
+        for broker in registered
     )
     summary = (
         "주의: " + ", ".join(warnings)
         if warnings
-        else f"정상 · 등록 broker {len(status.brokers)}건"
+        else f"정상 · 등록 broker {len(registered)}건"
+    )
+    persisted_note = (
+        "저장된 개인 runtime 상태입니다."
+        if personal_state_persisted
+        else "개인 runtime 저장 행이 없어 유효 기본값(PAPER/OFF)을 표시하며, "
+        "이 조회는 행을 생성하지 않습니다."
     )
     return OpsPanel(
         status=PanelStatus.WARN if warnings else PanelStatus.OK,
         summary=summary,
         metrics=metrics,
-        columns=("broker", "연결", "마지막 확인"),
+        columns=("구분", "대상", "상태", "수/최근 확인"),
         rows=rows,
-        source="app/extensions/kasset/api/router.py::_build_system_status",
+        note=(
+            f"내 trading mode와 내 kill switch는 현재 관리자 id={ctx.admin_user_id} "
+            f"기준이며 소유자 전체 상태 및 전역 상태와 분리 표시합니다. {persisted_note}"
+        ),
+        source=(
+            "alembic_version · kasset_broker_credentials · "
+            "kasset_android_runtime_state · kasset_global_runtime_state"
+        ),
     )
 
 
@@ -388,6 +481,10 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
     # attempts_without_usage is the honest denominator caveat: MCP /
     # subscription / Cloudflare / Hermes routes return no usage at all, so
     # their tokens are missing, not zero.
+    all_tokens_unreported = (
+        summary_data.attempts > 0
+        and summary_data.attempts_without_usage == summary_data.attempts
+    )
     usage_hint = (
         f"토큰 미제공 {summary_data.attempts_without_usage:,}건 제외"
         if summary_data.attempts_without_usage
@@ -400,7 +497,10 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
             OpsMetric(
                 "논리 호출",
                 _count(summary_data.logical_calls),
-                hint="기능이 요청한 횟수",
+                hint=(
+                    "routed client 호출 수 (모델 티어당 1개, "
+                    "terra→sol escalation은 2회)"
+                ),
             ),
             OpsMetric(
                 "provider 시도",
@@ -408,7 +508,11 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
                 hint="fallback·티어 escalation 포함",
             ),
             OpsMetric("실패 시도", _count(summary_data.failure_attempts)),
-            OpsMetric("총 토큰", _count(summary_data.total_tokens), hint=usage_hint),
+            OpsMetric(
+                "총 토큰",
+                None if all_tokens_unreported else _count(summary_data.total_tokens),
+                hint=usage_hint,
+            ),
             OpsMetric(
                 "토큰 미제공 시도",
                 _count(summary_data.attempts_without_usage),
@@ -443,19 +547,36 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
 # 3. 자동매매 funnel
 # --------------------------------------------------------------------------
 
-# ``owner_user_id IN (SELECT id FROM users)`` keeps the leading column of
-# ix_ai_recommendations_owner_decision_created_at / of
-# ix_kasset_android_paper_order_owner_created bound, so Postgres drives the
-# aggregate off the index instead of scanning the event table. ``users`` is a
-# 3-row table in production.
+# The check constraint fixes the decision domain to these three values.
+# Splitting them into equality-bound UNION ALL branches lets the existing
+# (owner_user_id, decision, created_at DESC, id) index constrain all
+# leading columns, including the 24-hour created_at bound. With production's
+# three owners this is at most 3 decisions × 3 owners = 9 bounded index probes;
+# the outer aggregate sees only rows from the requested window.
 _RECOMMENDATION_FUNNEL_SQL = """/* ops_dashboard:recommendations */
 SELECT decision,
        count(*) AS attempt_count,
        max(created_at) AS last_created_at,
        count(*) FILTER (WHERE decided_at IS NOT NULL) AS decided_count
-FROM review.ai_recommendations
-WHERE owner_user_id IN (SELECT id FROM users)
-  AND created_at >= :since
+FROM (
+    SELECT decision, created_at, decided_at
+    FROM review.ai_recommendations
+    WHERE owner_user_id IN (SELECT id FROM users)
+      AND decision = 'PENDING'
+      AND created_at >= :since
+    UNION ALL
+    SELECT decision, created_at, decided_at
+    FROM review.ai_recommendations
+    WHERE owner_user_id IN (SELECT id FROM users)
+      AND decision = 'APPROVED'
+      AND created_at >= :since
+    UNION ALL
+    SELECT decision, created_at, decided_at
+    FROM review.ai_recommendations
+    WHERE owner_user_id IN (SELECT id FROM users)
+      AND decision = 'REJECTED'
+      AND created_at >= :since
+) AS recent
 GROUP BY decision
 ORDER BY attempt_count DESC, decision
 """
@@ -1039,6 +1160,12 @@ GROUP BY status
 ORDER BY candidate_count DESC, status
 """
 
+_PROMOTION_BYPASS_SQL = """/* ops_dashboard:promotion_bypass */
+SELECT count(*) AS enabled_owner_count
+FROM kasset_android_runtime_state
+WHERE promotion_bypass_enabled = true
+"""
+
 _APPROVED_STATES = frozenset({"PAPER_APPROVED"})
 
 
@@ -1047,6 +1174,7 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
     candidates = await _rows(
         ctx, _PROMOTION_CANDIDATE_SQL, {"since": _naive_utc(ctx.since_ledger)}
     )
+    bypass_rows = await _rows(ctx, _PROMOTION_BYPASS_SQL)
 
     promotion_total = sum(int(row["promotion_count"]) for row in states)
     approved_total = sum(
@@ -1055,6 +1183,7 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         if str(row["state"]) in _APPROVED_STATES
     )
     candidate_total = sum(int(row["candidate_count"]) for row in candidates)
+    bypass_owner_total = int(bypass_rows[0]["enabled_owner_count"])
 
     rows = tuple(
         OpsRow(
@@ -1078,22 +1207,37 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         for row in candidates
     )
 
-    if promotion_total == 0:
+    if bypass_owner_total:
+        status = PanelStatus.WARN
+        if approved_total == 0:
+            summary = (
+                f"승격 레지스트리 {promotion_total:,}건 · PAPER_APPROVED 0건이지만 "
+                f"승격 우회 ON {bypass_owner_total:,}명 — 해당 소유자가 PAPER 모드이고 "
+                "kill switch OFF이면 승격 근거 없이 AUTO_PAPER 자동발주 가능"
+            )
+        else:
+            summary = (
+                f"PAPER_APPROVED {approved_total:,}건 · 전체 승격 "
+                f"{promotion_total:,}건 · 승격 우회 ON {bypass_owner_total:,}명 — "
+                "해당 소유자는 조건 충족 시 승격 근거 검사를 건너뜀"
+            )
+    elif promotion_total == 0:
         status = PanelStatus.IDLE
         summary = (
-            "승격 레지스트리 0건 (조회 성공) — PAPER_APPROVED 전략이 없어 "
-            "AUTO_PAPER 자동발주 근거가 없고 APPROVAL 경로만 열립니다."
+            "승격 레지스트리 0건 (조회 성공) — PAPER_APPROVED 전략이 없고 "
+            "승격 우회 ON 소유자도 0명이라 AUTO_PAPER 자동발주 불가"
         )
     elif approved_total == 0:
         status = PanelStatus.WARN
         summary = (
-            f"승격 {promotion_total:,}건 중 PAPER_APPROVED 0건 — "
-            "AUTO_PAPER 자동발주 근거 없음, APPROVAL 경로만 열림"
+            f"승격 {promotion_total:,}건 중 PAPER_APPROVED 0건이고 승격 우회 OFF — "
+            "AUTO_PAPER 자동발주 불가"
         )
     else:
         status = PanelStatus.OK
         summary = (
-            f"PAPER_APPROVED {approved_total:,}건 · 전체 승격 {promotion_total:,}건"
+            f"PAPER_APPROVED {approved_total:,}건 · 전체 승격 {promotion_total:,}건 · "
+            "승격 우회 OFF"
         )
 
     return OpsPanel(
@@ -1102,12 +1246,16 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         metrics=(
             OpsMetric("PAPER_APPROVED", _count(approved_total)),
             OpsMetric("승격 레지스트리", _count(promotion_total)),
+            OpsMetric("승격 우회 ON 소유자", _count(bypass_owner_total)),
             OpsMetric("최근 30일 후보", _count(candidate_total)),
         ),
         columns=("구분", "상태", "건수", "최근 시각"),
         rows=rows,
         window="승격 전량 · 후보 최근 30일",
-        source="review.kasset_strategy_promotions · research.promotion_candidates",
+        source=(
+            "review.kasset_strategy_promotions · research.promotion_candidates · "
+            "kasset_android_runtime_state"
+        ),
     )
 
 
