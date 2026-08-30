@@ -64,7 +64,7 @@ http:// {
 		# only for Caddy's upstream health probe.
 		@health path /health
 		handle @health {
-			reverse_proxy api:8000 {
+			reverse_proxy 127.0.0.1:8000 {
 				header_up X-KAsset-Admin-Edge-Key {$KASSET_ADMIN_EDGE_KEY}
 				health_uri /healthz
 				health_interval 10s
@@ -91,7 +91,7 @@ http:// {
 		# 만들 때도 같은 edge-key `header_up` 덮어쓰기를 유지하고 timeout 을 넣지
 		# 마라 — 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
 		handle {
-			reverse_proxy api:8000 {
+			reverse_proxy 127.0.0.1:8000 {
 				# Always replace any client-supplied value with Caddy's key.
 				header_up X-KAsset-Admin-Edge-Key {$KASSET_ADMIN_EDGE_KEY}
 				header_up X-Real-IP {remote_host}

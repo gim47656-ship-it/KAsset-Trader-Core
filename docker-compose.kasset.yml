@@ -144,6 +144,10 @@ services:
   # KASSET_DOMAIN 은 쉼표로 여러 호스트를 넣을 수 있다(전환 중 병행 운용).
   caddy:
     image: caddy:2.11.4-alpine
+    # Tailscale userspace forwarding is SNATed to the Docker bridge gateway.
+    # Host networking preserves the real Tailnet IPv4/IPv6 peer for Caddy's
+    # immediate-peer admin allowlist.
+    network_mode: host
     volumes:
       - ./deploy/kasset/Caddyfile:/etc/caddy/Caddyfile:ro
       - /opt/kasset-tailnet-certs:/etc/caddy/tailnet:ro
@@ -160,9 +164,6 @@ services:
       KASSET_TAILNET_DOMAIN: "${KASSET_TAILNET_DOMAIN:-import kasset_tailnet_disabled}"
       # Space-delimited IPv4/IPv6 CIDRs. Unset or empty remains tailnet-only.
       KASSET_ADMIN_ALLOWED_IPS: "${KASSET_ADMIN_ALLOWED_IPS:-100.64.0.0/10 fd7a:115c:a1e0::/48}"
-    ports:
-      - "80:80"
-      - "443:443"
     depends_on:
       - api
     logging: *default-logging
