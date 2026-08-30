@@ -317,6 +317,15 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 text("ALTER TABLE instruments DROP COLUMN aliases")
             )
             await connection.execute(text("DROP TABLE symbol_master"))
+            # News translation fields are post-boundary additive columns too.
+            # Remove the current-head shape so its migration can add them.
+            await connection.execute(
+                text(
+                    "ALTER TABLE news_analysis_results "
+                    "DROP COLUMN translated_title, "
+                    "DROP COLUMN translated_excerpt"
+                )
+            )
 
         env = {**os.environ, "DATABASE_URL": target_url_text}
 
