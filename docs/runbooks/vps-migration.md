@@ -1,6 +1,6 @@
 # KAsset Trader 서버 구조와 VPS 이전 런북
 
-갱신: 2026-08-28. 현재 서버는 Naver Cloud(모두의 AI 실험실) Rocky Linux 8.8,
+갱신: 2026-08-30. 현재 서버는 Naver Cloud(모두의 AI 실험실) Rocky Linux 8.8,
 `root@100.73.186.78`(Tailscale) / 공인 `175.45.201.51`이다. 3개월 뒤 일반 VPS(Ubuntu)로
 이전을 전제로 정리한다. 이 문서와 저장소의 `docker-compose.kasset.yml`이 기준이며,
 Naver 전용 서비스 종속은 없다.
@@ -9,6 +9,8 @@ Naver 전용 서비스 종속은 없다.
 
 ```text
 인터넷 ──> Cloudflare Tunnel(api.hsps-portal.xyz) ──> cloudflared ──> api:8000
+           (public/mobile 전용; production API가 /admin*·/web-auth*를 403 차단)
+허용된 tailnet/사무실 IP ──> Caddy ──[공유 edge key 덮어쓰기]──> api:8000
 
 docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ db          timescale/timescaledb-ha:pg17  (volume postgres_data)
@@ -17,7 +19,8 @@ docker compose (project: kasset-trader, /opt/kasset-trader-core)
 ├─ worker      taskiq worker  app.tasks.kasset_market_events_tasks
 ├─ scheduler   taskiq scheduler (캔들 수집 매시 :05, 스캔 매시 :10, KST 평일 9-16시)
 ├─ mcp         analysis_readonly MCP :8768 (127.0.0.1, 토큰 인증)
-├─ cloudflared Cloudflare Tunnel kasset-trader (http2 강제 — UDP 7844 차단 환경)
+├─ caddy       허용 IP 관리자 ingress + X-KAsset-Admin-Edge-Key 주입
+├─ cloudflared 공개 public/mobile API 터널(별도 관리 시; 관리자 ingress 아님)
 └─ migration   alembic upgrade head (profile: migration, 수동 1회성)
 
 환경변수 항목은 `.env.kasset.example`이 기준이다(키 이름 전수 + 주석).
@@ -83,19 +86,20 @@ scp old:/root/backups/kasset-daily/kasset-<최신>.dump.gz /root/
 
 # 4) 새 서버 기동 + 복원
 cd /opt/kasset-trader-core
+# 신규 설치이거나 기존 env에 KASSET_ADMIN_EDGE_KEY가 없으면 §9.1 절차로 먼저 생성
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml build api
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d db redis
 /usr/local/sbin/kasset-db-restore.sh /root/kasset-<최신>.dump.gz
-docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp cloudflared
+docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp caddy
 
 # 5) 검증
-curl -sS https://api.hsps-portal.xyz/health          # 터널 경유 200
-docker compose ... ps                                 # 전 서비스 healthy
-docker logs kasset-trader-cloudflared-1 | grep Registered
+curl -sS https://175-45-201-51.sslip.io/health     # Caddy 경유 200
+docker compose ... ps                              # 전 서비스 healthy
+docker logs kasset-trader-caddy-1                  # 기동 오류 없음(키 값 출력 금지)
 # Toss 허용 IP 갱신 후: 캔들 수집 태스크 수동 1회 실행 확인
 ```
 
-주의: 새 환경에서 UDP 7844가 열려 있으면 compose의 cloudflared `--protocol http2`
+주의: 별도 관리하는 cloudflared 환경에서 UDP 7844가 열려 있으면 `--protocol http2`
 강제를 제거해 quic로 되돌려도 된다(성능상 이득 미미, 그대로 둬도 무방).
 
 ## 5. 복구(같은 서버에서 DB만)
@@ -109,9 +113,10 @@ docker logs kasset-trader-cloudflared-1 | grep Registered
 
 1. Cloudflare One > Networks > Tunnels > **Create tunnel** (Remote-managed, 이름 `kasset-trader`).
 2. 발급된 커넥터 토큰을 `.env.kasset`의 `TUNNEL_TOKEN`에 넣는다(커밋 금지).
-3. Public hostname 추가: `api.hsps-portal.xyz` → Service `http://api:8000`
-   (cloudflared가 compose 내부 네트워크에서 서비스명 `api`로 접근).
-4. `docker compose ... up -d cloudflared` → 존에 CNAME `api → <tunnel-id>.cfargotunnel.com` 자동 생성.
+3. Public hostname의 `http://api:8000` 연결은 public/mobile API 전용으로만 쓴다.
+   production API는 edge key가 없는 `/admin*`와 `/web-auth*`를 항상 `403`으로 거부하므로
+   이 direct tunnel은 로그인·복구·관리자 ingress가 아니다.
+4. 별도 관리 중인 cloudflared를 기동하면 존의 CNAME이 터널로 연결된다.
 5. FastAPI 포트는 호스트에 `127.0.0.1` 바인딩뿐이므로 인터넷 직접 노출이 없다.
 
 ## 7. 롤백 (이전 실패 시)
@@ -119,7 +124,7 @@ docker logs kasset-trader-cloudflared-1 | grep Registered
 구 서버를 지우기 전에는 언제든 5분 안에 되돌릴 수 있다:
 
 ```bash
-new$ docker compose --env-file .env.kasset -f docker-compose.kasset.yml stop cloudflared
+new$ systemctl stop cloudflared   # 실제 별도 connector 관리 방식에 맞춰 정지
 old$ docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d   # 전 서비스 재기동
 curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 200
 ```
@@ -136,7 +141,7 @@ curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 2
 |---|---|---|---|
 | 1 | 터널 경유 API | `curl -sS https://api.hsps-portal.xyz/health` | 200 |
 | 2 | 컨테이너 상태 | `docker compose ... ps` | api/db/redis/mcp healthy, worker/scheduler Up |
-| 3 | 커넥터 등록 | `docker logs kasset-trader-cloudflared-1 \| grep Registered` | 커넥션 4개 |
+| 3 | 커넥터 등록 | Cloudflare Tunnel 대시보드 또는 별도 connector 로그 | 커넥션 4개 |
 | 4 | DB 복원 무결성 | `psql -tAc "SELECT count(*) FROM users; SELECT max(time) FROM kr_candles_1d"` | 이전 전과 동일 |
 | 5 | 스케줄 동작 | 다음 정시 +10분에 worker 로그 `market-scan` 실행 | 에러 없음 |
 | 6 | 캔들 수집 | Toss 허용 IP 갱신 후 장중 :05 로그 | rows_upserted > 0 |
@@ -144,16 +149,23 @@ curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 2
 | 8 | 안전 스위치 | `TRADING_ENABLED=false`, `LIVE_TRADING_ENABLED=false` 유지 | PAPER 전용 |
 | 9 | 포트 비노출 | 외부에서 `nc -zv <새IP> 8000 5432 6379` | 전부 실패 |
 | 10 | 백업 cron | 다음날 `/root/backups/kasset-daily/` 신규 덤프 | 생성됨 |
+| 11 | 관리자 ingress | Caddy 허용 경로 200/404, direct API `/admin*`·`/web-auth*` | Caddy만 통과, direct는 403 |
 
 ## 9. 관리자 경로 네트워크 경계
 
 ### 9.1 정책과 설정
 
 Caddy는 `/admin`, `/admin/*`, `/web-auth`, `/web-auth/*`를 일반 catch-all보다 먼저
-검사한다. 현재 Google Identity Services callback은 같은 origin의 `POST /web-auth/google`이고,
-향후 redirect 방식의 callback이 추가돼도 `/web-auth/*` 아래이면 같은 allowlist에 포함된다.
+검사한다. 허용된 immediate peer만 API로 보내고, 보내기 직전에
+`X-KAsset-Admin-Edge-Key`를 서버 공유 키로 **덮어쓴다**. FastAPI의
+`AuthMiddleware`도 production에서 같은 네 경계를 먼저 검사하고 키가 없거나 다르면
+constant-time 비교 후 동일한 `403`을 반환한다. 따라서 client가 같은 이름의 header나
+`X-Forwarded-For`/`X-Real-IP`를 보내도 Caddy 경유 값은 신뢰되지 않고, Caddy를 우회한
+direct cloudflared→api 요청은 로그인·복구·관리자 화면에 도달하지 못한다.
+현재 Google Identity Services callback은 같은 origin의 `POST /web-auth/google`이고,
+향후 redirect 방식의 callback이 추가돼도 `/web-auth/*` 아래이면 같은 경계에 포함된다.
 따라서 로그인 시작과 callback 요청 모두 허용된 네트워크에서 수행해야 한다.
-애플리케이션의 기존 admin 세션·role 검사는 이 네트워크 경계 뒤에서 별도로 계속 적용된다.
+애플리케이션의 기존 admin 세션·role 검사는 이 ingress 경계 뒤에서 별도로 계속 적용된다.
 웹 Google 버튼은 `.env.kasset`의 `WEB_GOOGLE_OAUTH_CLIENT_ID`가 비어 있지 않을 때만
 렌더된다. 이 client ID는 브라우저에 노출되는 공개 식별자이며 client secret이 아니다.
 미설정 시 버튼은 숨고 `POST /web-auth/google`은 `503`으로 fail-closed한다.
@@ -196,6 +208,29 @@ Tailscale 공식 reserved range 표:
 ```dotenv
 KASSET_ADMIN_ALLOWED_IPS="100.64.0.0/10 fd7a:115c:a1e0::/48"
 ```
+
+`KASSET_ADMIN_EDGE_KEY`는 Caddy와 API만 공유하는 최소 256-bit 무작위 값이다. 새 서버에서는
+아래처럼 화면에 출력하지 않고 `.env.kasset`에 한 번 생성한다. 실행 전 shell tracing을
+끄고, 생성한 값을 채팅·티켓·로그·명령행 인자로 복사하지 않는다.
+
+```bash
+cd /opt/kasset-trader-core
+set +x
+umask 077
+ADMIN_EDGE_KEY="$(openssl rand -hex 32)"
+grep -v '^KASSET_ADMIN_EDGE_KEY=' .env.kasset > .env.kasset.next
+printf 'KASSET_ADMIN_EDGE_KEY=%s\n' "$ADMIN_EDGE_KEY" >> .env.kasset.next
+mv .env.kasset.next .env.kasset
+unset ADMIN_EDGE_KEY
+chmod 600 .env.kasset
+```
+
+Compose의 required interpolation과 Caddyfile의 `header_up` 값 요구 때문에 키가 없거나 빈
+상태에서는 Caddy가 기동하지 않는다. API 설정은 optional이어서 development/test는 키 없이
+계속 쓸 수 있지만, `ENVIRONMENT=production`에서는 미설정도 모든 관리자 ingress 요청을
+`403`으로 막는다. Caddy access log는 이 header를 삭제한 뒤 기록한다. 실제 키가 펼쳐지는
+`docker compose config`나 `caddy adapt` 결과를 터미널·CI 로그에 출력하지 말고, 이 런북처럼
+Compose 검증 출력은 `/dev/null`로 보낸다.
 
 Caddy의 `{$ENV:default}` 치환은 Caddyfile 파싱 전에 일어나며 공백이 든 값을 여러 token으로
 확장한다. 따라서 IP 목록을 한 변수로 전달할 수 있다. 근거:
@@ -322,7 +357,8 @@ tailnet URL만 사용한다.
 
 적용 전에 Caddyfile과 실제 env를 백업한다. 첫 번째 `caddy validate`는
 `KASSET_ADMIN_ALLOWED_IPS`를 전혀 전달하지 않아도 Caddyfile 기본값으로 유효한지를 확인한다.
-두 번째 검증은 실제 Compose 치환 결과를 검사한다.
+edge key는 Caddy 기동 필수값이므로 이 문법 검사에는 실제 운영 키 대신 일회성 검증 문자열을
+넣는다. 두 번째 검증은 실제 Compose 치환 결과를 출력하지 않고 검사한다.
 
 ```bash
 cd /opt/kasset-trader-core
@@ -332,6 +368,7 @@ cp -p .env.kasset .env.kasset.before-admin-guard
 docker run --rm \
   -e KASSET_DOMAIN=admin-guard.example.invalid \
   -e ACME_EMAIL=ops@example.invalid \
+  -e KASSET_ADMIN_EDGE_KEY=validation-only-not-a-production-secret \
   -v "$PWD/deploy/kasset/Caddyfile:/etc/caddy/Caddyfile:ro" \
   caddy:2.11.4-alpine \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -396,13 +433,19 @@ host-agnostic `http://` site block에서 같은 관리자 guard를 먼저 실행
 `https://175-45-201-51.sslip.io/health`는 200이다. Tunnel 복구는 이 변경의 범위 밖이고,
 530은 관리자 경계가 차단했다는 증거가 아니다.
 
-Tunnel을 나중에 복구할 때 connector를 `api:8000`으로 직접 보내면 Caddy를 완전히 우회하므로
-금지한다. Caddy를 경유하도록 별도 설계하더라도 `remote_ip`가 보는 peer는 최종 사용자가 아니라
-connector다. connector 주소를 `KASSET_ADMIN_ALLOWED_IPS`에 넣으면 모든 Tunnel 사용자가
-같은 허용 peer로 보여 네트워크 경계가 무력화된다. 관리자 경로는 connector를 allowlist에
-넣지 않은 채 차단하고, tailnet/확정된 사무실 공인 IP에서
-`175-45-201-51.sslip.io` origin Caddy로 직접 접속한다. Tunnel 재구성 시에는 공개 API만
-통과하고 관리자 두 접두어는 Caddy를 우회하지 않는다는 별도 검증이 필요하다.
+Tunnel을 복구해 connector를 `api:8000`으로 직접 보내는 경우에도 그 경로는 public/mobile
+API 전용이다. cloudflared 설정이나 Cloudflare Transform Rule에
+`X-KAsset-Admin-Edge-Key`를 넣어서는 안 된다. 공개 edge가 키를 주입하면 모든 인터넷
+사용자에게 관리자 ingress 증명이 붙어 경계가 사라진다. direct tunnel 요청은 production
+middleware에서 `/admin`, `/admin/*`, `/web-auth`, `/web-auth/*`가 모두 `403`이어야 하며,
+일반 proxy IP header 위조로 결과가 바뀌면 안 된다.
+
+유효한 관리자 요청은 tailnet 또는 확인된 사무실 공인 IP에서 Caddy로 직접 들어와야 한다.
+Caddy는 immediate peer allowlist를 통과한 요청에만 비밀 header를 덮어쓰고 API로 보낸다.
+키 자체를 아는 client를 신뢰하는 설계가 아니므로 `.env.kasset` 외에는 배포하지 않는다.
+connector 주소를 `KASSET_ADMIN_ALLOWED_IPS`에 추가하거나 edge key를 connector와 공유하지
+않는다. Tunnel 재구성 시에는 direct API의 관리자 두 접두어 차단과 public API 통과를
+아래 smoke로 각각 검증한다.
 
 ### 9.5 Smoke: tailnet 허용, 외부 차단, public API 유지
 
@@ -439,6 +482,7 @@ tailnet을 끈 외부 회선에서 직접 origin을 검사한다. 위조한 `X-F
 결과가 바뀌면 안 된다. 동시에 `/health`가 200인지 확인해 Android/public API 비영향을
 확인한다.
 
+
 ```bash
 DIRECT_HOST=175-45-201-51.sslip.io
 curl -sS -o /dev/null -w "direct admin => %{http_code}\n" \
@@ -464,15 +508,36 @@ curl -sS -o /dev/null -w "direct-IP health redirect => %{http_code}\n" \
 ```
 
 기대값은 admin 3건 모두 `403`, health는 `308`이다.
+같은 서버에서 Caddy를 우회해 production API의 loopback 포트도 검사한다. 일반 proxy
+header를 위조해도 로그인·복구·관리자 경로는 모두 `403`이고, health는 그대로 `200`이어야
+한다. edge key는 이 명령에 넣거나 출력하지 않는다.
 
-공개 도메인은 현재 Tunnel 장애 때문에 아래 두 요청이 모두 `530`이다. 이는 현 상태 기록일
-뿐 allowlist smoke가 아니다. Tunnel이 Caddy 경계를 우회하지 않도록 복구된 뒤에는 각각
-`403`, `200`이어야 한다.
+```bash
+curl -H 'X-Forwarded-For: 100.64.0.1' -sS -o /dev/null \
+  -w "direct-api spoofed-XFF login => %{http_code}\n" \
+  http://127.0.0.1:8000/web-auth/login
+curl -sS -o /dev/null -w "direct-api recovery => %{http_code}\n" \
+  http://127.0.0.1:8000/web-auth/forgot-password
+curl -sS -o /dev/null -w "direct-api admin => %{http_code}\n" \
+  http://127.0.0.1:8000/admin/__edge_smoke_not_found__
+curl -sS -o /dev/null -w "direct-api health => %{http_code}\n" \
+  http://127.0.0.1:8000/health
+```
+
+기대값은 차례로 `403`, `403`, `403`, `200`이다.
+
+공개 도메인은 현재 Tunnel 장애 때문에 아래 요청이 모두 `530`이다. 이는 현 상태 기록일
+뿐 ingress smoke가 아니다. direct cloudflared→api 경로로 복구된 뒤에는 관리자·로그인·복구
+요청이 모두 `403`, health가 `200`이어야 한다.
 
 ```bash
 PUBLIC_HOST=api.hsps-portal.xyz
 curl -sS -o /dev/null -w "public admin => %{http_code}\n" \
   "https://${PUBLIC_HOST}/admin/__network_smoke_not_found__"
+curl -sS -o /dev/null -w "public login => %{http_code}\n" \
+  "https://${PUBLIC_HOST}/web-auth/login"
+curl -sS -o /dev/null -w "public recovery => %{http_code}\n" \
+  "https://${PUBLIC_HOST}/web-auth/forgot-password"
 curl -sS -o /dev/null -w "public health => %{http_code}\n" \
   "https://${PUBLIC_HOST}/health"
 ```

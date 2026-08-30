@@ -152,6 +152,9 @@ services:
     environment:
       KASSET_DOMAIN: ${KASSET_DOMAIN:?KASSET_DOMAIN must be set}
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL must be set}
+      # Shared only between Caddy and the API runtime; required so Caddy
+      # cannot start without the production admin-ingress proof.
+      KASSET_ADMIN_EDGE_KEY: ${KASSET_ADMIN_EDGE_KEY:?KASSET_ADMIN_EDGE_KEY must be set}
       # Empty user config expands to an internal Caddy import sentinel, which
       # omits the optional MagicDNS site block without creating a blank address.
       KASSET_TAILNET_DOMAIN: "${KASSET_TAILNET_DOMAIN:-import kasset_tailnet_disabled}"

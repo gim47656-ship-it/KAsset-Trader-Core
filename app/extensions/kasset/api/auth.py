@@ -213,7 +213,12 @@ class MobileAuthService:
         device_id = self._claim(payload, "deviceId")
         device_name = self._claim(payload, "deviceName")
         session_id = self._claim(payload, "sessionId")
-        user = await self._active_user(db, user_id=user_id, username=username)
+        user = await self._active_user(
+            db,
+            user_id=user_id,
+            username=username,
+            for_update=True,
+        )
 
         result = await db.execute(
             select(KAssetDeviceSession)
@@ -407,10 +412,12 @@ class MobileAuthService:
         *,
         user_id: int,
         username: str,
+        for_update: bool = False,
     ) -> User:
-        result = await db.execute(
-            select(User).where(User.id == user_id, User.username == username)
-        )
+        query = select(User).where(User.id == user_id, User.username == username)
+        if for_update:
+            query = query.with_for_update()
+        result = await db.execute(query)
         user = result.scalar_one_or_none()
         if user is None or not user.is_active:
             raise unauthorized()
@@ -421,7 +428,10 @@ class MobileAuthService:
         if not identifier:
             return None
         username_result = await db.execute(
-            select(User).where(func.lower(User.username) == identifier.lower()).limit(2)
+            select(User)
+            .where(func.lower(User.username) == identifier.lower())
+            .limit(2)
+            .with_for_update()
         )
         username_matches = list(username_result.scalars().all())
         if len(username_matches) == 1:
@@ -429,7 +439,10 @@ class MobileAuthService:
         if username_matches:
             return None
         email_result = await db.execute(
-            select(User).where(func.lower(User.email) == identifier.lower()).limit(2)
+            select(User)
+            .where(func.lower(User.email) == identifier.lower())
+            .limit(2)
+            .with_for_update()
         )
         email_matches = list(email_result.scalars().all())
         return email_matches[0] if len(email_matches) == 1 else None

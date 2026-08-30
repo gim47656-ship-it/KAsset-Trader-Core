@@ -39,7 +39,11 @@ http:// {
 	encode zstd gzip
 
 	log {
-		format json
+		format filter {
+			request>headers>X-KAsset-Admin-Edge-Key delete
+			request>headers>X-Kasset-Admin-Edge-Key delete
+			wrap json
+		}
 	}
 
 	header {
@@ -61,6 +65,7 @@ http:// {
 		@health path /health
 		handle @health {
 			reverse_proxy api:8000 {
+				header_up X-KAsset-Admin-Edge-Key {$KASSET_ADMIN_EDGE_KEY}
 				health_uri /healthz
 				health_interval 10s
 				health_timeout 5s
@@ -83,10 +88,12 @@ http:// {
 		# 101 응답에는 `encode` 가 개입하지 않으므로 추가 지시어가 필요 없다.
 		# 주의: 이 catch-all 위에 응답을 버퍼링하는 지시어(`request_body`,
 		# `handle_response` 등)를 끼우면 스트림이 끊긴다. 스트림 전용 경로를 따로
-		# 만들 때는 `reverse_proxy api:8000` 그대로 두고 timeout 을 넣지 마라 —
-		# 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
+		# 만들 때도 같은 edge-key `header_up` 덮어쓰기를 유지하고 timeout 을 넣지
+		# 마라 — 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
 		handle {
 			reverse_proxy api:8000 {
+				# Always replace any client-supplied value with Caddy's key.
+				header_up X-KAsset-Admin-Edge-Key {$KASSET_ADMIN_EDGE_KEY}
 				header_up X-Real-IP {remote_host}
 				header_up X-Forwarded-Proto {scheme}
 				health_uri /healthz

@@ -134,8 +134,10 @@ async def login(
     """
     username_hash = hashlib.sha256(form_data.username.encode()).hexdigest()[:16]
 
-    # Get user by username
-    result = await db.execute(select(User).where(User.username == form_data.username))
+    # Serialize password verification and token issuance with password reset.
+    result = await db.execute(
+        select(User).where(User.username == form_data.username).with_for_update()
+    )
     user = result.scalar_one_or_none()
 
     if not user or not user.hashed_password:
@@ -263,8 +265,11 @@ async def refresh_token(
 
     username_hash = hashlib.sha256(username.encode()).hexdigest()[:16]
 
-    # Verify user exists and is active
-    result = await db.execute(select(User).where(User.username == username))
+    # Lock the user before refresh-token lookup so reset and rotation share
+    # one order: User -> RefreshToken.
+    result = await db.execute(
+        select(User).where(User.username == username).with_for_update()
+    )
     user = result.scalar_one_or_none()
 
     if not user or not user.is_active:

@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.auth.web_router import create_session_token
 from app.core.config import settings
@@ -26,6 +27,26 @@ async def protected_route(request: Request):
 @app.get("/web-auth/login", response_class=HTMLResponse)
 async def login_page():
     return "Login Page"
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    return "Admin Page"
+
+
+@app.get("/admin/ops", response_class=HTMLResponse)
+async def admin_ops_page():
+    return "Admin Ops"
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/auth/login")
+async def mobile_login_boundary():
+    return {"surface": "mobile"}
 
 
 @app.get("/api/data")
@@ -94,10 +115,147 @@ def mock_session_local(mock_db_session):
         yield mock
 
 
-def test_public_path_access(client, mock_session_local):
+def test_public_path_access(client, mock_session_local, monkeypatch):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    monkeypatch.setattr(settings, "KASSET_ADMIN_EDGE_KEY", None)
     response = client.get("/web-auth/login")
     assert response.status_code == 200
     assert response.text == "Login Page"
+
+
+def _assert_secret_not_exposed(response, secret: str) -> None:
+    response_wire = response.content + repr(dict(response.headers)).encode()
+    assert secret.encode() not in response_wire
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/admin", "/admin/ops", "/web-auth", "/web-auth/login"],
+)
+def test_production_admin_edge_denies_when_key_is_not_configured(
+    client, monkeypatch, path
+):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "KASSET_ADMIN_EDGE_KEY", None)
+
+    response = client.get(
+        path,
+        headers={
+            "X-Forwarded-For": "100.64.0.1",
+            "X-Real-IP": "100.64.0.1",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Forbidden"}
+
+
+@pytest.mark.parametrize("supplied_key", [None, "wrong-edge-key"])
+def test_production_admin_edge_denies_missing_or_wrong_key_without_leaking_secret(
+    client, monkeypatch, supplied_key
+):
+    expected_key = "expected-edge-key-that-must-stay-secret"
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        settings,
+        "KASSET_ADMIN_EDGE_KEY",
+        SecretStr(expected_key),
+    )
+    headers = {
+        "X-Forwarded-For": "100.64.0.1",
+        "X-Real-IP": "100.64.0.1",
+    }
+    if supplied_key is not None:
+        headers["X-KAsset-Admin-Edge-Key"] = supplied_key
+
+    response = client.get(
+        "/web-auth/login",
+        headers=headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Forbidden"}
+    _assert_secret_not_exposed(response, expected_key)
+
+
+def test_production_admin_edge_accepts_correct_key_without_leaking_it(
+    client, monkeypatch
+):
+    expected_key = "expected-edge-key-that-must-stay-secret"
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        settings,
+        "KASSET_ADMIN_EDGE_KEY",
+        SecretStr(expected_key),
+    )
+
+    response = client.get(
+        "/web-auth/login",
+        headers={"X-KAsset-Admin-Edge-Key": expected_key},
+    )
+
+    assert response.status_code == 200
+    assert response.text == "Login Page"
+    _assert_secret_not_exposed(response, expected_key)
+
+
+def test_production_admin_edge_allows_authenticated_admin_with_correct_key(
+    client, monkeypatch
+):
+    expected_key = "expected-edge-key-that-must-stay-secret"
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        settings,
+        "KASSET_ADMIN_EDGE_KEY",
+        SecretStr(expected_key),
+    )
+    admin_user = User(id=1, username="admin", is_active=True)
+    monkeypatch.setattr(
+        AuthMiddleware,
+        "_load_user",
+        staticmethod(AsyncMock(return_value=admin_user)),
+    )
+
+    response = client.get(
+        "/admin/ops",
+        headers={"X-KAsset-Admin-Edge-Key": expected_key},
+    )
+
+    assert response.status_code == 200
+    assert response.text == "Admin Ops"
+    _assert_secret_not_exposed(response, expected_key)
+
+
+def test_non_production_admin_edge_remains_usable_without_key(client, monkeypatch):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    monkeypatch.setattr(settings, "KASSET_ADMIN_EDGE_KEY", None)
+
+    response = client.get("/web-auth/login")
+
+    assert response.status_code == 200
+    assert response.text == "Login Page"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_payload"),
+    [
+        ("/health", {"status": "ok"}),
+        ("/api/data", {"data": "ok"}),
+        ("/api/v1/auth/login", {"surface": "mobile"}),
+    ],
+)
+def test_production_non_admin_surfaces_do_not_require_edge_key(
+    client, mock_session_local, monkeypatch, path, expected_payload
+):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "KASSET_ADMIN_EDGE_KEY", None)
+
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json() == expected_payload
 
 
 def test_api_path_access(client, mock_session_local):

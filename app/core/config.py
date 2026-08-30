@@ -705,6 +705,10 @@ class Settings(BaseSettings):
     KASSET_SERVER_VERSION: str = "2.3-R1"
     # Google ID tokens must target this web client ID; empty disables Google login.
     KASSET_GOOGLE_OAUTH_CLIENT_ID: str = ""
+    # Shared Caddy-to-API proof for production browser-admin ingress.
+    # Optional here so non-production remains usable; production middleware
+    # fails closed when it is absent.
+    KASSET_ADMIN_EDGE_KEY: SecretStr | None = None
     CREDENTIAL_MASTER_KEY: SecretStr | None = None
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False

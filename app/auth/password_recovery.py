@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.token_repository import revoke_all_refresh_tokens
 from app.core.config import settings
+from app.extensions.kasset.models import KAssetDeviceSession
 from app.models.trading import PasswordResetToken, User
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,16 @@ async def issue_password_reset_code(
 ) -> str:
     """Invalidate older codes and create one fresh single-use reset code."""
 
+    locked_user_id = await db.scalar(
+        select(User.id).where(User.id == user.id).with_for_update()
+    )
+    if locked_user_id is None:
+        raise ValueError("Cannot issue a password reset code for a missing user")
+
     await db.execute(
         update(PasswordResetToken)
         .where(
-            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.user_id == locked_user_id,
             PasswordResetToken.used_at.is_(None),
         )
         .values(used_at=now)
@@ -112,7 +119,7 @@ async def issue_password_reset_code(
     code = secrets.token_urlsafe(32)
     db.add(
         PasswordResetToken(
-            user_id=user.id,
+            user_id=locked_user_id,
             token_hash=hash_reset_code(code),
             expires_at=now
             + timedelta(minutes=settings.AUTH_PASSWORD_RESET_TTL_MINUTES),
@@ -133,18 +140,32 @@ async def consume_password_reset_code(
     if not normalized or len(normalized) > 256:
         return None
 
-    token = await db.scalar(
-        select(PasswordResetToken)
-        .where(PasswordResetToken.token_hash == hash_reset_code(normalized))
-        .with_for_update()
+    # Discover the owner without taking a token lock. Every mutating recovery
+    # path locks User first, then re-reads and validates the token under lock.
+    token_hash = hash_reset_code(normalized)
+    token_user_id = await db.scalar(
+        select(PasswordResetToken.user_id).where(
+            PasswordResetToken.token_hash == token_hash
+        )
     )
-    if token is None or token.used_at is not None or token.expires_at <= now:
+    if token_user_id is None:
         return None
 
     user = await db.scalar(
-        select(User).where(User.id == token.user_id).with_for_update()
+        select(User).where(User.id == token_user_id).with_for_update()
     )
     if user is None or not user.is_active or not user.hashed_password:
+        return None
+
+    token = await db.scalar(
+        select(PasswordResetToken)
+        .where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.user_id == user.id,
+        )
+        .with_for_update()
+    )
+    if token is None or token.used_at is not None or token.expires_at <= now:
         return None
 
     token.used_at = now
@@ -161,6 +182,14 @@ async def consume_password_reset_code(
     user.web_session_version = int(user.web_session_version or 0) + 1
     reset_password_throttle(user)
     await revoke_all_refresh_tokens(db, user.id)
+    await db.execute(
+        update(KAssetDeviceSession)
+        .where(
+            KAssetDeviceSession.owner_user_id == user.id,
+            KAssetDeviceSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
     await db.flush()
     return user
 

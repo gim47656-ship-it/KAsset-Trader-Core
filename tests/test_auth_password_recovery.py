@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import ssl
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from app.auth.password_recovery import (
 )
 from app.auth.security import get_password_hash, verify_password
 from app.core.config import settings
+from app.extensions.kasset.models import KAssetDeviceSession
 from app.models.trading import PasswordResetToken, RefreshToken, User, UserRole
 
 
@@ -86,7 +88,7 @@ def test_progressive_cooldown_ladder_and_success_reset() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_code_is_hashed_single_use_and_revokes_refresh_tokens(
+async def test_reset_code_is_hashed_single_use_and_revokes_all_refresh_mechanisms(
     db_session: AsyncSession,
 ) -> None:
     suffix = uuid4().hex
@@ -104,13 +106,24 @@ async def test_reset_code_is_hashed_single_use_and_revokes_refresh_tokens(
     db_session.add(user)
     await db_session.flush()
     user_id = user.id
-    db_session.add(
-        RefreshToken(
-            user_id=user.id,
-            token_hash=f"refresh-{suffix}",
-            expires_at=now + timedelta(days=1),
-            revoked=False,
-        )
+    db_session.add_all(
+        [
+            RefreshToken(
+                user_id=user.id,
+                token_hash=f"refresh-{suffix}",
+                expires_at=now + timedelta(days=1),
+                revoked=False,
+            ),
+            KAssetDeviceSession(
+                id=f"reset-device-{suffix}",
+                owner_user_id=user.id,
+                device_id=f"device-{suffix}",
+                device_name="Reset test device",
+                refresh_token_hash=f"device-refresh-{suffix}",
+                expires_at=now + timedelta(days=1),
+                revoked_at=None,
+            ),
+        ]
     )
     await db_session.commit()
 
@@ -143,8 +156,14 @@ async def test_reset_code_is_hashed_single_use_and_revokes_refresh_tokens(
         refresh = await db_session.scalar(
             select(RefreshToken).where(RefreshToken.user_id == user.id)
         )
+        device_session = await db_session.scalar(
+            select(KAssetDeviceSession).where(
+                KAssetDeviceSession.owner_user_id == user.id
+            )
+        )
         assert token is not None and token.used_at is not None
         assert refresh is not None and refresh.revoked is True
+        assert device_session is not None and device_session.revoked_at is not None
 
         assert (
             await consume_password_reset_code(
@@ -154,6 +173,58 @@ async def test_reset_code_is_hashed_single_use_and_revokes_refresh_tokens(
                 now=now + timedelta(minutes=2),
             )
             is None
+        )
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(User).where(User.id == user_id))
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reset_code_issuance_leaves_one_active_code(
+    db_session: AsyncSession,
+) -> None:
+    from app.core.db import AsyncSessionLocal
+
+    suffix = uuid4().hex
+    now = datetime(2026, 8, 30, 11, 0, tzinfo=UTC)
+    user = User(
+        username=f"recovery-race-{suffix}",
+        email=f"recovery-race-{suffix}@example.com",
+        hashed_password=get_password_hash("OldPassword1!"),
+        role=UserRole.admin,
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    user_id = user.id
+
+    async def issue() -> str:
+        async with AsyncSessionLocal() as session:
+            concurrent_user = await session.get(User, user_id)
+            assert concurrent_user is not None
+            code = await issue_password_reset_code(session, concurrent_user, now=now)
+            await session.commit()
+            return code
+
+    try:
+        codes = await asyncio.gather(issue(), issue())
+        tokens = list(
+            (
+                await db_session.scalars(
+                    select(PasswordResetToken)
+                    .where(PasswordResetToken.user_id == user_id)
+                    .order_by(PasswordResetToken.id)
+                )
+            ).all()
+        )
+        active_tokens = [token for token in tokens if token.used_at is None]
+
+        assert len(tokens) == 2
+        assert len(active_tokens) == 1
+        assert active_tokens[0].token_hash in {hash_reset_code(code) for code in codes}
+        assert all(
+            token.used_at == now for token in tokens if token.used_at is not None
         )
     finally:
         await db_session.rollback()

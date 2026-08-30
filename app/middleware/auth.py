@@ -22,7 +22,7 @@ class AuthMiddleware:
     Middleware to protect web routes requiring authentication.
 
     Public routes (no authentication required):
-    - /web-auth/* (login, recovery, optional register, logout)
+    - /web-auth/* (public after the production Caddy-edge proof)
     - /auth/* (API authentication endpoints)
     - /static/* (runtime CSS/font assets)
     - /health
@@ -66,6 +66,8 @@ class AuthMiddleware:
     NEWS_RELEVANCE_PATH_PREFIX: ClassVar[str] = "/trading/api/news-relevance/"
     TELEGRAM_CALLBACK_PATH_PREFIX: ClassVar[str] = "/trading/api/telegram/"
     LEGACY_DEPRECATED_PREFIXES: ClassVar[tuple[str, ...]] = LEGACY_PREFIXES
+    ADMIN_EDGE_PATH_ROOTS: ClassVar[tuple[str, ...]] = ("/admin", "/web-auth")
+    ADMIN_EDGE_HEADER_NAME: ClassVar[str] = "X-KAsset-Admin-Edge-Key"
 
     def __init__(self, app: ASGIApp):
         """Initialize middleware with dynamic public paths."""
@@ -115,6 +117,30 @@ class AuthMiddleware:
             for legacy_prefix in self.LEGACY_DEPRECATED_PREFIXES
         )
 
+    @classmethod
+    def _is_admin_edge_path(cls, path: str) -> bool:
+        """Return whether a path belongs to the browser-admin ingress."""
+        return any(
+            path == root or path.startswith(f"{root}/")
+            for root in cls.ADMIN_EDGE_PATH_ROOTS
+        )
+
+    @classmethod
+    def _has_valid_admin_edge_key(cls, request: Request) -> bool:
+        """Validate Caddy's production-only shared ingress proof."""
+        if settings.ENVIRONMENT != "production":
+            return True
+
+        configured_key = settings.KASSET_ADMIN_EDGE_KEY
+        if configured_key is None:
+            return False
+        expected_key = configured_key.get_secret_value()
+        if not expected_key:
+            return False
+
+        supplied_key = request.headers.get(cls.ADMIN_EDGE_HEADER_NAME, "")
+        return hmac.compare_digest(supplied_key.encode(), expected_key.encode())
+
     @staticmethod
     async def _load_user(request: Request):
         session_manager = cast(
@@ -161,6 +187,17 @@ class AuthMiddleware:
         Returns None if request should continue to the downstream app.
         """
         path = request.url.path
+
+        # Production browser-admin traffic must arrive through the allowlisted
+        # Caddy edge. This check precedes public login/recovery paths and all
+        # session authentication so direct API ingress fails closed.
+        if self._is_admin_edge_path(path) and not self._has_valid_admin_edge_key(
+            request
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Forbidden"},
+            )
 
         # Legacy paths must always pass through to deprecated router handlers.
         if self._is_legacy_deprecated_path(path):
