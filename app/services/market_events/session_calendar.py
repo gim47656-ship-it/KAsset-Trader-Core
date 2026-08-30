@@ -37,7 +37,13 @@ _SESSION_SEARCH_DAYS = 32
 # upstream calendar data incorporates the closures.
 _ADDITIONAL_CLOSED_DAYS: dict[Market, frozenset[date]] = {
     "kr": frozenset(
-        {date(2025, 12, 31), date(2026, 7, 17), date(2026, 8, 17), date(2026, 12, 31)}
+        {
+            date(2025, 12, 31),
+            date(2026, 6, 3),
+            date(2026, 7, 17),
+            date(2026, 8, 17),
+            date(2026, 12, 31),
+        }
     ),
     "us": frozenset(),
 }
