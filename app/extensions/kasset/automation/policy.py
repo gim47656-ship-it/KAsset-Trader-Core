@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,6 +30,8 @@ from app.extensions.kasset.models import (
 from app.models.ai_recommendations import AIRecommendation
 from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.user_settings import UserSetting
+
+logger = logging.getLogger(__name__)
 
 _SETTING_KEY = "kasset.ai_trading"
 _MIN_AI_CONFIDENCE = Decimal("0.50")
@@ -298,6 +301,9 @@ class AITradingSnapshot:
     kill_switch: bool
     updated_at: datetime
     executions: tuple[PaperExecutionView, ...] = ()
+    # 소유자가 명시적으로 켠 "승격 근거 없이 PAPER 자동실행 허용". kill switch가
+    # 켜져 있거나 trading_mode가 PAPER가 아니면 여기서 이미 False로 접힌다.
+    promotion_bypass: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,17 +371,23 @@ class AITradingPolicyService:
             db, owner_user_id, limit=max(0, min(execution_limit, 100))
         )
         updated_at = row.updated_at if row is not None else state.updated_at
+        kill_switch = (
+            limits.kill_switch
+            or bool(state.kill_switch_enabled)
+            or bool(global_state.kill_switch_enabled)
+        )
         return AITradingSnapshot(
             mode=mode,
             limits=limits,
             usage=usage,
-            kill_switch=(
-                limits.kill_switch
-                or bool(state.kill_switch_enabled)
-                or bool(global_state.kill_switch_enabled)
-            ),
+            kill_switch=kill_switch,
             updated_at=_aware_utc(updated_at),
             executions=tuple(executions),
+            promotion_bypass=(
+                bool(state.promotion_bypass_enabled)
+                and not kill_switch
+                and str(state.trading_mode).strip().upper() == "PAPER"
+            ),
         )
 
     async def put_snapshot(
@@ -401,6 +413,33 @@ class AITradingPolicyService:
         state.max_symbol_ratio = limits.max_symbol_allocation
         await db.commit()
         await db.refresh(row)
+        return await self.get_snapshot(db, owner_user_id, now=current)
+
+    async def set_promotion_bypass(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        *,
+        enabled: bool,
+        reason: str,
+        now: datetime,
+    ) -> AITradingSnapshot:
+        """승격 근거 없이 PAPER 자동실행을 허용할지 소유자별로 저장한다.
+
+        기본값은 False이고, 켜도 kill switch와 PAPER 판정은 그대로 남는다.
+        승격 근거 요구 하나만 면제하므로 전환 사실과 사유를 감사 로그에 남긴다.
+        """
+
+        current = _aware_utc(now)
+        state = await runtime_state.get(db, owner_user_id, for_update=True)
+        state.promotion_bypass_enabled = _strict_bool(enabled, "enabled")
+        await db.commit()
+        logger.warning(
+            "kasset promotion bypass %s: owner_user_id=%s reason=%s",
+            "enabled" if enabled else "disabled",
+            owner_user_id,
+            reason,
+        )
         return await self.get_snapshot(db, owner_user_id, now=current)
 
     async def usage(

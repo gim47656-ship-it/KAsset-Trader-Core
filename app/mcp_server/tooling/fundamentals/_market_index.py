@@ -11,10 +11,13 @@ from app.core.timezone import KST, now_kst
 from app.mcp_server.tooling.fundamentals_sources_indices import (
     _DEFAULT_INDICES,
     _INDEX_META,
+    INDEX_INTRADAY_PERIOD,
     _fetch_index_crypto_current,
     _fetch_index_kr_completed,
     _fetch_index_kr_current,
     _fetch_index_kr_history,
+    _fetch_index_upbit_current,
+    _fetch_index_upbit_history,
     _fetch_index_us_current,
     _fetch_index_us_history,
     _fetch_indices_us_current_batch,
@@ -37,6 +40,9 @@ _KR_INDEX_LAGGING_REASON = "kr_index_fresh_clock_payload_lagging"
 _KR_INDEX_QUOTE_LAG_STALE_SECONDS = 120
 _KR_INDEX_QUOTE_LAG_REASON = "kr_index_quote_lagging"
 _MAX_INDEX_HISTORY_COUNT = 126
+# 분봉은 하루치가 일봉 126개보다 많다(10분봉 24시간 = 144개). Upbit 분봉 API
+# 상한이 200이므로 그 이상은 어차피 못 받는다.
+_MAX_INDEX_INTRADAY_COUNT = 200
 
 
 def _parse_quote_asof(value: Any) -> datetime | None:
@@ -130,12 +136,23 @@ async def handle_get_market_index(
     이력이 동일한 완료 정규장 cutoff를 사용한다. target 봉이나 직전 세션 봉을
     증명하지 못하면 현재값과 이력을 unavailable로 두며, 진행 중·미래·더 오래된
     봉으로 대체하지 않는다.
+
+    ``period``가 ``INDEX_INTRADAY_PERIOD``면 이력이 분봉이 되고 ``date``에 날짜
+    라벨이 아니라 UTC timestamp가 실린다. 분봉은 완료 세션 cutoff와 결합하지
+    않는다(진행 중 세션을 보는 것이 목적이다).
     """
     period = (period or "day").strip().lower()
-    if period not in ("day", "week", "month"):
-        raise ValueError("period must be 'day', 'week', or 'month'")
+    if period not in ("day", "week", "month", INDEX_INTRADAY_PERIOD):
+        raise ValueError(
+            f"period must be 'day', 'week', 'month', or '{INDEX_INTRADAY_PERIOD}'"
+        )
 
-    capped_count = min(max(count, 1), _MAX_INDEX_HISTORY_COUNT)
+    capped_count = min(
+        max(count, 1),
+        _MAX_INDEX_INTRADAY_COUNT
+        if period == INDEX_INTRADAY_PERIOD
+        else _MAX_INDEX_HISTORY_COUNT,
+    )
 
     if symbol:
         sym = symbol.strip().upper()
@@ -143,6 +160,16 @@ async def handle_get_market_index(
         if meta is None:
             raise ValueError(
                 f"Unknown index symbol '{sym}'. Supported: {', '.join(sorted(_INDEX_META))}"
+            )
+        if period == INDEX_INTRADAY_PERIOD and meta["source"] not in (
+            "yfinance",
+            "upbit",
+        ):
+            # 네이버 지수 API에는 분봉 endpoint가 없고 CoinGecko /global은 이력이
+            # 없다. 없는 소스를 일봉으로 대체하면 "1일"이 아닌 차트가 나온다.
+            raise ValueError(
+                f"index symbol '{sym}' has no intraday source for period "
+                f"'{INDEX_INTRADAY_PERIOD}'"
             )
 
         def unavailable_current() -> dict[str, Any]:
@@ -197,9 +224,27 @@ async def handle_get_market_index(
                     meta["cg_metric"], meta["name"], sym
                 )
                 return {"indices": [current_data], "history": []}
+            if meta["source"] == "upbit":
+                # 암호화폐는 24시간 시장이라 완료 정규장 cutoff가 없다. 넘어온
+                # completed_as_of_by_market은 KRX/US 전용이므로 무시한다.
+                current_data, history = await asyncio.gather(
+                    _fetch_index_upbit_current(
+                        meta["upbit_market"],
+                        meta["name"],
+                        sym,
+                    ),
+                    _fetch_index_upbit_history(
+                        meta["upbit_market"],
+                        capped_count,
+                        period,
+                    ),
+                )
+                return {"indices": [current_data], "history": history}
 
             async def load_us_current() -> dict[str, Any]:
-                if completed_as_of_by_market is None:
+                if completed_as_of_by_market is None or period == INDEX_INTRADAY_PERIOD:
+                    # 분봉 차트는 진행 중 세션을 보는 것이 목적이므로 요약도
+                    # 완료봉이 아니라 실시간 현재가를 쓴다.
                     return await _fetch_index_us_current(
                         meta["yf_ticker"], meta["name"], sym
                     )
@@ -214,9 +259,13 @@ async def handle_get_market_index(
                 return rows[0] if rows else unavailable_current()
 
             async def load_us_history() -> list[dict[str, Any]]:
-                if completed_as_of_by_market is None:
+                fallback_yf_ticker = meta.get("yf_fallback_ticker")
+                if completed_as_of_by_market is None or period == INDEX_INTRADAY_PERIOD:
                     return await _fetch_index_us_history(
-                        meta["yf_ticker"], capped_count, period
+                        meta["yf_ticker"],
+                        capped_count,
+                        period,
+                        fallback_yf_ticker=fallback_yf_ticker,
                     )
                 completed_as_of = completed_as_of_by_market.get("US")
                 if completed_as_of is None:
@@ -226,6 +275,7 @@ async def handle_get_market_index(
                     capped_count,
                     period,
                     completed_as_of=completed_as_of,
+                    fallback_yf_ticker=fallback_yf_ticker,
                 )
 
             current_data, history = await asyncio.gather(
@@ -389,6 +439,11 @@ async def handle_get_market_index_current_only(symbol: str) -> dict[str, Any]:
         if meta["source"] == "coingecko":
             current_data = await _fetch_index_crypto_current(
                 meta["cg_metric"], meta["name"], sym
+            )
+            return {"indices": [current_data]}
+        if meta["source"] == "upbit":
+            current_data = await _fetch_index_upbit_current(
+                meta["upbit_market"], meta["name"], sym
             )
             return {"indices": [current_data]}
         current_data = await _fetch_index_us_current(

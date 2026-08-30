@@ -8,7 +8,9 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import PaperOrderFacade, paper_orders
@@ -20,7 +22,7 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
-from app.models.paper_trading import PaperAccount, PaperTrade
+from app.models.paper_trading import PaperAccount, PaperPosition, PaperTrade
 from app.models.trading import InstrumentType, User
 from app.services.paper_trading_service import PaperTradingService
 
@@ -75,14 +77,14 @@ def _account() -> SimpleNamespace:
     return SimpleNamespace(id="paper-account", cash_krw=Decimal("10000000"))
 
 
-def _quote() -> Quote:
+def _quote(*, price: str = "70000") -> Quote:
     return Quote(
         broker="PAPER",
         market="KRX",
         symbol="005930",
         name="삼성전자",
         currency="KRW",
-        price="70000",
+        price=price,
         as_of="2026-08-28T00:00:00Z",
         source="TEST",
     )
@@ -468,10 +470,14 @@ async def test_old_and_new_worker_race_converges_to_one_order_and_trade(
         quantity: Decimal,
         price: Decimal | None = None,
         amount: Decimal | None = None,
+        resolved_market_price: Decimal | None = None,
         reason: str = "",
         correlation_id: str | None = None,
     ) -> dict[str, object]:
-        del price, amount
+        del amount
+        # MARKET은 기준가를 `resolved_market_price`로, LIMIT은 `price`로 받는다.
+        assert price is None
+        assert resolved_market_price == Decimal("70000")
         service.db.add(
             PaperTrade(
                 account_id=account_id,
@@ -551,3 +557,115 @@ async def test_old_and_new_worker_race_converges_to_one_order_and_trade(
             delete(PaperAccount).where(PaperAccount.id == account_id)
         )
         await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_market_order_fills_at_submit_reference_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MARKET 체결가는 제출 시점 기준가여야 한다.
+
+    회귀 방지(2026-08-30): `_fill()`이 MARKET에서 기준가를 버려 Core가
+    `_fetch_current_price()`로 가격을 다시 만들었다. KRX 재조회 경로는 KIS
+    전용이라 (1) KIS 403이면 토스가 정상이어도 체결 단계에서 주문이 실패하고,
+    (2) KIS가 살아 있어도 리스크·교차 판정 가격과 체결가가 서로 다른 공급자에서
+    나온 다른 값이 된다.
+
+    세션 I/O만 가짜다. `submit -> preview -> _fill -> PaperTradingService.
+    execute_order -> preview_order -> PaperTrade`는 실제 코드가 돈다.
+    """
+    monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+    db = FakeSession()
+    owner_id = 101
+    reference_price = Decimal("71234")
+    account = PaperAccount(
+        id=1,
+        name="paper-refprice",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+
+    async def only_quote_source(_db: object, *, market: str, symbol: str) -> Quote:
+        # 이 경로의 유일한 시세 공급자. 기준가는 여기서만 나온다.
+        assert (market, symbol) == ("KRX", "005930")
+        return _quote(price=format(reference_price, "f"))
+
+    async def forbidden_refetch(*_args: object, **_kwargs: object) -> Decimal:
+        raise AssertionError(
+            "PaperTradingService._fetch_current_price must not run for a KAsset "
+            "PAPER MARKET fill: the submit-time reference price is authoritative"
+        )
+
+    async def trade_by_correlation(
+        _db: object, _account_id: int, correlation_id: str
+    ) -> PaperTrade | None:
+        return next(
+            (
+                added
+                for added in db.added
+                if isinstance(added, PaperTrade)
+                and added.correlation_id == correlation_id
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(krx_quotes, "quote_for_market", only_quote_source)
+    monkeypatch.setattr(PaperTradingService, "_fetch_current_price", forbidden_refetch)
+    monkeypatch.setattr(
+        PaperTradingService, "get_account", AsyncMock(return_value=account)
+    )
+    monkeypatch.setattr(
+        PaperTradingService, "_get_position", AsyncMock(return_value=None)
+    )
+    # 이 파일의 다른 테스트가 `paper_orders` 인스턴스 속성을 남기므로 클래스가
+    # 아니라 싱글턴을 직접 덮는다.
+    monkeypatch.setattr(paper_orders, "_trade_by_correlation", trade_by_correlation)
+    monkeypatch.setattr(paper_orders, "_fill_for_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        paper_orders, "get_by_client_order_id", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        runtime_state, "assert_order_allowed", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        runtime_state,
+        "get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                kill_switch_enabled=False,
+                max_order_ratio=Decimal("0.1000"),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_state,
+        "get_global",
+        AsyncMock(return_value=SimpleNamespace(kill_switch_enabled=False)),
+    )
+    monkeypatch.setattr(
+        paper_account_adapter, "resolve_account", AsyncMock(return_value=account)
+    )
+
+    envelope, replay = await paper_orders.submit(  # type: ignore[arg-type]
+        db, owner_id, _request()
+    )
+
+    trade = next(added for added in db.added if isinstance(added, PaperTrade))
+    position = next(added for added in db.added if isinstance(added, PaperPosition))
+
+    assert replay is False
+    assert envelope.order.status == "FILLED"
+    # 재조회 없이 제출 시점 기준가로 체결된다.
+    assert trade.price == reference_price
+    assert trade.order_type == "market"
+    assert trade.quantity == Decimal("2")
+    assert trade.total_amount == Decimal("142468.0000")
+    assert position.avg_price == reference_price
+    # 리스크·교차 판정에 쓴 가격과 기록된 체결가가 같은 값이다.
+    assert envelope.risk is not None
+    assert envelope.risk.decision == "APPROVED"
+    assert Decimal(envelope.risk.reference_price) == trade.price
+    assert Decimal(envelope.risk.estimated_amount) == trade.total_amount
+    assert Decimal(envelope.order.average_fill_price or "0") == trade.price

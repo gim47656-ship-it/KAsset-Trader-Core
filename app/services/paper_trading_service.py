@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select, update
@@ -192,6 +192,26 @@ class PaperTradingService:
             raise ValueError(f"Could not fetch current price for {symbol}")
         return Decimal(str(price))
 
+    @staticmethod
+    def _validate_resolved_market_price(value: Decimal | float | int) -> Decimal:
+        """Fail-closed validation for a caller-resolved market reference price.
+
+        The caller already resolved and *approved* this price (risk assessment,
+        limit crossing). Never repair it by re-fetching a different provider's
+        price — a bad reference price must reject the order.
+        """
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as err:
+            raise ValueError(
+                f"resolved_market_price is not a valid decimal: {value!r}"
+            ) from err
+        if not parsed.is_finite():
+            raise ValueError(f"resolved_market_price must be finite, got {value!r}")
+        if parsed <= 0:
+            raise ValueError(f"resolved_market_price must be positive, got {value!r}")
+        return parsed
+
     # ------------------------------------------------------------------ #
     # Preview order
     # ------------------------------------------------------------------ #
@@ -205,6 +225,7 @@ class PaperTradingService:
         quantity: Decimal | float | int | None = None,
         price: Decimal | float | int | None = None,
         amount: Decimal | float | int | None = None,
+        resolved_market_price: Decimal | float | int | None = None,
     ) -> dict[str, Any]:
         side = side.lower()
         order_type = order_type.lower()
@@ -212,6 +233,11 @@ class PaperTradingService:
             raise ValueError("side must be 'buy' or 'sell'")
         if order_type not in ("limit", "market"):
             raise ValueError("order_type must be 'limit' or 'market'")
+        if order_type == "limit" and resolved_market_price is not None:
+            raise ValueError(
+                "resolved_market_price is only valid for market orders; "
+                "a limit order fills at the caller-provided price"
+            )
 
         from app.mcp_server.tooling.shared import resolve_market_type
 
@@ -231,11 +257,15 @@ class PaperTradingService:
         elif instrument_type == "crypto" and resolved_symbol.startswith("USDT-"):
             currency = "USDT"
 
-        # Determine price
+        # Determine price. A caller that already resolved and approved a market
+        # reference price passes it in; re-fetching here would fill at a
+        # different provider's price than the one the risk check approved.
         if order_type == "limit":
             if price is None:
                 raise ValueError("price is required for limit orders")
             fill_price = Decimal(str(price))
+        elif resolved_market_price is not None:
+            fill_price = self._validate_resolved_market_price(resolved_market_price)
         else:
             fill_price = await self._fetch_current_price(
                 resolved_symbol, instrument_type
@@ -307,6 +337,7 @@ class PaperTradingService:
         quantity: Decimal | float | int | None = None,
         price: Decimal | float | int | None = None,
         amount: Decimal | float | int | None = None,
+        resolved_market_price: Decimal | float | int | None = None,
         reason: str = "",
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
@@ -319,6 +350,7 @@ class PaperTradingService:
             quantity=quantity,
             price=price,
             amount=amount,
+            resolved_market_price=resolved_market_price,
         )
         p = preview["preview"]
         account = await self.get_account(account_id)  # refresh (same row)

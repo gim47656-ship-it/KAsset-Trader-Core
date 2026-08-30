@@ -179,6 +179,14 @@ def _indicator_rows() -> list[dict[str, Any]]:
             "change_pct": "0.33",
             "source": "yfinance",
         },
+        {
+            "symbol": "DXY",
+            "current": "98.42",
+            "previous_close": "98.10",
+            "change": "0.32",
+            "change_pct": "0.33",
+            "source": "yfinance",
+        },
     ]
 
 
@@ -194,6 +202,23 @@ def _btc_ticker() -> dict[str, Any]:
             datetime(2026, 8, 28, 6, 10, tzinfo=UTC).timestamp() * 1000
         ),
     }
+
+
+def _eth_ticker() -> dict[str, Any]:
+    return {
+        "market": "KRW-ETH",
+        "trade_price": 5842000,
+        "prev_closing_price": 5790000,
+        "signed_change_price": 52000,
+        "signed_change_rate": 0.0089,
+        "trade_timestamp": int(
+            datetime(2026, 8, 28, 6, 10, tzinfo=UTC).timestamp() * 1000
+        ),
+    }
+
+
+def _upbit_tickers() -> list[dict[str, Any]]:
+    return [_btc_ticker(), _eth_ticker()]
 
 
 def _toss_points() -> dict[str, TossIndicatorPoint]:
@@ -221,6 +246,7 @@ def _fx_snapshot() -> OpenErApiUsdSnapshot:
         jpy_per_usd=Decimal("150"),
         eur_per_usd=Decimal("0.75"),
         as_of=datetime(2026, 8, 28, 6, 0, tzinfo=UTC),
+        cny_per_usd=Decimal("7.5"),
     )
 
 
@@ -256,7 +282,7 @@ def _stub_successful_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value=_index_payload()),
     )
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
@@ -299,7 +325,9 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "WTI",
         "BRENT",
         "GOLD",
+        "DXY",
         "BTC",
+        "ETH",
     ]
     assert [item["unit"] for item in body["indicators"]] == [
         "POINT",
@@ -313,7 +341,15 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "USD",
         "USD",
         "USD",
+        # 달러인덱스는 지수 포인트, 원화 암호화폐는 KRW다.
+        "POINT",
         "KRW",
+        "KRW",
+    ]
+    assert [item["group"] for item in body["indicators"][-3:]] == [
+        "FX",
+        "CRYPTO",
+        "CRYPTO",
     ]
     # ^TNX와 국고채는 % 단위를 유지하되 값은 소수 2자리로 제한한다.
     assert body["indicators"][1]["value"] == "4.68"
@@ -323,6 +359,8 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
     assert indicator_values["US10Y"] == "4.68"
     assert indicator_values["WTI"] == "82.69"
     assert indicator_values["BTC"] == "109807000"
+    assert indicator_values["ETH"] == "5842000"
+    assert indicator_values["DXY"] == "98.42"
     assert body["indicators"][5]["previousClose"] is None
     assert body["indicators"][5]["changeAmount"] is None
     assert body["indicators"][5]["changeRate"] is None
@@ -333,6 +371,7 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "USDKRW",
         "JPYKRW",
         "EURKRW",
+        "CNYKRW",
     ]
     assert body["indices"][0]["changeRate"] == "0.7"
     assert body["indices"][0]["changeAmount"] == "18.9"
@@ -342,6 +381,7 @@ def test_overview_http_contract_is_camel_case_ordered_and_uses_percentage_points
         "1500",
         "10",
         "2000",
+        "200",
     ]
     assert all(item["changeAmount"] is None for item in body["fx"])
     assert all(item["changeRate"] is None for item in body["fx"])
@@ -825,12 +865,22 @@ def test_overview_quantizes_live_provider_precision_without_exponent_notation() 
     }
     indicators, _indicator_errors = mod._indicator_items(
         indicator_result,
-        {
-            "trade_price": 109975000.0,
-            "prev_closing_price": 111000000.0,
-            "signed_change_price": -1025000.0,
-            "signed_change_rate": -0.0092699362,
-        },
+        [
+            {
+                "market": "KRW-BTC",
+                "trade_price": 109975000.0,
+                "prev_closing_price": 111000000.0,
+                "signed_change_price": -1025000.0,
+                "signed_change_rate": -0.0092699362,
+            },
+            {
+                "market": "KRW-ETH",
+                "trade_price": 5842123.0,
+                "prev_closing_price": 5790000.0,
+                "signed_change_price": 52123.0,
+                "signed_change_rate": 0.0090022453,
+            },
+        ],
         {
             "KR_BOND_10Y": TossIndicatorPoint(
                 symbol="KR_BOND_10Y",
@@ -853,12 +903,15 @@ def test_overview_quantizes_live_provider_precision_without_exponent_notation() 
     assert indicators_by_key["KR_BOND_10Y"].value == "4.25"
     assert indicators_by_key["BTC"].value == "109975000"
     assert indicators_by_key["BTC"].change_rate == "-0.93"
+    assert indicators_by_key["ETH"].value == "5842123"
+    assert indicators_by_key["ETH"].change_rate == "0.9"
 
     fx, fx_errors = mod._fx_items(
         SimpleNamespace(
             usd_krw=Decimal("1381.39"),
             jpy_krw=Decimal("8.671256687620105017577911603"),
             eur_krw=Decimal("1609.719278172501299131038629"),
+            cny_krw=Decimal("193.7658426966292134831460674"),
             as_of=datetime(2026, 8, 28, 6, 0, tzinfo=UTC),
         ),
         None,
@@ -869,6 +922,7 @@ def test_overview_quantizes_live_provider_precision_without_exponent_notation() 
         "USDKRW": "1381.39",
         "JPYKRW": "8.67",
         "EURKRW": "1609.72",
+        "CNYKRW": "193.77",
     }
 
     wire_numbers = [
@@ -910,6 +964,7 @@ async def test_overview_prefers_configured_toss_for_usd_krw(
     assert response.fx[0].as_of == "2026-08-28T06:05:00Z"
     assert response.fx[1].price == "10"
     assert response.fx[2].price == "2000"
+    assert response.fx[3].price == "200"
 
 
 @pytest.mark.asyncio
@@ -927,7 +982,7 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
         AsyncMock(return_value=payload),
     )
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
@@ -946,7 +1001,7 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
     assert all(item.status == "stale" for item in response.indices)
     assert all(item.status == "available" for item in response.fx)
     assert response.errors == []
-    # US 배치 지표는 미국 세션을 따라 stale로 내려간다. 24시간 시장인 BTC와,
+    # US 배치 지표는 미국 세션을 따라 stale로 내려간다. 24시간 시장인 암호화폐와,
     # 기준 시각이 있는 토스 국채는 세션과 무관하게 available로 남는다.
     assert [item.status for item in response.indicators] == [
         "stale",
@@ -960,6 +1015,8 @@ async def test_overview_maps_closed_sessions_to_stale_without_age_arithmetic(
         "stale",
         "stale",
         "stale",
+        "stale",
+        "available",
         "available",
     ]
 
@@ -977,7 +1034,7 @@ async def test_overview_retains_failed_item_with_null_numbers_and_partial_status
         AsyncMock(return_value=payload),
     )
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
@@ -1052,17 +1109,24 @@ async def test_overview_returns_all_fixed_entries_when_both_source_groups_fail(
         "WTI",
         "BRENT",
         "GOLD",
+        "DXY",
         "BTC",
+        "ETH",
     ]
-    assert [item.symbol for item in response.fx] == ["USDKRW", "JPYKRW", "EURKRW"]
+    assert [item.symbol for item in response.fx] == [
+        "USDKRW",
+        "JPYKRW",
+        "EURKRW",
+        "CNYKRW",
+    ]
     assert all(
         item.status == "unavailable"
         for item in [*response.indices, *response.fx, *response.indicators]
     )
     assert all(item.price is None for item in [*response.indices, *response.fx])
     assert all(item.value is None for item in response.indicators)
-    # 지수 7 + 지표 12 + 환율 3
-    assert len(response.errors) == 22
+    # 지수 7 + 지표 14 + 환율 4
+    assert len(response.errors) == 25
 
 
 @pytest.mark.asyncio
@@ -1082,7 +1146,7 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
     _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", slow_indices)
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
@@ -1101,11 +1165,13 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
         ("US", "REGULAR"),
     ]
     assert all(item.session_state == "REGULAR" for item in response.indices)
-    # 배치 타임아웃은 지수 7건과 US 배치 지표 5건만 때린다. Upbit BTC는 살아 있다.
-    assert [error.code for error in response.errors] == ["TIMEOUT"] * 12
-    btc = next(item for item in response.indicators if item.key == "BTC")
-    assert btc.status == "available"
-    assert btc.value == "109807000"
+    # 배치 타임아웃은 지수 7건과 US 배치 지표 6건만 때린다. Upbit 암호화폐는
+    # 별도 공급자라 살아 있다.
+    assert [error.code for error in response.errors] == ["TIMEOUT"] * 13
+    crypto = {item.key: item for item in response.indicators if item.group == "CRYPTO"}
+    assert [item.status for item in crypto.values()] == ["available", "available"]
+    assert crypto["BTC"].value == "109807000"
+    assert crypto["ETH"].value == "5842000"
 
 
 @pytest.mark.asyncio
@@ -1143,7 +1209,7 @@ async def test_overview_keeps_krx_rows_when_us_batch_times_out(
     _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", split_indices)
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
@@ -1198,7 +1264,7 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
     _stub_sessions(monkeypatch)
     monkeypatch.setattr(mod, "handle_get_market_index_current_batch", indices)
     monkeypatch.setattr(
-        mod, "fetch_multiple_tickers", AsyncMock(return_value=[_btc_ticker()])
+        mod, "fetch_multiple_tickers", AsyncMock(return_value=_upbit_tickers())
     )
     monkeypatch.setattr(
         mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())

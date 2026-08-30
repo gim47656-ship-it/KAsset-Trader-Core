@@ -162,6 +162,7 @@ async def test_readiness_emits_cohort_and_separate_history_promotion_results(
         corporate_action_covered_symbol_count=100,
         adjustment_covered_symbol_count=100,
         list_date_covered_symbol_count=100,
+        members_listed_after_cohort_start=0,
         delist_date_covered_inactive_count=0,
         point_in_time_available=False,
         inactive_with_candles_count=0,

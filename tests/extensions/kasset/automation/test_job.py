@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
 from app.core.config import settings
+from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.automation import job
+from app.extensions.kasset.automation.contracts import PROMOTION_BYPASSED_BY_OWNER
 from app.extensions.kasset.automation.job import (
     OwnerScopedRecommendationService,
     RuntimeStateSafetyGate,
@@ -85,6 +87,32 @@ async def _set_auto_policy(
     )
 
 
+async def _enable_promotion_bypass(
+    db_session: AsyncSession,
+    owner_user_id: int,
+) -> None:
+    await AITradingPolicyService().set_promotion_bypass(
+        db_session,
+        owner_user_id,
+        enabled=True,
+        reason="모의투자 계좌 완전 자동매매 게이트 개방",
+        now=_NOW,
+    )
+
+
+async def _promotion_bypass_snapshot(
+    db_session: AsyncSession,
+    owner_user_id: int,
+) -> bool:
+    snapshot = await AITradingPolicyService().get_snapshot(
+        db_session,
+        owner_user_id,
+        now=_NOW,
+        execution_limit=0,
+    )
+    return snapshot.promotion_bypass
+
+
 async def _cleanup_owner(db_session: AsyncSession, username: str) -> None:
     await db_session.rollback()
     await db_session.execute(delete(User).where(User.username == username))
@@ -150,6 +178,7 @@ async def test_enabled_sweep_is_blocked_by_the_owner_kill_switch(
                 "reason": "global_kill_switch_enabled",
                 "recommendation_id": None,
                 "replayed": False,
+                "promotion_bypass_reason": None,
             }
         ]
         stored = await db_session.scalar(
@@ -362,3 +391,230 @@ async def test_expired_claim_is_selected_for_reconciliation(
         assert reclaimed.paper_execution_attempt_count == 2
     finally:
         await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bypass_is_off_by_default_and_still_requires_promotion(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """override를 켜지 않으면 승격 없는 추천은 지금과 똑같이 차단된다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        assert await _promotion_bypass_snapshot(db_session, owner_id) is False
+
+        gate = RuntimeStateSafetyGate(
+            db_session,
+            automatic=True,
+            recommendation_id=recommendation_id,
+        )
+        policy = await gate.get_policy(owner_user_id=str(owner_id), now=_NOW)
+        assert policy.promotion_bypassed is False
+        assert policy.paper_automation_enabled is False
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        outcome = next(
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        )
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "strategy_promotion_required"
+        assert outcome["promotion_bypass_reason"] is None
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bypass_executes_unpromoted_recommendation_with_evidence(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """override를 켜면 승격 없는 추천도 실행되고 그 사실이 결과에 남는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
+        await _enable_promotion_bypass(db_session, owner_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        assert await _promotion_bypass_snapshot(db_session, owner_id) is True
+
+        # 실행 직전 게이트도 승격 근거를 요구하지 않는다.
+        gate = RuntimeStateSafetyGate(
+            db_session,
+            automatic=True,
+            recommendation_id=recommendation_id,
+        )
+        policy = await gate.get_policy(owner_user_id=str(owner_id), now=_NOW)
+        assert policy.promotion_bypassed is True
+        assert policy.paper_automation_enabled is True
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        outcome = next(
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        )
+        # 승격 근거가 없는데도 후보로 선정되어 실행 단계까지 갔다.
+        assert outcome["reason"] != "strategy_promotion_required"
+        assert outcome["recommendation_id"] == recommendation_id
+        assert outcome["promotion_bypass_reason"] == PROMOTION_BYPASSED_BY_OWNER
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored in {"CLAIMED", "FAILED", "SUCCEEDED"}
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bypass_never_beats_the_kill_switch(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, kill_switch=True)
+        await _enable_promotion_bypass(db_session, owner_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        assert await _promotion_bypass_snapshot(db_session, owner_id) is False
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        outcome = next(
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        )
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "global_kill_switch_enabled"
+        assert outcome["promotion_bypass_reason"] is None
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bypass_is_ignored_when_trading_mode_is_not_paper(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id)
+        await _enable_promotion_bypass(db_session, owner_id)
+        state = await runtime_state.get(db_session, owner_id, for_update=True)
+        state.trading_mode = "LIVE"
+        await db_session.commit()
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        assert await _promotion_bypass_snapshot(db_session, owner_id) is False
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        outcome = next(
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        )
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "strategy_promotion_required"
+        assert outcome["promotion_bypass_reason"] is None
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bypass_never_reaches_another_owners_recommendation(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_a_id, username_a = await _seed_owner(db_session)
+    owner_b_id, username_b = await _seed_owner(db_session)
+    recommendation_b = _approved_recommendation(owner_b_id)
+    recommendation_b_id = recommendation_b.id
+    try:
+        db_session.add(recommendation_b)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_a_id)
+        await _enable_promotion_bypass(db_session, owner_a_id)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        # override는 소유자 scope를 넓히지 않는다.
+        service = OwnerScopedRecommendationService(
+            db_session,
+            require_promotion=False,
+        )
+        selected = await service.authorize_next_for_auto_execution(
+            str(owner_a_id),
+            _NOW,
+        )
+        assert selected is None
+
+        gate = RuntimeStateSafetyGate(
+            db_session,
+            automatic=True,
+            recommendation_id=recommendation_b_id,
+        )
+        policy = await gate.get_policy(owner_user_id=str(owner_a_id), now=_NOW)
+        assert policy.promotion_bypassed is True
+        assert policy.paper_automation_enabled is False
+
+        assert await service.claim_for_paper_execution(str(owner_a_id), _NOW) is None
+
+        report = await run_paper_automation_once(now=_NOW)
+
+        assert owner_a_id not in {
+            item["owner_user_id"]
+            for item in report["outcomes"]  # type: ignore[union-attr]
+        }
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_b_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username_a)
+        await _cleanup_owner(db_session, username_b)

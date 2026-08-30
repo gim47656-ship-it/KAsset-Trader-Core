@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import math
 from collections.abc import Collection, Mapping
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,15 @@ import yfinance as yf
 
 from app.mcp_server.tooling.market_session import DATA_STATE_MARKET_CLOSED
 from app.monitoring import yfinance_tracing_session
+from app.services.brokers.upbit.client import (
+    fetch_minute_candles as upbit_fetch_minute_candles,
+)
+from app.services.brokers.upbit.client import (
+    fetch_multiple_tickers as upbit_fetch_multiple_tickers,
+)
+from app.services.brokers.upbit.client import (
+    fetch_ohlcv as upbit_fetch_ohlcv,
+)
 from app.services.external.btc_dominance import fetch_btc_dominance
 from app.services.market_events.session_calendar import previous_trading_session
 
@@ -39,6 +49,18 @@ _INDEX_META: dict[str, dict[str, str]] = {
     "WTI": {"name": "WTI 유가", "source": "yfinance", "yf_ticker": "CL=F"},
     "BRENT": {"name": "브렌트유", "source": "yfinance", "yf_ticker": "BZ=F"},
     "GOLD": {"name": "금", "source": "yfinance", "yf_ticker": "GC=F"},
+    # 달러인덱스는 Yahoo가 현물(DX-Y.NYB)을 자주 비우므로 선물(DX=F)을 예비
+    # 티커로 둔다. 후보 순서는 fx_dashboard_service의 YAHOO_GLOBAL_DOLLAR와 같다.
+    "DXY": {
+        "name": "달러인덱스",
+        "source": "yfinance",
+        "yf_ticker": "DX-Y.NYB",
+        "yf_fallback_ticker": "DX=F",
+    },
+    # 암호화폐는 24시간 시장이라 거래소 세션 cutoff가 없다. 현재가는 Upbit 공개
+    # 티커, 이력은 Upbit 캔들을 그대로 쓴다(원화 표기).
+    "BTC": {"name": "비트코인", "source": "upbit", "upbit_market": "KRW-BTC"},
+    "ETH": {"name": "이더리움", "source": "upbit", "upbit_market": "KRW-ETH"},
     "CRYPTO": {
         "name": "암호화폐 총 시가총액",
         "source": "coingecko",
@@ -60,6 +82,16 @@ NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{code}/price"
 
 _KST = ZoneInfo("Asia/Seoul")
 _US_EASTERN = ZoneInfo("America/New_York")
+
+# 지수/지표 상세의 "1일" 차트용 봉 주기. 소비자(market_overview)가 같은 토큰을
+# 쓰도록 여기서 한 번만 정의한다.
+INDEX_INTRADAY_PERIOD = "10m"
+_INTRADAY_YF_INTERVAL = "10m"
+# Yahoo 분봉 요청 창. 주말·공휴일을 건너 최근 거래일 하루를 확보하려면 며칠은
+# 필요하다(10분봉의 Yahoo 보관 한도는 60일이라 7일은 안전 범위다).
+_INTRADAY_LOOKBACK_DAYS = 7
+_UPBIT_INTRADAY_UNIT_MINUTES = 10
+_UPBIT_MAX_CANDLE_COUNT = 200
 
 
 def _parse_naver_num(value: Any) -> float | None:
@@ -750,6 +782,35 @@ async def _fetch_indices_us_current_batch(
                     "regular_market_price_at_completed_session_end"
                 )
 
+    # 주 티커가 값을 못 준 심볼 중 예비 티커를 선언한 것만 한 번 더 시도한다.
+    # 완료 세션 대상은 metadata 복구 규칙이 따로 있으므로 건드리지 않는다.
+    fallback_targets = [
+        (symbol, name, _INDEX_META[symbol]["yf_fallback_ticker"])
+        for symbol, name, _yf_ticker in definitions
+        if selected_by_symbol[symbol][0].empty
+        and "yf_fallback_ticker" in _INDEX_META.get(symbol, {})
+        and not (
+            completed_date is not None
+            and (completed_symbol_set is None or symbol in completed_symbol_set)
+        )
+    ]
+    fallback_rows: dict[str, dict[str, Any]] = {}
+    if fallback_targets:
+        recovered_rows = await asyncio.gather(
+            *(
+                _fetch_index_us_current(fallback_ticker, name, symbol)
+                for symbol, name, fallback_ticker in fallback_targets
+            ),
+            return_exceptions=True,
+        )
+        for (symbol, _name, _ticker), recovered_row in zip(
+            fallback_targets,
+            recovered_rows,
+            strict=True,
+        ):
+            if isinstance(recovered_row, dict) and not recovered_row.get("unavailable"):
+                fallback_rows[symbol] = recovered_row
+
     rows: list[dict[str, Any]] = []
     for symbol, name, _yf_ticker in definitions:
         use_completed_session = completed_date is not None and (
@@ -757,6 +818,10 @@ async def _fetch_indices_us_current_batch(
         )
         valid, selected_as_of = selected_by_symbol[symbol]
         if valid.empty:
+            fallback_row = fallback_rows.get(symbol)
+            if fallback_row is not None:
+                rows.append(fallback_row)
+                continue
             rows.append(
                 {
                     "symbol": symbol,
@@ -824,7 +889,7 @@ async def _fetch_indices_us_current_batch(
     return rows
 
 
-async def _fetch_index_us_history(
+async def _fetch_index_us_daily_history(
     yf_ticker: str,
     count: int,
     period: str,
@@ -935,6 +1000,272 @@ async def _fetch_index_us_history(
     return history
 
 
+def _intraday_timestamp_utc(value: object) -> datetime.datetime | None:
+    """분봉 인덱스를 UTC 절대시각으로 옮긴다. timezone이 없으면 포기한다.
+
+    일봉 인덱스는 거래일 라벨이라 timezone을 버려도 의미가 남지만, 분봉은 시각
+    자체가 데이터다. naive 값을 임의의 timezone으로 가정해 ``Z``를 붙이면 없는
+    근거를 만드는 것이므로 그대로 버린다.
+    """
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp) or timestamp.tzinfo is None:
+        return None
+    return timestamp.tz_convert("UTC").to_pydatetime()
+
+
+def _intraday_history_row(
+    moment: datetime.datetime,
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """분봉 한 개를 지수 이력 행으로 옮긴다.
+
+    ``date``에 날짜가 아니라 UTC timestamp를 싣는다. 소비자가 같은 날 여러 봉을
+    날짜 하나로 덮어쓰지 않게 하려면 시각이 남아 있어야 한다.
+    """
+    return {
+        "date": moment.isoformat().replace("+00:00", "Z"),
+        "close": _batch_float(row.get("close")),
+        "open": _batch_float(row.get("open")),
+        "high": _batch_float(row.get("high")),
+        "low": _batch_float(row.get("low")),
+        "volume": _batch_float(row.get("volume")),
+    }
+
+
+async def _fetch_index_us_intraday_history(
+    yf_ticker: str,
+    count: int,
+) -> list[dict[str, Any]]:
+    """가장 최근 거래일의 10분봉만 반환한다.
+
+    일봉 경로는 ``ignore_tz=True``로 거래일 라벨만 남기지만 분봉은 절대시각이
+    필요하므로 timezone을 유지한 채 받아 UTC로 옮긴다. 주말을 건너 며칠치를
+    받아온 뒤 최근 거래일 하루만 남기며, 서로 다른 날의 봉을 이어 붙이지 않는다.
+    """
+    loop = asyncio.get_running_loop()
+    end = datetime.date.today() + datetime.timedelta(days=1)
+    start = end - datetime.timedelta(days=_INTRADAY_LOOKBACK_DAYS)
+
+    def download() -> pd.DataFrame:
+        raw_df = yf.download(
+            yf_ticker,
+            start=start,
+            end=end,
+            interval=_INTRADAY_YF_INTERVAL,
+            progress=False,
+            auto_adjust=False,
+            ignore_tz=False,
+            session=session,
+        )
+        if raw_df is None or not isinstance(raw_df, pd.DataFrame):
+            return pd.DataFrame()
+        return _normalized_yfinance_history_frame(raw_df)
+
+    with yfinance_tracing_session() as session:
+        df = await loop.run_in_executor(None, download)
+    if df.empty or "close" not in df.columns:
+        return []
+
+    valid = df.loc[df["close"].notna()].sort_index()
+    if valid.empty:
+        return []
+    session_dates = [_batch_session_date(value) for value in valid.index]
+    latest_session = max(
+        (session_date for session_date in session_dates if session_date is not None),
+        default=None,
+    )
+    if latest_session is None:
+        return []
+    latest = valid.iloc[
+        [
+            position
+            for position, session_date in enumerate(session_dates)
+            if session_date == latest_session
+        ]
+    ].tail(count)
+
+    history: list[dict[str, Any]] = []
+    for index_value, row in latest.iterrows():
+        moment = _intraday_timestamp_utc(index_value)
+        if moment is None:
+            continue
+        history.append(_intraday_history_row(moment, row))
+    return history
+
+
+async def _fetch_index_us_history(
+    yf_ticker: str,
+    count: int,
+    period: str,
+    *,
+    completed_as_of: datetime.datetime | None = None,
+    fallback_yf_ticker: str | None = None,
+) -> list[dict[str, Any]]:
+    """지수 이력. ``period``가 분봉 토큰이면 intraday 경로로 갈라진다.
+
+    ``fallback_yf_ticker``는 주 티커가 빈 이력을 줄 때만 한 번 더 시도한다
+    (DXY의 현물/선물처럼 Yahoo가 한쪽을 비우는 심볼용). 값이 나오면 fallback을
+    타지 않으므로 정상 경로에 추가 왕복이 생기지 않는다.
+    """
+    if period == INDEX_INTRADAY_PERIOD:
+        history = await _fetch_index_us_intraday_history(yf_ticker, count)
+        if not history and fallback_yf_ticker:
+            history = await _fetch_index_us_intraday_history(fallback_yf_ticker, count)
+        return history
+
+    history = await _fetch_index_us_daily_history(
+        yf_ticker,
+        count,
+        period,
+        completed_as_of=completed_as_of,
+    )
+    if not history and fallback_yf_ticker:
+        history = await _fetch_index_us_daily_history(
+            fallback_yf_ticker,
+            count,
+            period,
+            completed_as_of=completed_as_of,
+        )
+    return history
+
+
+def _upbit_kst_timestamp_utc(value: object) -> datetime.datetime | None:
+    """Upbit 캔들의 ``candle_date_time_kst``(naive KST)를 UTC로 옮긴다."""
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(_KST)
+    return timestamp.tz_convert("UTC").to_pydatetime()
+
+
+def _upbit_history_rows(frame: object, *, intraday: bool) -> list[dict[str, Any]]:
+    """Upbit 캔들 DataFrame을 지수 이력 행 목록으로 옮긴다.
+
+    분봉은 UTC timestamp를, 일봉은 다른 지수와 같은 거래일 라벨(KST 날짜)을
+    싣는다. 거래량은 코인 수량이라 소수점이 있으므로 정수로 자르지 않는다.
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    key = "datetime" if intraday else "date"
+    if key not in frame.columns:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for _, row in frame.sort_values(key).iterrows():
+        if intraday:
+            moment = _upbit_kst_timestamp_utc(row.get(key))
+            if moment is None:
+                continue
+            rows.append(_intraday_history_row(moment, row))
+            continue
+        session_date = _batch_session_date(row.get(key))
+        if session_date is None:
+            continue
+        rows.append(
+            {
+                "date": session_date.isoformat(),
+                "close": _batch_float(row.get("close")),
+                "open": _batch_float(row.get("open")),
+                "high": _batch_float(row.get("high")),
+                "low": _batch_float(row.get("low")),
+                "volume": _batch_float(row.get("volume")),
+            }
+        )
+    return rows
+
+
+async def _fetch_index_upbit_history(
+    upbit_market: str,
+    count: int,
+    period: str,
+) -> list[dict[str, Any]]:
+    """Upbit 캔들 이력. 기존 client 함수만 쓰고 새 endpoint를 추가하지 않는다."""
+    request_count = min(max(int(count), 1), _UPBIT_MAX_CANDLE_COUNT)
+    if period == INDEX_INTRADAY_PERIOD:
+        frame = await upbit_fetch_minute_candles(
+            upbit_market,
+            unit=_UPBIT_INTRADAY_UNIT_MINUTES,
+            count=request_count,
+        )
+        return _upbit_history_rows(frame, intraday=True)
+    frame = await upbit_fetch_ohlcv(
+        upbit_market,
+        days=request_count,
+        period=period,
+    )
+    return _upbit_history_rows(frame, intraday=False)
+
+
+def _upbit_index_row(ticker: object, symbol: str) -> dict[str, Any] | None:
+    """Upbit 공개 티커를 지수 행과 같은 모양으로 정규화한다.
+
+    ``signed_change_rate``는 비율(0.01 = 1%)이므로 지수 행의 관례(퍼센트포인트)에
+    맞춰 100을 곱한다. 전일종가가 없으면 등락을 계산하지 않고 그대로 비운다.
+    """
+    if not isinstance(ticker, dict):
+        return None
+    trade_price = ticker.get("trade_price")
+    if trade_price is None:
+        return None
+    previous_close = ticker.get("prev_closing_price")
+    change = ticker.get("signed_change_price") if previous_close is not None else None
+    raw_rate = ticker.get("signed_change_rate") if previous_close is not None else None
+    try:
+        change_pct = (
+            Decimal(str(raw_rate)) * 100
+            if raw_rate is not None and not isinstance(raw_rate, bool)
+            else None
+        )
+    except (InvalidOperation, ValueError):
+        change_pct = None
+
+    timestamp = ticker.get("trade_timestamp") or ticker.get("timestamp")
+    quote_asof: str | None = None
+    if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+        quote_asof = datetime.datetime.fromtimestamp(
+            timestamp / 1000,
+            tz=datetime.UTC,
+        ).isoformat()
+
+    return {
+        "symbol": symbol,
+        "current": trade_price,
+        "previous_close": previous_close,
+        "change": change,
+        "change_pct": change_pct,
+        "quote_asof": quote_asof,
+        "source": "upbit",
+    }
+
+
+async def _fetch_index_upbit_current(
+    upbit_market: str,
+    name: str,
+    symbol: str,
+) -> dict[str, Any]:
+    """Upbit 공개 티커 한 건으로 현재가 행을 만든다(인증 불필요)."""
+    rows = await upbit_fetch_multiple_tickers([upbit_market])
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get("market") != upbit_market:
+            continue
+        row = _upbit_index_row(raw, symbol)
+        if row is not None:
+            return {**row, "name": name}
+    return {
+        "symbol": symbol,
+        "name": name,
+        "source": "upbit",
+        "unavailable": True,
+    }
+
+
 async def _fetch_index_crypto_current(
     cg_metric: str, name: str, symbol: str
 ) -> dict[str, Any]:
@@ -972,13 +1303,17 @@ async def _fetch_index_crypto_current(
 
 
 __all__ = [
+    "INDEX_INTRADAY_PERIOD",
     "_DEFAULT_INDICES",
     "_INDEX_META",
     "_fetch_index_kr_completed",
     "_fetch_index_kr_current",
     "_fetch_index_kr_history",
+    "_fetch_index_upbit_current",
+    "_fetch_index_upbit_history",
     "_fetch_index_us_current",
     "_fetch_indices_us_current_batch",
     "_fetch_index_us_history",
     "_fetch_index_crypto_current",
+    "_upbit_index_row",
 ]

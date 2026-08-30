@@ -790,6 +790,22 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(
                 f"{market.market}:point_in_time_unavailable"
             )
+        if market.list_date_covered_symbol_count != market.total_symbol_count:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:list_date_coverage_incomplete"
+            )
+        if market.members_listed_after_cohort_start:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:member_listed_after_cohort_start"
+            )
+        if market.delist_date_covered_inactive_count != market.inactive_symbol_count:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:delist_date_coverage_incomplete"
+            )
+        if not market.includes_delisted:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:delisted_members_absent"
+            )
         if market.benchmark.status != "available":
             raise PromotionEvidenceBuildError(f"{market.market}:benchmark_unavailable")
         if not market.benchmark.sources:
@@ -1033,6 +1049,9 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
             item.corporate_action_covered_symbol_count
         ),
         "adjustmentCoveredSymbolCount": item.adjustment_covered_symbol_count,
+        "listDateCoveredSymbolCount": item.list_date_covered_symbol_count,
+        "membersListedAfterCohortStart": item.members_listed_after_cohort_start,
+        "delistDateCoveredInactiveCount": item.delist_date_covered_inactive_count,
         "pointInTimeAvailable": item.point_in_time_available,
         "includesDelisted": item.includes_delisted,
         "delistedSymbolCount": item.delisted_symbol_count,
@@ -1279,6 +1298,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         "eligibleNonzero": True,
         "fallbackOnly": False,
         "pointInTimeProven": True,
+        "delistedIncluded": True,
         "benchmarkProven": True,
     }
     if any(

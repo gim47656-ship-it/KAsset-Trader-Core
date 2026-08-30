@@ -454,14 +454,21 @@ class PaperOrderFacade:
             else Decimal(order.quantity) - prior_filled
         )
         service = PaperTradingService(db)
+        # `market_price` is the reference price this facade already resolved and
+        # approved (risk assessment + limit crossing). Both order types fill at
+        # it; only the carrying parameter differs, because Core treats `price`
+        # as authoritative for limit orders and would otherwise re-fetch a
+        # market order's price from a different provider.
+        is_limit = order.order_type == "LIMIT"
         try:
             await service.execute_order(
                 account_id=account_id,
                 symbol=order.symbol,
                 side=order.side.lower(),
-                order_type=("market" if order.order_type == "MARKET" else "limit"),
+                order_type=("limit" if is_limit else "market"),
                 quantity=execution_quantity,
-                price=(market_price if order.order_type == "LIMIT" else None),
+                price=(market_price if is_limit else None),
+                resolved_market_price=(None if is_limit else market_price),
                 reason="KAsset Android PAPER",
                 correlation_id=correlation_id,
             )

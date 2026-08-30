@@ -684,6 +684,11 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     "(member_kind = 'active' AND market_cap > 0) OR "
     "(member_kind IN ('forced', 'benchmark') "
     "AND (market_cap IS NULL OR market_cap > 0)))",
+    # 소유자별 "승격 근거 없이 PAPER 자동실행 허용" override. 지속형 테스트 DB에도
+    # 프로덕션 마이그레이션(20260830_kasset_promotion_bypass)과 같은 shape을 준다.
+    "ALTER TABLE public.kasset_android_runtime_state "
+    "ADD COLUMN IF NOT EXISTS promotion_bypass_enabled "
+    "BOOLEAN NOT NULL DEFAULT false",
     # ---- raw-SQL daily candle tables (logical schema only) ----
     # Production Alembic migrations turn these into Timescale hypertables.
     # Pytest runs on plain PostgreSQL, so mirror the table contract without

@@ -113,7 +113,7 @@ class AndroidRuntimeStateService:
             raise MobileApiError(
                 409,
                 "LIVE_TRADING_DISABLED",
-                "이번 단계에서는 PAPER 거래 모드만 사용할 수 있습니다.",
+                "실거래는 아직 사용할 수 없습니다. 모의투자만 주문할 수 있습니다.",
             )
         state = await self.get(db, owner_user_id, for_update=True)
         state.trading_mode = "PAPER"

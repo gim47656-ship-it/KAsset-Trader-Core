@@ -409,8 +409,8 @@ def _ready_market(market: str) -> MarketReadiness:
         cohort_active_member_count=10,
         forced_member_count=0,
         benchmark_member_count=1,
-        active_symbol_count=10,
-        inactive_symbol_count=0,
+        active_symbol_count=9,
+        inactive_symbol_count=1,
         symbols_with_exactly_251_bars=0,
         symbols_with_at_least_252_bars=10,
         eligible_symbol_count=10,
@@ -424,12 +424,13 @@ def _ready_market(market: str) -> MarketReadiness:
         corporate_action_covered_symbol_count=10,
         adjustment_covered_symbol_count=10,
         list_date_covered_symbol_count=10,
-        delist_date_covered_inactive_count=0,
+        members_listed_after_cohort_start=0,
+        delist_date_covered_inactive_count=1,
         point_in_time_available=True,
-        inactive_with_candles_count=0,
-        delisted_symbol_count=0,
-        delisted_with_candles_count=0,
-        includes_delisted=False,
+        inactive_with_candles_count=1,
+        delisted_symbol_count=1,
+        delisted_with_candles_count=1,
+        includes_delisted=True,
         fallback_only=False,
         benchmark=benchmark,
         daily_history_ready=True,
@@ -619,6 +620,7 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
         (("data", "eligible252Counts", "kr"), 0),
         (("validation", "fallbackOnly"), True),
         (("validation", "pointInTimeProven"), False),
+        (("validation", "delistedIncluded"), False),
         (("validation", "benchmarkProven"), False),
         (("data", "cohorts", "us", "evidenceScope"), "forward_paper"),
         (("benchmarks", "us", "status"), "unavailable"),
@@ -819,4 +821,40 @@ def test_require_readiness_rejects_current_forward_historical_use() -> None:
         PromotionEvidenceBuildError,
         match="us:cohort_not_historical_pit",
     ):
+        _require_readiness(tampered)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (
+            {"list_date_covered_symbol_count": 9},
+            "us:list_date_coverage_incomplete",
+        ),
+        (
+            {"members_listed_after_cohort_start": 1},
+            "us:member_listed_after_cohort_start",
+        ),
+        (
+            {"delist_date_covered_inactive_count": 0},
+            "us:delist_date_coverage_incomplete",
+        ),
+        (
+            {"includes_delisted": False},
+            "us:delisted_members_absent",
+        ),
+    ],
+)
+def test_require_readiness_rejects_missing_constituent_lifecycle_evidence(
+    overrides: dict[str, object],
+    expected: str,
+) -> None:
+    readiness = _readiness()
+    tampered_market = replace(readiness.for_market("us"), **overrides)
+    tampered = replace(
+        readiness,
+        markets=(readiness.for_market("kr"), tampered_market),
+    )
+
+    with pytest.raises(PromotionEvidenceBuildError, match=expected):
         _require_readiness(tampered)

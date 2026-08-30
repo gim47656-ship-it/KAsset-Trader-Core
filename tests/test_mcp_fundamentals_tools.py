@@ -5227,6 +5227,24 @@ class TestIndexMeta:
             assert meta["source"] == "yfinance"
             assert meta["yf_ticker"] == ticker
 
+    def test_dollar_index_declares_a_futures_fallback_ticker(self):
+        # Yahoo가 현물(DX-Y.NYB)을 자주 비우므로 선물(DX=F)을 예비 티커로 둔다.
+        meta = fundamentals_sources_indices._INDEX_META["DXY"]
+        assert meta["source"] == "yfinance"
+        assert meta["yf_ticker"] == "DX-Y.NYB"
+        assert meta["yf_fallback_ticker"] == "DX=F"
+
+    def test_won_priced_crypto_uses_the_upbit_source(self):
+        # BTC/ETH는 원화 시장이라 CoinGecko(USD 총계)가 아니라 Upbit에서 온다.
+        for sym, market in (("BTC", "KRW-BTC"), ("ETH", "KRW-ETH")):
+            meta = fundamentals_sources_indices._INDEX_META[sym]
+            assert meta["source"] == "upbit"
+            assert meta["upbit_market"] == market
+
+    def test_upbit_symbols_not_in_default_indices(self):
+        for sym in ("BTC", "ETH"):
+            assert sym not in fundamentals_sources_indices._DEFAULT_INDICES
+
     def test_aliases(self):
         assert (
             fundamentals_sources_indices._INDEX_META["SPX"]["yf_ticker"]

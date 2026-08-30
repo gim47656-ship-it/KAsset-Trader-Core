@@ -424,12 +424,22 @@ class AITradingStateResponse(BaseModel):
     kill_switch: bool = Field(alias="killSwitch")
     updated_at: datetime = Field(alias="updatedAt")
     executions: list[PaperOrderResult] = Field(default_factory=list)
+    promotion_bypass: bool = Field(default=False, alias="promotionBypass")
 
     _updated_at_timezone = field_validator("updated_at")(_validate_aware_timestamp)
 
     @field_serializer("updated_at", when_used="json")
     def serialize_updated_at(self, value: datetime) -> str:
         return _serialize_timestamp(value) or ""
+
+
+class PromotionBypassRequest(BaseModel):
+    """승격 근거 없는 PAPER 자동실행 허용을 소유자가 직접 켜고 끈다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class RecommendationError(BaseModel):
@@ -558,6 +568,7 @@ __all__ = [
     "AITradingStateUpdate",
     "AITradingUsageResponse",
     "PaperOrderResult",
+    "PromotionBypassRequest",
     "RecommendationDecisionRequest",
     "RecommendationErrorEnvelope",
     "RecommendationEvidence",

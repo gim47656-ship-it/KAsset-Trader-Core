@@ -69,6 +69,9 @@ def test_open_er_api_snapshot_validates_cross_rates_and_source_time() -> None:
     assert snapshot.jpy_krw == Decimal("10.00")
     assert snapshot.eur_krw == Decimal("2000")
     assert snapshot.as_of == as_of
+    # CNY가 빠진 응답은 기존 통화 경로를 그대로 유지하고 CNY만 비운다.
+    assert snapshot.cny_per_usd is None
+    assert snapshot.cny_krw is None
 
 
 def test_parse_open_er_api_usd_snapshot_keeps_missing_source_time_null() -> None:
@@ -85,6 +88,44 @@ def test_parse_open_er_api_usd_snapshot_keeps_missing_source_time_null() -> None
     )
 
     assert snapshot.as_of is None
+
+
+def test_open_er_api_snapshot_exposes_cny_cross_rate_when_present() -> None:
+    snapshot = mod._parse_open_er_api_usd_snapshot(
+        {
+            "result": "success",
+            "base_code": "USD",
+            "rates": {
+                "KRW": "1500",
+                "JPY": "150",
+                "EUR": "0.75",
+                "CNY": "7.5",
+            },
+        }
+    )
+
+    assert snapshot.cny_per_usd == Decimal("7.5")
+    assert snapshot.cny_krw == Decimal("200")
+
+
+@pytest.mark.parametrize("raw_cny", ["0", "-1", "abc", True, None])
+def test_open_er_api_snapshot_drops_only_cny_when_it_is_unusable(
+    raw_cny: object,
+) -> None:
+    """CNY 하나 때문에 USD/JPY/EUR 스냅샷 전체를 버리지 않는다(fail-closed 금지)."""
+    rates: dict[str, object] = {"KRW": "1500", "JPY": "150", "EUR": "0.75"}
+    if raw_cny is not None:
+        rates["CNY"] = raw_cny
+
+    snapshot = mod._parse_open_er_api_usd_snapshot(
+        {"result": "success", "base_code": "USD", "rates": rates}
+    )
+
+    assert snapshot.usd_krw == Decimal("1500")
+    assert snapshot.jpy_krw == Decimal("10")
+    assert snapshot.eur_krw == Decimal("2000")
+    assert snapshot.cny_per_usd is None
+    assert snapshot.cny_krw is None
 
 
 @pytest.mark.parametrize(

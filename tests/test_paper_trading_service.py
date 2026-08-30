@@ -1274,3 +1274,151 @@ class TestListAccountsStrategyFilter:
 
         accounts = await service.list_accounts(is_active=True)
         assert len(accounts) == 2
+
+
+class TestResolvedMarketPrice:
+    """`resolved_market_price`: 호출자가 이미 승인한 기준가로 체결한다.
+
+    KAsset PAPER 자동매매는 제출 시점에 토스 실시간 시세로 리스크·교차 판정을
+    끝낸다. 체결 단계가 가격을 다시 만들면 (a) 재조회 공급자(KRX는 KIS 전용)가
+    죽어 있으면 체결이 실패하고 (b) 살아 있어도 승인한 가격과 다른 가격으로
+    체결된다.
+    """
+
+    @pytest.fixture
+    def account(self):
+        return PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("10000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+
+    @pytest.fixture
+    def refetch(self):
+        return AsyncMock(return_value=Decimal("70000"))
+
+    @pytest.fixture
+    def service(self, mock_db, account, refetch, monkeypatch):
+        svc = PaperTradingService(mock_db)
+        monkeypatch.setattr(svc, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(svc, "_fetch_current_price", refetch)
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_market_preview_uses_resolved_price_without_refetch(
+        self, service, refetch
+    ):
+        preview = await service.preview_order(
+            account_id=1,
+            symbol="005930",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("2"),
+            resolved_market_price=Decimal("71234"),
+        )
+
+        assert preview["preview"]["price"] == Decimal("71234")
+        assert preview["preview"]["gross"] == pytest.approx(Decimal("142468"))
+        refetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_market_preview_without_resolved_price_still_refetches(
+        self, service, refetch
+    ):
+        preview = await service.preview_order(
+            account_id=1,
+            symbol="005930",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("2"),
+        )
+
+        assert preview["preview"]["price"] == Decimal("70000")
+        refetch.assert_awaited_once_with("005930", "equity_kr")
+
+    @pytest.mark.asyncio
+    async def test_market_execute_fills_and_records_resolved_price(
+        self, service, refetch, mock_db, monkeypatch
+    ):
+        monkeypatch.setattr(service, "_get_position", AsyncMock(return_value=None))
+
+        result = await service.execute_order(
+            account_id=1,
+            symbol="005930",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("2"),
+            resolved_market_price=Decimal("71234"),
+        )
+
+        assert result["execution"]["price"] == Decimal("71234")
+        added = [c.args[0] for c in mock_db.add.call_args_list]
+        trade = next(x for x in added if isinstance(x, PaperTrade))
+        assert trade.price == Decimal("71234")
+        assert trade.total_amount == pytest.approx(Decimal("142468.0000"))
+        refetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_limit_order_rejects_resolved_price(self, service, refetch):
+        with pytest.raises(
+            ValueError, match="resolved_market_price is only valid for market orders"
+        ):
+            await service.preview_order(
+                account_id=1,
+                symbol="005930",
+                side="buy",
+                order_type="limit",
+                quantity=Decimal("2"),
+                price=Decimal("60000"),
+                resolved_market_price=Decimal("71234"),
+            )
+        refetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_limit_order_rejects_resolved_price_via_execute_order(
+        self, service, mock_db
+    ):
+        with pytest.raises(
+            ValueError, match="resolved_market_price is only valid for market orders"
+        ):
+            await service.execute_order(
+                account_id=1,
+                symbol="005930",
+                side="buy",
+                order_type="limit",
+                quantity=Decimal("2"),
+                price=Decimal("60000"),
+                resolved_market_price=Decimal("71234"),
+            )
+        mock_db.commit.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("bad_price", "message"),
+        [
+            (Decimal("0"), "must be positive"),
+            (Decimal("-1"), "must be positive"),
+            (0.0, "must be positive"),
+            (float("nan"), "must be finite"),
+            (float("inf"), "must be finite"),
+            (Decimal("-Infinity"), "must be finite"),
+            ("not-a-price", "not a valid decimal"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_resolved_price_fails_closed(
+        self, service, refetch, bad_price, message
+    ):
+        with pytest.raises(ValueError, match=message):
+            await service.preview_order(
+                account_id=1,
+                symbol="005930",
+                side="buy",
+                order_type="market",
+                quantity=Decimal("2"),
+                resolved_market_price=bad_price,
+            )
+        # 나쁜 기준가는 조용히 재조회로 메워지지 않는다.
+        refetch.assert_not_awaited()

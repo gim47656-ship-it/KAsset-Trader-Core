@@ -162,12 +162,233 @@ async def test_new_us_indices_are_whitelisted_for_every_public_range(
 
 
 @pytest.mark.asyncio
-async def test_indicator_keys_are_not_reachable_as_index_details() -> None:
-    """지표 심볼(_INDEX_META에 있어도)은 지수 상세 화이트리스트가 아니다."""
-    for key in ("VIX", "US10Y", "WTI", "GOLD", "KR_BOND_10Y", "BTC"):
+async def test_kr_bond_keys_are_not_reachable_as_index_details() -> None:
+    """토스 국채 지표는 차트 소스가 없으므로 상세 화이트리스트에 없다."""
+    for key in (
+        "KR_BOND_2Y",
+        "KR_BOND_3Y",
+        "KR_BOND_5Y",
+        "KR_BOND_10Y",
+        "KR_BOND_20Y",
+        "KR_BOND_30Y",
+    ):
         with pytest.raises(mod.MobileApiError) as excinfo:
             await mod.get_market_index_detail(key, "1W")
+        assert excinfo.value.status_code == 404
         assert excinfo.value.code == "UNKNOWN_INDEX"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("symbol", "kind", "unit", "group"),
+    [
+        ("VIX", "INDICATOR", "POINT", "VOLATILITY"),
+        ("US10Y", "INDICATOR", "PERCENT", "RATE"),
+        ("WTI", "INDICATOR", "USD", "COMMODITY"),
+        ("BRENT", "INDICATOR", "USD", "COMMODITY"),
+        ("GOLD", "INDICATOR", "USD", "COMMODITY"),
+        ("DXY", "INDICATOR", "POINT", "FX"),
+        ("BTC", "INDICATOR", "KRW", "CRYPTO"),
+        ("ETH", "INDICATOR", "KRW", "CRYPTO"),
+    ],
+)
+async def test_indicator_detail_carries_kind_unit_group_and_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+    kind: str,
+    unit: str,
+    group: str,
+) -> None:
+    """지표 상세는 통화 대신 unit/group으로 값의 의미를 전달한다."""
+    source = AsyncMock(return_value=_index_result(symbol))
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
+
+    response = await mod.get_market_index_detail(symbol.lower(), "1M")
+
+    assert response.summary.symbol == symbol
+    assert response.summary.kind == kind
+    assert response.summary.unit == unit
+    assert response.summary.group == group
+    # 지표는 한 거래소 세션에 속하지 않는다: market="GLOBAL", currency/session 없음.
+    assert response.summary.market == "GLOBAL"
+    assert response.summary.currency is None
+    assert response.summary.session_state is None
+    assert response.summary.supported_ranges == ["1D", "1W", "1M", "3M", "6M"]
+    # 지표는 KRX/US 완료 정규장 cutoff를 강제하지 않는다(정규장 밖에도 거래된다).
+    source.assert_awaited_once_with(
+        symbol=symbol,
+        period="day",
+        count=20,
+        completed_as_of_by_market=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["KOSPI", "KOSDAQ"])
+async def test_kr_indices_reject_intraday_and_omit_it_from_supported_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+) -> None:
+    """네이버 지수 API에는 분봉이 없으므로 1D를 노출하지도, 대체하지도 않는다."""
+    source = AsyncMock(return_value=_index_result(symbol))
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
+
+    with pytest.raises(mod.MobileApiError) as excinfo:
+        await mod.get_market_index_detail(symbol, "1D")
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "UNSUPPORTED_RANGE"
+    source.assert_not_awaited()
+
+    monthly = await mod.get_market_index_detail(symbol, "1M")
+    assert monthly.summary.supported_ranges == ["1W", "1M", "3M", "6M"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["SPX", "WTI", "BTC"])
+async def test_intraday_detail_keeps_every_bar_of_the_same_day(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+) -> None:
+    """분봉은 날짜로 뭉개지 않는다. 같은 날 여러 봉이 시각별로 남아야 한다."""
+    result = {
+        "indices": [
+            {
+                "symbol": symbol,
+                "current": 6500.5,
+                "change": 20.15,
+                "change_pct": 0.31,
+            }
+        ],
+        "history": [
+            {
+                "date": "2026-08-28T13:40:00Z",
+                "open": 6490.0,
+                "high": 6495.0,
+                "low": 6488.0,
+                "close": 6494.0,
+                "volume": 120,
+            },
+            {
+                "date": "2026-08-28T13:30:00+00:00",
+                "open": 6480.0,
+                "high": 6492.0,
+                "low": 6478.0,
+                "close": 6490.0,
+                "volume": 100,
+            },
+            # timezone을 증명할 수 없는 행은 자정으로 뭉개지 않고 버린다.
+            {
+                "date": "2026-08-28T13:50:00",
+                "open": 6494.0,
+                "high": 6499.0,
+                "low": 6493.0,
+                "close": 6498.0,
+                "volume": 130,
+            },
+        ],
+    }
+    source = AsyncMock(return_value=result)
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
+
+    response = await mod.get_market_index_detail(symbol, "1D")
+
+    assert response.summary.range == "1D"
+    assert "1D" in response.summary.supported_ranges
+    assert [candle.time for candle in response.candles] == [
+        "2026-08-28T13:30:00Z",
+        "2026-08-28T13:40:00Z",
+    ]
+    # 캔들 값은 공급자가 준 정밀도를 그대로 보존한다(반올림·자릿수 축소 없음).
+    assert [candle.close for candle in response.candles] == ["6490.0", "6494.0"]
+    # 분봉은 완료 정규장 cutoff와 결합하지 않는다(진행 중 세션을 본다).
+    source.assert_awaited_once_with(
+        symbol=symbol,
+        period="10m",
+        count=144,
+        completed_as_of_by_market=None,
+    )
+
+
+def test_indicator_detail_http_contract_carries_unit_group_and_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "indices": [
+            {
+                "symbol": "WTI",
+                "current": 82.6900024,
+                "previous_close": 81.9,
+                "change": 0.79,
+                "change_pct": 0.96,
+                "quote_asof": "2026-08-28T17:40:00+00:00",
+                "source": "provider-must-not-leak",
+            }
+        ],
+        "history": [
+            {
+                "date": "2026-08-28T17:30:00Z",
+                "open": 82.5,
+                "high": 82.72,
+                "low": 82.48,
+                "close": 82.6,
+                "volume": 1200,
+            },
+            {
+                "date": "2026-08-28T17:40:00Z",
+                "open": 82.6,
+                "high": 82.75,
+                "low": 82.55,
+                "close": 82.69,
+                "volume": 900,
+            },
+        ],
+    }
+    monkeypatch.setattr(mod, "handle_get_market_index", AsyncMock(return_value=result))
+
+    with _client() as client:
+        response = client.get("/api/v1/market/indices/WTI?range=1D")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "summary": {
+            "symbol": "WTI",
+            "name": "WTI",
+            "market": "GLOBAL",
+            "currency": None,
+            "price": "82.69",
+            "changeAmount": "0.79",
+            "changeRate": "0.96",
+            "asOf": "2026-08-28T17:40:00Z",
+            "status": "available",
+            "sessionState": None,
+            "range": "1D",
+            "kind": "INDICATOR",
+            "unit": "USD",
+            "group": "COMMODITY",
+            "supportedRanges": ["1D", "1W", "1M", "3M", "6M"],
+        },
+        "candles": [
+            {
+                "time": "2026-08-28T17:30:00Z",
+                "open": "82.5",
+                "high": "82.72",
+                "low": "82.48",
+                "close": "82.6",
+                "volume": "1200",
+            },
+            {
+                "time": "2026-08-28T17:40:00Z",
+                "open": "82.6",
+                "high": "82.75",
+                "low": "82.55",
+                "close": "82.69",
+                "volume": "900",
+            },
+        ],
+    }
+    assert "provider-must-not-leak" not in response.text
+    assert "supported_ranges" not in response.text
 
 
 def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
@@ -238,6 +459,10 @@ def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
         "status": "available",
         "sessionState": "REGULAR",
         "range": "1M",
+        "kind": "INDEX",
+        "unit": "POINT",
+        "group": None,
+        "supportedRanges": ["1D", "1W", "1M", "3M", "6M"],
     }
     assert body["candles"] == [
         {
@@ -362,6 +587,10 @@ async def test_index_detail_returns_sanitized_unavailable_contract(
         "status": "unavailable",
         "sessionState": "REGULAR",
         "range": "1W",
+        "kind": "INDEX",
+        "unit": "POINT",
+        "group": None,
+        "supportedRanges": ["1D", "1W", "1M", "3M", "6M"],
     }
     assert payload["candles"] == []
     assert "sensitive provider exception" not in str(payload)
@@ -432,6 +661,7 @@ def test_index_detail_requires_mobile_auth_and_rejects_invalid_range(
                     status="unavailable",
                     session_state="CLOSED",
                     range="1W",
+                    supported_ranges=["1D", "1W", "1M", "3M", "6M"],
                 ),
                 candles=[],
             )

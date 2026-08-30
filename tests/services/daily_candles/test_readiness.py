@@ -157,6 +157,24 @@ def _member(
     }
 
 
+def _delisted_member(
+    symbol: str,
+    *,
+    sessions: tuple[date, ...],
+    rank: int = 2,
+    delist_date: date | None = None,
+) -> dict[str, object]:
+    """Cohort member kept after delisting, proving membership is not survivor-only."""
+    return _member(
+        symbol,
+        sessions=sessions,
+        rank=rank,
+        active=False,
+        listing_status="delisted",
+        delist_date=delist_date or (sessions[-1] + timedelta(days=1)),
+    )
+
+
 def _benchmark(
     symbol: str,
     *,
@@ -301,12 +319,14 @@ async def test_forced_missing_history_does_not_block_core_readiness_or_promotion
     result, _ = await _measure(
         monkeypatch,
         market="us",
+        cohort=_cohort("us", requested_size=2),
         members=[
             _member("AAPL", sessions=sessions),
+            _delisted_member("OLDCO", sessions=sessions, rank=2),
             _member(
                 "SOXL",
                 sessions=sessions,
-                rank=2,
+                rank=3,
                 member_kind="forced",
                 bar_count=0,
                 observed_expected=0,
@@ -317,14 +337,14 @@ async def test_forced_missing_history_does_not_block_core_readiness_or_promotion
     )
 
     market = result.for_market("us")
-    assert market.total_symbol_count == 1
-    assert market.cohort_active_member_count == 1
+    assert market.total_symbol_count == 2
+    assert market.cohort_active_member_count == 2
     assert market.forced_member_count == 1
-    assert market.symbols_with_at_least_252_bars == 1
-    assert market.eligible_symbol_count == 1
+    assert market.symbols_with_at_least_252_bars == 2
+    assert market.eligible_symbol_count == 2
     assert market.stale_bar_count == 0
     assert market.missing_expected_trading_day_count == 0
-    assert market.adjustment_covered_symbol_count == 1
+    assert market.adjustment_covered_symbol_count == 2
     assert market.corporate_action_status == "clear"
     assert market.daily_history_ready is True
     assert market.promotion_ready is True
@@ -339,26 +359,28 @@ async def test_forced_missing_kr_action_coverage_does_not_block_core(
     result, _ = await _measure(
         monkeypatch,
         market="kr",
+        cohort=_cohort("kr", requested_size=2),
         members=[
             _member("005930", sessions=sessions),
+            _delisted_member("000660", sessions=sessions, rank=2),
             _member(
                 "069500",
                 sessions=sessions,
-                rank=2,
+                rank=3,
                 member_kind="forced",
                 bar_count=0,
                 observed_expected=0,
                 invalid_adjustment=1,
             ),
         ],
-        coverage=_coverage_rows(["005930"], sessions),
+        coverage=_coverage_rows(["005930", "000660"], sessions),
         sessions=sessions,
     )
 
     market = result.for_market("kr")
-    assert market.total_symbol_count == 1
+    assert market.total_symbol_count == 2
     assert market.forced_member_count == 1
-    assert market.corporate_action_covered_symbol_count == 1
+    assert market.corporate_action_covered_symbol_count == 2
     assert market.corporate_action_status == "clear"
     assert market.daily_history_ready is True
     assert market.promotion_ready is True
@@ -451,7 +473,7 @@ async def test_current_forward_history_can_be_ready_while_promotion_is_blocked(
 
 
 @pytest.mark.asyncio
-async def test_historical_pit_cohort_is_promotion_ready_without_delisted_injection(
+async def test_historical_pit_label_without_delisted_evidence_is_not_promotion_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -463,11 +485,11 @@ async def test_historical_pit_cohort_is_promotion_ready_without_delisted_injecti
     )
 
     market = result.for_market("us")
-    assert market.point_in_time_available is True
     assert market.includes_delisted is False
     assert market.daily_history_ready is True
-    assert market.promotion_ready is True
-    assert result.promotion_ready is True
+    assert market.promotion_ready is False
+    assert result.promotion_ready is False
+    assert "us:delisted_members_absent" in market.blockers
     cohort_sql = next(
         sql for sql in db.statements if "daily_candles_readiness:cohort:us" in sql
     )
@@ -475,6 +497,114 @@ async def test_historical_pit_cohort_is_promotion_ready_without_delisted_injecti
     assert "created_at <= :as_of" in cohort_sql
     assert "selection_as_of <= :as_of" in cohort_sql
     assert "ORDER BY selection_as_of DESC" in cohort_sql
+
+
+@pytest.mark.asyncio
+async def test_historical_pit_cohort_with_delisted_survivor_is_promotion_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", requested_size=2),
+        members=[
+            _member("AAPL", sessions=sessions),
+            _delisted_member("OLDCO", sessions=sessions, rank=2),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.point_in_time_available is True
+    assert market.includes_delisted is True
+    assert market.list_date_covered_symbol_count == 2
+    assert market.members_listed_after_cohort_start == 0
+    assert market.delist_date_covered_inactive_count == 1
+    assert market.blockers == ()
+    assert market.promotion_ready is True
+
+
+@pytest.mark.asyncio
+async def test_missing_list_date_blocks_promotion_without_blocking_daily_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", requested_size=2),
+        members=[
+            _member("AAPL", sessions=sessions, list_date=None),
+            _delisted_member("OLDCO", sessions=sessions, rank=2),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.list_date_covered_symbol_count == 1
+    assert market.point_in_time_available is False
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is False
+    assert "us:list_date_coverage_incomplete" in market.blockers
+    assert "us:point_in_time_unavailable" in market.blockers
+
+
+@pytest.mark.asyncio
+async def test_member_listed_after_cohort_start_blocks_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", requested_size=3),
+        members=[
+            _member("AAPL", sessions=sessions),
+            _delisted_member("OLDCO", sessions=sessions, rank=2),
+            _member("NEWCO", sessions=sessions, rank=3, list_date=sessions[10]),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.members_listed_after_cohort_start == 1
+    assert market.point_in_time_available is False
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is False
+    assert "us:member_listed_after_cohort_start" in market.blockers
+
+
+@pytest.mark.asyncio
+async def test_inactive_member_without_delist_date_blocks_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", requested_size=2),
+        members=[
+            _member("AAPL", sessions=sessions),
+            _member(
+                "OLDCO",
+                sessions=sessions,
+                rank=2,
+                active=False,
+                listing_status="delisted",
+                delist_date=None,
+            ),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.delist_date_covered_inactive_count == 0
+    assert market.inactive_symbol_count == 1
+    assert market.point_in_time_available is False
+    assert market.promotion_ready is False
+    assert "us:delist_date_coverage_incomplete" in market.blockers
+    assert "us:delisted_members_absent" in market.blockers
 
 
 @pytest.mark.asyncio

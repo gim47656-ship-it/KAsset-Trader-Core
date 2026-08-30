@@ -1,6 +1,7 @@
 """Android TraderApi-compatible routes."""
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
@@ -8,6 +9,7 @@ from math import ceil
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.web_router import limiter
@@ -118,6 +120,7 @@ from app.schemas.ai_recommendations import (
     AITradingStateUpdate,
     AITradingUsageResponse,
     PaperOrderResult,
+    PromotionBypassRequest,
 )
 from app.services.brokers.toss.market_calendar import (
     TossKrMarketDay,
@@ -410,10 +413,53 @@ async def system_status(
     return await _build_system_status(db, session.user.id)
 
 
+# 리비전은 배포 중에만 바뀌므로 성공값은 길게 캐시한다. 실패는 일시적 DB 장애일
+# 수 있으므로 짧게만 캐시해 회복을 막지 않는다.
+_MIGRATION_REVISION_TTL_SECONDS = 300.0
+_MIGRATION_REVISION_MISS_TTL_SECONDS = 30.0
+_migration_revision_cache: tuple[float, str | None] | None = None
+
+
+async def _applied_migration_revision(db: AsyncSession) -> str | None:
+    """적용된 Alembic 리비전을 읽는다. 읽기 전용이며 실패하면 None이다.
+
+    이 값이 없어도 ``/system/status``의 나머지 필드는 정상이어야 하므로 조회
+    실패를 삼킨다. 실패한 조회는 세션 트랜잭션을 오염시키므로 곧바로 되돌려
+    같은 요청의 뒤따르는 조회가 함께 죽지 않게 한다(쓰기는 하지 않는다).
+    """
+
+    global _migration_revision_cache
+    now = time.monotonic()
+    cached = _migration_revision_cache
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    revision: str | None = None
+    try:
+        result = await db.execute(text("SELECT version_num FROM alembic_version"))
+        raw = result.scalar_one_or_none()
+    except Exception:
+        with suppress(Exception):
+            await db.rollback()
+    else:
+        if isinstance(raw, str) and raw.strip():
+            revision = raw.strip()
+    ttl = (
+        _MIGRATION_REVISION_TTL_SECONDS
+        if revision is not None
+        else _MIGRATION_REVISION_MISS_TTL_SECONDS
+    )
+    _migration_revision_cache = (now + ttl, revision)
+    return revision
+
+
 async def _build_system_status(
     db: AsyncSession,
     owner_user_id: int,
 ) -> SystemStatus:
+    # 리비전 조회를 먼저 끝낸다. 실패 시 rollback으로 트랜잭션을 정리한 뒤
+    # 나머지 조회가 깨끗한 상태에서 돌게 하려는 순서다.
+    migration_revision = await _applied_migration_revision(db)
     registered = await broker_registry.list_brokers(db, owner_user_id)
     state = await runtime_state.get(db, owner_user_id)
     global_state = await runtime_state.get_global(db)
@@ -422,7 +468,7 @@ async def _build_system_status(
         server_time=(
             datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         ),
-        database=DatabaseStatus(status="ok"),
+        database=DatabaseStatus(status="ok", migration_revision=migration_revision),
         trading_mode=state.trading_mode,
         trading_enabled=settings.TRADING_ENABLED,
         live_trading_enabled=settings.LIVE_TRADING_ENABLED,
@@ -440,7 +486,7 @@ async def _build_system_status(
         ai_relay=AiRelayStatus(
             configured=False,
             reachable=False,
-            message="AI Relay는 이번 통합 단계에서 확장하지 않습니다.",
+            message="AI Relay가 연결되지 않았습니다.",
         ),
     )
 
@@ -967,6 +1013,7 @@ def _ai_trading_state_response(
             )
             for item in snapshot.executions
         ],
+        promotionBypass=snapshot.promotion_bypass,
     )
 
 
@@ -1019,6 +1066,24 @@ async def update_ai_trading_state(
     return _ai_trading_state_response(snapshot)
 
 
+@router.post("/ai/trading/promotion-bypass", response_model=AITradingStateResponse)
+async def set_ai_trading_promotion_bypass(
+    request: PromotionBypassRequest,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AITradingStateResponse:
+    """승격 근거 없는 PAPER 자동실행 허용을 소유자 본인이 켜고 끈다."""
+    _require_trader(session)
+    snapshot = await AITradingPolicyService().set_promotion_bypass(
+        db,
+        session.user.id,
+        enabled=request.enabled,
+        reason=request.reason,
+        now=datetime.now(UTC),
+    )
+    return _ai_trading_state_response(snapshot)
+
+
 @router.get("/ai/daily-routine", response_model=DailyRoutineResponse)
 async def ai_daily_routine(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
@@ -1048,7 +1113,7 @@ async def ai_status(
     return AiStatus(
         relay_configured=False,
         reachable=False,
-        message="AI 기능은 이번 통합 단계에서 확장하지 않습니다.",
+        message="AI 릴레이가 연결되지 않았습니다.",
     )
 
 

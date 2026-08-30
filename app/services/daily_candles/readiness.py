@@ -112,6 +112,7 @@ class MarketReadiness:
     corporate_action_covered_symbol_count: int
     adjustment_covered_symbol_count: int
     list_date_covered_symbol_count: int
+    members_listed_after_cohort_start: int
     delist_date_covered_inactive_count: int
     point_in_time_available: bool
     inactive_with_candles_count: int
@@ -610,15 +611,37 @@ def _evaluate_market(
     delist_date_covered_inactive = sum(
         1 for row in inactive_rows if row.get("delist_date") is not None
     )
+    # The cohort claims membership as of its effective date, and the backtest window
+    # may start earlier than the evaluated readiness window. Anchoring on the cohort
+    # effective date is therefore the strictest available reference: a member listed
+    # after it did not exist when the cohort claims it was selected.
+    listed_after_cohort_start = sum(
+        1
+        for row in core_rows
+        if cohort is not None
+        and isinstance(row.get("list_date"), date)
+        and cast(date, row["list_date"]) > cohort.effective_date
+    )
     membership_period_usable = bool(
         cohort is not None
         and window_start is not None
         and window_start >= cohort.effective_date
     )
+    # Point-in-time membership is proven by persisted member lifecycle rows that
+    # cover the whole evaluated window, never by the declared evidence scope alone.
+    # A cohort assembled from the present-day universe cannot satisfy this.
+    constituent_history_proven = bool(
+        membership_period_usable
+        and total > 0
+        and list_date_covered == total
+        and listed_after_cohort_start == 0
+        and delist_date_covered_inactive == inactive
+    )
     point_in_time = bool(
         membership_period_usable
         and cohort is not None
         and cohort.evidence_scope == "historical_pit"
+        and constituent_history_proven
     )
 
     inactive_with_candles = sum(
@@ -719,6 +742,18 @@ def _evaluate_market(
             promotion_blockers.append(
                 _issue(market, "cohort_window_predates_effective_date")
             )
+        if list_date_covered < total:
+            promotion_blockers.append(_issue(market, "list_date_coverage_incomplete"))
+        if listed_after_cohort_start:
+            promotion_blockers.append(
+                _issue(market, "member_listed_after_cohort_start")
+            )
+        if delist_date_covered_inactive < inactive:
+            promotion_blockers.append(_issue(market, "delist_date_coverage_incomplete"))
+        if not point_in_time:
+            promotion_blockers.append(_issue(market, "point_in_time_unavailable"))
+        if not includes_delisted:
+            promotion_blockers.append(_issue(market, "delisted_members_absent"))
         if fallback_only:
             promotion_blockers.append(_issue(market, "fallback_only"))
         if not benchmark.sources:
@@ -750,6 +785,7 @@ def _evaluate_market(
         corporate_action_covered_symbol_count=corporate_action_covered,
         adjustment_covered_symbol_count=adjustment_covered,
         list_date_covered_symbol_count=list_date_covered,
+        members_listed_after_cohort_start=listed_after_cohort_start,
         delist_date_covered_inactive_count=delist_date_covered_inactive,
         point_in_time_available=point_in_time,
         inactive_with_candles_count=inactive_with_candles,

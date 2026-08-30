@@ -8,8 +8,10 @@ TaskIQ (or any other) scheduler can run one bounded automation sweep.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -28,6 +30,7 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.automation.consumer import PaperAutomationConsumer
 from app.extensions.kasset.automation.contracts import (
+    PROMOTION_BYPASSED_BY_OWNER,
     OwnerExecutionPolicy,
     PaperExecutionClaim,
     PaperExecutionOutcome,
@@ -45,6 +48,8 @@ from app.models.ai_recommendations import (
     RecommendationExecutionStatus,
 )
 from app.services.ai_recommendations.service import AIRecommendationService
+
+logger = logging.getLogger(__name__)
 
 
 def _is_reclaimable_execution_claim(
@@ -93,6 +98,9 @@ class RuntimeStateSafetyGate:
             OperatingMode.AUTO_PAPER if self._automatic else OperatingMode.APPROVAL
         )
         enabled = snapshot.mode == required_mode
+        # override는 자동 경로에서만, 그리고 승격 근거 요구에만 적용된다. 소유자
+        # 일치·kill switch·PAPER 판정은 아래에서 그대로 유지된다.
+        promotion_bypassed = self._automatic and snapshot.promotion_bypass
         if self._automatic:
             enabled = enabled and settings.AI_PAPER_AUTO_EXECUTION_ENABLED
             if enabled and self._recommendation_id is not None:
@@ -104,7 +112,9 @@ class RuntimeStateSafetyGate:
                     owner_user_id
                 ):
                     enabled = False
-                elif not _is_reclaimable_execution_claim(recommendation, now):
+                elif not promotion_bypassed and not _is_reclaimable_execution_claim(
+                    recommendation, now
+                ):
                     enabled = (
                         await StrategyPromotionService(
                             self._db
@@ -115,6 +125,7 @@ class RuntimeStateSafetyGate:
             paper_automation_enabled=enabled,
             global_kill_switch_enabled=snapshot.kill_switch,
             trading_mode="PAPER",
+            promotion_bypassed=promotion_bypassed,
         )
 
 
@@ -187,14 +198,19 @@ class OwnerScopedRecommendationService:
                 )
             ).all()
         )
-        promotion_service = StrategyPromotionService(self._db)
+        # ``require_promotion``이 False면 소유자 override가 승격 근거 요구를 면제한
+        # 상태다. 그때만 승격 없는 후보도 자동실행 대상으로 잡는다.
+        promotion_service = (
+            StrategyPromotionService(self._db) if self._require_promotion else None
+        )
         for row in (*approved_rows, *pending_rows):
             if _is_reclaimable_execution_claim(row, now):
                 self._recommendation_id = row.id
                 return row.id
-            approval = await promotion_service.approval_for_recommendation(row)
-            if not approval.approved:
-                continue
+            if promotion_service is not None:
+                approval = await promotion_service.approval_for_recommendation(row)
+                if not approval.approved:
+                    continue
             if row.decision == RecommendationDecision.PENDING:
                 row = await self._service.decide(
                     owner_id,
@@ -549,9 +565,21 @@ async def run_paper_automation_once(
                         reason="global_kill_switch_enabled",
                     )
                 else:
+                    # 여기까지 왔으면 AUTO_PAPER이고 kill switch는 꺼져 있다.
+                    # override는 승격 근거 요구 하나만 면제하며, PAPER 판정과
+                    # kill switch는 snapshot.promotion_bypass 계산에서 이미
+                    # 반영됐다.
+                    promotion_bypassed = snapshot.promotion_bypass
+                    if promotion_bypassed:
+                        logger.warning(
+                            "kasset paper automation runs without promotion "
+                            "evidence: owner_user_id=%s reason=%s",
+                            owner_id,
+                            PROMOTION_BYPASSED_BY_OWNER,
+                        )
                     recommendation_service = OwnerScopedRecommendationService(
                         db,
-                        require_promotion=True,
+                        require_promotion=not promotion_bypassed,
                     )
                     recommendation_id = (
                         await recommendation_service.authorize_next_for_auto_execution(
@@ -562,7 +590,11 @@ async def run_paper_automation_once(
                     if recommendation_id is None:
                         outcome = PaperExecutionOutcome(
                             status="BLOCKED",
-                            reason="strategy_promotion_required",
+                            reason=(
+                                "no_eligible_recommendation"
+                                if promotion_bypassed
+                                else "strategy_promotion_required"
+                            ),
                         )
                     else:
                         consumer = PaperAutomationConsumer(
@@ -575,11 +607,17 @@ async def run_paper_automation_once(
                             recommendation_service=recommendation_service,
                             paper_orders=OwnerScopedPaperOrders(
                                 now=current,
-                                require_promotion=True,
+                                require_promotion=not promotion_bypassed,
                             ),
                             db=db,
                         )
                         outcome = await consumer.run_once(now=current)
+                        if promotion_bypassed:
+                            # 승격 근거 없이 나간 실행임을 결과에 남긴다.
+                            outcome = replace(
+                                outcome,
+                                promotion_bypass_reason=PROMOTION_BYPASSED_BY_OWNER,
+                            )
         except Exception as exc:  # one owner's failure must not stop the sweep
             outcome = PaperExecutionOutcome(
                 status="FAILED",
@@ -592,6 +630,7 @@ async def run_paper_automation_once(
                 "reason": outcome.reason,
                 "recommendation_id": outcome.recommendation_id,
                 "replayed": outcome.replayed,
+                "promotion_bypass_reason": outcome.promotion_bypass_reason,
             }
         )
     return {"enabled": True, "owners": len(owner_ids), "outcomes": outcomes}

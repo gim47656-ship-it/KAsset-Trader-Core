@@ -139,6 +139,11 @@ class AndroidRuntimeState(Base):
     kill_switch_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # 소유자가 명시적으로 켠 "승격 근거 없이 PAPER 자동실행 허용". 기본은 차단이고
+    # 켜도 kill switch·PAPER 판정은 그대로 남는다.
+    promotion_bypass_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     trading_mode: Mapped[str] = mapped_column(
         Text, nullable=False, default="PAPER", server_default="PAPER"
     )

@@ -49,6 +49,9 @@ class OpenErApiUsdSnapshot:
     jpy_per_usd: Decimal
     eur_per_usd: Decimal
     as_of: datetime | None = None
+    # CNY는 응답에서 빠질 수 있다. 없으면 CNY 교차환율만 비우고 USD/JPY/EUR
+    # 경로는 그대로 살린다(전체를 실패로 만들지 않는다).
+    cny_per_usd: Decimal | None = None
 
     @property
     def jpy_krw(self) -> Decimal:
@@ -61,6 +64,18 @@ class OpenErApiUsdSnapshot:
         """KRW value of one EUR."""
 
         return self.usd_krw / self.eur_per_usd
+
+    @property
+    def cny_krw(self) -> Decimal | None:
+        """KRW value of one CNY, or ``None`` when the source omitted CNY."""
+
+        if self.cny_per_usd is None:
+            return None
+        try:
+            rate = self.usd_krw / self.cny_per_usd
+        except DecimalException:
+            return None
+        return rate if rate.is_finite() and rate > 0 else None
 
 
 class _ExchangeRatePayload(TypedDict, total=False):
@@ -142,6 +157,16 @@ def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
     if any(not rate.is_finite() or rate <= 0 for rate in cross_rates):
         raise ValueError("open.er-api cross rates must be positive finite decimals")
 
+    # CNY는 필수가 아니다. 빠졌거나 값이 이상하면 CNY만 비우고 나머지 통화는
+    # 그대로 내려준다(교차환율 하나 때문에 스냅샷 전체를 버리지 않는다).
+    raw_cny = rates.get("CNY")
+    cny_per_usd: Decimal | None = None
+    if raw_cny is not None:
+        try:
+            cny_per_usd = _strict_positive_decimal(raw_cny, field="rates.CNY")
+        except ValueError:
+            cny_per_usd = None
+
     raw_as_of = data.get("time_last_update_unix")
     as_of: datetime | None = None
     if raw_as_of is not None:
@@ -159,6 +184,7 @@ def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
         jpy_per_usd=jpy_per_usd,
         eur_per_usd=eur_per_usd,
         as_of=as_of,
+        cny_per_usd=cny_per_usd,
     )
 
 

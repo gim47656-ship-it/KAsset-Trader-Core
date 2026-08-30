@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -239,7 +239,8 @@ async def test_single_us_index_keeps_individual_current_and_history_calls(
     result = await handler.handle_get_market_index(symbol="SPX", period="day", count=5)
 
     current.assert_awaited_once_with("^GSPC", "S&P 500", "SPX")
-    history.assert_awaited_once_with("^GSPC", 5, "day")
+    # 예비 티커를 선언하지 않은 심볼은 fallback_yf_ticker=None으로 내려간다.
+    history.assert_awaited_once_with("^GSPC", 5, "day", fallback_yf_ticker=None)
     batch.assert_not_awaited()
     assert result["history"] == [{"date": "2026-08-28", "close": 6500.0}]
 
@@ -287,6 +288,7 @@ async def test_single_index_completed_summary_keeps_existing_range_history(
         5,
         "day",
         completed_as_of=completed_end,
+        fallback_yf_ticker=None,
     )
     assert result["indices"][0]["current"] == 6500.0
     assert result["history"] == history_rows
@@ -418,3 +420,284 @@ async def test_single_kr_index_uses_completed_close_not_live_quote(
     )
     assert result["indices"] == [completed_row]
     assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_intraday_period_uses_live_current_and_ten_minute_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """분봉은 진행 중 세션을 본다: 완료봉 cutoff를 넘겨도 실시간 현재가를 쓴다."""
+    completed_end = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+    live = AsyncMock(return_value={"symbol": "SPX", "current": 6500.0})
+    completed = AsyncMock(side_effect=AssertionError("완료봉 배치를 타면 안 된다"))
+    history_rows = [{"date": "2026-08-28T13:30:00Z", "close": 6500.0}]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_index_us_current", live)
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", completed)
+    monkeypatch.setattr(handler, "_fetch_index_us_history", history)
+
+    result = await handler.handle_get_market_index(
+        symbol="SPX",
+        period=sources.INDEX_INTRADAY_PERIOD,
+        count=144,
+        completed_as_of_by_market={"US": completed_end},
+    )
+
+    live.assert_awaited_once_with("^GSPC", "S&P 500", "SPX")
+    completed.assert_not_awaited()
+    history.assert_awaited_once_with(
+        "^GSPC",
+        144,
+        "10m",
+        fallback_yf_ticker=None,
+    )
+    assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_naver_indices_reject_the_intraday_period() -> None:
+    """네이버 지수 API에는 분봉이 없다. 일봉으로 조용히 대체하지 않는다."""
+    for symbol in ("KOSPI", "KOSDAQ"):
+        with pytest.raises(ValueError, match="intraday"):
+            await handler.handle_get_market_index(
+                symbol=symbol,
+                period=sources.INDEX_INTRADAY_PERIOD,
+                count=144,
+            )
+
+
+@pytest.mark.asyncio
+async def test_dxy_history_declares_the_futures_fallback_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Yahoo가 현물(DX-Y.NYB)을 비우면 선물(DX=F)로 한 번 더 시도해야 한다."""
+    history = AsyncMock(return_value=[])
+    monkeypatch.setattr(handler, "_fetch_index_us_current", AsyncMock(return_value={}))
+    monkeypatch.setattr(handler, "_fetch_index_us_history", history)
+
+    await handler.handle_get_market_index(symbol="DXY", period="day", count=5)
+
+    history.assert_awaited_once_with(
+        "DX-Y.NYB",
+        5,
+        "day",
+        fallback_yf_ticker="DX=F",
+    )
+
+
+@pytest.mark.asyncio
+async def test_us_history_falls_back_to_the_secondary_ticker_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+
+    async def daily(
+        yf_ticker: str,
+        count: int,
+        period: str,
+        *,
+        completed_as_of: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        del count, period, completed_as_of
+        requested.append(yf_ticker)
+        if yf_ticker == "DX-Y.NYB":
+            return []
+        return [{"date": "2026-08-28", "close": 98.42}]
+
+    monkeypatch.setattr(sources, "_fetch_index_us_daily_history", daily)
+
+    history = await sources._fetch_index_us_history(
+        "DX-Y.NYB",
+        5,
+        "day",
+        fallback_yf_ticker="DX=F",
+    )
+
+    assert requested == ["DX-Y.NYB", "DX=F"]
+    assert history == [{"date": "2026-08-28", "close": 98.42}]
+
+
+@pytest.mark.asyncio
+async def test_us_intraday_history_keeps_only_the_latest_session_in_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """분봉은 UTC 절대시각을 보존하고, 서로 다른 날의 봉을 이어 붙이지 않는다."""
+    index = pd.to_datetime(
+        [
+            "2026-08-27 15:50:00-04:00",
+            "2026-08-28 09:30:00-04:00",
+            "2026-08-28 09:40:00-04:00",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "Open": [6470.0, 6480.0, 6490.0],
+            "High": [6475.0, 6492.0, 6495.0],
+            "Low": [6465.0, 6478.0, 6488.0],
+            "Close": [6472.0, 6490.0, 6494.0],
+            "Volume": [900.0, 100.0, 120.0],
+        },
+        index=index,
+    )
+    captured: dict[str, Any] = {}
+
+    def download(*_args: Any, **kwargs: Any) -> pd.DataFrame:
+        captured.update(kwargs)
+        return frame
+
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(sources.yf, "download", download)
+    monkeypatch.setattr(sources, "yfinance_tracing_session", traced_session)
+
+    history = await sources._fetch_index_us_history(
+        "^GSPC",
+        144,
+        sources.INDEX_INTRADAY_PERIOD,
+    )
+
+    assert captured["interval"] == "10m"
+    # 분봉은 timezone을 버릴 수 없다: naive 인덱스로는 UTC 변환이 불가능하다.
+    assert captured["ignore_tz"] is False
+    assert [row["date"] for row in history] == [
+        "2026-08-28T13:30:00Z",
+        "2026-08-28T13:40:00Z",
+    ]
+    assert [row["close"] for row in history] == [6490.0, 6494.0]
+
+
+@pytest.mark.asyncio
+async def test_upbit_symbols_route_to_the_upbit_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = AsyncMock(return_value={"symbol": "ETH", "current": 5842000})
+    history_rows = [{"date": "2026-08-28T13:30:00Z", "close": 5842000.0}]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_index_upbit_current", current)
+    monkeypatch.setattr(handler, "_fetch_index_upbit_history", history)
+
+    result = await handler.handle_get_market_index(
+        symbol="ETH",
+        period=sources.INDEX_INTRADAY_PERIOD,
+        count=144,
+        # 암호화폐는 24시간 시장이라 KRX/US 완료봉 cutoff와 무관하다.
+        completed_as_of_by_market={"US": datetime(2026, 8, 28, 20, 0, tzinfo=UTC)},
+    )
+
+    current.assert_awaited_once_with("KRW-ETH", "이더리움", "ETH")
+    history.assert_awaited_once_with("KRW-ETH", 144, "10m")
+    assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_upbit_history_adapter_maps_minute_and_daily_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """분봉은 KST naive를 UTC로 옮기고, 일봉은 다른 지수와 같은 거래일 라벨을 쓴다."""
+    minute_frame = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-08-28 22:30:00", "2026-08-28 22:40:00"]),
+            "open": [109_000_000.0, 109_500_000.0],
+            "high": [109_600_000.0, 109_900_000.0],
+            "low": [108_900_000.0, 109_400_000.0],
+            "close": [109_500_000.0, 109_807_000.0],
+            "volume": [1.25, 0.75],
+        }
+    )
+    daily_frame = pd.DataFrame(
+        {
+            "date": [date(2026, 8, 27), date(2026, 8, 28)],
+            "open": [110_000_000.0, 111_000_000.0],
+            "high": [112_000_000.0, 112_500_000.0],
+            "low": [109_000_000.0, 109_100_000.0],
+            "close": [111_005_000.0, 109_807_000.0],
+            "volume": [520.5, 480.25],
+        }
+    )
+    minute_calls: dict[str, Any] = {}
+    daily_calls: dict[str, Any] = {}
+
+    async def minute_candles(market: str, *, unit: int, count: int) -> pd.DataFrame:
+        minute_calls.update({"market": market, "unit": unit, "count": count})
+        return minute_frame
+
+    async def ohlcv(market: str, *, days: int, period: str) -> pd.DataFrame:
+        daily_calls.update({"market": market, "days": days, "period": period})
+        return daily_frame
+
+    monkeypatch.setattr(sources, "upbit_fetch_minute_candles", minute_candles)
+    monkeypatch.setattr(sources, "upbit_fetch_ohlcv", ohlcv)
+
+    intraday = await sources._fetch_index_upbit_history(
+        "KRW-BTC",
+        144,
+        sources.INDEX_INTRADAY_PERIOD,
+    )
+    daily = await sources._fetch_index_upbit_history("KRW-BTC", 20, "day")
+
+    assert minute_calls == {"market": "KRW-BTC", "unit": 10, "count": 144}
+    assert daily_calls == {"market": "KRW-BTC", "days": 20, "period": "day"}
+    assert [row["date"] for row in intraday] == [
+        "2026-08-28T13:30:00Z",
+        "2026-08-28T13:40:00Z",
+    ]
+    # 코인 거래량은 소수점이 있으므로 정수로 자르지 않는다.
+    assert [row["volume"] for row in intraday] == [1.25, 0.75]
+    assert [row["date"] for row in daily] == ["2026-08-27", "2026-08-28"]
+
+
+@pytest.mark.asyncio
+async def test_upbit_current_adapter_converts_rate_to_percentage_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def tickers(market_codes: list[str]) -> list[dict[str, Any]]:
+        assert market_codes == ["KRW-BTC"]
+        return [
+            {"market": "KRW-ETH", "trade_price": 1},
+            {
+                "market": "KRW-BTC",
+                "trade_price": 109_807_000,
+                "prev_closing_price": 111_005_000,
+                "signed_change_price": -1_198_000,
+                "signed_change_rate": -0.0108,
+            },
+        ]
+
+    monkeypatch.setattr(sources, "upbit_fetch_multiple_tickers", tickers)
+
+    row = await sources._fetch_index_upbit_current("KRW-BTC", "비트코인", "BTC")
+
+    assert row["symbol"] == "BTC"
+    assert row["name"] == "비트코인"
+    assert row["current"] == 109_807_000
+    # 업비트는 비율(0.01 = 1%)을 주므로 지수 행 관례인 퍼센트포인트로 옮긴다.
+    assert float(row["change_pct"]) == pytest.approx(-1.08)
+    assert row["source"] == "upbit"
+
+
+@pytest.mark.asyncio
+async def test_upbit_current_adapter_degrades_when_the_market_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def tickers(_market_codes: list[str]) -> list[dict[str, Any]]:
+        return [{"market": "KRW-ETH", "trade_price": 1}]
+
+    monkeypatch.setattr(sources, "upbit_fetch_multiple_tickers", tickers)
+
+    row = await sources._fetch_index_upbit_current("KRW-BTC", "비트코인", "BTC")
+
+    assert row == {
+        "symbol": "BTC",
+        "name": "비트코인",
+        "source": "upbit",
+        "unavailable": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_upbit_symbols_are_rejected_by_the_naver_yfinance_batch() -> None:
+    """배치는 naver/yfinance 전용이다. Upbit 심볼은 조용히 통과시키지 않는다."""
+    with pytest.raises(ValueError, match="BTC"):
+        await handler.handle_get_market_index_current_batch(["SPX", "BTC"])

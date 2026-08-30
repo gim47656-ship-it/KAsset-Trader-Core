@@ -55,6 +55,25 @@ def _btc_ticker(**overrides: Any) -> dict[str, Any]:
     return ticker
 
 
+def _eth_ticker(**overrides: Any) -> dict[str, Any]:
+    ticker: dict[str, Any] = {
+        "market": "KRW-ETH",
+        "trade_price": 5842000,
+        "prev_closing_price": 5790000,
+        "signed_change_price": 52000,
+        "signed_change_rate": 0.0089,
+        "trade_timestamp": int(
+            datetime(2026, 8, 28, 6, 10, tzinfo=UTC).timestamp() * 1000
+        ),
+    }
+    ticker.update(overrides)
+    return ticker
+
+
+def _upbit_tickers(**btc_overrides: Any) -> list[dict[str, Any]]:
+    return [_btc_ticker(**btc_overrides), _eth_ticker()]
+
+
 def _toss_points(*, as_of: datetime | None) -> dict[str, TossIndicatorPoint]:
     return {
         "KR_BOND_10Y": TossIndicatorPoint(
@@ -116,18 +135,24 @@ def test_missing_previous_close_leaves_change_null_instead_of_zero() -> None:
 
 
 def test_upbit_rate_becomes_percentage_points_and_needs_a_previous_close() -> None:
-    items, _errors = mod._indicator_items(None, _btc_ticker(), None, sessions=_SESSIONS)
-    btc = _by_key(items)["BTC"]
+    items, _errors = mod._indicator_items(
+        None, _upbit_tickers(), None, sessions=_SESSIONS
+    )
+    by_key = _by_key(items)
+    btc = by_key["BTC"]
 
     assert btc.value == "109807000"
     assert btc.previous_close == "111005000"
     assert btc.change_amount == "-1198000"
     # 업비트는 비율(-0.0108)로 주므로 퍼센트포인트(-1.08)로 옮긴다.
     assert Decimal(btc.change_rate) == Decimal("-1.08")
+    # 같은 정규화를 원화 암호화폐 전체에 적용한다(심볼별 예외 없음).
+    assert by_key["ETH"].value == "5842000"
+    assert Decimal(by_key["ETH"].change_rate) == Decimal("0.89")
 
     without_previous, _errors = mod._indicator_items(
         None,
-        _btc_ticker(prev_closing_price=None),
+        _upbit_tickers(prev_closing_price=None),
         None,
         sessions=_SESSIONS,
     )
@@ -160,12 +185,14 @@ def test_toss_indicator_without_timestamp_is_stale_not_available() -> None:
 
 
 def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
-    rows = [_yf_row(symbol) for symbol in ("VIX", "US10Y", "WTI", "BRENT", "GOLD")]
+    rows = [
+        _yf_row(symbol) for symbol in ("VIX", "US10Y", "WTI", "BRENT", "GOLD", "DXY")
+    ]
 
     # 토스만 죽은 경우: 국채 6종만 unavailable이고 나머지는 값을 유지한다.
     items, errors = mod._indicator_items(
         _us_batch_payload(rows),
-        _btc_ticker(),
+        _upbit_tickers(),
         None,
         sessions=_SESSIONS,
         toss_error_code="TIMEOUT",
@@ -182,6 +209,7 @@ def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
     }
     assert by_key["VIX"].value == "10"
     assert by_key["BTC"].value == "109807000"
+    assert by_key["ETH"].value == "5842000"
     assert [error.scope for error in errors] == ["indicators"] * 6
     assert {error.code for error in errors} == {"TIMEOUT"}
 
@@ -196,6 +224,8 @@ def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
     by_key = _by_key(items)
     assert by_key["BTC"].status == "unavailable"
     assert by_key["BTC"].value is None
+    assert by_key["ETH"].status == "unavailable"
+    assert by_key["ETH"].value is None
     assert by_key["KR_BOND_10Y"].value == "4.25"
     assert by_key["GOLD"].value == "10"
     assert [error.symbol for error in errors] == [
@@ -205,6 +235,7 @@ def test_one_provider_failure_only_downgrades_its_own_indicators() -> None:
         "KR_BOND_20Y",
         "KR_BOND_30Y",
         "BTC",
+        "ETH",
     ]
 
 
@@ -217,7 +248,7 @@ def test_one_us_batch_row_error_does_not_touch_the_other_indicators() -> None:
         _yf_row("GOLD"),
     ]
     items, errors = mod._indicator_items(
-        _us_batch_payload(rows), _btc_ticker(), None, sessions=_SESSIONS
+        _us_batch_payload(rows), _upbit_tickers(), None, sessions=_SESSIONS
     )
     by_key = _by_key(items)
 

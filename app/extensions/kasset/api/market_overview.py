@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.schemas import (
     MarketIndexCandle,
     MarketIndexDetailResponse,
+    MarketIndexKind,
     MarketIndexRange,
     MarketIndexSummary,
     MarketIndicatorGroup,
@@ -36,6 +38,11 @@ from app.extensions.kasset.api.toss_market_data import (
 from app.mcp_server.tooling.fundamentals._market_index import (
     handle_get_market_index,
     handle_get_market_index_current_batch,
+)
+from app.mcp_server.tooling.fundamentals_sources_indices import (
+    _INDEX_META,
+    INDEX_INTRADAY_PERIOD,
+    _upbit_index_row,
 )
 from app.mcp_server.tooling.market_session import (
     DATA_STATE_FRESH,
@@ -80,23 +87,21 @@ _INDEX_DEFINITIONS: tuple[tuple[str, str, _IndexMarket, _IndexCurrency], ...] = 
     ("RUT", "러셀2000", "US", "USD"),
     ("SOX", "필라델피아 반도체", "US", "USD"),
 )
-_INDEX_DEFINITIONS_BY_SYMBOL: dict[
-    str,
-    tuple[str, _IndexMarket, _IndexCurrency],
-] = {
-    symbol: (name, market, currency)
-    for symbol, name, market, currency in _INDEX_DEFINITIONS
-}
+_DAILY_INDEX_RANGES: tuple[MarketIndexRange, ...] = ("1W", "1M", "3M", "6M")
 _INDEX_RANGE_CONFIG: dict[MarketIndexRange, tuple[str, int]] = {
     "1W": ("day", 5),
     "1M": ("day", 20),
     "3M": ("day", 60),
     "6M": ("day", 126),
 }
+# "1일"은 10분봉이다. 24시간 시장(암호화폐)을 다 담는 길이로 요청하고, 정규장만
+# 있는 심볼은 소스가 최근 거래일 하루만 남기므로 자연히 짧아진다.
+_INTRADAY_CANDLE_COUNT = 144
 _FX_DEFINITIONS = (
     ("USDKRW", "USD/KRW"),
     ("JPYKRW", "JPY/KRW"),
     ("EURKRW", "EUR/KRW"),
+    ("CNYKRW", "CNY/KRW"),
 )
 # 비주식 지표. market 필드를 두지 않으므로 세션 딕셔너리를 심볼로 인덱싱하는
 # 경로가 생기지 않는다. provider는 이 행을 채우는 소스이며, 상태 판정과 그룹
@@ -126,7 +131,10 @@ _INDICATOR_DEFINITIONS: tuple[
     ("WTI", "WTI", "COMMODITY", "USD", "us_batch"),
     ("BRENT", "브렌트유", "COMMODITY", "USD", "us_batch"),
     ("GOLD", "금", "COMMODITY", "USD", "us_batch"),
+    # 달러인덱스는 지수 포인트다(달러 가격이 아니므로 USD로 표기하지 않는다).
+    ("DXY", "달러인덱스", "FX", "POINT", "us_batch"),
     ("BTC", "비트코인", "CRYPTO", "KRW", "upbit"),
+    ("ETH", "이더리움", "CRYPTO", "KRW", "upbit"),
 )
 # KRX HTTP와 yfinance 배치를 서로 독립적으로 제한한다. 한 공급자가 느리다고 이미
 # 끝난 다른 시장 값까지 버리면 홈의 모든 지수가 동시에 unavailable이 된다.
@@ -140,14 +148,103 @@ _OVERVIEW_US_BATCH_SYMBOLS: tuple[str, ...] = tuple(
     for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
     if provider == "us_batch"
 )
-_OVERVIEW_BATCH_SYMBOLS = _OVERVIEW_KRX_SYMBOLS + _OVERVIEW_US_BATCH_SYMBOLS
 # 토스 지표는 한 번의 배치 호출(최대 200심볼)로 함께 조회한다.
 _TOSS_INDICATOR_SYMBOLS: tuple[str, ...] = tuple(
     key
     for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
     if provider == "toss"
 )
-_UPBIT_BTC_MARKET = "KRW-BTC"
+# Upbit 마켓 코드는 _INDEX_META가 유일한 근거다. 여기서 따로 적으면 상세 경로와
+# 홈 경로가 서로 다른 마켓을 볼 수 있으므로 그대로 끌어온다(누락은 import 시점에
+# KeyError로 드러난다).
+_UPBIT_MARKET_BY_SYMBOL: dict[str, str] = {
+    key: _INDEX_META[key]["upbit_market"]
+    for key, _name, _group, _unit, provider in _INDICATOR_DEFINITIONS
+    if provider == "upbit"
+}
+
+_DetailProvider = Literal["naver", "yfinance", "upbit"]
+# 상세 이력 소스. 토스 시장지표는 현재값 endpoint만 있고 차트 소스가 없으므로
+# 상세 화이트리스트에서 빠진다(앱에서도 이 심볼은 누를 수 없다).
+_DETAIL_PROVIDER_BY_INDICATOR_PROVIDER: dict[
+    _IndicatorProvider,
+    _DetailProvider | None,
+] = {
+    "us_batch": "yfinance",
+    "upbit": "upbit",
+    "toss": None,
+}
+# 분봉이 있는 소스만 "1D"를 노출한다. 네이버 지수 API에는 분봉 endpoint가 없어
+# KOSPI/KOSDAQ은 "1D"를 제공하지 않는다.
+_INTRADAY_DETAIL_PROVIDERS: frozenset[str] = frozenset({"yfinance", "upbit"})
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexDetailDefinition:
+    """상세 한 심볼의 단일 정의.
+
+    홈 격자 정의(``_INDEX_DEFINITIONS``/``_INDICATOR_DEFINITIONS``)에서 전부
+    파생한다. 상세와 홈이 서로 다른 이름·단위·공급자를 갖는 상태가 만들어지지
+    않게 하려는 것이므로 여기에 심볼을 직접 적지 않는다.
+    """
+
+    name: str
+    kind: MarketIndexKind
+    market: Literal["KRX", "US", "GLOBAL"]
+    currency: _IndexCurrency | None
+    unit: MarketIndicatorUnit
+    group: MarketIndicatorGroup | None
+    provider: _DetailProvider
+    # 지표만 값이 있다. 상태 판정을 홈 격자와 같은 규칙으로 돌리는 데 쓴다.
+    indicator_provider: _IndicatorProvider | None
+    supported_ranges: tuple[MarketIndexRange, ...]
+
+
+def _detail_supported_ranges(
+    provider: _DetailProvider,
+) -> tuple[MarketIndexRange, ...]:
+    if provider in _INTRADAY_DETAIL_PROVIDERS:
+        return ("1D", *_DAILY_INDEX_RANGES)
+    return _DAILY_INDEX_RANGES
+
+
+def _build_index_detail_definitions() -> dict[str, _IndexDetailDefinition]:
+    definitions: dict[str, _IndexDetailDefinition] = {}
+    for symbol, name, market, currency in _INDEX_DEFINITIONS:
+        provider: _DetailProvider = "naver" if market == "KRX" else "yfinance"
+        definitions[symbol] = _IndexDetailDefinition(
+            name=name,
+            kind="INDEX",
+            market=market,
+            currency=currency,
+            unit="POINT",
+            group=None,
+            provider=provider,
+            indicator_provider=None,
+            supported_ranges=_detail_supported_ranges(provider),
+        )
+    for key, name, group, unit, indicator_provider in _INDICATOR_DEFINITIONS:
+        detail_provider = _DETAIL_PROVIDER_BY_INDICATOR_PROVIDER[indicator_provider]
+        if detail_provider is None:
+            continue
+        definitions[key] = _IndexDetailDefinition(
+            name=name,
+            kind="INDICATOR",
+            # 지표는 한 거래소 세션에 속하지 않는다. 원자재·금리 선물은 미국
+            # 정규장 밖에도 거래되고 암호화폐는 24시간이다. 통화도 붙이지 않고
+            # unit만으로 값의 의미를 전달한다.
+            market="GLOBAL",
+            currency=None,
+            unit=unit,
+            group=group,
+            provider=detail_provider,
+            indicator_provider=indicator_provider,
+            supported_ranges=_detail_supported_ranges(detail_provider),
+        )
+    return definitions
+
+
+_INDEX_DETAIL_DEFINITIONS = _build_index_detail_definitions()
 _SessionStates = dict[str, MarketSessionState | None]
 
 _cache: dict[str, object] = {}
@@ -399,6 +496,7 @@ def _usable_index_row(
 
 
 def _history_date_bucket(value: object) -> str | None:
+    """일봉 한 행의 거래일 라벨. 시각은 의미가 없으므로 자정으로 정규화한다."""
     if isinstance(value, datetime):
         trading_date = value.date()
     elif isinstance(value, date):
@@ -413,7 +511,35 @@ def _history_date_bucket(value: object) -> str | None:
     return f"{trading_date.isoformat()}T00:00:00Z"
 
 
-def _index_candles(result: object) -> list[MarketIndexCandle]:
+def _history_moment_bucket(value: object) -> str | None:
+    """분봉 한 행의 체결 시각. timezone을 증명하지 못하면 버린다.
+
+    naive 값에 임의로 UTC를 붙이면 없는 근거를 만드는 것이고, 날짜로 뭉개면 같은
+    날 봉들이 서로를 덮어쓴다. 둘 다 하지 않고 그 행만 버린다.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return _datetime_text(parsed)
+
+
+def _index_candles(
+    result: object, *, intraday: bool = False
+) -> list[MarketIndexCandle]:
+    """이력 행을 와이어 캔들로 옮긴다.
+
+    일봉은 같은 거래일 행이 여러 번 오면 마지막 행이 이긴다(공급자가 같은 날을
+    갱신해 보내는 경우가 있다). 분봉은 시각까지 키로 쓰므로 같은 날 여러 봉이
+    그대로 남는다.
+    """
     if not isinstance(result, dict):
         return []
     history = result.get("history")
@@ -424,7 +550,11 @@ def _index_candles(result: object) -> list[MarketIndexCandle]:
     for row in history:
         if not isinstance(row, dict):
             continue
-        bucket = _history_date_bucket(row.get("date"))
+        bucket = (
+            _history_moment_bucket(row.get("date"))
+            if intraday
+            else _history_date_bucket(row.get("date"))
+        )
         open_ = _decimal_text(row.get("open"))
         high = _decimal_text(row.get("high"))
         low = _decimal_text(row.get("low"))
@@ -453,50 +583,64 @@ def _index_summary(
     result: object,
     *,
     symbol: str,
+    definition: _IndexDetailDefinition,
     range_: MarketIndexRange,
     sessions: _SessionStates,
 ) -> MarketIndexSummary:
-    name, market, currency = _INDEX_DEFINITIONS_BY_SYMBOL[symbol]
-    session_state = sessions[market]
+    # 지표는 특정 거래소 세션에 속하지 않으므로 sessionState를 노출하지 않는다.
+    # 세션 딕셔너리를 "GLOBAL" 키로 조회하는 경로도 만들지 않는다.
+    session_state = sessions[definition.market] if definition.kind == "INDEX" else None
+    decimal_places = INDICATOR_DECIMAL_PLACES[definition.unit]
     usable = _usable_index_row(
         _index_rows_by_symbol(result),
         symbol,
-        decimal_places=INDEX_DECIMAL_PLACES,
+        decimal_places=decimal_places,
     )
-    if usable is None:
-        return MarketIndexSummary(
-            symbol=symbol,
-            name=name,
-            market=market,
-            currency=currency,
-            price=None,
-            change_amount=None,
-            change_rate=None,
-            as_of=None,
-            status="unavailable",
-            session_state=session_state,
-            range=range_,
-        )
 
-    row, price = usable
-    return MarketIndexSummary(
-        symbol=symbol,
-        name=name,
-        market=market,
-        currency=currency,
-        price=price,
-        change_amount=_quantized_decimal_text(
+    price: str | None = None
+    change_amount: str | None = None
+    change_rate: str | None = None
+    as_of: str | None = None
+    status: MarketOverviewItemStatus = "unavailable"
+    if usable is not None:
+        row, price = usable
+        change_amount = _quantized_decimal_text(
             row.get("change"),
-            decimal_places=INDEX_DECIMAL_PLACES,
-        ),
-        change_rate=_quantized_decimal_text(
+            decimal_places=decimal_places,
+        )
+        change_rate = _quantized_decimal_text(
             row.get("change_pct"),
             decimal_places=CHANGE_RATE_DECIMAL_PLACES,
-        ),
-        as_of=_source_as_of(row),
-        status=_index_status(row, session_state=session_state),
+        )
+        as_of = _source_as_of(row)
+        # 상태 판정 규칙은 홈 격자와 같은 함수를 쓴다. 지표는 provider별로
+        # 갈리므로(Upbit 24시간 / 토스 기준시각 유무) 지수 규칙을 강요하지 않는다.
+        status = (
+            _index_status(row, session_state=session_state)
+            if definition.indicator_provider is None
+            else _indicator_status(
+                row,
+                provider=definition.indicator_provider,
+                sessions=sessions,
+            )
+        )
+
+    return MarketIndexSummary(
+        symbol=symbol,
+        name=definition.name,
+        market=definition.market,
+        currency=definition.currency,
+        price=price,
+        change_amount=change_amount,
+        change_rate=change_rate,
+        as_of=as_of,
+        status=status,
         session_state=session_state,
         range=range_,
+        kind=definition.kind,
+        unit=definition.unit,
+        group=definition.group,
+        supported_ranges=list(definition.supported_ranges),
     )
 
 
@@ -570,43 +714,23 @@ def _index_items(
     return items, errors
 
 
-def _upbit_btc_row(ticker: object) -> dict[str, Any] | None:
-    """Upbit KRW-BTC 티커를 지수 행과 같은 모양으로 정규화한다.
+def _upbit_indicator_rows(tickers: object) -> dict[str, dict[str, Any]]:
+    """Upbit 공개 티커 목록을 지표별 지수 행으로 정규화한다.
 
-    ``signed_change_rate``는 비율(0.01 = 1%)이므로 지수 행의 관례(퍼센트포인트)에
-    맞춰 100을 곱한다. 전일종가가 없으면 등락을 계산하지 않고 그대로 비운다.
+    정규화 규칙은 상세 경로와 공용(``_upbit_index_row``)이다. 홈과 상세가 같은
+    티커에서 서로 다른 등락률을 만들지 않게 하려는 것이다.
     """
-    if not isinstance(ticker, dict):
-        return None
-    trade_price = ticker.get("trade_price")
-    if trade_price is None:
-        return None
-    previous_close = ticker.get("prev_closing_price")
-    change = ticker.get("signed_change_price") if previous_close is not None else None
-    raw_rate = ticker.get("signed_change_rate") if previous_close is not None else None
-    try:
-        change_pct = (
-            Decimal(str(raw_rate)) * 100
-            if raw_rate is not None and not isinstance(raw_rate, bool)
-            else None
-        )
-    except (InvalidOperation, ValueError):
-        change_pct = None
-
-    timestamp = ticker.get("trade_timestamp") or ticker.get("timestamp")
-    quote_asof: str | None = None
-    if isinstance(timestamp, int | float) and not isinstance(timestamp, bool):
-        quote_asof = datetime.fromtimestamp(timestamp / 1000, tz=UTC).isoformat()
-
-    return {
-        "symbol": "BTC",
-        "current": trade_price,
-        "previous_close": previous_close,
-        "change": change,
-        "change_pct": change_pct,
-        "quote_asof": quote_asof,
-        "source": "upbit",
+    if not isinstance(tickers, list):
+        return {}
+    rows_by_market = {
+        ticker.get("market"): ticker for ticker in tickers if isinstance(ticker, dict)
     }
+    rows: dict[str, dict[str, Any]] = {}
+    for symbol, market in _UPBIT_MARKET_BY_SYMBOL.items():
+        row = _upbit_index_row(rows_by_market.get(market), symbol)
+        if row is not None:
+            rows[symbol] = row
+    return rows
 
 
 def _toss_indicator_rows(points: object) -> dict[str, dict[str, Any]]:
@@ -657,7 +781,7 @@ def _indicator_status(
 
 def _indicator_items(
     index_result: object,
-    btc_ticker: object,
+    upbit_tickers: object,
     toss_points: object,
     *,
     sessions: _SessionStates,
@@ -668,9 +792,7 @@ def _indicator_items(
     """비주식 지표 행을 조립한다. 한 공급자가 죽어도 그 항목만 unavailable이다."""
 
     rows_by_symbol = _index_rows_by_symbol(index_result)
-    btc_row = _upbit_btc_row(btc_ticker)
-    if btc_row is not None:
-        rows_by_symbol["BTC"] = btc_row
+    rows_by_symbol.update(_upbit_indicator_rows(upbit_tickers))
     rows_by_symbol.update(_toss_indicator_rows(toss_points))
 
     group_error_codes: dict[_IndicatorProvider, MarketOverviewErrorCode | None] = {
@@ -775,9 +897,14 @@ def _fx_items(
             (snapshot.eur_krw, snapshot_as_of)
             if snapshot is not None
             else (None, None),
+            # open.er-api가 CNY를 빼고 응답하면 cny_krw만 None이 된다. 나머지
+            # 통화는 그대로 살아 있어야 하므로 여기서 전체를 버리지 않는다.
+            (snapshot.cny_krw, snapshot_as_of)
+            if snapshot is not None
+            else (None, None),
         )
     except DecimalException:
-        values = ((None, None), (None, None), (None, None))
+        values = ((None, None), (None, None), (None, None), (None, None))
 
     items: list[MarketOverviewItem] = []
     errors: list[MarketOverviewError] = []
@@ -837,13 +964,11 @@ async def _toss_usd_quote() -> UsdKrwExchangeRateQuote | None:
     return quote if quote.source == "toss" else None
 
 
-async def _upbit_btc_ticker() -> dict[str, Any] | None:
-    """Upbit 공개 티커에서 KRW-BTC 한 건만 읽는다(인증 불필요)."""
-    rows = await fetch_multiple_tickers([_UPBIT_BTC_MARKET])
-    for row in rows:
-        if isinstance(row, dict) and row.get("market") == _UPBIT_BTC_MARKET:
-            return row
-    return None
+async def _upbit_indicator_tickers() -> list[dict[str, Any]]:
+    """Upbit 공개 티커를 지표 심볼 전체에 대해 한 번에 읽는다(인증 불필요)."""
+    markets = list(_UPBIT_MARKET_BY_SYMBOL.values())
+    rows = await fetch_multiple_tickers(markets)
+    return [row for row in rows if isinstance(row, dict)]
 
 
 async def _toss_indicator_points() -> dict[str, TossIndicatorPoint]:
@@ -920,19 +1045,19 @@ async def _completed_index_snapshot() -> tuple[
 
 
 async def _build_market_overview() -> MarketOverviewResponse:
-    # 환율·BTC·시장지표는 지수의 완료 세션 확인과 동시에 조회한다. 지수 가격은
-    # 캘린더 cutoff와 공통 선택기가 허용한 target/직전 1개 세션 일봉만 쓴다.
+    # 환율·암호화폐·시장지표는 지수의 완료 세션 확인과 동시에 조회한다. 지수
+    # 가격은 캘린더 cutoff와 공통 선택기가 허용한 target/직전 1개 세션 일봉만 쓴다.
     (
         index_snapshot_result,
         fx_result,
         toss_usd_result,
-        btc_result,
+        upbit_result,
         toss_indicator_result,
     ) = await asyncio.gather(
         _completed_index_snapshot(),
         _bounded(get_open_er_api_usd_snapshot()),
         _bounded(_toss_usd_quote()),
-        _bounded(_upbit_btc_ticker()),
+        _bounded(_upbit_indicator_tickers()),
         _bounded(_toss_indicator_points()),
         return_exceptions=True,
     )
@@ -964,14 +1089,14 @@ async def _build_market_overview() -> MarketOverviewResponse:
         group_error_code=index_error_code,
     )
 
-    btc_error_code: MarketOverviewErrorCode | None = None
-    if isinstance(btc_result, BaseException):
-        btc_error_code = (
-            "TIMEOUT" if isinstance(btc_result, TimeoutError) else "UNAVAILABLE"
+    upbit_error_code: MarketOverviewErrorCode | None = None
+    if isinstance(upbit_result, BaseException):
+        upbit_error_code = (
+            "TIMEOUT" if isinstance(upbit_result, TimeoutError) else "UNAVAILABLE"
         )
-        btc_payload: object = None
+        upbit_payload: object = None
     else:
-        btc_payload = btc_result
+        upbit_payload = upbit_result
     toss_indicator_error_code: MarketOverviewErrorCode | None = None
     if isinstance(toss_indicator_result, BaseException):
         toss_indicator_error_code = (
@@ -984,11 +1109,11 @@ async def _build_market_overview() -> MarketOverviewResponse:
         toss_indicator_payload = toss_indicator_result
     indicators, indicator_errors = _indicator_items(
         index_payload,
-        btc_payload,
+        upbit_payload,
         toss_indicator_payload,
         sessions=session_states,
         us_batch_error_code=index_error_code,
-        upbit_error_code=btc_error_code,
+        upbit_error_code=upbit_error_code,
         toss_error_code=toss_indicator_error_code,
     )
 
@@ -1072,17 +1197,31 @@ async def _build_market_index_detail(
     symbol: str,
     range_: MarketIndexRange,
 ) -> MarketIndexDetailResponse:
+    definition = _INDEX_DETAIL_DEFINITIONS[symbol]
+    intraday = range_ == "1D"
     moment = datetime.now(UTC)
     _, session_states = await _session_snapshot(moment=moment)
-    period, count = _INDEX_RANGE_CONFIG[range_]
-    market = _INDEX_DEFINITIONS_BY_SYMBOL[symbol][1]
-    completed_window = await get_latest_completed_regular_window_from_toss(
-        "kr" if market == "KRX" else "us",
-        moment,
+    period, count = (
+        (INDEX_INTRADAY_PERIOD, _INTRADAY_CANDLE_COUNT)
+        if intraday
+        else _INDEX_RANGE_CONFIG[range_]
     )
-    completed_as_of_by_market = (
-        {market: completed_window.end} if completed_window is not None else {}
-    )
+
+    # 완료 정규장 cutoff는 주식지수 일봉에만 의미가 있다. 분봉은 진행 중 세션을
+    # 보는 것이 목적이고, 지표(원자재·금리 선물·암호화폐)는 KRX/US 정규장 밖에도
+    # 거래되므로 cutoff를 걸면 값이 통째로 사라진다. 그런 심볼은 None을 넘겨
+    # 공급자의 실시간 경로를 그대로 쓴다.
+    completed_as_of_by_market: dict[str, datetime] | None = None
+    if not intraday and definition.kind == "INDEX":
+        completed_window = await get_latest_completed_regular_window_from_toss(
+            "kr" if definition.market == "KRX" else "us",
+            moment,
+        )
+        completed_as_of_by_market = (
+            {definition.market: completed_window.end}
+            if completed_window is not None
+            else {}
+        )
     try:
         result: object = await _bounded(
             handle_get_market_index(
@@ -1099,10 +1238,11 @@ async def _build_market_index_detail(
         summary=_index_summary(
             result,
             symbol=symbol,
+            definition=definition,
             range_=range_,
             sessions=session_states,
         ),
-        candles=_index_candles(result),
+        candles=_index_candles(result, intraday=intraday),
     )
 
 
@@ -1113,8 +1253,17 @@ async def get_market_index_detail(
     """Return one sanitized, keyed 15-second index detail snapshot."""
 
     normalized_symbol = symbol.strip().upper()
-    if normalized_symbol not in _INDEX_DEFINITIONS_BY_SYMBOL:
+    definition = _INDEX_DETAIL_DEFINITIONS.get(normalized_symbol)
+    if definition is None:
         raise MobileApiError(404, "UNKNOWN_INDEX", "지원하지 않는 지수입니다.")
+    if range_ not in definition.supported_ranges:
+        # supportedRanges가 클라이언트 range 칩의 유일한 근거이므로, 목록에 없는
+        # range를 다른 주기로 바꿔 응답하지 않고 거절한다.
+        raise MobileApiError(
+            400,
+            "UNSUPPORTED_RANGE",
+            "이 심볼은 해당 기간 차트를 제공하지 않습니다.",
+        )
 
     key = (normalized_symbol, range_)
     now = time.monotonic()

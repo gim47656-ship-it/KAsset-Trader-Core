@@ -11,6 +11,10 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from app.extensions.kasset.api.paper_schemas import OrderRequest, RiskAssessment
 
+# 소유자가 명시적으로 켠 override로 승격 근거 요구를 면제한 채 실행했다는 사유.
+# 이 값이 남은 결과는 PAPER 승격 근거 없이 나간 실행이라는 뜻이다.
+PROMOTION_BYPASSED_BY_OWNER = "promotion_bypassed_by_owner"
+
 
 class Action(StrEnum):
     BUY = "BUY"
@@ -138,6 +142,9 @@ class OwnerExecutionPolicy:
     paper_automation_enabled: bool
     global_kill_switch_enabled: bool
     trading_mode: Literal["PAPER", "LIVE", "DISABLED"]
+    # 소유자 override로 승격 근거 요구만 면제된 상태. kill switch·운용 모드·
+    # PAPER 판정은 이 값과 무관하게 그대로 적용된다.
+    promotion_bypassed: bool = False
 
 
 @runtime_checkable
@@ -256,6 +263,8 @@ class PaperExecutionOutcome:
     reason: str
     recommendation_id: str | None = None
     replayed: bool = False
+    # 승격 근거 요구를 면제한 채 실행했으면 그 사유를 남긴다. 정상 경로는 None.
+    promotion_bypass_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

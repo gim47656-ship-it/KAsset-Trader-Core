@@ -32,7 +32,7 @@ MarketSessionState = Literal[
     "CLOSED",
 ]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
-MarketIndexRange = Literal["1W", "1M", "3M", "6M"]
+MarketIndexRange = Literal["1D", "1W", "1M", "3M", "6M"]
 CandleRange = Literal["1D", "1W", "1M", "3M", "6M"]
 CandleInterval = Literal["10m", "1h", "1d"]
 MarketNewsFilterKind = Literal["all", "news", "disclosure"]
@@ -49,10 +49,15 @@ MarketIndicatorKey = Literal[
     "WTI",
     "BRENT",
     "GOLD",
+    "DXY",
     "BTC",
+    "ETH",
 ]
-MarketIndicatorGroup = Literal["VOLATILITY", "RATE", "COMMODITY", "CRYPTO"]
+MarketIndicatorGroup = Literal["VOLATILITY", "RATE", "COMMODITY", "CRYPTO", "FX"]
 MarketIndicatorUnit = Literal["POINT", "PERCENT", "USD", "KRW"]
+# 지수 상세는 주식지수(POINT)와 지표(PERCENT/USD/KRW)를 같은 엔드포인트로 싣는다.
+# 단위 집합이 지표와 동일하므로 별도 Literal을 만들지 않고 그대로 재사용한다.
+MarketIndexKind = Literal["INDEX", "INDICATOR"]
 MAX_WATCHLIST_ITEMS = 50
 
 
@@ -129,8 +134,24 @@ class MarketOverviewItem(AndroidWireModel):
 
 
 class MarketIndexSummary(MarketOverviewItem):
-    market: Literal["KRX", "US"]
+    """지수·지표 상세 헤더.
+
+    ``market``은 주식지수에서만 거래소를 뜻한다. 지표(원자재·금리·암호화폐)는
+    특정 거래소 세션에 묶이지 않으므로 ``"GLOBAL"``을 싣고 ``currency``를
+    비운다(원화·달러 어느 쪽으로도 환산하지 않는다는 뜻이다). 값의 의미는
+    ``unit``만으로 읽어야 한다.
+
+    ``supported_ranges``는 이 심볼이 실제로 제공하는 range 목록이며 클라이언트
+    range 칩의 유일한 근거다. 여기 없는 range 요청은 서버가 400으로 거절한다.
+    """
+
+    market: Literal["KRX", "US", "GLOBAL"]
+    currency: Literal["KRW", "USD"] | None
     range: MarketIndexRange
+    kind: MarketIndexKind = "INDEX"
+    unit: MarketIndicatorUnit | None = None
+    group: MarketIndicatorGroup | None = None
+    supported_ranges: list[MarketIndexRange]
 
 
 class MarketIndexCandle(AndroidWireModel):
