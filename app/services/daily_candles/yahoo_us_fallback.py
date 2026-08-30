@@ -138,8 +138,8 @@ def _recover_latest_completed_row(
         or high is None
         or metadata_low is None
         or metadata_high is None
-        or not math.isclose(metadata_low, low, abs_tol=0.01)
-        or not math.isclose(metadata_high, high, abs_tol=0.01)
+        or not math.isclose(metadata_low, low, rel_tol=1e-6, abs_tol=0.01)
+        or not math.isclose(metadata_high, high, rel_tol=1e-6, abs_tol=0.01)
         or not metadata_low <= current <= metadata_high
         or (
             raw_close is not None and not math.isclose(raw_close, current, abs_tol=0.01)

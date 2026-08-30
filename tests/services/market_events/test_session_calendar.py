@@ -42,7 +42,10 @@ def test_kr_holiday_is_not_a_session():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("closed_day", [date(2026, 7, 17), date(2026, 8, 17)])
+@pytest.mark.parametrize(
+    "closed_day",
+    [date(2025, 12, 31), date(2026, 7, 17), date(2026, 8, 17), date(2026, 12, 31)],
+)
 def test_kr_confirmed_one_off_closures_override_stale_upstream_calendar(closed_day):
     assert trading_session_status("kr", closed_day) == "closed"
     assert is_trading_session("kr", closed_day) is False

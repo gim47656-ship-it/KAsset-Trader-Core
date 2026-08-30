@@ -176,19 +176,20 @@ class TestFetchUsDailyYahooFallback:
         sample = pd.DataFrame(
             {
                 "date": pd.to_datetime(["2026-08-27", "2026-08-28"]),
-                "open": [83.52, 82.92],
-                "high": [83.76, 82.90],
-                "low": [82.78, 81.33],
-                "close": [83.47, float("nan")],
-                "adj_close": [82.847, float("nan")],
+                "open": [755_000.0, 754_105.75],
+                "high": [760_000.0, 759_544.9375],
+                "low": [750_000.0, 754_553.875],
+                "close": [758_000.0, float("nan")],
+                "adj_close": [754_000.0, float("nan")],
                 "volume": [8_641_700, 13_950_121],
             }
         )
         metadata = {
-            "regularMarketPrice": 81.84,
-            "previousClose": 82.8468,
-            "regularMarketDayLow": 81.33,
-            "regularMarketDayHigh": 82.90,
+            "regularMarketPrice": 757_985.0,
+            "previousClose": 754_000.0,
+            # Yahoo metadata rounds large prices more coarsely than history.
+            "regularMarketDayLow": 754_553.9,
+            "regularMarketDayHigh": 759_544.9,
             "currentTradingPeriod": {
                 "regular": {
                     "end": int(datetime(2026, 8, 28, 20, 0, tzinfo=UTC).timestamp())
@@ -212,8 +213,8 @@ class TestFetchUsDailyYahooFallback:
             )
 
         assert len(rows) == 2
-        assert rows[-1].open == pytest.approx(82.92)
-        assert rows[-1].high == pytest.approx(82.92)
-        assert rows[-1].low == pytest.approx(81.33)
-        assert rows[-1].close == pytest.approx(81.84)
-        assert rows[-1].adj_close == pytest.approx(81.84)
+        assert rows[-1].open == pytest.approx(754_105.75)
+        assert rows[-1].high == pytest.approx(759_544.9375)
+        assert rows[-1].low == pytest.approx(754_105.75)
+        assert rows[-1].close == pytest.approx(757_985.0)
+        assert rows[-1].adj_close == pytest.approx(757_985.0)

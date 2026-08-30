@@ -31,12 +31,14 @@ _CALENDAR_NAME: dict[str, str] = {"us": "XNYS", "kr": "XKRX"}
 # ~4 (Thanksgiving Wed -> following Mon). 32 leaves a generous safety margin so
 # a real session is never missed within the supported calendar range.
 _SESSION_SEARCH_DAYS = 32
-# exchange_calendars 4.13.2 still classifies these confirmed 2026 KRX closure
-# dates as sessions. Production Naver KOSPI and Toss equity histories both omit
-# them, so keep the shared calendar aligned with the exchange until upstream
-# calendar data incorporates the one-off closures.
+# exchange_calendars 4.13.2 still classifies these confirmed KRX closure dates
+# through 2026 as sessions. Production Naver KOSPI and Toss equity histories
+# omit them, so keep the shared calendar aligned with the exchange until
+# upstream calendar data incorporates the closures.
 _ADDITIONAL_CLOSED_DAYS: dict[Market, frozenset[date]] = {
-    "kr": frozenset({date(2026, 7, 17), date(2026, 8, 17)}),
+    "kr": frozenset(
+        {date(2025, 12, 31), date(2026, 7, 17), date(2026, 8, 17), date(2026, 12, 31)}
+    ),
     "us": frozenset(),
 }
 
