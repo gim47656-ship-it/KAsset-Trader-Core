@@ -12,6 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.extensions.kasset.ai.api_provider import OpenAiResponsesClient
 from app.extensions.kasset.ai.base import StructuredJsonClient
 from app.extensions.kasset.ai.prompt_context import build_owner_address_instruction
+from app.extensions.kasset.ai.runtime_config import (
+    DEFAULT_ROUTE_POLICY,
+    AiLane,
+    AiRoutePolicy,
+    ai_route_provider,
+)
 from app.extensions.kasset.ai.structured_router import (
     AvailabilityRoutedJsonClient,
     StructuredJsonRoute,
@@ -73,6 +79,13 @@ _STARTING_TIER: dict[AnalysisKind, _Tier] = {
     AnalysisKind.CRITICAL_REVIEW: "sol",
 }
 
+#: 각 tier가 정책을 읽어오는 lane. 저장된 정책은 route ID 순서만 담는다.
+_TIER_LANE: dict[_Tier, AiLane] = {
+    "luna": AiLane.REVIEW_LUNA,
+    "terra": AiLane.REVIEW_TERRA,
+    "sol": AiLane.REVIEW_SOL,
+}
+
 _REASONING_EFFORT: dict[AnalysisKind, Literal["low", "medium", "high"]] = {
     AnalysisKind.NEWS_TRIAGE: "low",
     AnalysisKind.MARKET_STATE: "low",
@@ -130,7 +143,14 @@ class OpenAiModelRouter:
         openrouter_pro_model: str = "",
         timeout_seconds: float = 60.0,
         mcp_client: StructuredJsonClient | None = None,
+        route_policy: AiRoutePolicy | None = None,
     ) -> None:
+        # 한 cycle이 공유하는 불변 정책. ``None``이면 환경변수 시절과 동일한
+        # 기본 순서를 쓴다. 빈 lane은 명시적 비활성화이므로 기본값으로
+        # 되돌리지 않는다.
+        self._route_policy: AiRoutePolicy = (
+            route_policy if route_policy is not None else DEFAULT_ROUTE_POLICY
+        )
         self._models: dict[_Tier, str] = {
             "luna": luna_model.strip(),
             "terra": terra_model.strip(),
@@ -247,34 +267,7 @@ class OpenAiModelRouter:
         correlation_id: str | None,
         address_instruction: str | None,
     ) -> TierVerdict:
-        routes: list[StructuredJsonRoute] = []
-        if self._mcp_client is not None and kind in _MCP_REVIEW_KINDS:
-            tool_name = str(getattr(self._mcp_client, "tool_name", "run_skill"))
-            routes.append(
-                StructuredJsonRoute(
-                    client=self._mcp_client,
-                    model=f"tool:{tool_name}",
-                )
-            )
-
-        primary_model = self._models[tier]
-        if self._primary_client is not None and primary_model:
-            routes.append(
-                StructuredJsonRoute(
-                    client=self._primary_client,
-                    model=primary_model,
-                )
-            )
-
-        fallback_model = self._fallback_models[tier]
-        if self._fallback_client is not None and fallback_model:
-            routes.append(
-                StructuredJsonRoute(
-                    client=self._fallback_client,
-                    model=fallback_model,
-                    include_reasoning=False,
-                )
-            )
+        routes = self._lane_routes(tier, kind)
 
         routed_client = AvailabilityRoutedJsonClient(
             name=f"{kind.value}:{tier}",
@@ -294,6 +287,53 @@ class OpenAiModelRouter:
             include_reasoning=True,
             address_instruction=address_instruction,
         )
+
+    def _lane_routes(
+        self,
+        tier: _Tier,
+        kind: AnalysisKind,
+    ) -> list[StructuredJsonRoute]:
+        """정책 순서대로 사용 가능한 route만 조립한다.
+
+        credential이나 model이 비어 있는 route는 조용히 빠진다(기존 fail-closed
+        동작). MCP는 정책에 있어도 MCP 대상 분석 종류에서만 쓰인다. lane이 비어
+        있으면 route가 하나도 없고 ``AvailabilityRoutedJsonClient``가
+        ``AiProviderUnavailable``로 끝낸다.
+        """
+
+        routes: list[StructuredJsonRoute] = []
+        for route_id in self._route_policy.get(_TIER_LANE[tier], ()):
+            provider = ai_route_provider(route_id)
+            if provider == "mcp":
+                if self._mcp_client is None or kind not in _MCP_REVIEW_KINDS:
+                    continue
+                tool_name = str(getattr(self._mcp_client, "tool_name", "run_skill"))
+                routes.append(
+                    StructuredJsonRoute(
+                        client=self._mcp_client,
+                        model=f"tool:{tool_name}",
+                    )
+                )
+            elif provider == "direct-api":
+                primary_model = self._models[tier]
+                if self._primary_client is not None and primary_model:
+                    routes.append(
+                        StructuredJsonRoute(
+                            client=self._primary_client,
+                            model=primary_model,
+                        )
+                    )
+            elif provider == "openrouter":
+                fallback_model = self._fallback_models[tier]
+                if self._fallback_client is not None and fallback_model:
+                    routes.append(
+                        StructuredJsonRoute(
+                            client=self._fallback_client,
+                            model=fallback_model,
+                            include_reasoning=False,
+                        )
+                    )
+        return routes
 
     @staticmethod
     async def _request_verdict(

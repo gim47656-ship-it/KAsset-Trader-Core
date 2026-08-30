@@ -20,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.extensions.kasset.ai.base import StructuredJsonClient
 from app.extensions.kasset.ai.factory import build_summary_json_client
+from app.extensions.kasset.ai.runtime_config import AiRuntimeSnapshot
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
+from app.services.ai_runtime_config import get_ai_runtime_snapshot
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -654,8 +656,11 @@ class OpenAiNewsSummaryGenerator:
         return response
 
 
-def build_news_summary_generator() -> NewsSummaryGenerator | None:
-    """direct API -> OpenRouter 일반 뉴스 요약 route를 만든다."""
+def build_news_summary_generator(
+    *,
+    snapshot: AiRuntimeSnapshot | None = None,
+) -> NewsSummaryGenerator | None:
+    """``summary_luna`` 정책 순서로 일반 뉴스 요약 route를 만든다."""
 
     direct_model = settings.KASSET_AI_MODEL_LUNA.strip()
     fallback_model = settings.KASSET_AI_OPENROUTER_MODEL_FLASH.strip()
@@ -663,6 +668,7 @@ def build_news_summary_generator() -> NewsSummaryGenerator | None:
         name="news-summary",
         direct_model=direct_model,
         fallback_model=fallback_model,
+        snapshot=snapshot,
     )
     if client is None:
         return None
@@ -896,9 +902,14 @@ async def summarize_pending_news(
     """미요약 일반 뉴스를 제한 batch로 처리하며 각 행을 독립 커밋한다."""
 
     _validate_scope(batch_size, market, feed_source)
-    effective_generator = (
-        generator if generator is not None else build_news_summary_generator()
-    )
+    effective_generator = generator
+    if effective_generator is None:
+        # batch 시작 시 정책을 한 번만 읽는다. 기사마다 DB를 다시 읽지 않으므로
+        # 이 batch 안에서는 route가 섞이지 않고, 다음 batch부터 새 정책이
+        # 재시작 없이 적용된다.
+        effective_generator = build_news_summary_generator(
+            snapshot=await get_ai_runtime_snapshot(db),
+        )
     if effective_generator is None:
         return NewsSummaryBatchResult(
             status="unconfigured",

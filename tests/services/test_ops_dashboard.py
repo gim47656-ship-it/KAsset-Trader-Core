@@ -8,6 +8,7 @@ database therefore proves two things at once — the statements are valid, and
 """
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy import event, text
 
 from app.extensions.kasset.models import AndroidRuntimeState
 from app.models.trading import User, UserRole
+from app.models.user_settings import UserSetting
 from app.services import ops_dashboard
 from app.services.ops_dashboard import (
     OpsContext,
@@ -31,6 +33,7 @@ from app.services.ops_dashboard import (
 
 pytestmark = pytest.mark.asyncio
 
+_REQUEST = SimpleNamespace(state=SimpleNamespace(csrftoken="test-csrf-token"))
 _NOW = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
 
 # Panels whose SQL must run unchanged against the real schema.
@@ -54,7 +57,7 @@ def no_redis():
 
 @pytest.mark.parametrize("key,builder", _SQL_PANELS, ids=[k for k, _ in _SQL_PANELS])
 async def test_sql_panel_runs_against_real_schema(db_session, key, builder):
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await builder(ctx)
 
@@ -69,7 +72,7 @@ async def test_sql_panel_runs_against_real_schema(db_session, key, builder):
 
 async def test_empty_database_is_idle_not_error(db_session):
     """0 rows is a successful measurement, so counts are real zeros."""
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await _funnel_panel(ctx)
 
@@ -83,17 +86,17 @@ async def test_empty_database_is_idle_not_error(db_session):
 
 async def test_strategy_panel_without_bypass_names_auto_paper_block(db_session):
     """No approval evidence and no bypass means AUTO_PAPER cannot place orders."""
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await _strategy_panel(ctx)
 
     assert panel.status is PanelStatus.IDLE
-    assert "PAPER_APPROVED" in panel.summary
-    assert "우회 ON 소유자도 0명" in panel.summary
-    assert "자동발주 불가" in panel.summary
+    assert "모의투자 승인 전략이 없고" in panel.summary
+    assert "승격 우회가 켜진 사용자도 없어" in panel.summary
+    assert "자동 모의주문 불가" in panel.summary
     values = {metric.label: metric.value for metric in panel.metrics}
-    assert values["PAPER_APPROVED"] == "0"
-    assert values["승격 우회 ON 소유자"] == "0"
+    assert values["모의투자 승인"] == "0"
+    assert values["승격 우회 사용자"] == "0"
 
 
 async def test_strategy_panel_warns_when_bypass_allows_unpromoted_orders(db_session):
@@ -115,16 +118,17 @@ async def test_strategy_panel_warns_when_bypass_allows_unpromoted_orders(db_sess
         )
     )
     await db_session.flush()
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await _strategy_panel(ctx)
 
     assert panel.status is PanelStatus.WARN
-    assert "승격 레지스트리 0건" in panel.summary
-    assert "자동발주 가능" in panel.summary
-    assert "PAPER 모드이고 kill switch OFF이면" in panel.summary
+    assert "승격 기록 0건" in panel.summary
+    assert "자동 모의주문 가능" in panel.summary
+    assert "모의투자 모드이고" in panel.summary
+    assert "긴급 중지가 꺼져 있으면" in panel.summary
     values = {metric.label: metric.value for metric in panel.metrics}
-    assert values["승격 우회 ON 소유자"] == "1"
+    assert values["승격 우회 사용자"] == "1"
 
 
 def _ai_summary(**overrides):
@@ -184,7 +188,7 @@ async def test_ai_panel_separates_logical_calls_from_provider_attempts(db_sessio
             ),
         ),
     )
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     with patch.object(
         ops_dashboard, "summarize_ai_usage", AsyncMock(return_value=summary)
@@ -192,22 +196,22 @@ async def test_ai_panel_separates_logical_calls_from_provider_attempts(db_sessio
         panel = await _ai_usage_panel(ctx)
 
     values = {metric.label: metric.value for metric in panel.metrics}
-    assert values["논리 호출"] == "3"
-    assert values["provider 시도"] == "7"
+    assert values["AI 요청"] == "3"
+    assert values["AI 제공사 시도"] == "7"
     assert values["실패 시도"] == "2"
     assert values["총 토큰"] == "1,200"
     assert values["토큰 미제공 시도"] == "4"
     # Cost the provider never reported must stay unmeasured, not 0.
     assert values["비용"] is None
     hints = {metric.label: metric.hint for metric in panel.metrics}
-    assert hints["총 토큰"] == "토큰 미제공 4건 제외"
+    assert hints["총 토큰"] == "사용량을 보내지 않은 시도 4건 제외"
     assert panel.status is PanelStatus.WARN
-    assert panel.rows[0].cells[:2] == ("provider", "openai")
+    assert panel.rows[0].cells[:2] == ("AI 제공사", "openai")
     assert panel.rows[0].cells[-1] is None
 
 
 async def test_ai_panel_with_no_calls_is_idle_with_real_zeros(db_session):
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     with patch.object(
         ops_dashboard, "summarize_ai_usage", AsyncMock(return_value=_ai_summary())
@@ -217,8 +221,8 @@ async def test_ai_panel_with_no_calls_is_idle_with_real_zeros(db_session):
     assert panel.status is PanelStatus.IDLE
     assert panel.rows == ()
     values = {metric.label: metric.value for metric in panel.metrics}
-    assert values["논리 호출"] == "0"
-    assert values["provider 시도"] == "0"
+    assert values["AI 요청"] == "0"
+    assert values["AI 제공사 시도"] == "0"
     assert values["총 토큰"] == "0"
     # No latency samples and no cost: unmeasured, never 0.
     assert values["p50 지연"] is None
@@ -234,7 +238,7 @@ async def test_ai_panel_marks_all_unreported_tokens_unmeasured(db_session):
         total_tokens=0,
         attempts_without_usage=2,
     )
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     with patch.object(
         ops_dashboard, "summarize_ai_usage", AsyncMock(return_value=summary)
@@ -244,10 +248,11 @@ async def test_ai_panel_marks_all_unreported_tokens_unmeasured(db_session):
     values = {metric.label: metric.value for metric in panel.metrics}
     hints = {metric.label: metric.hint for metric in panel.metrics}
     assert values["총 토큰"] is None
-    assert hints["총 토큰"] == "토큰 미제공 2건 제외"
+    assert hints["총 토큰"] == "사용량을 보내지 않은 시도 2건 제외"
     from app.core.templates import templates
 
     html = templates.get_template("admin_ops.html").render(
+        request=_REQUEST,
         user=None,
         dashboard=ops_dashboard.OpsDashboard(
             generated_at=_NOW,
@@ -265,8 +270,10 @@ async def test_ai_panel_marks_all_unreported_tokens_unmeasured(db_session):
     )[0]
     assert 'data-measured="false">—</div>' in token_card
     assert next(
-        metric for metric in panel.metrics if metric.label == "논리 호출"
-    ).hint == ("routed client 호출 수 (모델 티어당 1개, terra→sol escalation은 2회)")
+        metric for metric in panel.metrics if metric.label == "AI 요청"
+    ).hint == (
+        "기능별 요청 수입니다. 한 요청이 정밀 검토로 넘어가면 모델을 두 번 호출할 수 있습니다."
+    )
 
 
 async def test_ai_panel_discloses_the_uninstrumented_paths(db_session):
@@ -275,18 +282,18 @@ async def test_ai_panel_discloses_the_uninstrumented_paths(db_session):
     run_skill-family providers never create a ledger row, so their usage is
     absent from these numbers — the panel has to say so.
     """
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     with patch.object(
         ops_dashboard, "summarize_ai_usage", AsyncMock(return_value=_ai_summary())
     ):
         panel = await _ai_usage_panel(ctx)
 
-    assert "AI를 쓰지 않았다는 뜻은 아니다" in panel.summary
+    assert "별도 AI 경로는 이 화면에 표시되지 않습니다" in panel.summary
     assert panel.note == ops_dashboard.AI_COVERAGE_NOTE
-    assert "run_skill" in panel.note
-    assert "MCP" in panel.note
-    assert "AvailabilityRoutedJsonClient" in panel.note
+    assert "구독형 CLI" in panel.note
+    assert "AI MCP" in panel.note
+    assert "0건이 곧 AI 미사용을 뜻하지 않습니다" in panel.note
 
 
 async def test_system_panel_reads_grouped_runtime_state_from_real_db(db_session):
@@ -316,23 +323,72 @@ async def test_system_panel_reads_grouped_runtime_state_from_real_db(db_session)
             promotion_bypass_enabled=False,
         )
     )
+    db_session.add(
+        UserSetting(
+            user_id=911,
+            key="kasset.ai_trading",
+            value={"mode": "AUTO_PAPER"},
+        )
+    )
     await db_session.flush()
-    ctx = OpsContext(db=db_session, admin_user_id=914, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await _system_panel(ctx)
 
     values = {metric.label: metric.value for metric in panel.metrics}
     assert panel.status is PanelStatus.WARN
-    assert "소유자 kill switch ON 1명" in panel.summary
-    assert values["내 kill switch"] == "OFF"
-    assert values["소유자 kill switch ON"] == "1"
-    assert values["전역 kill switch"] == "OFF"
+    assert "사용자 긴급 중지 켜짐 1명" in panel.summary
+    assert values["활성 거래 사용자"] == "1"
+    assert values["승인 없는 자동 주문 사용자"] == "1"
+    assert values["승인 후 주문 사용자"] == "0"
+    assert values["사용자 긴급 중지 켜짐"] == "1"
+    assert values["전체 긴급 중지"] == "꺼짐"
     assert any(
-        row.cells[:3] == ("소유자 runtime", "PAPER", "kill switch ON")
+        row.cells[:3] == ("사용자 거래 설정", "모의투자 (PAPER)", "긴급 중지 켜짐")
         for row in panel.rows
     )
-    assert "현재 관리자 id=914 기준" in panel.note
-    assert "소유자 전체 상태 및 전역 상태와 분리" in panel.note
+    assert any(
+        row.cells[:3]
+        == ("AI 주문 방식", "승인 없는 자동 모의주문 (AUTO_PAPER)", "설정됨")
+        for row in panel.rows
+    )
+    assert "활성 trader와 거래 설정·상태·추천이 있는 admin만 집계" in panel.note
+
+
+async def test_system_panel_counts_active_admin_execution_owner(db_session):
+    """승인·자동 실행이 허용된 admin owner도 운영 집계에서 빠지지 않는다."""
+    db_session.add(
+        User(
+            id=915,
+            username="ops-admin-owner",
+            email="ops-admin-owner@example.com",
+            role=UserRole.admin,
+        )
+    )
+    await db_session.flush()
+    db_session.add_all(
+        [
+            AndroidRuntimeState(
+                owner_user_id=915,
+                trading_mode="PAPER",
+                kill_switch_enabled=False,
+                promotion_bypass_enabled=False,
+            ),
+            UserSetting(
+                user_id=915,
+                key="kasset.ai_trading",
+                value={"mode": "AUTO_PAPER"},
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    panel = await _system_panel(OpsContext(db=db_session, now=_NOW))
+
+    values = {metric.label: metric.value for metric in panel.metrics}
+    assert values["활성 거래 사용자"] == "1"
+    assert values["승인 없는 자동 주문 사용자"] == "1"
+    assert values["승인 후 주문 사용자"] == "0"
 
 
 async def test_system_panel_distinguishes_execution_master_switches(
@@ -342,15 +398,17 @@ async def test_system_panel_distinguishes_execution_master_switches(
     monkeypatch.setattr(
         ops_dashboard.settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", False
     )
-    ctx = OpsContext(db=db_session, admin_user_id=42, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     panel = await _system_panel(ctx)
 
     values = {metric.label: metric.value for metric in panel.metrics}
-    assert values["Core 거래 기능 (TRADING_ENABLED)"] == "ON"
-    assert values["PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)"] == "OFF"
-    assert "내 trading mode" in values
-    assert "전역 kill switch" in values
+    assert values["Core 거래 기능"] == "켜짐"
+    assert values["모의투자 자동 실행"] == "꺼짐"
+    assert "활성 거래 사용자" in values
+    assert "승인 없는 자동 주문 사용자" in values
+    assert "승인 후 주문 사용자" in values
+    assert "전체 긴급 중지" in values
 
 
 async def test_full_dashboard_renders_every_panel_without_committing(
@@ -374,7 +432,7 @@ async def test_full_dashboard_renders_every_panel_without_committing(
 
     event.listen(db_session.sync_session, "after_commit", record_commit)
     try:
-        dashboard = await build_ops_dashboard(db_session, admin_user_id=921, now=_NOW)
+        dashboard = await build_ops_dashboard(db_session, now=_NOW)
     finally:
         event.remove(db_session.sync_session, "after_commit", record_commit)
 
@@ -403,9 +461,10 @@ async def test_template_renders_the_real_dashboard(db_session, no_redis):
     from app.core.templates import templates
     from app.services.ops_dashboard import UNMEASURED_TEXT
 
-    dashboard = await build_ops_dashboard(db_session, admin_user_id=1, now=_NOW)
+    dashboard = await build_ops_dashboard(db_session, now=_NOW)
 
     html = templates.get_template("admin_ops.html").render(
+        request=_REQUEST,
         user=None,
         dashboard=dashboard,
         generated_at="2026-08-30 12:00:00 KST",
@@ -422,10 +481,13 @@ async def test_template_renders_the_real_dashboard(db_session, no_redis):
     assert "조회 성공 · 해당 기간 0건" in html
     # The AI panel's standing coverage caveat must reach the page.
     assert 'data-role="panel-note"' in html
-    assert "run_skill 계열" in html
-    assert "Core 거래 기능 (TRADING_ENABLED)" in html
-    assert "PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)" in html
-    assert "전역 kill switch" in html
+    assert "구독형 CLI" in html
+    assert "Core 거래 기능" in html
+    assert "모의투자 자동 실행" in html
+    assert "전체 긴급 중지" in html
+    assert 'id="ai-route-panel"' in html
+    assert 'id="ai-route-save"' in html
+    assert '"X-CSRFToken": csrfToken' in html
 
 
 async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
@@ -459,7 +521,7 @@ async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
     client = AsyncMock()
     client.get.return_value = json.dumps(snapshot)
     measure = AsyncMock()
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
 
     with (
         patch.object(
@@ -472,7 +534,7 @@ async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
     measure.assert_not_awaited()
     client.set.assert_not_awaited()
     assert panel.status is PanelStatus.OK
-    assert panel.rows[0].cells[0] == "KR"
+    assert panel.rows[0].cells[0] == "국내 (KR)"
     # missing_expected_trading_day_count is NULL upstream — stays unmeasured.
     assert panel.rows[0].cells[6] is None
     assert panel.metrics[2].hint == "캐시"
@@ -543,7 +605,7 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         blockers=("kr:cohort_missing",),
         reasons=(),
     )
-    ctx = OpsContext(db=db_session, admin_user_id=1, now=_NOW)
+    ctx = OpsContext(db=db_session, now=_NOW)
     client = AsyncMock()
     client.get.return_value = None
 

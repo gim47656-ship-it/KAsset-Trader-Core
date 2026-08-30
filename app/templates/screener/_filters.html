@@ -1,56 +1,66 @@
 <article class="panel" id="filters-panel">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-        <h2>Filters</h2>
-        <span class="subtle" id="last-updated">Not loaded</span>
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-1">
+        <h2>검색 조건</h2>
+        <span class="subtle" id="last-updated">아직 불러오지 않음</span>
     </div>
+    <p class="field-help mb-2">조건을 정하고 <strong>검색</strong>을 누르면 아래 표에 종목이 나옵니다.</p>
     <form id="filter-form" class="d-grid gap-2">
         <div class="controls-grid">
-            <div>
-                <label for="market" class="form-label form-label-sm mb-1">Market</label>
-                <select class="form-select form-select-sm" id="market" name="market">
-                    <option value="kr">KR</option>
-                    <option value="us" selected>US</option>
-                    <option value="crypto">Crypto</option>
+            <div class="field">
+                <label for="market" class="form-label form-label-sm mb-1">시장</label>
+                <select class="form-select form-select-sm" id="market" name="market" aria-describedby="market-help">
+                    <option value="kr">국내 주식 (KR)</option>
+                    <option value="us" selected>미국 주식 (US)</option>
+                    <option value="crypto">암호화폐 (Crypto)</option>
                 </select>
+                <p class="field-help" id="market-help">어느 시장에서 찾을지 고릅니다.</p>
             </div>
-            <div>
-                <label for="sort-by" class="form-label form-label-sm mb-1">Sort By</label>
-                <select class="form-select form-select-sm" id="sort-by" name="sort_by">
-                    <option value="volume" data-markets="kr us" selected>volume</option>
-                    <option value="trade_amount" data-markets="crypto">trade_amount</option>
-                    <option value="market_cap" data-markets="kr us crypto">market_cap</option>
-                    <option value="change_rate" data-markets="kr us crypto">change_rate</option>
-                    <option value="rsi" data-markets="crypto">rsi</option>
+            <div class="field">
+                <label for="sort-by" class="form-label form-label-sm mb-1">정렬 기준</label>
+                <select class="form-select form-select-sm" id="sort-by" name="sort_by" aria-describedby="sort-by-help">
+                    <option value="volume" data-markets="kr us" selected>거래량</option>
+                    <option value="trade_amount" data-markets="crypto">거래대금</option>
+                    <option value="market_cap" data-markets="kr us crypto">시가총액</option>
+                    <option value="change_rate" data-markets="kr us crypto">등락률</option>
+                    <option value="rsi" data-markets="crypto">RSI</option>
                 </select>
+                <p class="field-help" id="sort-by-help">고른 시장에서 쓸 수 있는 기준만 표시됩니다.</p>
             </div>
-            <div>
-                <label for="sort-order" class="form-label form-label-sm mb-1">Order</label>
-                <select class="form-select form-select-sm" id="sort-order" name="sort_order">
-                    <option value="desc" selected>desc</option>
-                    <option value="asc">asc</option>
+            <div class="field">
+                <label for="sort-order" class="form-label form-label-sm mb-1">정렬 방향</label>
+                <select class="form-select form-select-sm" id="sort-order" name="sort_order" aria-describedby="sort-order-help">
+                    <option value="desc" selected>높은 값부터</option>
+                    <option value="asc">낮은 값부터</option>
                 </select>
+                <p class="field-help" id="sort-order-help">정렬 기준 값이 큰 종목을 먼저 볼지 정합니다.</p>
             </div>
-            <div>
-                <label for="max-rsi" class="form-label form-label-sm mb-1">Max RSI</label>
-                <input type="number" class="form-control form-control-sm" id="max-rsi" name="max_rsi" step="0.1" placeholder="optional">
+            <div class="field">
+                <label for="max-rsi" class="form-label form-label-sm mb-1">RSI 최대값</label>
+                <input type="number" class="form-control form-control-sm" id="max-rsi" name="max_rsi" step="0.1" placeholder="선택 입력" aria-describedby="max-rsi-help">
+                <p class="field-help" id="max-rsi-help">이 값보다 RSI가 낮은 종목만 봅니다. 비워두면 제한 없음.</p>
             </div>
-            <div>
-                <label for="min-volume" class="form-label form-label-sm mb-1">Min Volume</label>
-                <input type="number" class="form-control form-control-sm" id="min-volume" name="min_volume" step="0.01" min="0" placeholder="optional">
+            <div class="field">
+                <label for="min-volume" class="form-label form-label-sm mb-1">최소 거래량</label>
+                <input type="number" class="form-control form-control-sm" id="min-volume" name="min_volume" step="0.01" min="0" placeholder="선택 입력" aria-describedby="min-volume-help">
+                <p class="field-help" id="min-volume-help">거래가 너무 적은 종목을 걸러냅니다. 비워두면 제한 없음.</p>
             </div>
-            <div>
-                <label for="limit" class="form-label form-label-sm mb-1">Limit</label>
-                <input type="number" class="form-control form-control-sm" id="limit" name="limit" min="1" max="100" value="50">
+            <div class="field">
+                <label for="limit" class="form-label form-label-sm mb-1">최대 표시 개수</label>
+                <input type="number" class="form-control form-control-sm" id="limit" name="limit" min="1" max="100" value="50" aria-describedby="limit-help">
+                <p class="field-help" id="limit-help">1~100개까지 표시합니다.</p>
             </div>
         </div>
 
-        <div class="d-flex gap-2">
+        <div class="d-flex flex-wrap gap-2">
             <button class="btn btn-dark btn-sm" type="submit" id="search-button">
-                Search
+                검색
             </button>
             <button class="btn btn-outline-dark btn-sm" type="button" id="refresh-button">
-                Refresh Cache
+                최신 시세로 다시 받기
             </button>
         </div>
+        <p class="field-help mb-0">
+            ‘최신 시세로 다시 받기’는 저장된 시세를 버리고 새로 가져옵니다. 검색보다 시간이 더 걸립니다.
+        </p>
     </form>
 </article>

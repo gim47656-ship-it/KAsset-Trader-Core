@@ -132,6 +132,29 @@ def test_auth_api_post_is_exempt_from_csrf(auth_test_client):
     assert response.status_code != 403
 
 
+def test_admin_mutation_is_not_exempt_from_csrf(auth_test_client):
+    """``/admin/*``는 더 이상 CSRF 면제 목록에 없다.
+
+    토큰이 없으면 미들웨어가 403으로 끊고, 유효한 토큰이 있으면 검사를 통과해
+    기존 관리자 인증(``require_admin``)이 401을 낸다. 즉 CSRF와 인증이 각각
+    독립적으로 살아 있다.
+    """
+
+    without_token = auth_test_client.put(
+        "/admin/users/2/role",
+        json={"role": "trader"},
+    )
+    assert without_token.status_code == 403
+
+    auth_test_client.get("/health")
+    with_token = auth_test_client.put(
+        "/admin/users/2/role",
+        json={"role": "trader"},
+        headers={"X-CSRFToken": auth_test_client.cookies["csrftoken"]},
+    )
+    assert with_token.status_code == 401
+
+
 @pytest.mark.asyncio
 async def test_csrf_middleware_reads_multipart_form_token():
     body = (

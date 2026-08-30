@@ -269,10 +269,11 @@ def create_app() -> FastAPI:
     app.add_middleware(
         TemplateFormCSRFMiddleware,
         secret=settings.SECRET_KEY,
+        # ``/admin/*``는 브라우저 전용 관리 화면이므로 면제하지 않는다. 관리자
+        # mutation은 세션 쿠키와 ``X-CSRFToken`` 헤더를 모두 요구한다.
         exempt_urls=[
             re.compile(r"^/api/"),
             re.compile(r"^/auth/"),
-            re.compile(r"^/admin/"),
             re.compile(r"^/openclaw/"),
             re.compile(r"^/agent/"),
             re.compile(r"^/ws/"),

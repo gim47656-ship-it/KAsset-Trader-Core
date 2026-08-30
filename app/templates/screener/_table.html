@@ -1,19 +1,23 @@
 <article class="panel" id="results-panel">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-        <h2>Results</h2>
-        <span class="subtle" id="result-stats">0 rows</span>
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-1">
+        <h2>검색 결과</h2>
+        <span class="subtle" id="result-stats">0개</span>
     </div>
-    <div class="results-table-wrap screener-results-table-wrap">
+    <p class="field-help mb-2">
+        종목 오른쪽의 <strong>리포트</strong> 버튼을 누르면 그 종목의 AI 분석이 시작됩니다.
+    </p>
+    <div class="results-table-wrap screener-results-table-wrap" tabindex="0" role="region"
+         aria-label="검색 결과 표">
         <table class="table table-sm table-striped results-table" id="results-table">
             <thead>
             <tr>
-                <th>Symbol</th>
-                <th>Name</th>
-                <th>Price</th>
-                <th>Change</th>
-                <th>Volume</th>
+                <th>종목코드</th>
+                <th>종목명</th>
+                <th>현재가</th>
+                <th>등락률</th>
+                <th>거래량</th>
                 <th>RSI</th>
-                <th>Report</th>
+                <th>분석</th>
             </tr>
             </thead>
             <tbody id="results-body"></tbody>
@@ -21,6 +25,24 @@
     </div>
     <div class="results-cards" id="results-cards" aria-live="polite"></div>
     <p class="muted-block mt-2 mb-0" id="results-message" aria-live="polite">
-        Load screen data to start report generation.
+        먼저 위에서 조건을 정하고 검색하세요.
     </p>
+
+    <details class="disclose mt-2">
+        <summary>표에 나오는 말 뜻</summary>
+        <dl class="term-list">
+            <dt>종목코드</dt>
+            <dd>시장에서 종목을 구분하는 고유 기호입니다. 국내는 숫자 6자리, 미국은 알파벳입니다.</dd>
+            <dt>현재가</dt>
+            <dd>마지막으로 확인된 가격입니다. 실시간 호가가 아닙니다.</dd>
+            <dt>등락률</dt>
+            <dd>직전 기준 대비 가격이 얼마나 오르내렸는지를 나타냅니다.</dd>
+            <dt>거래량</dt>
+            <dd>얼마나 많이 거래됐는지입니다. 암호화폐는 24시간 거래대금이 들어옵니다.</dd>
+            <dt>RSI</dt>
+            <dd>가격이 최근에 많이 올랐는지 내렸는지를 0~100으로 나타낸 지표입니다. 통상 70 이상은 과열, 30 이하는 침체로 봅니다. 이 값만으로 매매를 판단하지 마세요.</dd>
+            <dt>값이 ‘-’ 로 나올 때</dt>
+            <dd>0이라는 뜻이 아니라, 이 종목에 대해 받아온 값이 없다는 뜻입니다.</dd>
+        </dl>
+    </details>
 </article>

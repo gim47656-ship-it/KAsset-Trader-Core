@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.extensions.kasset.automation.contracts import PaperExecutionOutcome
 from app.extensions.kasset.automation.job import run_approved_recommendation_once
 from app.models.trading import User, UserRole
 from app.routers.dependencies import get_authenticated_user
@@ -146,6 +147,7 @@ async def _parse_decision_body(
                 "portfolio",
                 "hard_risk",
                 "paper_order",
+                "paper_execution",
             }
         }
     },
@@ -295,11 +297,19 @@ async def decide_recommendation(
             ),
             details={"reason": exc.reason},
         )
+    paper_execution = None
     if parsed.decision == "APPROVED" and _supports_paper_execution(row):
-        await run_approved_recommendation_once(
-            current_user.id,
-            recommendation_id,
-        )
+        try:
+            paper_execution = await run_approved_recommendation_once(
+                current_user.id,
+                recommendation_id,
+            )
+        except Exception as exc:
+            paper_execution = PaperExecutionOutcome(
+                status="FAILED",
+                reason=f"approval_execution_failed:{type(exc).__name__}",
+                recommendation_id=recommendation_id,
+            )
         row = await service.get_recommendation(
             current_user.id,
             recommendation_id,
@@ -309,6 +319,7 @@ async def decide_recommendation(
     return build_recommendation_response(
         row,
         paper_order=paper_orders.get(row.id),
+        paper_execution=paper_execution,
         resolved_name=symbol_names.get((row.market, row.symbol)),
     )
 

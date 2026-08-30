@@ -14,6 +14,7 @@ from .ai_recommendations import (
     RecommendationStatusGroup,
     TerminalRecommendationDecision,
 )
+from .ai_runtime_config import AiRuntimeConfig
 from .analysis import StockAnalysisResult, StockInfo
 from .analysis_artifact import AnalysisArtifact
 from .analyst_consensus_snapshot import AnalystConsensusSnapshot
@@ -204,6 +205,7 @@ __all__ = [
     "Base",
     "AnalysisArtifact",
     "AiCallEvent",
+    "AiRuntimeConfig",
     "AIRecommendation",
     "RecommendationAction",
     "RecommendationDecision",

@@ -23,6 +23,7 @@ from app.extensions.kasset.automation.contracts import PROMOTION_BYPASSED_BY_OWN
 from app.extensions.kasset.automation.job import (
     OwnerScopedRecommendationService,
     RuntimeStateSafetyGate,
+    run_approved_recommendation_once,
     run_paper_automation_once,
 )
 from app.extensions.kasset.automation.policy import (
@@ -99,6 +100,21 @@ async def _set_auto_policy(
         owner_user_id,
         mode=OperatingMode.AUTO_PAPER,
         limits=replace(AITradingLimits(), kill_switch=kill_switch),
+        now=now,
+    )
+
+
+async def _set_approval_policy(
+    db_session: AsyncSession,
+    owner_user_id: int,
+    *,
+    now: datetime = _NOW,
+) -> None:
+    await AITradingPolicyService().put_snapshot(
+        db_session,
+        owner_user_id,
+        mode=OperatingMode.APPROVAL,
+        limits=AITradingLimits(),
         now=now,
     )
 
@@ -723,6 +739,70 @@ async def _cleanup_paper_wiring(db_session: AsyncSession, owner_id: int) -> None
             delete(PaperAccount).where(PaperAccount.id.in_(account_ids))
         )
     await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_approved_decision_places_order_in_the_owner_paper_account(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """APPROVAL mode reaches the same owner-scoped PAPER adapter as AUTO_PAPER."""
+
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_approval_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        calls = _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        outcome = await run_approved_recommendation_once(
+            owner_id,
+            recommendation_id,
+            now=_NOW_IN_SESSION,
+        )
+
+        assert outcome.status == "SUBMITTED"
+        assert outcome.reason == "submitted"
+        assert outcome.recommendation_id == recommendation_id
+        assert set(calls) == {("KRX", "005930")}
+        account_ids = list(
+            await db_session.scalars(
+                select(AndroidPaperAccount.paper_account_id).where(
+                    AndroidPaperAccount.owner_user_id == owner_id
+                )
+            )
+        )
+        order = await db_session.scalar(
+            select(AndroidPaperOrder).where(
+                AndroidPaperOrder.owner_user_id == owner_id,
+                AndroidPaperOrder.id
+                == (
+                    select(AIRecommendation.paper_order_id)
+                    .where(AIRecommendation.id == recommendation_id)
+                    .scalar_subquery()
+                ),
+            )
+        )
+        assert len(account_ids) == 1
+        assert order is not None
+        assert order.paper_account_id == account_ids[0]
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "SUCCEEDED"
+    finally:
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
 
 
 @pytest.mark.asyncio

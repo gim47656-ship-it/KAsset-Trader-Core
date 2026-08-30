@@ -18,9 +18,9 @@ trading stack):
   does not provide (NULL cost, NULL realized P&L, AI usage the provider never
   reported) is also ``None`` — never silently coerced to ``0``.
 
-Query budget for one page load — 25 statements cold, 17 warm::
+Query budget for one page load — 26 statements cold, 18 warm::
 
-    운영 상태          4  alembic_version (5분 캐시) + brokers + 소유자 상태 집계 + 전역 kill switch
+    운영 상태          5  alembic_version (5분 캐시) + 활성 사용자/AI 모드/증권사/전역 kill switch
     AI 사용량          4  summarize_ai_usage() 합계 + provider/model/feature — 24시간
     자동매매 funnel    2  추천 24시간 / PAPER 주문 24시간
     PAPER 포트폴리오   2  보유 포지션(계좌 한정) / 체결 30일
@@ -50,7 +50,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.timezone import KST
-from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.router import _applied_migration_revision
 from app.services.ai_usage_service import summarize_ai_usage
 from app.services.daily_candles.readiness import (
@@ -154,7 +153,6 @@ class OpsDashboard:
 @dataclass(frozen=True, slots=True)
 class OpsContext:
     db: AsyncSession
-    admin_user_id: int
     now: datetime
 
     @property
@@ -228,7 +226,54 @@ def _age(value: datetime | None, now: datetime) -> str | None:
 
 
 def _flag(value: bool) -> str:
-    return "ON" if value else "OFF"
+    return "켜짐" if value else "꺼짐"
+
+
+_TRADING_MODE_LABELS = {
+    "PAPER": "모의투자 (PAPER)",
+    "AUTO_PAPER": "자동 모의투자 (AUTO_PAPER)",
+    "LIVE": "실거래 (LIVE)",
+}
+
+_STATE_LABELS = {
+    "PENDING": "대기 중 (PENDING)",
+    "APPROVED": "승인됨 (APPROVED)",
+    "REJECTED": "거절됨 (REJECTED)",
+    "PAPER_APPROVED": "모의투자 승인 (PAPER_APPROVED)",
+    "FILLED": "체결 완료 (FILLED)",
+    "PARTIALLY_FILLED": "일부 체결 (PARTIALLY_FILLED)",
+    "CANCELLED": "취소됨 (CANCELLED)",
+    "FAILED": "실패 (FAILED)",
+    "success": "성공 (success)",
+    "dry_run_ok": "모의 실행 성공 (dry_run_ok)",
+}
+
+
+def _trading_mode(value: object) -> str:
+    normalized = str(value)
+    return _TRADING_MODE_LABELS.get(normalized, normalized)
+
+
+def _ai_mode(value: object) -> str:
+    normalized = str(value)
+    return {
+        "APPROVAL": "승인 후 모의주문 (APPROVAL)",
+        "AUTO_PAPER": "승인 없는 자동 모의주문 (AUTO_PAPER)",
+    }.get(normalized, normalized)
+
+
+def _state(value: object) -> str:
+    normalized = str(value)
+    return _STATE_LABELS.get(normalized, normalized)
+
+
+def _market(value: object) -> str:
+    normalized = str(value).lower()
+    return {
+        "kr": "국내 (KR)",
+        "us": "미국 (US)",
+        "crypto": "가상자산",
+    }.get(normalized, str(value))
 
 
 def _window_label(since: datetime, now: datetime) -> str:
@@ -258,14 +303,65 @@ async def _rows(
 
 
 _OWNER_RUNTIME_SUMMARY_SQL = """/* ops_dashboard:owner_runtime_summary */
-SELECT trading_mode,
-       kill_switch_enabled,
+SELECT state.trading_mode,
+       state.kill_switch_enabled,
+       count(*) AS owner_count
+FROM kasset_android_runtime_state AS state
+JOIN users AS owner
+  ON owner.id = state.owner_user_id
+ AND owner.is_active IS TRUE
+ AND owner.role IN ('trader', 'admin')
+GROUP BY state.trading_mode, state.kill_switch_enabled
+ORDER BY state.trading_mode, state.kill_switch_enabled
+"""
+
+_AI_MODE_SUMMARY_SQL = """/* ops_dashboard:ai_mode_summary */
+SELECT COALESCE(NULLIF(setting.value ->> 'mode', ''), 'APPROVAL') AS ai_mode,
+       count(*) AS owner_count
+FROM users AS owner
+LEFT JOIN user_settings AS setting
+  ON setting.user_id = owner.id
+ AND setting.key = 'kasset.ai_trading'
+WHERE owner.is_active IS TRUE
+  AND (
+    owner.role = 'trader'
+    OR (
+      owner.role = 'admin'
+      AND (
+        setting.user_id IS NOT NULL
+        OR EXISTS (
+          SELECT 1
+          FROM kasset_android_runtime_state AS runtime
+          WHERE runtime.owner_user_id = owner.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM kasset_broker_credentials AS credentials
+          WHERE credentials.owner_user_id = owner.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM review.ai_recommendations AS recommendation
+          WHERE recommendation.owner_user_id = owner.id
+        )
+      )
+    )
+  )
+GROUP BY COALESCE(NULLIF(setting.value ->> 'mode', ''), 'APPROVAL')
+ORDER BY ai_mode
+"""
+
+_ACTIVE_BROKER_SUMMARY_SQL = """/* ops_dashboard:active_broker_summary */
+SELECT credentials.provider,
        count(*) AS owner_count,
-       max(CASE WHEN owner_user_id = :admin_user_id THEN 1 ELSE 0 END)
-           AS includes_viewer
-FROM kasset_android_runtime_state
-GROUP BY trading_mode, kill_switch_enabled
-ORDER BY trading_mode, kill_switch_enabled
+       max(credentials.last_verified_at) AS last_verified_at
+FROM kasset_broker_credentials AS credentials
+JOIN users AS owner
+  ON owner.id = credentials.owner_user_id
+ AND owner.is_active IS TRUE
+ AND owner.role IN ('trader', 'admin')
+GROUP BY credentials.provider
+ORDER BY credentials.provider
 """
 
 _GLOBAL_RUNTIME_SQL = """/* ops_dashboard:global_runtime */
@@ -276,49 +372,40 @@ WHERE id = 1
 
 
 async def _system_panel(ctx: OpsContext) -> OpsPanel:
-    # Unlike runtime_state.get/get_global, these SELECTs do not create default
-    # rows or commit the shared dashboard session. Missing rows use the same
-    # effective defaults (PAPER/OFF) and are disclosed in the panel note.
+    # These read-only SELECTs do not create default runtime or user-setting
+    # rows. Missing runtime means PAPER/OFF; missing AI mode means APPROVAL.
     revision = await _applied_migration_revision(ctx.db)
-    registered = await broker_registry.list_brokers(ctx.db, ctx.admin_user_id)
-    owner_states = await _rows(
-        ctx,
-        _OWNER_RUNTIME_SUMMARY_SQL,
-        {"admin_user_id": ctx.admin_user_id},
-    )
+    owner_states = await _rows(ctx, _OWNER_RUNTIME_SUMMARY_SQL)
+    ai_modes = await _rows(ctx, _AI_MODE_SUMMARY_SQL)
+    active_brokers = await _rows(ctx, _ACTIVE_BROKER_SUMMARY_SQL)
     global_rows = await _rows(ctx, _GLOBAL_RUNTIME_SQL)
 
-    personal_mode = "PAPER"
-    personal_kill_switch = False
-    personal_state_persisted = False
-    owner_total = 0
-    owner_kill_switch_total = 0
-    for row in owner_states:
-        count = int(row["owner_count"])
-        owner_total += count
-        if bool(row["kill_switch_enabled"]):
-            owner_kill_switch_total += count
-        if bool(row["includes_viewer"]):
-            personal_mode = str(row["trading_mode"])
-            personal_kill_switch = bool(row["kill_switch_enabled"])
-            personal_state_persisted = True
-
+    owner_total = sum(int(row["owner_count"]) for row in ai_modes)
+    owner_kill_switch_total = sum(
+        int(row["owner_count"])
+        for row in owner_states
+        if bool(row["kill_switch_enabled"])
+    )
+    ai_mode_counts = {str(row["ai_mode"]): int(row["owner_count"]) for row in ai_modes}
+    auto_owner_total = ai_mode_counts.get("AUTO_PAPER", 0)
+    approval_owner_total = ai_mode_counts.get("APPROVAL", 0)
+    broker_connection_total = sum(int(row["owner_count"]) for row in active_brokers)
     global_kill_switch = bool(global_rows and global_rows[0]["kill_switch_enabled"])
+
     warnings: list[str] = []
     if global_kill_switch:
-        warnings.append("전역 kill switch ON")
+        warnings.append("전체 긴급 중지 켜짐")
     if owner_kill_switch_total:
-        warnings.append(f"소유자 kill switch ON {owner_kill_switch_total:,}명")
+        warnings.append(f"사용자 긴급 중지 켜짐 {owner_kill_switch_total:,}명")
+    if not owner_total:
+        warnings.append("활성 거래 사용자 없음")
+    elif settings.AI_PAPER_AUTO_EXECUTION_ENABLED and not auto_owner_total:
+        warnings.append("승인 없는 자동 주문 사용자 없음")
     if revision is None:
-        warnings.append("migration revision 조회 불가")
+        warnings.append("DB 스키마 버전 조회 불가")
     if settings.LIVE_TRADING_ENABLED:
-        warnings.append("LIVE 매매 허용")
+        warnings.append("실거래 허용됨")
 
-    personal_hint = (
-        f"현재 관리자 id={ctx.admin_user_id} 기준 · 저장된 개인 상태"
-        if personal_state_persisted
-        else f"현재 관리자 id={ctx.admin_user_id} 기준 · 저장 행 없음, 기본값"
-    )
     metrics = (
         OpsMetric("서버 버전", settings.KASSET_SERVER_VERSION),
         OpsMetric(
@@ -328,60 +415,87 @@ async def _system_panel(ctx: OpsContext) -> OpsPanel:
             .isoformat()
             .replace("+00:00", "Z"),
         ),
-        OpsMetric("DB", "ok"),
-        OpsMetric("migration revision", revision, hint="alembic_version"),
-        OpsMetric("내 trading mode", personal_mode, hint=personal_hint),
+        OpsMetric("데이터베이스", "정상"),
+        OpsMetric("DB 스키마 버전", revision, hint="alembic_version"),
         OpsMetric(
-            "Core 거래 기능 (TRADING_ENABLED)",
+            "활성 거래 사용자",
+            _count(owner_total),
+            hint="활성 trader + 거래 상태가 있는 admin",
+        ),
+        OpsMetric(
+            "승인 없는 자동 주문 사용자",
+            _count(auto_owner_total),
+            hint="AUTO_PAPER",
+        ),
+        OpsMetric(
+            "승인 후 주문 사용자",
+            _count(approval_owner_total),
+            hint="APPROVAL",
+        ),
+        OpsMetric(
+            "Core 거래 기능",
             _flag(settings.TRADING_ENABLED),
+            hint="TRADING_ENABLED",
         ),
         OpsMetric(
-            "실거래 허용 (LIVE_TRADING_ENABLED)",
+            "실거래 허용",
             _flag(settings.LIVE_TRADING_ENABLED),
+            hint="LIVE_TRADING_ENABLED",
         ),
         OpsMetric(
-            "PAPER 자동실행 (AI_PAPER_AUTO_EXECUTION_ENABLED)",
+            "모의투자 자동 실행",
             _flag(settings.AI_PAPER_AUTO_EXECUTION_ENABLED),
+            hint="AI_PAPER_AUTO_EXECUTION_ENABLED",
         ),
-        OpsMetric("내 kill switch", _flag(personal_kill_switch), hint=personal_hint),
         OpsMetric(
-            "소유자 kill switch ON",
+            "사용자 긴급 중지 켜짐",
             _count(owner_kill_switch_total),
-            hint=f"runtime state 전체 {owner_total:,}명",
+            hint=f"활성 거래 사용자 {owner_total:,}명",
         ),
-        OpsMetric("전역 kill switch", _flag(global_kill_switch)),
+        OpsMetric("전체 긴급 중지", _flag(global_kill_switch)),
     )
-    rows = tuple(
-        OpsRow(
-            (
-                "소유자 runtime",
-                str(row["trading_mode"]),
-                f"kill switch {_flag(bool(row['kill_switch_enabled']))}",
-                _count(row["owner_count"]),
+    rows = (
+        tuple(
+            OpsRow(
+                (
+                    "사용자 거래 설정",
+                    _trading_mode(row["trading_mode"]),
+                    f"긴급 중지 {_flag(bool(row['kill_switch_enabled']))}",
+                    _count(row["owner_count"]),
+                )
             )
+            for row in owner_states
         )
-        for row in owner_states
-    ) + tuple(
-        OpsRow(
-            (
-                "broker",
-                broker.provider,
-                "연결됨" if broker.connected else "미연결",
-                broker.last_verified_at or UNMEASURED_TEXT,
+        + tuple(
+            OpsRow(
+                (
+                    "AI 주문 방식",
+                    _ai_mode(row["ai_mode"]),
+                    "설정됨",
+                    _count(row["owner_count"]),
+                )
             )
+            for row in ai_modes
         )
-        for broker in registered
+        + tuple(
+            OpsRow(
+                (
+                    "증권사 연결",
+                    str(row["provider"]),
+                    "인증정보 등록됨",
+                    _ts(row["last_verified_at"]) or _count(row["owner_count"]),
+                )
+            )
+            for row in active_brokers
+        )
     )
     summary = (
-        "주의: " + ", ".join(warnings)
+        "확인 필요: " + ", ".join(warnings)
         if warnings
-        else f"정상 · 등록 broker {len(registered)}건"
-    )
-    persisted_note = (
-        "저장된 개인 runtime 상태입니다."
-        if personal_state_persisted
-        else "개인 runtime 저장 행이 없어 유효 기본값(PAPER/OFF)을 표시하며, "
-        "이 조회는 행을 생성하지 않습니다."
+        else (
+            f"운영 안전 설정 정상 · 활성 거래 사용자 {owner_total:,}명 · "
+            f"증권사 연결 {broker_connection_total:,}건"
+        )
     )
     return OpsPanel(
         status=PanelStatus.WARN if warnings else PanelStatus.OK,
@@ -390,11 +504,12 @@ async def _system_panel(ctx: OpsContext) -> OpsPanel:
         columns=("구분", "대상", "상태", "수/최근 확인"),
         rows=rows,
         note=(
-            f"내 trading mode와 내 kill switch는 현재 관리자 id={ctx.admin_user_id} "
-            f"기준이며 소유자 전체 상태 및 전역 상태와 분리 표시합니다. {persisted_note}"
+            "활성 trader와 거래 설정·상태·추천이 있는 admin만 집계합니다. 저장된 runtime 행이 없으면 모의투자/긴급 중지 꺼짐, "
+            "AI 주문 방식 행이 없으면 승인 후 주문(APPROVAL)이 안전 기본값입니다. "
+            "이 조회는 기본 행을 만들거나 설정을 바꾸지 않습니다."
         ),
         source=(
-            "alembic_version · kasset_broker_credentials · "
+            "alembic_version · users · user_settings · kasset_broker_credentials · "
             "kasset_android_runtime_state · kasset_global_runtime_state"
         ),
     )
@@ -411,12 +526,11 @@ async def _system_panel(ctx: OpsContext) -> OpsPanel:
 # absent from these numbers — not zero, not NULL, absent. Saying so on screen
 # is the difference between "AI를 안 썼다" and "여기서는 안 보인다".
 AI_COVERAGE_NOTE = (
-    "계측 범위: AvailabilityRoutedJsonClient를 거치는 구조화 호출만 "
-    "(MCP 포함, 단 MCP는 usage를 주지 않아 토큰이 '미제공'으로 잡힘). "
-    "run_skill 계열 경로(구독형 CLI·Cloudflare·Hermes·ChainedApiProvider)는 "
-    "원장에 행 자체가 남지 않으므로 이 숫자에 전혀 나타나지 않는다. "
-    "비용은 provider가 금액과 통화를 함께 줄 때만 기록되며 현재 운영 경로는 "
-    "아무도 주지 않는다."
+    "이 화면에는 앱이 기록한 구조화 AI 호출(일반 API·OpenRouter·AI MCP)만 "
+    "집계됩니다. 구독형 CLI와 알림형 연동은 별도 경로라 여기에 표시되지 않으므로 "
+    "0건이 곧 AI 미사용을 뜻하지 않습니다. AI MCP는 토큰 사용량을 보내지 않아 "
+    "'토큰 미제공'으로 표시됩니다. 비용도 AI 제공사가 금액과 통화를 함께 보낼 때만 "
+    "표시됩니다."
 )
 
 
@@ -437,9 +551,9 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
     )
 
     breakdowns = (
-        ("provider", summary_data.by_provider),
-        ("model", summary_data.by_model),
-        ("feature", summary_data.by_feature),
+        ("AI 제공사", summary_data.by_provider),
+        ("모델", summary_data.by_model),
+        ("기능", summary_data.by_feature),
     )
     rows = tuple(
         OpsRow(
@@ -461,20 +575,20 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
     if summary_data.attempts == 0:
         status = PanelStatus.IDLE
         summary = (
-            "최근 24시간 계측된 AI 호출 0건 (조회 성공). "
-            "계측 범위 밖 경로가 있으므로 AI를 쓰지 않았다는 뜻은 아니다."
+            "최근 24시간 화면에 집계된 AI 호출 0건 (조회 성공). "
+            "구독형 CLI 등 별도 AI 경로는 이 화면에 표시되지 않습니다."
         )
     elif summary_data.failure_attempts:
         status = PanelStatus.WARN
         summary = (
-            f"논리 호출 {summary_data.logical_calls:,}건 / provider 시도 "
+            f"AI 요청 {summary_data.logical_calls:,}건 / 제공사 연결 시도 "
             f"{summary_data.attempts:,}건 중 실패 "
             f"{summary_data.failure_attempts:,}건"
         )
     else:
         status = PanelStatus.OK
         summary = (
-            f"논리 호출 {summary_data.logical_calls:,}건 · provider 시도 "
+            f"AI 요청 {summary_data.logical_calls:,}건 · 제공사 연결 시도 "
             f"{summary_data.attempts:,}건 전부 성공"
         )
 
@@ -486,26 +600,26 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
         and summary_data.attempts_without_usage == summary_data.attempts
     )
     usage_hint = (
-        f"토큰 미제공 {summary_data.attempts_without_usage:,}건 제외"
+        f"사용량을 보내지 않은 시도 {summary_data.attempts_without_usage:,}건 제외"
         if summary_data.attempts_without_usage
-        else "모든 시도가 usage 보고"
+        else "모든 시도가 토큰 사용량을 보냄"
     )
     return OpsPanel(
         status=status,
         summary=summary,
         metrics=(
             OpsMetric(
-                "논리 호출",
+                "AI 요청",
                 _count(summary_data.logical_calls),
                 hint=(
-                    "routed client 호출 수 (모델 티어당 1개, "
-                    "terra→sol escalation은 2회)"
+                    "기능별 요청 수입니다. 한 요청이 정밀 검토로 넘어가면 "
+                    "모델을 두 번 호출할 수 있습니다."
                 ),
             ),
             OpsMetric(
-                "provider 시도",
+                "AI 제공사 시도",
                 _count(summary_data.attempts),
-                hint="fallback·티어 escalation 포함",
+                hint="대체 제공사 호출·모델 단계 상승 포함",
             ),
             OpsMetric("실패 시도", _count(summary_data.failure_attempts)),
             OpsMetric(
@@ -516,21 +630,21 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
             OpsMetric(
                 "토큰 미제공 시도",
                 _count(summary_data.attempts_without_usage),
-                hint="usage를 주지 않는 경로",
+                hint="토큰 사용량을 보내지 않은 AI 경로",
             ),
             OpsMetric(
                 "비용",
                 _cost_cell(summary_data.cost_amount, summary_data.cost_currency),
-                hint="provider가 보고한 값만",
+                hint="AI 제공사가 보고한 값만",
             ),
             OpsMetric("p50 지연", _opt_count(summary_data.p50_latency_ms), hint="ms"),
             OpsMetric("p95 지연", _opt_count(summary_data.p95_latency_ms), hint="ms"),
         ),
         columns=(
-            "구분",
-            "키",
-            "논리 호출",
-            "시도",
+            "분류",
+            "제공사·모델·기능",
+            "AI 요청",
+            "연결 시도",
             "성공률",
             "총 토큰",
             "토큰 미제공",
@@ -610,8 +724,8 @@ async def _funnel_panel(ctx: OpsContext) -> OpsPanel:
     rows = tuple(
         OpsRow(
             (
-                "추천",
-                str(row["decision"]),
+                "AI 추천",
+                _state(row["decision"]),
                 _count(row["attempt_count"]),
                 _count(row["decided_count"]),
                 _ts(row["last_created_at"]),
@@ -621,8 +735,8 @@ async def _funnel_panel(ctx: OpsContext) -> OpsPanel:
     ) + tuple(
         OpsRow(
             (
-                "PAPER 주문",
-                str(row["status"]),
+                "모의투자 주문",
+                _state(row["status"]),
                 _count(row["order_count"]),
                 _amount(row["filled_quantity"]),
                 _ts(row["last_update_at"]),
@@ -643,7 +757,7 @@ async def _funnel_panel(ctx: OpsContext) -> OpsPanel:
         summary=summary,
         metrics=(
             OpsMetric("추천 생성", _count(recommendation_total)),
-            OpsMetric("PAPER 주문", _count(order_total)),
+            OpsMetric("모의투자 주문", _count(order_total)),
             OpsMetric(
                 "마지막 체결",
                 _ts(last_fill),
@@ -795,7 +909,7 @@ async def _reconcile_panel(ctx: OpsContext) -> OpsPanel:
                 str(row["broker"]),
                 _ts(row["started_at"]),
                 _age(row["finished_at"], ctx.now) or "미완료",
-                "dry-run" if row["dry_run"] else "commit",
+                "확인만 함" if row["dry_run"] else "실제 반영",
                 _count(int(row["committed_insert"]) + int(row["committed_update"])),
                 str(row["error_summary"]) if row["error_summary"] else "-",
             )
@@ -816,17 +930,17 @@ async def _reconcile_panel(ctx: OpsContext) -> OpsPanel:
         summary = "주의: " + ", ".join(parts)
     else:
         status = PanelStatus.OK
-        summary = f"broker {len(runs)}곳 대사 정상 · 반영 {committed:,}건"
+        summary = f"증권사 {len(runs)}곳 대사 정상 · 반영 {committed:,}건"
 
     return OpsPanel(
         status=status,
         summary=summary,
         metrics=(
-            OpsMetric("대사한 broker", _count(len(runs))),
+            OpsMetric("대사한 증권사", _count(len(runs))),
             OpsMetric("오류/미완료", _count(len(failing))),
             OpsMetric("반영 행", _count(committed)),
         ),
-        columns=("broker", "시작", "완료", "모드", "반영", "오류"),
+        columns=("증권사", "시작", "완료", "처리 방식", "반영", "오류"),
         rows=rows,
         window=_window_label(ctx.since_runs, ctx.now),
         source="review.execution_ledger_reconcile_runs",
@@ -942,7 +1056,7 @@ async def _readiness_panel(ctx: OpsContext) -> OpsPanel:
     rows = tuple(
         OpsRow(
             (
-                str(market["market"]).upper(),
+                _market(market["market"]),
                 "준비됨" if market["daily_history_ready"] else "미달",
                 "준비됨" if market["promotion_ready"] else "미달",
                 _count(market["eligible_symbol_count"]),
@@ -996,12 +1110,12 @@ async def _readiness_panel(ctx: OpsContext) -> OpsPanel:
             "승격",
             "적격 종목",
             "252봉 이상",
-            "stale",
+            "오래된 봉",
             "결측 거래일",
             "중복",
             "이상치",
-            "벤치마크",
-            "blocker",
+            "기준 종목",
+            "차단 사유",
         ),
         rows=rows,
         window=f"캐시 TTL {_READINESS_CACHE_TTL_SECONDS // 60}분",
@@ -1063,9 +1177,9 @@ async def _news_panel(ctx: OpsContext) -> OpsPanel:
     rows = tuple(
         OpsRow(
             (
-                "수집 run",
-                str(row["market"]),
-                str(row["status"]),
+                "뉴스 수집",
+                _market(row["market"]),
+                _state(row["status"]),
                 _count(row["inserted_count"]),
                 _count(row["skipped_count"]),
                 _age(row["finished_at"], ctx.now) or "미완료",
@@ -1077,7 +1191,7 @@ async def _news_panel(ctx: OpsContext) -> OpsPanel:
         OpsRow(
             (
                 "기사",
-                str(row["market"]),
+                _market(row["market"]),
                 "-",
                 _count(row["article_count"]),
                 f"요약 {_count(row['summarized_count'])} / 분석 "
@@ -1091,14 +1205,14 @@ async def _news_panel(ctx: OpsContext) -> OpsPanel:
 
     if not runs and article_total == 0:
         status = PanelStatus.IDLE
-        summary = "최근 7일 수집 run 0건 · 최근 24시간 기사 0건 (조회 성공)"
+        summary = "최근 7일 수집 실행 0건 · 최근 24시간 기사 0건 (조회 성공)"
     elif failing:
         status = PanelStatus.WARN
-        summary = f"주의: 실패/부분 성공 run {len(failing)}건"
+        summary = f"확인 필요: 실패/부분 성공 수집 {len(failing)}건"
     else:
         status = PanelStatus.OK
         summary = (
-            f"수집 run {len(runs)}건 · 최근 24시간 기사 {article_total:,}건 "
+            f"수집 실행 {len(runs)}건 · 최근 24시간 기사 {article_total:,}건 "
             f"(요약 {summarized_total:,} / 분석 {analyzed_total:,})"
         )
 
@@ -1106,12 +1220,12 @@ async def _news_panel(ctx: OpsContext) -> OpsPanel:
         status=status,
         summary=summary,
         metrics=(
-            OpsMetric("수집 run", _count(len(runs))),
+            OpsMetric("수집 실행", _count(len(runs))),
             OpsMetric("기사", _count(article_total)),
             OpsMetric(
                 "최근 수집",
                 _ts(latest_run_finished),
-                hint=_age(latest_run_finished, ctx.now) or "완료된 run 없음",
+                hint=_age(latest_run_finished, ctx.now) or "완료된 수집 없음",
             ),
         ),
         columns=(
@@ -1125,8 +1239,8 @@ async def _news_panel(ctx: OpsContext) -> OpsPanel:
         ),
         rows=rows,
         window=(
-            f"run {_window_label(ctx.since_runs, ctx.now)} · "
-            "기사 최근 24시간(발행시각 기준, 수집기별 타임존 혼재로 최대 +9시간 과대집계)"
+            f"수집 {_window_label(ctx.since_runs, ctx.now)} · "
+            "기사 최근 24시간(발행시각 기준, 수집기별 시간대 혼재로 최대 +9시간 과대집계)"
         ),
         source="news_ingestion_runs · news_articles",
     )
@@ -1189,7 +1303,7 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         OpsRow(
             (
                 "승격",
-                str(row["state"]),
+                _state(row["state"]),
                 _count(row["promotion_count"]),
                 _ts(row["last_updated_at"]),
             )
@@ -1199,7 +1313,7 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         OpsRow(
             (
                 "후보",
-                str(row["status"]),
+                _state(row["status"]),
                 _count(row["candidate_count"]),
                 _ts(row["last_evaluated_at"]),
             )
@@ -1211,42 +1325,42 @@ async def _strategy_panel(ctx: OpsContext) -> OpsPanel:
         status = PanelStatus.WARN
         if approved_total == 0:
             summary = (
-                f"승격 레지스트리 {promotion_total:,}건 · PAPER_APPROVED 0건이지만 "
-                f"승격 우회 ON {bypass_owner_total:,}명 — 해당 소유자가 PAPER 모드이고 "
-                "kill switch OFF이면 승격 근거 없이 AUTO_PAPER 자동발주 가능"
+                f"승격 기록 {promotion_total:,}건 · 모의투자 승인 0건이지만 "
+                f"승격 우회 켜짐 {bypass_owner_total:,}명 — 해당 사용자가 모의투자 모드이고 "
+                "긴급 중지가 꺼져 있으면 승격 근거 없이 자동 모의주문 가능"
             )
         else:
             summary = (
-                f"PAPER_APPROVED {approved_total:,}건 · 전체 승격 "
-                f"{promotion_total:,}건 · 승격 우회 ON {bypass_owner_total:,}명 — "
-                "해당 소유자는 조건 충족 시 승격 근거 검사를 건너뜀"
+                f"모의투자 승인 {approved_total:,}건 · 전체 승격 "
+                f"{promotion_total:,}건 · 승격 우회 켜짐 {bypass_owner_total:,}명 — "
+                "해당 사용자는 조건 충족 시 승격 근거 검사를 건너뜀"
             )
     elif promotion_total == 0:
         status = PanelStatus.IDLE
         summary = (
-            "승격 레지스트리 0건 (조회 성공) — PAPER_APPROVED 전략이 없고 "
-            "승격 우회 ON 소유자도 0명이라 AUTO_PAPER 자동발주 불가"
+            "승격 기록 0건 (조회 성공) — 모의투자 승인 전략이 없고 "
+            "승격 우회가 켜진 사용자도 없어 자동 모의주문 불가"
         )
     elif approved_total == 0:
         status = PanelStatus.WARN
         summary = (
-            f"승격 {promotion_total:,}건 중 PAPER_APPROVED 0건이고 승격 우회 OFF — "
-            "AUTO_PAPER 자동발주 불가"
+            f"승격 {promotion_total:,}건 중 모의투자 승인 0건이고 승격 우회 꺼짐 — "
+            "자동 모의주문 불가"
         )
     else:
         status = PanelStatus.OK
         summary = (
-            f"PAPER_APPROVED {approved_total:,}건 · 전체 승격 {promotion_total:,}건 · "
-            "승격 우회 OFF"
+            f"모의투자 승인 {approved_total:,}건 · 전체 승격 {promotion_total:,}건 · "
+            "승격 우회 꺼짐"
         )
 
     return OpsPanel(
         status=status,
         summary=summary,
         metrics=(
-            OpsMetric("PAPER_APPROVED", _count(approved_total)),
-            OpsMetric("승격 레지스트리", _count(promotion_total)),
-            OpsMetric("승격 우회 ON 소유자", _count(bypass_owner_total)),
+            OpsMetric("모의투자 승인", _count(approved_total), hint="PAPER_APPROVED"),
+            OpsMetric("승격 기록", _count(promotion_total)),
+            OpsMetric("승격 우회 사용자", _count(bypass_owner_total)),
             OpsMetric("최근 30일 후보", _count(candidate_total)),
         ),
         columns=("구분", "상태", "건수", "최근 시각"),
@@ -1267,20 +1381,19 @@ PanelBuilder = Callable[[OpsContext], Awaitable[OpsPanel]]
 
 PANEL_BUILDERS: tuple[tuple[str, str, PanelBuilder], ...] = (
     ("system", "운영 상태", _system_panel),
-    ("ai_usage", "AI 사용량", _ai_usage_panel),
-    ("funnel", "자동매매 funnel", _funnel_panel),
-    ("paper_portfolio", "PAPER 포트폴리오", _paper_portfolio_panel),
-    ("reconcile", "체결 대사", _reconcile_panel),
-    ("data_readiness", "KR/US 데이터 readiness", _readiness_panel),
-    ("news", "뉴스 파이프라인", _news_panel),
-    ("strategy", "전략 승격", _strategy_panel),
+    ("ai_usage", "AI 연결과 사용량", _ai_usage_panel),
+    ("funnel", "자동매매 진행 흐름", _funnel_panel),
+    ("paper_portfolio", "모의투자 포트폴리오", _paper_portfolio_panel),
+    ("reconcile", "체결 내역 대조", _reconcile_panel),
+    ("data_readiness", "국내/미국 데이터 준비", _readiness_panel),
+    ("news", "뉴스 수집과 AI 분석", _news_panel),
+    ("strategy", "전략 승인", _strategy_panel),
 )
 
 
 async def build_ops_dashboard(
     db: AsyncSession,
     *,
-    admin_user_id: int,
     now: datetime | None = None,
 ) -> OpsDashboard:
     """Measure every panel sequentially, isolating each one's failures.
@@ -1290,7 +1403,7 @@ async def build_ops_dashboard(
     next one runs. That is what keeps the other panels renderable.
     """
     moment = now or datetime.now(UTC)
-    ctx = OpsContext(db=db, admin_user_id=admin_user_id, now=moment)
+    ctx = OpsContext(db=db, now=moment)
 
     panels: list[OpsPanel] = []
     for key, title, builder in PANEL_BUILDERS:

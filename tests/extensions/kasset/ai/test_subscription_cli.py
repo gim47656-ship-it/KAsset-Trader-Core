@@ -230,7 +230,9 @@ async def test_factory_builds_configured_cli_invoker(
     )
     monkeypatch.setattr(settings, "KASSET_AI_SUBSCRIPTION_TIMEOUT_SECONDS", 17.5)
     monkeypatch.setattr(factory, "build_cli_invoker", fake_build_cli_invoker)
-    monkeypatch.setattr(factory, "build_api_provider_chain", lambda: None)
+    monkeypatch.setattr(
+        factory, "build_api_provider_chain", lambda *, snapshot=None: None
+    )
 
     result = await factory.build_ai_provider_router().run_skill(_REQUEST)
 
@@ -250,7 +252,9 @@ async def test_factory_leaves_subscription_unconfigured_for_empty_command(
     monkeypatch.setattr(settings, "KASSET_AI_PROVIDER_MODE", "subscription")
     monkeypatch.setattr(settings, "KASSET_AI_SUBSCRIPTION_CMD", "   ")
     monkeypatch.setattr(factory, "build_cli_invoker", unexpected_builder)
-    monkeypatch.setattr(factory, "build_api_provider_chain", lambda: None)
+    monkeypatch.setattr(
+        factory, "build_api_provider_chain", lambda *, snapshot=None: None
+    )
 
     router = factory.build_ai_provider_router()
 

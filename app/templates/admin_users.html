@@ -279,6 +279,10 @@
 
 {% block scripts %}
 <script>
+// 관리자 mutation은 CSRF 미들웨어가 handler 앞에서 검사한다. 쿠키와 같은 토큰을
+// 헤더로 함께 보내야 한다.
+const CSRF_TOKEN = {{ request.state.csrftoken | tojson }};
+
 // Role change handler
 document.querySelectorAll('.role-select').forEach(select => {
     select.addEventListener('change', async (e) => {
@@ -298,6 +302,7 @@ document.querySelectorAll('.role-select').forEach(select => {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRFToken': CSRF_TOKEN,
                 },
                 body: JSON.stringify({ role: newRole })
             });
@@ -342,6 +347,7 @@ document.querySelectorAll('.btn-toggle').forEach(button => {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRFToken': CSRF_TOKEN,
                 }
             });
 

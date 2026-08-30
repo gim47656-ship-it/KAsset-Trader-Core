@@ -101,10 +101,13 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v47: review.ai_call_events (AI 호출 원장) joins the ORM shape.
 # v48: password reset token metadata adds the per-user active-token partial
 # unique index used by both create_all schemas and Alembic-managed production.
+# v49: kasset_ai_runtime_config (AI route 정책 singleton)이 ORM shape에 들어온다.
+# create_all이 테이블을 통째로 만들고 mirrored ALTER는 없다. 운영은
+# alembic/versions/20260830_kasset_ai_runtime_config.py를 따로 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 48
+SCHEMA_BOOTSTRAP_VERSION = 49
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

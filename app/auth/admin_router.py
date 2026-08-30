@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +17,13 @@ from app.core.db import get_db
 from app.core.session_blacklist import get_session_blacklist
 from app.core.templates import templates
 from app.core.timezone import KST
+from app.extensions.kasset.ai.runtime_config import AiRoutePolicyError
 from app.models.trading import User, UserRole
+from app.services.ai_runtime_config import (
+    AiRoutePolicyRevisionConflict,
+    apply_ai_routes_update,
+    build_ai_routes_view,
+)
 from app.services.ops_dashboard import UNMEASURED_TEXT, build_ops_dashboard
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -37,6 +43,25 @@ class RoleUpdateRequest(BaseModel):
     """Request model for role update."""
 
     role: UserRole
+
+
+#: 저장 가능한 route ID의 최대 길이. 임의 model 문자열이나 URL이 들어올 수 없게
+#: 입력 자체를 좁힌다. 실제 허용값은 서버 allowlist가 다시 검증한다.
+_RouteIdText = Annotated[str, StringConstraints(max_length=64)]
+
+
+class AiRoutePolicyUpdateRequest(BaseModel):
+    """AI route 정책 전체 교체 요청.
+
+    ``extra="forbid"``이므로 model/provider/base URL/API key/명령 같은 필드는
+    아예 받아들이지 않는다(422). lane 값은 route ID 배열뿐이며 빈 배열은 그
+    lane의 명시적 비활성화다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0, alias="expectedRevision")
+    lanes: dict[_RouteIdText, Annotated[list[_RouteIdText], Field(max_length=16)]]
 
 
 async def require_admin(
@@ -346,7 +371,7 @@ async def ops_dashboard_page(
     ``require_admin``(세션 쿠키 + admin 역할)만이 이 화면의 인증 장치다.
     Android JWT는 세션 쿠키를 만들지 않으므로 여기까지 오지 못한다.
     """
-    dashboard = await build_ops_dashboard(db, admin_user_id=admin_user.id)
+    dashboard = await build_ops_dashboard(db)
     return templates.TemplateResponse(
         request,
         "admin_ops.html",
@@ -360,3 +385,76 @@ async def ops_dashboard_page(
             "unmeasured_text": UNMEASURED_TEXT,
         },
     )
+
+
+@router.get("/ops/ai-routes")
+async def ai_routes_view(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin_user: Annotated[User, Depends(require_admin)] = None,
+):
+    """현재 AI route 정책과 각 route의 사용 가능 여부.
+
+    ``/admin/ops``와 같은 게이트(세션 쿠키 + admin 역할)를 쓴다. 응답에는 API key,
+    token, base URL, subscription 명령 원문이 들어가지 않는다. ``model``은 현재
+    서버 설정에서 resolve된 표시용 문자열이다.
+    """
+
+    return await build_ai_routes_view(db)
+
+
+@router.put("/ops/ai-routes")
+async def ai_routes_update(
+    request: Request,
+    payload: AiRoutePolicyUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin_user: Annotated[User, Depends(require_admin)] = None,
+):
+    """AI route 정책 전체를 교체한다.
+
+    브라우저 admin 세션과 CSRF 토큰이 모두 필요하다(CSRF는 미들웨어가 handler
+    앞에서 검사한다). ``expectedRevision``이 낡으면 409로 현재 revision만
+    알려주고 아무것도 쓰지 않는다. 알 수 없거나 lane에 맞지 않거나 중복이거나
+    현재 사용 불가한 route는 422다.
+    """
+
+    try:
+        result = await apply_ai_routes_update(
+            db,
+            expected_revision=payload.expected_revision,
+            lanes=payload.lanes,
+            admin_user_id=admin_user.id,
+        )
+    except AiRoutePolicyError as exc:
+        logger.warning(
+            "AI route 정책 거부: code=%s",
+            exc.code,
+            extra=_security_log_extra(
+                request,
+                user_id=admin_user.id,
+                event="ai_route_policy_rejected",
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": exc.message},
+        ) from None
+    except AiRoutePolicyRevisionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "revision_conflict",
+                "currentRevision": exc.current_revision,
+                "message": "다른 관리자가 먼저 저장했습니다. 새로 불러온 뒤 다시 저장하세요.",
+            },
+        ) from None
+
+    logger.info(
+        "AI route 정책 저장 완료: revision=%s",
+        result["revision"],
+        extra=_security_log_extra(
+            request,
+            user_id=admin_user.id,
+            event="ai_route_policy_updated",
+        ),
+    )
+    return result

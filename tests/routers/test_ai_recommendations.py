@@ -18,6 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal, get_db
+from app.extensions.kasset.automation.contracts import PaperExecutionOutcome
 from app.middleware.auth import AuthMiddleware
 from app.models.ai_recommendations import AIRecommendation
 from app.models.symbol_master import SymbolMaster
@@ -51,6 +52,7 @@ def _recommendation(
     confidence: str | None = "0.7200",
     reference_price: str | None = "71500.00",
     suggested_quantity: str | None = "10.000",
+    evidence: list[dict[str, object]] | None = None,
 ) -> AIRecommendation:
     return AIRecommendation(
         owner_user_id=owner_user_id or _test_owner_id(),
@@ -64,7 +66,9 @@ def _recommendation(
         headline="실적 회복 신호",
         rationale=["실적 개선", "수급 유입"] if rationale is None else rationale,
         risks=["업황 변동"],
-        evidence=[
+        evidence=evidence
+        if evidence is not None
+        else [
             {
                 "title": "분기보고서",
                 "source": "거래소 공시",
@@ -454,6 +458,90 @@ async def test_approval_guards_leave_recommendation_pending(
     row = await db_session.get(AIRecommendation, "guarded")
     assert row is not None and row.decision == "PENDING"
     assert row.decided_at is None
+
+
+@pytest.mark.asyncio
+async def test_approval_returns_the_paper_execution_outcome_when_submission_is_blocked(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed(
+        db_session,
+        _recommendation(
+            "approval-blocked",
+            evidence=[{"kind": "ai_vertical_slice"}],
+        ),
+    )
+
+    async def _blocked(owner_user_id: int, recommendation_id: str):
+        assert owner_user_id == _test_owner_id()
+        assert recommendation_id == "approval-blocked"
+        return PaperExecutionOutcome(
+            status="BLOCKED",
+            reason="global_kill_switch_enabled",
+            recommendation_id=recommendation_id,
+        )
+
+    monkeypatch.setattr(
+        "app.routers.ai_recommendations.run_approved_recommendation_once",
+        _blocked,
+    )
+
+    response = await _request(
+        _app(db_session),
+        "POST",
+        "/api/v1/ai/recommendations/approval-blocked/decision",
+        json={"decision": "APPROVED"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "APPROVED"
+    assert response.json()["paperExecution"] == {
+        "status": "BLOCKED",
+        "reason": "global_kill_switch_enabled",
+        "recommendationId": "approval-blocked",
+        "replayed": False,
+    }
+    assert "paperOrder" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_approval_returns_structured_failure_when_execution_raises(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed(
+        db_session,
+        _recommendation(
+            "approval-error",
+            evidence=[{"kind": "ai_vertical_slice"}],
+        ),
+    )
+
+    async def _raise(_owner_user_id: int, _recommendation_id: str):
+        raise RuntimeError("synthetic execution failure")
+
+    monkeypatch.setattr(
+        "app.routers.ai_recommendations.run_approved_recommendation_once",
+        _raise,
+    )
+
+    response = await _request(
+        _app(db_session),
+        "POST",
+        "/api/v1/ai/recommendations/approval-error/decision",
+        json={"decision": "APPROVED"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "APPROVED"
+    assert response.json()["paperExecution"] == {
+        "status": "FAILED",
+        "reason": "approval_execution_failed:RuntimeError",
+        "recommendationId": "approval-error",
+        "replayed": False,
+    }
+    assert "paperOrder" not in response.json()
 
 
 @pytest.mark.asyncio

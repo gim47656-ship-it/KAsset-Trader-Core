@@ -963,13 +963,13 @@ async def run_ai_recommendation_cycle_once(
     if not settings.KASSET_MARKET_EVENTS_ENABLED:
         return {"enabled": False, "owners": [], "candidateCount": 0}
     from app.extensions.kasset.ai.factory import build_model_router
+    from app.services.ai_runtime_config import get_ai_runtime_snapshot
 
-    try:
-        ai_router: OpenAiModelRouter | None = build_model_router()
-    except AiProviderUnavailable:
-        ai_router = None
     live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] = {}
     async with _session() as db:
+        # cycle 시작 시 정책을 한 번만 읽는다. 이 cycle 안에서는 route가 섞이지
+        # 않고, 다음 cycle부터 새 정책이 재시작 없이 적용된다.
+        snapshot = await get_ai_runtime_snapshot(db)
         owner_ids = list(
             (
                 await db.scalars(
@@ -979,6 +979,11 @@ async def run_ai_recommendation_cycle_once(
                 )
             ).all()
         )
+
+    try:
+        ai_router: OpenAiModelRouter | None = build_model_router(snapshot=snapshot)
+    except AiProviderUnavailable:
+        ai_router = None
     owners: list[dict[str, object]] = []
     total_candidates = 0
     for raw_owner_id in owner_ids:

@@ -241,6 +241,17 @@ class PaperOrderResult(BaseModel):
         return _serialize_timestamp(value) or ""
 
 
+class PaperExecutionResult(BaseModel):
+    """Request-scoped result of the PAPER execution attempted after approval."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    status: Literal["IDLE", "BLOCKED", "REJECTED", "SUBMITTED", "FAILED"]
+    reason: str
+    recommendation_id: str | None = Field(default=None, alias="recommendationId")
+    replayed: bool
+
+
 class RecommendationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -282,6 +293,10 @@ class RecommendationResponse(BaseModel):
     portfolio: RecommendationPortfolio | None = None
     hard_risk: RecommendationHardRisk | None = Field(default=None, alias="hardRisk")
     paper_order: PaperOrderResult | None = Field(default=None, alias="paperOrder")
+    paper_execution: PaperExecutionResult | None = Field(
+        default=None,
+        alias="paperExecution",
+    )
 
     _decimal_strings = field_validator(
         "confidence",
@@ -456,6 +471,7 @@ def build_recommendation_response(
     row: Any,
     *,
     paper_order: Any | None = None,
+    paper_execution: Any | None = None,
     resolved_name: str | None = None,
 ) -> RecommendationResponse:
     """Project one persistence row plus its optional PAPER execution."""
@@ -534,6 +550,13 @@ def build_recommendation_response(
         "portfolio": detail.get("portfolio"),
         "hardRisk": hard_risk_value,
     }
+    if paper_execution is not None:
+        payload["paperExecution"] = {
+            "status": paper_execution.status,
+            "reason": paper_execution.reason,
+            "recommendationId": paper_execution.recommendation_id,
+            "replayed": paper_execution.replayed,
+        }
     if paper_order is not None:
         payload["paperOrder"] = {
             "id": paper_order.id,
@@ -568,6 +591,7 @@ __all__ = [
     "AITradingStateUpdate",
     "AITradingUsageResponse",
     "PaperOrderResult",
+    "PaperExecutionResult",
     "PromotionBypassRequest",
     "RecommendationDecisionRequest",
     "RecommendationErrorEnvelope",

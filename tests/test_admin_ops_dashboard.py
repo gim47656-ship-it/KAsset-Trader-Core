@@ -241,7 +241,7 @@ async def test_builder_isolates_a_failing_panel_and_rolls_back():
         "app.services.ops_dashboard.PANEL_BUILDERS",
         (("a", "패널 A", boom), ("b", "패널 B", fine)),
     ):
-        dashboard = await build_ops_dashboard(db, admin_user_id=1)
+        dashboard = await build_ops_dashboard(db)
 
     failed, healthy = dashboard.panels
     assert failed.key == "a"
@@ -266,7 +266,7 @@ async def test_builder_stamps_registry_key_and_title():
         )
 
     with patch("app.services.ops_dashboard.PANEL_BUILDERS", (("zzz", "패널 Z", fine),)):
-        dashboard = await build_ops_dashboard(AsyncMock(), admin_user_id=1)
+        dashboard = await build_ops_dashboard(AsyncMock())
 
     (panel,) = dashboard.panels
     assert (panel.key, panel.title) == ("zzz", "패널 Z")
