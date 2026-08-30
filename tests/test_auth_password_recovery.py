@@ -272,6 +272,7 @@ def test_legacy_smtp_tls_requires_explicit_opt_in(
         context = password_recovery._smtp_ssl_context()
 
     assert context.minimum_version is ssl.TLSVersion.TLSv1
+    assert context.options & ssl.OP_LEGACY_SERVER_CONNECT
 
 
 def test_recovery_pages_are_csrf_protected_and_fragment_safe(auth_test_client) -> None:

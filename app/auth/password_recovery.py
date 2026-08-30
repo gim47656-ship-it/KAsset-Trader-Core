@@ -290,6 +290,7 @@ def _smtp_ssl_context() -> ssl.SSLContext:
     if settings.AUTH_SMTP_ALLOW_LEGACY_TLS:
         context.minimum_version = ssl.TLSVersion.TLSv1
         context.set_ciphers("DEFAULT:@SECLEVEL=0")
+        context.options |= ssl.OP_LEGACY_SERVER_CONNECT
     return context
 
 
