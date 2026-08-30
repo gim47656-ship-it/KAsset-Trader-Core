@@ -98,10 +98,11 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v46: KAsset research cohort/lifecycle/action ORM tables plus
 # kr_symbol_universe.std_pdno are now part of the persistent test schema;
 # listing_status is widened and forced/benchmark market caps become nullable.
+# v47: review.ai_call_events (AI 호출 원장) joins the ORM shape.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 46
+SCHEMA_BOOTSTRAP_VERSION = 47
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

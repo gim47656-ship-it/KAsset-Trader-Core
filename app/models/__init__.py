@@ -4,6 +4,7 @@
 # create_all-based test bootstraps regardless of which module imports models.
 from app.extensions.kasset import models as _kasset_models  # noqa: E402,F401
 
+from .ai_call_events import AiCallEvent
 from .ai_recommendations import (
     AIRecommendation,
     RecommendationAction,
@@ -202,6 +203,7 @@ __all__ = [
     "WatchEventRepricingClaim",
     "Base",
     "AnalysisArtifact",
+    "AiCallEvent",
     "AIRecommendation",
     "RecommendationAction",
     "RecommendationDecision",

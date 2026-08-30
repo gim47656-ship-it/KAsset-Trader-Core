@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -14,6 +16,11 @@ from app.extensions.kasset.ai.base import (
     ReasoningEffort,
 )
 from app.extensions.kasset.ai.models import SkillRequest, SkillResult
+from app.services.ai_usage_service import (
+    COST_SOURCE_PROVIDER_REPORTED,
+    report_ai_attempt_http_status,
+    report_ai_attempt_usage,
+)
 
 _SYSTEM_CONTRACT = STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS
 
@@ -40,6 +47,81 @@ _SKILL_RESULT_SCHEMA: dict[str, object] = {
 }
 
 _ALLOWED_SIGNALS = frozenset({"BUY", "SELL", "HOLD", "WATCH"})
+
+
+# The Responses API reports ``input_tokens``/``output_tokens``; OpenAI-compatible
+# gateways in front of the same endpoint still emit the Chat Completions names.
+# Both are accepted; anything else is left unreported rather than guessed.
+_PROMPT_TOKEN_KEYS = ("input_tokens", "prompt_tokens")
+_COMPLETION_TOKEN_KEYS = ("output_tokens", "completion_tokens")
+
+
+def _token_count(usage: Mapping[str, object], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def _reported_cost(
+    usage: Mapping[str, object],
+) -> tuple[Decimal | None, str | None, str | None]:
+    """Accept a cost only as an amount plus an explicit currency.
+
+    There is no local price table here on purpose: model prices change without
+    notice and a stale table reports confident, wrong money. A provider that
+    quotes an amount but names no currency is therefore not recorded — the
+    ledger keeps NULL and the dashboard shows "not reported".
+    """
+
+    currency = usage.get("cost_currency")
+    amount = usage.get("cost")
+    if not isinstance(currency, str) or not currency.strip():
+        return None, None, None
+    if isinstance(amount, bool) or not isinstance(amount, int | float | str):
+        return None, None, None
+    try:
+        parsed = Decimal(str(amount))
+    except (InvalidOperation, ValueError):
+        return None, None, None
+    if not parsed.is_finite() or parsed < 0:
+        return None, None, None
+    return parsed, currency.strip(), COST_SOURCE_PROVIDER_REPORTED
+
+
+def _report_provider_usage(envelope: object) -> None:
+    """Forward the provider's own usage block to the AI call ledger.
+
+    A missing or mis-shaped ``usage`` block reports nothing, so the attempt row
+    keeps NULL tokens. Character-count estimates are never substituted.
+    """
+
+    if not isinstance(envelope, Mapping):
+        return
+    usage = envelope.get("usage")
+    if not isinstance(usage, Mapping):
+        return
+    prompt_tokens = _token_count(usage, _PROMPT_TOKEN_KEYS)
+    completion_tokens = _token_count(usage, _COMPLETION_TOKEN_KEYS)
+    total_tokens = _token_count(usage, ("total_tokens",))
+    if (
+        total_tokens is None
+        and prompt_tokens is not None
+        and completion_tokens is not None
+    ):
+        total_tokens = prompt_tokens + completion_tokens
+    cost_amount, cost_currency, cost_source = _reported_cost(usage)
+    report_ai_attempt_usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_amount=cost_amount,
+        cost_currency=cost_currency,
+        cost_source=cost_source,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +219,10 @@ class OpenAiResponsesClient:
                 f"{self._name} unreachable: {type(exc).__name__}"
             ) from exc
 
+        # The transport is the only layer that sees the wire status; the ledger
+        # attempt row is opened one level up, in the availability router.
+        report_ai_attempt_http_status(response.status_code)
+
         if response.status_code == 429 or response.status_code >= 500:
             raise AiProviderUnavailable(
                 f"{self._name} unavailable: HTTP {response.status_code}"
@@ -150,7 +236,15 @@ class OpenAiResponsesClient:
                 f"HTTP {response.status_code}: {excerpt}"
             )
 
-        output_text = self._extract_output_text(response)
+        try:
+            envelope = response.json()
+        except ValueError as exc:
+            raise ValueError(
+                f"{self._name} returned a malformed Responses payload"
+            ) from exc
+        _report_provider_usage(envelope)
+
+        output_text = self._extract_output_text(envelope)
         try:
             analysis = json.loads(output_text)
         except (TypeError, ValueError) as exc:
@@ -161,13 +255,8 @@ class OpenAiResponsesClient:
             raise ValueError(f"{self._name} did not return a JSON object")
         return analysis
 
-    def _extract_output_text(self, response: httpx.Response) -> str:
-        try:
-            output = response.json()["output"]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{self._name} returned a malformed Responses payload"
-            ) from exc
+    def _extract_output_text(self, envelope: object) -> str:
+        output = envelope.get("output") if isinstance(envelope, Mapping) else None
         if not isinstance(output, list):
             raise ValueError(f"{self._name} returned a malformed Responses payload")
 
