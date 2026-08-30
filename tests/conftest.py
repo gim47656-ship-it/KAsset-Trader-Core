@@ -5,6 +5,7 @@ Pytest configuration and common fixtures for auto-trader tests.
 import asyncio
 import contextlib
 import os
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -77,6 +78,23 @@ _AUTH_DB_SCOPE_PARTS = (
     "/test_middleware",
     "/test_routers",
     "/test_web",
+)
+_WINDOWS_POSIX_ONLY_TEST_DIRS = frozenset({Path("scripts/b0x")})
+_WINDOWS_POSIX_ONLY_TEST_FILES = frozenset(
+    {
+        Path("research/toss_phase2/test_load.py"),
+        Path("scripts/test_mock_session_mcp.py"),
+        Path("scripts/test_r4_p0_manifest_cli.py"),
+        Path("scripts/test_r4_p0_readiness.py"),
+        Path("services/mock_integration/test_kiwoom_coordination_adapter.py"),
+        Path("services/test_krb1_p0_journal.py"),
+        Path("services/test_market_events_dart_helpers.py"),
+        Path("test_binance_r4_p0_backfill.py"),
+        Path("test_binance_r4_p0_collector.py"),
+        Path("test_binance_r4_p0_hardening.py"),
+        Path("test_binance_r4_p0_watchdog.py"),
+        Path("test_services_dart.py"),
+    }
 )
 
 
@@ -772,6 +790,22 @@ def pytest_terminal_summary(terminalreporter) -> None:
         f"databases={len(metrics)} applied={applied} "
         f"schema_seconds={schema_seconds:.2f} "
         f"database_seconds={database_seconds:.2f}"
+    )
+
+
+def pytest_ignore_collect(collection_path: Path) -> bool:
+    """Avoid importing POSIX-only test modules on Windows."""
+    if sys.platform != "win32":
+        return False
+
+    try:
+        relative_path = collection_path.relative_to(Path(__file__).parent)
+    except ValueError:
+        return False
+
+    return relative_path in _WINDOWS_POSIX_ONLY_TEST_FILES or any(
+        relative_path == directory or directory in relative_path.parents
+        for directory in _WINDOWS_POSIX_ONLY_TEST_DIRS
     )
 
 

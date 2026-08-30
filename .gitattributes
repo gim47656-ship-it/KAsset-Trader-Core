@@ -3,3 +3,10 @@
 # an end-of-line marker in whitespace diagnostics; the registry verifies SHA-256.
 tests/fixtures/kr_a0_golden_v6/fixture_*.csv -text whitespace=cr-at-eol
 tests/fixtures/kr_a0_golden_v6/variants/**/fixture_*.csv -text whitespace=cr-at-eol
+
+# Source-freeze guards bind these Python modules to LF bytes.
+# Force LF checkout on every OS so EOL conversion cannot invalidate SHA-256.
+research/kr_backfill/adjacent_window_predicate.py text eol=lf
+research/intraday_harness_v2/__init__.py text eol=lf
+research/intraday_harness_v2/contract.py text eol=lf
+research/intraday_harness_v2/engine.py text eol=lf
