@@ -69,6 +69,8 @@ COPY --from=builder /app/.venv /app/.venv
 
 # 앱 소스 코드 복사
 COPY app/ ./app/
+COPY research_contracts/ ./research_contracts/
+COPY research/ ./research/
 COPY alembic/ ./alembic/
 COPY alembic.ini pyproject.toml README.md ./
 COPY scripts/ ./scripts/
