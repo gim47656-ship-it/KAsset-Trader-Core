@@ -152,6 +152,21 @@ async def fetch_ohlcv(
     return raw
 
 
+async def fetch_history_metadata(ticker: str) -> dict[str, Any]:
+    """Fetch Yahoo history metadata with the same traced fresh-session boundary."""
+
+    yahoo_ticker = to_yahoo_symbol(ticker)
+
+    def fetch() -> dict[str, Any]:
+        with yfinance_tracing_session() as session:
+            metadata = yf.Ticker(yahoo_ticker, session=session).get_history_metadata(
+                repair=False
+            )
+        return metadata if isinstance(metadata, dict) else {}
+
+    return await asyncio.to_thread(fetch)
+
+
 async def fetch_52w_high_date(ticker: str) -> date | None:
     """ROB-440: date of the 52-week high (max daily ``high`` over ~1y) for US
     undervalued_breakout date-recency. None on any error / empty (fail-closed)."""

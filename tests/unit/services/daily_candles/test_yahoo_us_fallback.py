@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -57,3 +58,89 @@ class TestFetchUsDailyYahooFallback:
         ):
             rows = await fetch_us_daily_yahoo_fallback(symbol="X", n=2)
         assert all(r.adj_close is None for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_recovers_exact_completed_terminal_row_from_validated_metadata(self):
+        sample = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-08-27", "2026-08-28"]),
+                "open": [100.0, 101.0],
+                "high": [101.0, 103.0],
+                "low": [99.0, 100.0],
+                "close": [100.0, float("nan")],
+                "adj_close": [99.5, float("nan")],
+                "volume": [1000, 1200],
+            }
+        )
+        metadata = {
+            "regularMarketPrice": 102.0,
+            "previousClose": 100.0,
+            "currentTradingPeriod": {
+                "regular": {
+                    "end": int(datetime(2026, 8, 28, 20, 0, tzinfo=UTC).timestamp())
+                }
+            },
+        }
+        metadata_fetcher = AsyncMock(return_value=metadata)
+        with (
+            patch(
+                "app.services.brokers.yahoo.client.fetch_ohlcv",
+                new=AsyncMock(return_value=sample),
+            ),
+            patch(
+                "app.services.brokers.yahoo.client.fetch_history_metadata",
+                new=metadata_fetcher,
+            ),
+        ):
+            rows = await fetch_us_daily_yahoo_fallback(
+                symbol="AMD",
+                n=2,
+                now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+            )
+
+        assert len(rows) == 2
+        assert rows[-1].time_utc.date().isoformat() == "2026-08-28"
+        assert rows[-1].close == pytest.approx(102.0)
+        assert rows[-1].adj_close == pytest.approx(102.0)
+        metadata_fetcher.assert_awaited_once_with("AMD")
+
+    @pytest.mark.asyncio
+    async def test_rejects_terminal_row_when_metadata_session_end_mismatches(self):
+        sample = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-08-27", "2026-08-28"]),
+                "open": [100.0, 101.0],
+                "high": [101.0, 103.0],
+                "low": [99.0, 100.0],
+                "close": [100.0, float("nan")],
+                "adj_close": [99.5, float("nan")],
+                "volume": [1000, 1200],
+            }
+        )
+        metadata = {
+            "regularMarketPrice": 102.0,
+            "previousClose": 100.0,
+            "currentTradingPeriod": {
+                "regular": {
+                    "end": int(datetime(2026, 8, 28, 19, 0, tzinfo=UTC).timestamp())
+                }
+            },
+        }
+        with (
+            patch(
+                "app.services.brokers.yahoo.client.fetch_ohlcv",
+                new=AsyncMock(return_value=sample),
+            ),
+            patch(
+                "app.services.brokers.yahoo.client.fetch_history_metadata",
+                new=AsyncMock(return_value=metadata),
+            ),
+        ):
+            rows = await fetch_us_daily_yahoo_fallback(
+                symbol="AMD",
+                n=2,
+                now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+            )
+
+        assert len(rows) == 1
+        assert rows[-1].time_utc.date().isoformat() == "2026-08-27"
