@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+
+{% block title %}운영 대시보드 - Auto Trader{% endblock %}
+
+{% block styles %}
+.ops-container {
+    max-width: 1400px;
+    width: 100%;
+}
+
+.ops-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: var(--sp-8);
+    margin-bottom: var(--sp-8);
+    padding-bottom: var(--sp-6);
+    border-bottom: 1px solid var(--border-dash);
+}
+
+.ops-header h1 {
+    color: var(--text-primary);
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--tracking-head);
+    margin: 0;
+}
+
+.ops-header h1 .bi {
+    color: var(--accent);
+    margin-right: var(--sp-2);
+}
+
+.ops-generated {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    text-align: right;
+}
+
+.ops-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-4);
+    margin-bottom: var(--sp-6);
+    font-size: var(--fs-xs);
+    color: var(--text-muted);
+}
+
+.ops-degraded {
+    padding: var(--sp-5);
+    border-radius: var(--r-md);
+    margin-bottom: var(--sp-6);
+    font-size: var(--fs-sm);
+    background: var(--error-soft);
+    border: 1px solid var(--error-ring);
+    color: var(--error);
+}
+
+.ops-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--r-2xl);
+    box-shadow: var(--elev-card);
+    padding: var(--sp-8);
+    margin-bottom: var(--sp-6);
+}
+
+.ops-panel-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--sp-4);
+    margin-bottom: var(--sp-2);
+}
+
+.ops-panel-head h2 {
+    font-size: var(--fs-lg);
+    font-weight: var(--fw-semibold);
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.ops-window {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    letter-spacing: var(--tracking-label);
+}
+
+.ops-summary {
+    color: var(--text-secondary);
+    font-size: var(--fs-sm);
+    margin: 0 0 var(--sp-6) 0;
+}
+
+.ops-note {
+    background: var(--info-soft);
+    border-left: 3px solid var(--info);
+    border-radius: var(--r-md);
+    color: var(--text-secondary);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-body);
+    margin: 0 0 var(--sp-6) 0;
+    padding: var(--sp-4) var(--sp-5);
+}
+
+.ops-error {
+    background: var(--error-soft);
+    border: 1px solid var(--error-ring);
+    color: var(--error);
+    border-radius: var(--r-md);
+    padding: var(--sp-5);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    word-break: break-all;
+}
+
+.ops-status {
+    display: inline-block;
+    padding: var(--sp-1) var(--sp-4);
+    border-radius: var(--r-pill);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--tracking-label);
+}
+
+.ops-status-ok {
+    background: var(--success-soft);
+    color: var(--success);
+    border: 1px solid var(--success-ring);
+}
+
+.ops-status-idle {
+    background: var(--info-soft);
+    color: var(--info);
+    border: 1px solid var(--info-ring);
+}
+
+.ops-status-warn {
+    background: var(--warn-soft);
+    color: var(--warn);
+    border: 1px solid var(--warn-ring);
+}
+
+.ops-status-error {
+    background: var(--error-soft);
+    color: var(--error);
+    border: 1px solid var(--error-ring);
+}
+
+.ops-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: var(--sp-5);
+    margin-bottom: var(--sp-6);
+}
+
+.ops-metric {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-dash);
+    border-radius: var(--r-lg);
+    padding: var(--sp-5);
+}
+
+.ops-metric-label {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+}
+
+.ops-metric-value {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--fs-lg);
+    font-weight: var(--fw-semibold);
+    line-height: var(--lh-tight);
+    margin-top: var(--sp-2);
+    word-break: break-all;
+}
+
+.ops-metric-value.is-unmeasured {
+    color: var(--text-muted);
+    font-weight: var(--fw-regular);
+}
+
+.ops-metric-hint {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    margin-top: var(--sp-1);
+}
+
+.ops-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+}
+
+.ops-table th {
+    background: var(--bg-subtle);
+    padding: var(--sp-4);
+    text-align: left;
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-light);
+    white-space: nowrap;
+}
+
+.ops-table td {
+    padding: var(--sp-4);
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border-dash);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+}
+
+.ops-table td.is-unmeasured {
+    color: var(--text-muted);
+}
+
+.ops-empty {
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+    padding: var(--sp-5) 0;
+}
+
+.ops-source {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    margin-top: var(--sp-5);
+}
+{% endblock %}
+
+{% block content %}
+<div class="ops-container">
+    <div class="ops-header">
+        <h1><i class="bi bi-speedometer2" aria-hidden="true"></i> 운영 대시보드</h1>
+        <div class="ops-generated">
+            생성 {{ generated_at }}<br>
+            <a href="/admin/ops">새로고침</a> · <a href="/admin/users">사용자 관리</a>
+        </div>
+    </div>
+
+    <div class="ops-legend" id="ops-legend">
+        <span><span class="ops-status ops-status-ok">정상</span> 조회 성공, 이상 없음</span>
+        <span><span class="ops-status ops-status-idle">대기</span> 조회 성공, 대상 0건</span>
+        <span><span class="ops-status ops-status-warn">주의</span> 조회 성공, 확인 필요</span>
+        <span><span class="ops-status ops-status-error">조회실패</span> 측정하지 못함 ({{ unmeasured_text }})</span>
+    </div>
+
+    {% if dashboard.failed_panel_titles %}
+    <div class="ops-degraded" id="ops-degraded">
+        조회에 실패한 패널이 있습니다: {{ dashboard.failed_panel_titles|join(', ') }}.
+        해당 패널의 값은 0이 아니라 <strong>미측정</strong>입니다.
+    </div>
+    {% endif %}
+
+    {% for panel in dashboard.panels %}
+    <section class="ops-panel" id="panel-{{ panel.key }}" data-panel="{{ panel.key }}"
+             data-status="{{ panel.status.value }}">
+        <div class="ops-panel-head">
+            <h2>{{ panel.title }}</h2>
+            <span class="ops-status ops-status-{{ panel.status.value }}">{{ panel.status_label }}</span>
+            {% if panel.window %}<span class="ops-window">{{ panel.window }}</span>{% endif %}
+        </div>
+        <p class="ops-summary">{{ panel.summary }}</p>
+
+        {% if panel.note %}
+        <p class="ops-note" data-role="panel-note">{{ panel.note }}</p>
+        {% endif %}
+
+        {% if panel.error %}
+        <div class="ops-error" data-role="panel-error">{{ panel.error }}</div>
+        {% endif %}
+
+        {% if panel.metrics %}
+        <div class="ops-metrics">
+            {% for metric in panel.metrics %}
+            <div class="ops-metric">
+                <div class="ops-metric-label">{{ metric.label }}</div>
+                {% if metric.value is none %}
+                <div class="ops-metric-value is-unmeasured" data-measured="false">{{ unmeasured_text }}</div>
+                {% else %}
+                <div class="ops-metric-value" data-measured="true">{{ metric.value }}</div>
+                {% endif %}
+                {% if metric.hint %}<div class="ops-metric-hint">{{ metric.hint }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if panel.columns %}
+        {% if panel.rows %}
+        <table class="ops-table">
+            <thead>
+                <tr>{% for column in panel.columns %}<th>{{ column }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+                {% for row in panel.rows %}
+                <tr>
+                    {% for cell in row.cells %}
+                    {% if cell is none %}
+                    <td class="is-unmeasured" data-measured="false">{{ unmeasured_text }}</td>
+                    {% else %}
+                    <td data-measured="true">{{ cell }}</td>
+                    {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% elif panel.status.value != 'error' %}
+        <p class="ops-empty" data-role="panel-empty">조회 성공 · 해당 기간 0건</p>
+        {% endif %}
+        {% endif %}
+
+        {% if panel.source %}
+        <div class="ops-source">출처: {{ panel.source }}</div>
+        {% endif %}
+    </section>
+    {% endfor %}
+</div>
+{% endblock %}

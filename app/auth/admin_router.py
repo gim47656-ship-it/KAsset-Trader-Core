@@ -16,7 +16,9 @@ from app.auth.web_router import get_current_user_from_session, invalidate_user_c
 from app.core.db import get_db
 from app.core.session_blacklist import get_session_blacklist
 from app.core.templates import templates
+from app.core.timezone import KST
 from app.models.trading import User, UserRole
+from app.services.ops_dashboard import UNMEASURED_TEXT, build_ops_dashboard
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
@@ -331,3 +333,30 @@ async def get_admin_stats(
         "inactive_users": inactive_users,
         "role_counts": role_counts,
     }
+
+
+@router.get("/ops", response_class=HTMLResponse)
+async def ops_dashboard_page(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin_user: Annotated[User, Depends(require_admin)] = None,
+):
+    """운영 대시보드.
+
+    ``require_admin``(세션 쿠키 + admin 역할)만이 이 화면의 인증 장치다.
+    Android JWT는 세션 쿠키를 만들지 않으므로 여기까지 오지 못한다.
+    """
+    dashboard = await build_ops_dashboard(db, admin_user_id=admin_user.id)
+    return templates.TemplateResponse(
+        request,
+        "admin_ops.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "dashboard": dashboard,
+            "generated_at": dashboard.generated_at.astimezone(KST).strftime(
+                "%Y-%m-%d %H:%M:%S KST"
+            ),
+            "unmeasured_text": UNMEASURED_TEXT,
+        },
+    )
