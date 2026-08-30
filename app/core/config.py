@@ -742,6 +742,25 @@ class Settings(BaseSettings):
     SESSION_BLACKLIST_FAIL_SAFE: bool = True
     SESSION_BLACKLIST_DB_FALLBACK: bool = True
 
+    # Browser-session "Sign in with Google" for /web-auth. Empty (the default)
+    # keeps the route fail-closed: POST /web-auth/google refuses and only the
+    # password form works. Deliberately NOT sharing
+    # KASSET_GOOGLE_OAUTH_CLIENT_ID so that enabling Google login for the
+    # Android client never silently opens a browser login surface, and so the
+    # two audiences can be revoked independently.
+    #
+    # Operator setup, Google Cloud Console -> APIs & Services -> Credentials
+    # -> OAuth 2.0 Client IDs -> an OAuth client of type "Web application":
+    #   * "Authorized JavaScript origins": the admin origin(s) that serve the
+    #     login page, e.g. https://<admin-host> (scheme + host + optional
+    #     port, no path). Required, because Google Identity Services refuses
+    #     to mint an ID token for an unregistered origin.
+    #   * "Authorized redirect URIs": nothing to add. The login page posts the
+    #     ID token to /web-auth/google itself; Google never redirects to us.
+    # Then set WEB_GOOGLE_OAUTH_CLIENT_ID to that client's ID (not a secret;
+    # it is rendered into the login page). No client secret is used.
+    WEB_GOOGLE_OAUTH_CLIENT_ID: str = ""
+
     PUBLIC_API_PATHS: Annotated[list[str], NoDecode] = []
 
     # news-ingestor machine-to-machine bulk ingest authentication

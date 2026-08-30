@@ -49,6 +49,32 @@
             <button type="submit" class="btn-primary">로그인</button>
         </form>
 
+        {% if google_client_id %}
+        <div class="divider">또는</div>
+
+        {# Google Identity Services renders the button; its callback drops the
+           returned ID token into this hidden form, which posts same-origin so
+           the shared CSRF hidden field applies exactly like the password
+           form above. #}
+        <form method="POST" action="/web-auth/google" id="google-login-form">
+            <input type="hidden" name="csrftoken" value="{{ request.state.csrftoken }}">
+            {% if next %}
+            <input type="hidden" name="next" value="{{ next }}">
+            {% endif %}
+            <input type="hidden" name="credential" id="google-credential">
+        </form>
+
+        <div id="g_id_onload"
+             data-client_id="{{ google_client_id }}"
+             data-callback="onGoogleCredential"
+             data-auto_prompt="false"></div>
+        <div class="g_id_signin"
+             data-type="standard"
+             data-shape="rectangular"
+             data-text="signin_with"
+             data-logo_alignment="left"></div>
+        {% endif %}
+
         <div class="divider">또는</div>
 
         <div class="register-link">
@@ -56,4 +82,16 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{% if google_client_id %}
+<script>
+    function onGoogleCredential(response) {
+        document.getElementById("google-credential").value = response.credential;
+        document.getElementById("google-login-form").submit();
+    }
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+{% endif %}
 {% endblock %}

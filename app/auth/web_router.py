@@ -24,6 +24,8 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.session_blacklist import get_session_blacklist
 from app.core.templates import templates
+from app.extensions.kasset.api.auth import MobileAuthService
+from app.extensions.kasset.api.errors import MobileApiError
 from app.models.trading import User, UserRole
 
 router = APIRouter(prefix="/web-auth", tags=["web-authentication"])
@@ -270,104 +272,44 @@ async def require_role(
     return user
 
 
-@router.get("/login", response_class=HTMLResponse)
-async def login_page(
+def _login_page_response(
     request: Request,
-    next: str | None = None,
-    db: Annotated[AsyncSession, Depends(get_db)] = None,
-):
-    """Display login page."""
-    # Check if already logged in
-    if db:
-        user = await get_current_user_from_session(request, db)
-        if user:
-            redirect_url = _sanitize_next(next) or "/"
-            return RedirectResponse(
-                url=redirect_url, status_code=status.HTTP_303_SEE_OTHER
-            )
-
+    *,
+    next_value: str | None,
+    error: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """Render the login page with both the credential and Google entry points."""
     return templates.TemplateResponse(
         request=request,
         name="login.html",
         context={
-            "next": next,
+            "next": next_value,
+            "error": error,
+            # Empty keeps the Google button out of the page entirely, matching
+            # the fail-closed behaviour of POST /web-auth/google.
+            "google_client_id": settings.WEB_GOOGLE_OAUTH_CLIENT_ID.strip(),
         },
+        status_code=status_code,
     )
 
 
-@router.post("/login")
-@limiter.limit("5/minute")
-async def login(
+async def _issue_web_session_response(
     request: Request,
-    username: Annotated[str, Form()],
-    password: Annotated[str, Form()],
-    next: str | None = Form(None),
-    db: Annotated[AsyncSession, Depends(get_db)] = None,
-):
-    """Handle login form submission with rate limiting (5 attempts/minute)."""
-    username_hash = hashlib.sha256(username.encode()).hexdigest()[:16]
+    user: User,
+    *,
+    next_value: str | None,
+    event_scope: str,
+) -> RedirectResponse:
+    """Mint the browser session shared by every web login path.
 
-    # Get user by username
-    result = await db.execute(select(User).where(User.username == username))
-    user = result.scalar_one_or_none()
-
-    # Verify credentials
-    if not user or not user.hashed_password:
-        logger.warning(
-            "Web login failed: user not found or password missing",
-            extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
-            ),
-        )
-        return templates.TemplateResponse(
-            request=request,
-            name="login.html",
-            context={
-                "error": "사용자명 또는 비밀번호가 올바르지 않습니다.",
-                "next": next,
-            },
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    if not verify_password(password, user.hashed_password):
-        logger.warning(
-            "Web login failed: invalid password",
-            extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
-            ),
-        )
-        return templates.TemplateResponse(
-            request=request,
-            name="login.html",
-            context={
-                "error": "사용자명 또는 비밀번호가 올바르지 않습니다.",
-                "next": next,
-            },
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    if not user.is_active:
-        logger.warning(
-            "Web login failed: inactive user",
-            extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
-            ),
-        )
-        return templates.TemplateResponse(
-            request=request,
-            name="login.html",
-            context={
-                "error": "비활성화된 계정입니다.",
-                "next": next,
-            },
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-
-    # Create session token
+    Both the credential form and the Google button end here, so
+    ``get_current_user_from_session`` -- and therefore ``require_admin`` --
+    sees exactly one kind of session regardless of how the operator signed in.
+    """
+    username_hash = hashlib.sha256(user.username.encode()).hexdigest()[:16]
     session_token = create_session_token(user.id)
     session_hash = _hash_session_token(session_token)
-
-    import redis.asyncio as redis
 
     redis_client = None
     redis_error = False
@@ -399,7 +341,7 @@ async def login(
             "Web login failed to persist session cache",
             exc_info=True,
             extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_error"
+                request, username_hash=username_hash, event=f"{event_scope}_error"
             ),
         )
     finally:
@@ -407,7 +349,7 @@ async def login(
             await redis_client.aclose()
 
     # Redirect to next page or home
-    redirect_url = _sanitize_next(next) or "/"
+    redirect_url = _sanitize_next(next_value) or "/"
     response = RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -422,18 +364,186 @@ async def login(
         logger.info(
             "Web login succeeded without cache persistence",
             extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_cache_bypass"
+                request,
+                username_hash=username_hash,
+                event=f"{event_scope}_cache_bypass",
             ),
         )
 
     logger.info(
         "Web login succeeded",
         extra=_security_log_extra(
-            request, username_hash=username_hash, event="web_login_success"
+            request, username_hash=username_hash, event=f"{event_scope}_success"
         ),
     )
 
     return response
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_page(
+    request: Request,
+    next: str | None = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Display login page."""
+    # Check if already logged in
+    if db:
+        user = await get_current_user_from_session(request, db)
+        if user:
+            redirect_url = _sanitize_next(next) or "/"
+            return RedirectResponse(
+                url=redirect_url, status_code=status.HTTP_303_SEE_OTHER
+            )
+
+    return _login_page_response(request, next_value=next)
+
+
+@router.post("/login")
+@limiter.limit("5/minute")
+async def login(
+    request: Request,
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    next: str | None = Form(None),
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Handle login form submission with rate limiting (5 attempts/minute)."""
+    username_hash = hashlib.sha256(username.encode()).hexdigest()[:16]
+
+    # Get user by username
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+
+    # Verify credentials
+    if not user or not user.hashed_password:
+        logger.warning(
+            "Web login failed: user not found or password missing",
+            extra=_security_log_extra(
+                request, username_hash=username_hash, event="web_login_failure"
+            ),
+        )
+        return _login_page_response(
+            request,
+            next_value=next,
+            error="사용자명 또는 비밀번호가 올바르지 않습니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not verify_password(password, user.hashed_password):
+        logger.warning(
+            "Web login failed: invalid password",
+            extra=_security_log_extra(
+                request, username_hash=username_hash, event="web_login_failure"
+            ),
+        )
+        return _login_page_response(
+            request,
+            next_value=next,
+            error="사용자명 또는 비밀번호가 올바르지 않습니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not user.is_active:
+        logger.warning(
+            "Web login failed: inactive user",
+            extra=_security_log_extra(
+                request, username_hash=username_hash, event="web_login_failure"
+            ),
+        )
+        return _login_page_response(
+            request,
+            next_value=next,
+            error="비활성화된 계정입니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return await _issue_web_session_response(
+        request, user, next_value=next, event_scope="web_login"
+    )
+
+
+@router.post("/google")
+@limiter.limit("5/minute")
+async def google_login(
+    request: Request,
+    credential: Annotated[str, Form()],
+    next: str | None = Form(None),
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Turn a Google Identity Services ID token into the normal web session.
+
+    The login page posts here same-origin, so the shared
+    ``TemplateFormCSRFMiddleware`` hidden-field check applies unchanged; no
+    Google-specific ``g_csrf_token`` double-submit scheme is introduced.
+
+    Unlike ``POST /api/v1/auth/google`` (the Android surface) this route never
+    provisions accounts: an ID token for an unknown ``google_sub`` is refused.
+    The browser surface is reachable by anyone who clears the network
+    allowlist, so creating accounts stays an explicit admin action.
+
+    Operator setup lives on ``settings.WEB_GOOGLE_OAUTH_CLIENT_ID``
+    (app/core/config.py): a Google Cloud "Web application" OAuth client whose
+    "Authorized JavaScript origins" contains the admin origin. No redirect URI
+    and no client secret are involved.
+    """
+    client_id = settings.WEB_GOOGLE_OAUTH_CLIENT_ID.strip()
+    if not client_id:
+        logger.warning(
+            "Web Google login rejected: WEB_GOOGLE_OAUTH_CLIENT_ID is unset",
+            extra=_security_log_extra(request, event="web_google_login_unavailable"),
+        )
+        return _login_page_response(
+            request,
+            next_value=next,
+            error="Google 로그인이 설정되지 않았습니다.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    def _rejected(
+        reason: str,
+        message: str = "등록되지 않은 Google 계정이거나 인증에 실패했습니다.",
+    ) -> Response:
+        logger.warning(
+            "Web Google login failed",
+            extra=_security_log_extra(
+                request, event="web_google_login_failure", reason=reason
+            ),
+        )
+        return _login_page_response(
+            request,
+            next_value=next,
+            error=message,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        # Reuse the Android surface's verification verbatim
+        # (app/extensions/kasset/api/auth.py:470-487): Google JWKS signature,
+        # RS256 only, aud == our client id, iss in Google's issuers, and
+        # aud/exp/iss/sub required.
+        payload = await MobileAuthService._decode_google_id_token(credential, client_id)
+    except MobileApiError:
+        return _rejected("invalid_id_token")
+
+    if payload.get("email_verified") is not True:
+        return _rejected("email_not_verified")
+
+    google_sub = payload.get("sub")
+    if not isinstance(google_sub, str) or not google_sub:
+        return _rejected("missing_sub")
+
+    result = await db.execute(select(User).where(User.google_sub == google_sub))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return _rejected("unknown_google_sub")
+
+    if not user.is_active:
+        return _rejected("inactive_user", "비활성화된 계정입니다.")
+
+    return await _issue_web_session_response(
+        request, user, next_value=next, event_scope="web_google_login"
+    )
 
 
 @router.get("/register", response_class=HTMLResponse)
