@@ -1,12 +1,41 @@
 {
 	admin off
+	auto_https disable_redirects
 	email {$ACME_EMAIL}
 	log {
 		format json
 	}
 }
 
-{$KASSET_DOMAIN} {
+# Reuse the same immediate-peer allowlist on the named HTTPS origin and on
+# host-agnostic plaintext traffic. Caddyfile env substitution happens before
+# parsing, so a space-delimited value expands to multiple remote_ip arguments.
+(admin_guard) {
+	@admin_not_allowed {
+		path /admin /admin/* /web-auth /web-auth/*
+		not remote_ip {$KASSET_ADMIN_ALLOWED_IPS:100.64.0.0/10}
+	}
+	respond @admin_not_allowed 403
+}
+
+# Raw and variant Host headers do not match KASSET_DOMAIN. Guard them before
+# reproducing Caddy's normal permanent HTTP-to-HTTPS redirect.
+http:// {
+	route {
+		# Active HTTP-01 tokens are handled by Caddy before user routes. Keep an
+		# unclaimed challenge probe at 404 instead of sending it through the
+		# application-independent HTTPS redirect.
+		@unclaimed_acme_challenge path /.well-known/acme-challenge/*
+		respond @unclaimed_acme_challenge 404
+
+		import admin_guard
+		redir https://{host}{uri} 308
+	}
+}
+
+# Shared HTTPS application surface for the public sslip origin and the
+# optional MagicDNS origin.
+(kasset_https_app) {
 	encode zstd gzip
 
 	log {
@@ -22,44 +51,64 @@
 		Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=()"
 	}
 
-	# Preserve the Android public /health wire contract while using /healthz
-	# only for Caddy's upstream health probe.
-	@health path /health
-	handle @health {
-		reverse_proxy api:8000 {
-			health_uri /healthz
-			health_interval 10s
-			health_timeout 5s
+	route {
+		# Restrict the administrator UI and its Google callback before every
+		# application handler, including the catch-all proxy.
+		import admin_guard
+
+		# Preserve the Android public /health wire contract while using /healthz
+		# only for Caddy's upstream health probe.
+		@health path /health
+		handle @health {
+			reverse_proxy api:8000 {
+				health_uri /healthz
+				health_interval 10s
+				health_timeout 5s
+			}
+		}
+
+		# Optional web-terminal contract. It is inert by default, not denied.
+		# To preserve an existing terminal, set KASSET_WEB_TERMINAL_PATH to a Caddy
+		# path matcher such as /terminal/* and KASSET_WEB_TERMINAL_UPSTREAM to its
+		# separately managed upstream (for example terminal:7681). Caddy's proxy
+		# carries WebSocket upgrades automatically. Add that service to the edge
+		# network in an operator-owned Compose override.
+		@web_terminal path {$KASSET_WEB_TERMINAL_PATH:/__kasset_terminal_not_configured__}
+		handle @web_terminal {
+			reverse_proxy {$KASSET_WEB_TERMINAL_UPSTREAM:127.0.0.1:65535}
+		}
+
+		# 실시간 시세 WebSocket(`/api/v1/market/stream`)은 아래 catch-all 이 그대로
+		# 통과시킨다. Caddy 의 reverse_proxy 는 HTTP/1.1 Upgrade 를 자동으로 나르고
+		# 101 응답에는 `encode` 가 개입하지 않으므로 추가 지시어가 필요 없다.
+		# 주의: 이 catch-all 위에 응답을 버퍼링하는 지시어(`request_body`,
+		# `handle_response` 등)를 끼우면 스트림이 끊긴다. 스트림 전용 경로를 따로
+		# 만들 때는 `reverse_proxy api:8000` 그대로 두고 timeout 을 넣지 마라 —
+		# 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
+		handle {
+			reverse_proxy api:8000 {
+				header_up X-Real-IP {remote_host}
+				header_up X-Forwarded-Proto {scheme}
+				health_uri /healthz
+				health_interval 10s
+				health_timeout 5s
+				lb_try_duration 10s
+				lb_try_interval 250ms
+			}
 		}
 	}
+}
 
-	# Optional web-terminal contract. It is inert by default, not denied.
-	# To preserve an existing terminal, set KASSET_WEB_TERMINAL_PATH to a Caddy
-	# path matcher such as /terminal/* and KASSET_WEB_TERMINAL_UPSTREAM to its
-	# separately managed upstream (for example terminal:7681). Caddy's proxy
-	# carries WebSocket upgrades automatically. Add that service to the edge
-	# network in an operator-owned Compose override.
-	@web_terminal path {$KASSET_WEB_TERMINAL_PATH:/__kasset_terminal_not_configured__}
-	handle @web_terminal {
-		reverse_proxy {$KASSET_WEB_TERMINAL_UPSTREAM:127.0.0.1:65535}
-	}
+# When KASSET_TAILNET_DOMAIN is unset, its default expands this whole block
+# into an ignored import and no tailnet site exists.
+(kasset_tailnet_disabled) {
+}
 
-	# 실시간 시세 WebSocket(`/api/v1/market/stream`)은 아래 catch-all 이 그대로
-	# 통과시킨다. Caddy 의 reverse_proxy 는 HTTP/1.1 Upgrade 를 자동으로 나르고
-	# 101 응답에는 `encode` 가 개입하지 않으므로 추가 지시어가 필요 없다.
-	# 주의: 이 catch-all 위에 응답을 버퍼링하는 지시어(`request_body`,
-	# `handle_response` 등)를 끼우면 스트림이 끊긴다. 스트림 전용 경로를 따로
-	# 만들 때는 `reverse_proxy api:8000` 그대로 두고 timeout 을 넣지 마라 —
-	# 이 연결은 60초 간격 keepalive 로 몇 시간씩 유지되는 것이 정상이다.
-	handle {
-		reverse_proxy api:8000 {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			health_uri /healthz
-			health_interval 10s
-			health_timeout 5s
-			lb_try_duration 10s
-			lb_try_interval 250ms
-		}
-	}
+{$KASSET_DOMAIN} {
+	import kasset_https_app
+}
+
+{$KASSET_TAILNET_DOMAIN:import kasset_tailnet_disabled} {
+	tls /etc/caddy/tailnet/cert.pem /etc/caddy/tailnet/key.pem
+	import kasset_https_app
 }
