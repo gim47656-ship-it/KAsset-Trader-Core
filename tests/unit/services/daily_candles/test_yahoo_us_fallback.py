@@ -97,6 +97,8 @@ class TestFetchUsDailyYahooFallback:
         metadata = {
             "regularMarketPrice": 102.0,
             "previousClose": 100.0,
+            "regularMarketDayLow": 100.0,
+            "regularMarketDayHigh": 103.0,
             "currentTradingPeriod": {
                 "regular": {
                     "end": int(datetime(2026, 8, 28, 20, 0, tzinfo=UTC).timestamp())
@@ -142,6 +144,8 @@ class TestFetchUsDailyYahooFallback:
         metadata = {
             "regularMarketPrice": 102.0,
             "previousClose": 100.0,
+            "regularMarketDayLow": 100.0,
+            "regularMarketDayHigh": 103.0,
             "currentTradingPeriod": {
                 "regular": {
                     "end": int(datetime(2026, 8, 28, 19, 0, tzinfo=UTC).timestamp())
@@ -166,3 +170,50 @@ class TestFetchUsDailyYahooFallback:
 
         assert len(rows) == 1
         assert rows[-1].time_utc.date().isoformat() == "2026-08-27"
+
+    @pytest.mark.asyncio
+    async def test_recovers_ex_dividend_row_and_normalizes_metadata_ohlc_bounds(self):
+        sample = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-08-27", "2026-08-28"]),
+                "open": [83.52, 82.92],
+                "high": [83.76, 82.90],
+                "low": [82.78, 81.33],
+                "close": [83.47, float("nan")],
+                "adj_close": [82.847, float("nan")],
+                "volume": [8_641_700, 13_950_121],
+            }
+        )
+        metadata = {
+            "regularMarketPrice": 81.84,
+            "previousClose": 82.8468,
+            "regularMarketDayLow": 81.33,
+            "regularMarketDayHigh": 82.90,
+            "currentTradingPeriod": {
+                "regular": {
+                    "end": int(datetime(2026, 8, 28, 20, 0, tzinfo=UTC).timestamp())
+                }
+            },
+        }
+        with (
+            patch(
+                "app.services.brokers.yahoo.client.fetch_ohlcv",
+                new=AsyncMock(return_value=sample),
+            ),
+            patch(
+                "app.services.brokers.yahoo.client.fetch_history_metadata",
+                new=AsyncMock(return_value=metadata),
+            ),
+        ):
+            rows = await fetch_us_daily_yahoo_fallback(
+                symbol="NEE",
+                n=2,
+                now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+            )
+
+        assert len(rows) == 2
+        assert rows[-1].open == pytest.approx(82.92)
+        assert rows[-1].high == pytest.approx(82.92)
+        assert rows[-1].low == pytest.approx(81.33)
+        assert rows[-1].close == pytest.approx(81.84)
+        assert rows[-1].adj_close == pytest.approx(81.84)

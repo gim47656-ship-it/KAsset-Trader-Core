@@ -302,6 +302,12 @@ def test_terminal_session_gate_rejects_weekend_and_us_holiday():
 
     assert "not a XNYS regular session" in str(weekend)
     assert "not a XNYS regular session" in str(holiday)
+    kr_one_off_closure = svc._terminal_close_session_failure(
+        instrument_type="equity_kr",
+        review_date=date(2026, 8, 17),
+        now=datetime(2026, 8, 18, 7, tzinfo=UTC),
+    )
+    assert "not a XKRX regular session" in str(kr_one_off_closure)
 
 
 def test_terminal_session_gate_honors_early_close_and_kr_cutoff():

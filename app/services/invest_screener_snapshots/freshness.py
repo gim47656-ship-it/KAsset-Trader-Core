@@ -58,7 +58,7 @@ def classify_kr_session_slot(now: dt.datetime) -> KRSessionSlot:
     ====================  ==========================================
 
     Weekends and KR holidays are out of scope here; callers should gate
-    actionable use on ``exchange_calendars.get_calendar("XKRX").is_session``.
+    actionable use on ``market_events.session_calendar.is_trading_session``.
     Naive ``now`` is treated as UTC and converted to KST.
     """
     if now.tzinfo is None:

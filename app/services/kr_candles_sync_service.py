@@ -3,11 +3,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from functools import lru_cache
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-import exchange_calendars as xcals
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +25,10 @@ from app.services.candles_sync_common import (
 )
 from app.services.manual_holdings_service import ManualHoldingsService
 from app.services.market_data.toss_ohlcv import fetch_kr_intraday_toss_frame
+from app.services.market_events.session_calendar import (
+    is_trading_session,
+    trading_sessions_in_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +78,6 @@ _VENUE_CONFIG: dict[str, VenueConfig] = {
 _TABLE_CFG = SyncTableConfig(table_name="kr_candles_1m", partition_col="venue")
 _CURSOR_SQL = build_cursor_sql(_TABLE_CFG)
 _UPSERT_SQL = build_upsert_sql(_TABLE_CFG)
-
-
-@lru_cache(maxsize=1)
-def _get_xkrx_calendar():
-    return xcals.get_calendar("XKRX")
 
 
 def _normalize_symbol(value: object) -> str | None:
@@ -141,8 +138,7 @@ def _build_venue_plan(
 
 
 def _is_session_day_kst(target_day: date) -> bool:
-    calendar = _get_xkrx_calendar()
-    return bool(calendar.is_session(pd.Timestamp(target_day)))
+    return is_trading_session("kr", target_day)
 
 
 def _should_process_venue(
@@ -191,16 +187,14 @@ def _recent_session_days(
     *,
     include_today: bool,
 ) -> list[date]:
-    calendar = _get_xkrx_calendar()
     lookback_days = max(90, sessions * 8)
-    start = pd.Timestamp(now_kst.date() - timedelta(days=lookback_days))
-    end = pd.Timestamp(now_kst.date())
-    session_index = calendar.sessions_in_range(start, end)
-    days = [pd.Timestamp(value).date() for value in session_index]
+    days = trading_sessions_in_range(
+        "kr",
+        now_kst.date() - timedelta(days=lookback_days),
+        now_kst.date(),
+    )
     if not include_today and days and days[-1] == now_kst.date():
         days = days[:-1]
-    if not days:
-        return []
     return days[-sessions:]
 
 

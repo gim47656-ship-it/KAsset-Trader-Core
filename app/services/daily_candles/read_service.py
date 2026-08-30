@@ -39,6 +39,11 @@ import pandas as pd
 from app.core.timezone import KST, now_kst
 from app.services.daily_candles.repository import DailyCandleRow
 from app.services.kis_ohlcv_cache import KRX_DAILY_CACHE_CUTOFF
+from app.services.market_events.session_calendar import (
+    is_trading_session,
+    previous_trading_session,
+    regular_session_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,14 @@ def latest_exchange_session(
     ``minute_to_past_session`` excludes an in-progress session, so during
     trading hours this returns the *previous* session.
     """
+    if exchange == "XKRX":
+        current_utc = _coerce_utc_timestamp(now).to_pydatetime()
+        local_date = current_utc.astimezone(KST).date()
+        bounds = regular_session_bounds("kr", local_date)
+        if bounds is not None and current_utc >= bounds[1]:
+            return local_date
+        return previous_trading_session("kr", local_date)
+
     cal = get_calendar(exchange)
     try:
         session = cal.minute_to_past_session(_coerce_utc_timestamp(now), count=1)
@@ -103,15 +116,10 @@ def kr_daily_bar_may_be_forming(now: datetime.datetime | None = None) -> bool:
     settling buffer, same semantics as ``kis_ohlcv_cache``).
     """
     current = _coerce_kst(now)
-    try:
-        cal = get_calendar("XKRX")
-        if not bool(cal.is_session(pd.Timestamp(current.date()))):
-            return False
-    except Exception:
-        # Calendar failure: don't block the DB path here — the freshness
-        # check downstream is the authority and also fails closed to live.
-        return False
-    return current.time() < KRX_DAILY_CACHE_CUTOFF
+    return (
+        is_trading_session("kr", current.date())
+        and current.time() < KRX_DAILY_CACHE_CUTOFF
+    )
 
 
 def last_final_session_kr(now: datetime.datetime | None = None) -> datetime.date | None:
@@ -122,17 +130,9 @@ def last_final_session_kr(now: datetime.datetime | None = None) -> datetime.date
     """
     current = _coerce_kst(now)
     today = current.date()
-    try:
-        cal = get_calendar("XKRX")
-        ts_today = pd.Timestamp(today)
-        if bool(cal.is_session(ts_today)) and current.time() >= KRX_DAILY_CACHE_CUTOFF:
-            return today
-        prev = cal.date_to_session(
-            ts_today - pd.Timedelta(days=1), direction="previous"
-        )
-        return pd.Timestamp(prev).date()
-    except Exception:
-        return None
+    if is_trading_session("kr", today) and current.time() >= KRX_DAILY_CACHE_CUTOFF:
+        return today
+    return previous_trading_session("kr", today)
 
 
 def last_final_session_us(now: datetime.datetime | None = None) -> datetime.date | None:

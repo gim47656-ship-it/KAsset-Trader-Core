@@ -98,6 +98,11 @@ def test_is_market_session_today_kr_weekend() -> None:
     assert task_module.is_market_session_today("kr", now=now) is False
 
 
+def test_is_market_session_today_kr_confirmed_one_off_closure() -> None:
+    now = dt.datetime(2026, 8, 17, 1, 0, tzinfo=dt.UTC)
+    assert task_module.is_market_session_today("kr", now=now) is False
+
+
 def test_is_market_session_today_us_independence_day_is_holiday() -> None:
     """2025-07-04 Fri — NYSE closed for Independence Day."""
     # 18:00 UTC == 14:00 EDT on July 4.

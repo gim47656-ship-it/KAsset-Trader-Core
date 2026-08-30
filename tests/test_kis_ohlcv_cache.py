@@ -68,6 +68,11 @@ def test_is_cache_fresh_for_day_respects_xkrx_session_policy(
 def test_is_session_day_kst_uses_xkrx_calendar() -> None:
     assert kis_ohlcv_cache._is_session_day_kst(date(2026, 1, 1)) is False
     assert kis_ohlcv_cache._is_session_day_kst(date(2026, 1, 2)) is True
+    assert kis_ohlcv_cache._is_session_day_kst(date(2026, 7, 17)) is False
+    assert kis_ohlcv_cache._is_session_day_kst(date(2026, 8, 17)) is False
+    assert kis_ohlcv_cache._latest_session_day_on_or_before(date(2026, 8, 17)) == date(
+        2026, 8, 14
+    )
 
 
 def _configure_cache_runtime(monkeypatch, fake_redis: FakeRedis, now: datetime) -> None:

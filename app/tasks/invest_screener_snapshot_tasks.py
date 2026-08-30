@@ -49,6 +49,7 @@ from app.services.invest_screener_snapshots.guards import (
     InsufficientRowsError,
     SuspiciousDistributionError,
 )
+from app.services.market_events.session_calendar import is_trading_session
 
 logger = logging.getLogger(__name__)
 
@@ -104,26 +105,13 @@ def _scheduled_us_post_close_labels() -> list[dict[str, str]]:
 def is_market_session_today(
     market: Literal["kr", "us"], *, now: dt.datetime | None = None
 ) -> bool:
-    """Return whether today (in the market's tz) is a trading session.
+    """Return whether today (in the market's timezone) is a trading session."""
 
-    Uses :mod:`exchange_calendars` XKRX for KR and XNYS for US (ROB-281 D2).
-    Pulling the calendar is the only expensive op here; imports are lazy to
-    keep startup snappy for non-scheduled importers.
-    """
-    import exchange_calendars as xcals
-    import pandas as pd
-
-    if market == "kr":
-        cal = xcals.get_calendar("XKRX")
-        tz = ZoneInfo("Asia/Seoul")
-    else:
-        cal = xcals.get_calendar("XNYS")
-        tz = ZoneInfo("America/New_York")
+    tz = ZoneInfo("Asia/Seoul" if market == "kr" else "America/New_York")
     moment = now or dt.datetime.now(dt.UTC)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=dt.UTC)
-    today_local = moment.astimezone(tz).date()
-    return bool(cal.is_session(pd.Timestamp(today_local)))
+    return is_trading_session(market, moment.astimezone(tz).date())
 
 
 # ---------------------------------------------------------------------------

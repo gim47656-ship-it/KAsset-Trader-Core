@@ -119,6 +119,22 @@ def test_should_process_venue_skips_holiday_in_incremental_mode() -> None:
     assert reason == "holiday"
 
 
+def test_shared_calendar_excludes_confirmed_one_off_closures() -> None:
+    from app.services import kr_candles_sync_service as svc
+
+    assert svc._is_session_day_kst(datetime(2026, 7, 17).date()) is False
+    days = svc._recent_session_days(
+        datetime(2026, 8, 18, 8, 0, tzinfo=svc._KST),
+        3,
+        include_today=False,
+    )
+    assert days == [
+        datetime(2026, 8, 12).date(),
+        datetime(2026, 8, 13).date(),
+        datetime(2026, 8, 14).date(),
+    ]
+
+
 def test_should_process_venue_skips_outside_session_in_incremental_mode() -> None:
     from app.services import kr_candles_sync_service as svc
 

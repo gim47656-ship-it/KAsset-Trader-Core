@@ -31,6 +31,14 @@ _CALENDAR_NAME: dict[str, str] = {"us": "XNYS", "kr": "XKRX"}
 # ~4 (Thanksgiving Wed -> following Mon). 32 leaves a generous safety margin so
 # a real session is never missed within the supported calendar range.
 _SESSION_SEARCH_DAYS = 32
+# exchange_calendars 4.13.2 still classifies these confirmed 2026 KRX closure
+# dates as sessions. Production Naver KOSPI and Toss equity histories both omit
+# them, so keep the shared calendar aligned with the exchange until upstream
+# calendar data incorporates the one-off closures.
+_ADDITIONAL_CLOSED_DAYS: dict[Market, frozenset[date]] = {
+    "kr": frozenset({date(2026, 7, 17), date(2026, 8, 17)}),
+    "us": frozenset(),
+}
 
 
 def _calendar(market: Market):
@@ -42,6 +50,10 @@ def _calendar(market: Market):
         raise ValueError(f"unsupported market {market!r}") from exc
 
 
+def _is_additional_closed_day(market: Market, day: date) -> bool:
+    return day in _ADDITIONAL_CLOSED_DAYS[market]
+
+
 def trading_session_status(market: Market, day: date) -> SessionStatus:
     """Classify ``day`` as an open, closed, or unresolvable exchange session.
 
@@ -50,6 +62,9 @@ def trading_session_status(market: Market, day: date) -> SessionStatus:
     classify the date instead of silently treating an infrastructure error as a
     holiday.
     """
+    if _is_additional_closed_day(market, day):
+        return "closed"
+
     import pandas as pd
 
     try:
@@ -90,6 +105,9 @@ def regular_session_bounds(
     half-days are honored — the bounds come straight from the library, which
     models them (e.g. the day after US Thanksgiving closes at 13:00 ET).
     """
+    if _is_additional_closed_day(market, day):
+        return None
+
     import pandas as pd
 
     try:
@@ -160,4 +178,6 @@ def trading_sessions_in_range(market: Market, start: date, end: date) -> list[da
             exc_info=True,
         )
         return []
-    return [ts.date() for ts in sessions]
+    return [
+        ts.date() for ts in sessions if not _is_additional_closed_day(market, ts.date())
+    ]

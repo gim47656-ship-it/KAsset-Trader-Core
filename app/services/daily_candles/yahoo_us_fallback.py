@@ -8,6 +8,7 @@ NOT know about the database or about KIS.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ import app.services.brokers.yahoo.client as yahoo_service
 from app.services.invest_screener_snapshots.freshness import (
     last_completed_us_session_close,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,7 @@ def _recover_latest_completed_row(
     frame: pd.DataFrame,
     metadata: object,
     *,
+    symbol: str,
     now: datetime,
 ) -> pd.DataFrame:
     """Recover only the exact completed-session terminal row from Yahoo metadata."""
@@ -90,9 +94,13 @@ def _recover_latest_completed_row(
         return frame
 
     target = frame.iloc[target_position]
-    previous_close = _finite(frame.iloc[prior_positions[-1]].get("close"))
+    prior = frame.iloc[prior_positions[-1]]
+    previous_close = _finite(prior.get("close"))
+    previous_adjusted_close = _finite(prior.get("adj_close"))
     current = _finite(metadata.get("regularMarketPrice"))
     metadata_previous = _finite(metadata.get("previousClose"))
+    metadata_low = _finite(metadata.get("regularMarketDayLow"))
+    metadata_high = _finite(metadata.get("regularMarketDayHigh"))
     current_period = metadata.get("currentTradingPeriod")
     regular_period = (
         current_period.get("regular") if isinstance(current_period, Mapping) else None
@@ -102,25 +110,59 @@ def _recover_latest_completed_row(
         if isinstance(regular_period, Mapping)
         else None
     )
+    open_value = _finite(target.get("open"))
     low = _finite(target.get("low"))
     high = _finite(target.get("high"))
     raw_close = _finite(target.get("close"))
+    previous_matches = (
+        metadata_previous is not None
+        and previous_close is not None
+        and (
+            math.isclose(metadata_previous, previous_close, abs_tol=0.01)
+            or (
+                previous_adjusted_close is not None
+                and math.isclose(
+                    metadata_previous,
+                    previous_adjusted_close,
+                    abs_tol=0.01,
+                )
+            )
+        )
+    )
     if (
         current is None
-        or previous_close is None
-        or metadata_previous is None
+        or not previous_matches
         or regular_end != completed_close.astimezone(UTC)
-        or not math.isclose(metadata_previous, previous_close, abs_tol=0.01)
+        or open_value is None
         or low is None
         or high is None
-        or not low <= current <= high
+        or metadata_low is None
+        or metadata_high is None
+        or not math.isclose(metadata_low, low, abs_tol=0.01)
+        or not math.isclose(metadata_high, high, abs_tol=0.01)
+        or not metadata_low <= current <= metadata_high
         or (
             raw_close is not None and not math.isclose(raw_close, current, abs_tol=0.01)
         )
     ):
         return frame
 
+    normalized_high = max(open_value, high, current)
+    normalized_low = min(open_value, low, current)
+    if normalized_high != high or normalized_low != low:
+        logger.info(
+            "Yahoo completed candle OHLC bounds normalized symbol=%s session=%s "
+            "open=%s original_high=%s original_low=%s close=%s",
+            symbol,
+            completed_date,
+            open_value,
+            high,
+            low,
+            current,
+        )
     recovered = frame.copy()
+    recovered.at[recovered.index[target_position], "high"] = normalized_high
+    recovered.at[recovered.index[target_position], "low"] = normalized_low
     recovered.at[recovered.index[target_position], "close"] = current
     recovered.at[recovered.index[target_position], "adj_close"] = current
     return recovered
@@ -154,7 +196,12 @@ async def fetch_us_daily_yahoo_fallback(
         or _finite(terminal.iloc[-1].get("adj_close")) is None
     ):
         metadata = await yahoo_service.fetch_history_metadata(symbol)
-        frame = _recover_latest_completed_row(frame, metadata, now=moment)
+        frame = _recover_latest_completed_row(
+            frame,
+            metadata,
+            symbol=symbol,
+            now=moment,
+        )
 
     out: list[YahooFallbackRow] = []
     for record in frame.to_dict("records"):

@@ -1122,20 +1122,21 @@ def _terminal_close_session_failure(
         return None
 
     from app.services.daily_candles.read_service import (
-        get_calendar,
         last_final_session_kr,
         last_final_session_us,
     )
+    from app.services.market_events.session_calendar import trading_session_status
 
-    calendar_name = "XKRX" if instrument_type == "equity_kr" else "XNYS"
-    try:
-        if not bool(get_calendar(calendar_name).is_session(review_date.isoformat())):
-            return (
-                f"review_date={review_date.isoformat()} is not a "
-                f"{calendar_name} regular session"
-            )
-    except Exception as exc:
-        return f"could not verify {calendar_name} review session: {exc}"
+    market = "kr" if instrument_type == "equity_kr" else "us"
+    calendar_name = "XKRX" if market == "kr" else "XNYS"
+    session_status = trading_session_status(market, review_date)
+    if session_status == "unknown":
+        return f"could not verify {calendar_name} review session"
+    if session_status == "closed":
+        return (
+            f"review_date={review_date.isoformat()} is not a "
+            f"{calendar_name} regular session"
+        )
 
     last_final = (
         last_final_session_kr(now)

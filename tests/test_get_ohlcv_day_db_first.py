@@ -27,6 +27,7 @@ from app.services.daily_candles.read_service import (
     cache_first_kr,
     cache_first_us,
     cache_is_fresh_equity,
+    last_final_session_kr,
     write_back_kr,
     write_back_us,
 )
@@ -59,6 +60,12 @@ def _after_cutoff_now() -> dt.datetime:
     """16:00 KST on the latest XKRX session — past the 15:35 cutoff."""
     latest, _ = _krx_latest_and_prev_session()
     return _kst_at(latest, 16, 0)
+
+
+def test_last_final_kr_session_skips_confirmed_one_off_closure():
+    assert last_final_session_kr(_kst_at(dt.date(2026, 8, 17), 16, 0)) == dt.date(
+        2026, 8, 14
+    )
 
 
 class _FakeSession:

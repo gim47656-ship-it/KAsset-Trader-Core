@@ -65,16 +65,6 @@ _KIS_DEFAULT_SCOPE_PARTS = (
     "/test_order",
     "/test_services_kis",
 )
-_KR_CALENDAR_SCOPE_PARTS = (
-    "market_session",
-    "session_calendar",
-    "/test_daily_scan.py",
-    "/test_market_events",
-    "/test_mcp_",
-    "/test_preopen",
-    "/test_screener",
-    "/services/market_events/",
-)
 _AUTH_DB_SCOPE_PARTS = (
     "/routers/",
     "/test_admin",
@@ -353,43 +343,6 @@ def _mock_nxt_eligible(monkeypatch):
     monkeypatch.setattr(
         "app.services.brokers.kis.domestic_orders.is_nxt_eligible",
         AsyncMock(return_value=True),
-    )
-
-
-@pytest.fixture
-def _mock_kr_market_session_calendar(monkeypatch):
-    """Use a deterministic lightweight KRX calendar in fast tests.
-
-    Tests that need precise holiday behavior patch market_session._get_kr_calendar
-    directly. The default fast gate only needs weekday/session arithmetic and must
-    not pay the exchange_calendars XKRX construction cost in every xdist worker.
-    """
-
-    class _FastKrCalendar:
-        tz = "Asia/Seoul"
-
-        def _local(self, value):
-            ts = pd.Timestamp(value)
-            if ts.tz is None:
-                return ts.tz_localize(self.tz)
-            return ts.tz_convert(self.tz)
-
-        def is_trading_minute(self, value):
-            local = self._local(value)
-            if local.weekday() >= 5:
-                return False
-            start = pd.Timestamp(local.date(), tz=self.tz) + pd.Timedelta(hours=9)
-            end = pd.Timestamp(local.date(), tz=self.tz) + pd.Timedelta(
-                hours=15, minutes=30
-            )
-            return start <= local < end
-
-        def is_session(self, value):
-            return self._local(value).weekday() < 5
-
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.market_session._get_kr_calendar",
-        lambda: _FastKrCalendar(),
     )
 
 
@@ -859,8 +812,6 @@ def _scoped_test_defaults(request: pytest.FixtureRequest) -> None:
     if any(part in path for part in _KIS_DEFAULT_SCOPE_PARTS):
         request.getfixturevalue("_mock_nxt_eligible")
         request.getfixturevalue("_isolate_kis_circuit_breaker")
-    if any(part in path for part in _KR_CALENDAR_SCOPE_PARTS):
-        request.getfixturevalue("_mock_kr_market_session_calendar")
     if any(part in path for part in _AUTH_DB_SCOPE_PARTS):
         request.getfixturevalue("mock_auth_middleware_db")
     if uses_shared_test_database() and (

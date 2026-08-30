@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.jobs import investment_watch_scanner as scanner_module
+from app.jobs import watch_market_data
 from app.jobs.investment_watch_scanner import InvestmentWatchScanner
 from app.schemas.investment_reports import (
     ActivateWatchRequest,
@@ -40,6 +42,16 @@ from app.services.investment_reports.repository import InvestmentReportsReposito
 from app.services.investment_reports.watch_activation import WatchActivationService
 from app.services.investment_reports.watch_create import DirectWatchCreateService
 from tests._investment_reports_helpers import future_datetime
+
+
+def test_watch_market_open_uses_shared_kr_closure_calendar():
+    assert (
+        watch_market_data.is_market_open(
+            "kr",
+            now=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+        )
+        is False
+    )
 
 
 @pytest_asyncio.fixture(name="session")

@@ -2,16 +2,18 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime, time, timedelta
-from functools import lru_cache
+from datetime import UTC, date, datetime, time
 
-import exchange_calendars as xcals
 import pandas as pd
 import redis.asyncio as redis
 
 from app.core.config import settings
 from app.core.log_sanitize import safe_log_value
 from app.core.timezone import KST, now_kst
+from app.services.market_events.session_calendar import (
+    is_trading_session,
+    previous_trading_session,
+)
 from app.services.ohlcv_cache_common import (
     _acquire_lock,
     _enforce_retention_limit,
@@ -92,28 +94,18 @@ def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
     return current.astimezone(KST)
 
 
-@lru_cache(maxsize=1)
-def _get_xkrx_calendar():
-    return xcals.get_calendar("XKRX")
-
-
 def _is_session_day_kst(target_day: date) -> bool:
-    calendar = _get_xkrx_calendar()
-    return bool(calendar.is_session(pd.Timestamp(target_day)))
+    return is_trading_session("kr", target_day)
 
 
 def _latest_session_day_on_or_before(target_day: date) -> date | None:
-    calendar = _get_xkrx_calendar()
-    start = pd.Timestamp(target_day - timedelta(days=30))
-    end = pd.Timestamp(target_day)
-    sessions = calendar.sessions_in_range(start, end)
-    if len(sessions) == 0:
-        return None
-    return pd.Timestamp(sessions[-1]).date()
+    if is_trading_session("kr", target_day):
+        return target_day
+    return previous_trading_session("kr", target_day)
 
 
 def _latest_session_day_before(target_day: date) -> date | None:
-    return _latest_session_day_on_or_before(target_day - timedelta(days=1))
+    return previous_trading_session("kr", target_day)
 
 
 def _canonicalize_frame(period: str, frame: pd.DataFrame) -> pd.DataFrame:

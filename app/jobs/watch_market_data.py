@@ -12,42 +12,33 @@ legacy scanner's duplicate copy.
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import lru_cache
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
-import exchange_calendars as xcals
 import pandas as pd
-from pandas import Timestamp
 
 from app.mcp_server.tooling.market_data_indicators import _calculate_rsi
 from app.services import exchange_rate_service, market_index_service
 from app.services import market_data as market_data_service
+from app.services.market_events.session_calendar import regular_session_bounds
 
 _CRYPTO_RSI_LOOKBACK_DAYS = 200
 
 
-@lru_cache(maxsize=2)
-def _get_calendar(market: str):
-    if market == "kr":
-        return xcals.get_calendar("XKRX")
-    if market == "us":
-        return xcals.get_calendar("XNYS")
-    return None
-
-
-def is_market_open(market: str) -> bool:
+def is_market_open(market: str, *, now: datetime | None = None) -> bool:
     if market == "crypto":
         return True
-
-    calendar = _get_calendar(market)
-    if calendar is None:
+    if market not in {"kr", "us"}:
         return False
 
-    now_utc = Timestamp.now("UTC").floor("min")
-    if now_utc.tz is None:
-        now_utc = now_utc.tz_localize("UTC")
-    now_in_market_tz = now_utc.tz_convert(calendar.tz)
-    return bool(calendar.is_trading_minute(now_in_market_tz))
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    current_utc = current.astimezone(UTC)
+    market_tz = ZoneInfo("Asia/Seoul" if market == "kr" else "America/New_York")
+    bounds = regular_session_bounds(market, current_utc.astimezone(market_tz).date())
+    return bool(bounds is not None and bounds[0] <= current_utc < bounds[1])
 
 
 def _to_float(value: object) -> float | None:
