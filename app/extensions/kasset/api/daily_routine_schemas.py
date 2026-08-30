@@ -37,6 +37,8 @@ class DailyRoutineAlert(AndroidWireModel):
     kind: RoutineKey
     headline: str
     summary: str | None = None
+    translated_title: str | None = None
+    translated_excerpt: str | None = None
     symbol: str | None = None
     source: str | None = None
     url: str | None = None

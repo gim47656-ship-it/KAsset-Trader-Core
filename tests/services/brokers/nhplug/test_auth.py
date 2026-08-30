@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -30,6 +31,7 @@ from app.services.brokers.nhplug.client import (
     _assert_mock_enabled as data_dispatch_gate,
 )
 from app.services.brokers.nhplug.errors import (
+    NHPlugMockConfigurationError,
     NHPlugMockDisabled,
     NHPlugMockEndpointError,
 )
@@ -127,6 +129,31 @@ async def test_auth_dispatch_gate_blocks_unset_or_false_before_transport(
 
     assert seen == []
     assert isinstance(error, NHPlugMockDisabled)
+
+
+@pytest.mark.asyncio
+async def test_cache_lock_failure_is_typed_without_oauth_dispatch(
+    armed: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_lock(_cache_path: Path) -> auth_module._CacheLockState:
+        raise OSError("lock unavailable")
+
+    monkeypatch.setattr(auth_module, "_acquire_cache_lock", fail_lock)
+    transport, seen = _transport()
+    client = NHPlugAuthClient(
+        app_key="test-key",
+        app_secret="test-secret",
+        transport=transport,
+    )
+
+    with pytest.raises(
+        NHPlugMockConfigurationError,
+        match="token cache lock is unavailable",
+    ):
+        await client.get_access_token()
+
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -317,6 +344,190 @@ async def test_file_cache_is_reused_by_a_different_client_instance(
 
     assert await second.get_access_token() == "process-shared-token"
     assert second_seen == []
+
+
+@pytest.mark.asyncio
+async def test_readable_cache_is_reused_when_file_mode_cannot_be_corrected(
+    armed: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_path = tmp_path / ".nhplug" / "token_cache.json"
+    cache_path.parent.mkdir()
+    cache_path.write_text(
+        json.dumps(_cache_payload(token="copied-token")),
+        encoding="utf-8",
+    )
+    original_chmod = auth_module.os.chmod
+
+    def fail_cache_chmod(path: Any, mode: int) -> None:
+        if Path(path) == cache_path:
+            raise PermissionError("mode correction denied")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(auth_module.os, "chmod", fail_cache_chmod)
+    transport, seen = _transport(
+        {"access_token": "must-not-be-issued", "expires_in": 3_600}
+    )
+    client = NHPlugAuthClient(
+        app_key="test-key",
+        app_secret="test-secret",
+        cache_path=cache_path,
+        transport=transport,
+    )
+
+    assert await client.get_access_token() == "copied-token"
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_default_cache_is_isolated_by_owner_fingerprint(
+    armed: None,
+) -> None:
+    first_transport, first_seen = _transport(
+        {"access_token": "owner-a-token", "expires_in": 3_600}
+    )
+    second_transport, second_seen = _transport(
+        {"access_token": "owner-b-token", "expires_in": 3_600}
+    )
+    owner_a = NHPlugAuthClient(
+        app_key="owner-a-key",
+        app_secret="owner-a-secret",
+        transport=first_transport,
+    )
+    owner_b = NHPlugAuthClient(
+        app_key="owner-b-key",
+        app_secret="owner-b-secret",
+        transport=second_transport,
+    )
+
+    assert await owner_a.get_access_token() == "owner-a-token"
+    assert await owner_b.get_access_token() == "owner-b-token"
+
+    unused_transport, unused_seen = _transport(
+        {"access_token": "must-not-be-issued", "expires_in": 3_600}
+    )
+    owner_a_again = NHPlugAuthClient(
+        app_key="owner-a-key",
+        app_secret="owner-a-secret",
+        transport=unused_transport,
+    )
+    assert await owner_a_again.get_access_token() == "owner-a-token"
+
+    cache_files = list(
+        auth_module.DEFAULT_TOKEN_CACHE_PATH.parent.glob("token_cache.*.json")
+    )
+    assert len(cache_files) == 2
+    assert {
+        json.loads(path.read_text(encoding="utf-8"))["token"] for path in cache_files
+    } == {"owner-a-token", "owner-b-token"}
+    assert len(first_seen) == 1
+    assert len(second_seen) == 1
+    assert unused_seen == []
+    assert not auth_module.DEFAULT_TOKEN_CACHE_PATH.exists()
+
+
+@pytest.mark.asyncio
+async def test_valid_legacy_default_cache_is_migrated_without_issuing(
+    armed: None,
+) -> None:
+    legacy_path = auth_module.DEFAULT_TOKEN_CACHE_PATH
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(_cache_payload(token="legacy-token")),
+        encoding="utf-8",
+    )
+    transport, seen = _transport(
+        {"access_token": "must-not-be-issued", "expires_in": 3_600}
+    )
+    client = NHPlugAuthClient(
+        app_key="test-key",
+        app_secret="test-secret",
+        transport=transport,
+    )
+
+    assert await client.get_access_token() == "legacy-token"
+
+    owner_path = auth_module._owner_cache_path(
+        legacy_path,
+        _cache_payload()["owner_fingerprint"],
+    )
+    assert seen == []
+    assert not legacy_path.exists()
+    assert json.loads(owner_path.read_text(encoding="utf-8"))["token"] == "legacy-token"
+
+
+@pytest.mark.asyncio
+async def test_valid_legacy_cache_is_reused_when_atomic_migration_fails(
+    armed: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_path = auth_module.DEFAULT_TOKEN_CACHE_PATH
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(_cache_payload(token="legacy-token")),
+        encoding="utf-8",
+    )
+
+    def fail_replace(_source: Any, _destination: Any) -> None:
+        raise PermissionError("migration denied")
+
+    monkeypatch.setattr(auth_module.os, "replace", fail_replace)
+    transport, seen = _transport(
+        {"access_token": "must-not-be-issued", "expires_in": 3_600}
+    )
+    client = NHPlugAuthClient(
+        app_key="test-key",
+        app_secret="test-secret",
+        transport=transport,
+    )
+
+    assert await client.get_access_token() == "legacy-token"
+    assert seen == []
+    assert legacy_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clients_with_same_owner_issue_only_once(
+    armed: None,
+) -> None:
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        request_started.set()
+        await release_request.wait()
+        return httpx.Response(
+            200,
+            json={"access_token": "shared-token", "expires_in": 3_600},
+        )
+
+    transport = httpx.MockTransport(handler)
+    first = NHPlugAuthClient(
+        app_key="shared-owner-key",
+        app_secret="shared-owner-secret",
+        transport=transport,
+    )
+    second = NHPlugAuthClient(
+        app_key="shared-owner-key",
+        app_secret="shared-owner-secret",
+        transport=transport,
+    )
+
+    first_task = asyncio.create_task(first.get_access_token())
+    second_task = asyncio.create_task(second.get_access_token())
+    await request_started.wait()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    release_request.set()
+
+    assert await asyncio.gather(first_task, second_task) == [
+        "shared-token",
+        "shared-token",
+    ]
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio

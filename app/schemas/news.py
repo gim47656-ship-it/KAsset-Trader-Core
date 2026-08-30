@@ -204,6 +204,8 @@ class NewsAnalysisResultResponse(BaseModel):
     sentiment: str
     sentiment_score: float | None
     summary: str
+    translated_title: str | None
+    translated_excerpt: str | None
     key_points: list[str]
     topics: list[str] | None
     price_impact: str | None

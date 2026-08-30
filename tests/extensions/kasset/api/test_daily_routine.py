@@ -354,6 +354,11 @@ async def test_watchlist_price_alerts_include_exact_five_percent_boundaries_and_
         alert.summary is not None and "AFTER_MARKET 형성 중 시세" in alert.summary
         for alert in first.alerts
     )
+    assert all(alert.translated_title is None for alert in first.alerts)
+    assert all(alert.translated_excerpt is None for alert in first.alerts)
+    wire_alerts = first.model_dump(by_alias=True, mode="json")["alerts"]
+    assert all(alert["translatedTitle"] is None for alert in wire_alerts)
+    assert all(alert["translatedExcerpt"] is None for alert in wire_alerts)
 
 
 def _news_article(
@@ -383,7 +388,12 @@ def _news_article(
 
 
 def _analysis(
-    article_id: int, *, summary: str, created_at: datetime
+    article_id: int,
+    *,
+    summary: str,
+    created_at: datetime,
+    translated_title: str | None = None,
+    translated_excerpt: str | None = None,
 ) -> NewsAnalysisResult:
     return NewsAnalysisResult(
         article_id=article_id,
@@ -391,6 +401,8 @@ def _analysis(
         sentiment=Sentiment.NEUTRAL,
         sentiment_score=None,
         summary=summary,
+        translated_title=translated_title,
+        translated_excerpt=translated_excerpt,
         key_points=[summary],
         topics=None,
         price_impact=None,
@@ -472,6 +484,10 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
             title="Markets await a decision",
             source="Local Wire",
             published_at=wall_now - timedelta(minutes=21),
+            content=(
+                "The Federal Reserve described its policy decision and the current "
+                "market conditions in the stored article body."
+            ),
         ),
         _news_article(
             suffix=suffix,
@@ -497,6 +513,19 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
                 articles[0].id,
                 summary="CNBC 제목에 적힌 시장 소식입니다.",
                 created_at=wall_now,
+                translated_title="CNBC 시장 소식",
+                translated_excerpt=None,
+            ),
+            _analysis(
+                next(
+                    article.id
+                    for article in articles
+                    if article.title == "Markets await a decision"
+                ),
+                summary="이전 연준 정책 결정 요약입니다.",
+                translated_title="이전 시장 결정 번역 제목",
+                translated_excerpt="이전 시장 결정 번역 발췌입니다.",
+                created_at=wall_now - timedelta(minutes=1),
             ),
             _analysis(
                 next(
@@ -506,6 +535,11 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
                 ),
                 summary="연준 정책 결정이 원문에 명시되었습니다.",
                 created_at=wall_now,
+                translated_title="시장은 정책 결정을 기다린다",
+                translated_excerpt=(
+                    "연방준비제도는 저장된 기사 본문에서 정책 결정과 현재 시장 "
+                    "여건을 설명했다."
+                ),
             ),
         ]
     )
@@ -544,10 +578,32 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
         alert for alert in global_alerts if alert.headline == "CNBC market bulletin"
     )
     assert title_only.summary is None
+    assert title_only.translated_title == "CNBC 시장 소식"
+    assert title_only.translated_excerpt is None
     assert {alert.headline for alert in trump_alerts} == {
         "Trump tariff policy changes",
         "Markets await a decision",
     }
+    translated_alert = next(
+        alert for alert in trump_alerts if alert.headline == "Markets await a decision"
+    )
+    assert translated_alert.summary == "연준 정책 결정이 원문에 명시되었습니다."
+    assert translated_alert.translated_title == "시장은 정책 결정을 기다린다"
+    assert translated_alert.translated_excerpt == (
+        "연방준비제도는 저장된 기사 본문에서 정책 결정과 현재 시장 여건을 설명했다."
+    )
+    assert translated_alert.url is not None
+    assert translated_alert.url.endswith("/31")
+    wire_alerts = {
+        alert["headline"]: alert
+        for alert in response.model_dump(by_alias=True, mode="json")["alerts"]
+    }
+    assert wire_alerts["Markets await a decision"]["translatedTitle"] == (
+        "시장은 정책 결정을 기다린다"
+    )
+    assert wire_alerts["Markets await a decision"]["translatedExcerpt"] == (
+        "연방준비제도는 저장된 기사 본문에서 정책 결정과 현재 시장 여건을 설명했다."
+    )
     assert "Old Reuters item" not in {alert.headline for alert in response.alerts}
     assert "Local sports result" not in {alert.headline for alert in response.alerts}
     assert {alert.id for alert in context.routine_alerts} == {

@@ -239,6 +239,12 @@ class NewsAnalysisResult(Base):
     summary: Mapped[str] = mapped_column(
         Text, nullable=False, comment="기사 요약 (한국어)"
     )
+    translated_title: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="영문 뉴스 제목의 한국어 번역"
+    )
+    translated_excerpt: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="영문 기사 본문 발췌의 한국어 번역"
+    )
     key_points: Mapped[list] = mapped_column(
         JSONB, nullable=False, comment="핵심 포인트 리스트 (JSON 배열)"
     )

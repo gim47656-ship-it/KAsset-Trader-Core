@@ -1,5 +1,5 @@
 # HANDOFF — KAsset Trader Core
-갱신: 2026-08-30 (운영 DB migration·KR/US 100종목 일봉·기준지수 적재 및 fail-closed readiness 배포)
+갱신: 2026-08-30 (영문 뉴스 번역 발췌·NH PLUG 토큰 중복발급 방지 및 readiness 미종결 재판정)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, PAPER/LIVE 주문 원장과 Android API를 제공한다. 현재 목표는 **PAPER에서 재현 가능한 추천·승격·주문·청산을 충분히 검증한 뒤 별도 승인으로 LIVE를 검토**하는 것이다. 일일 목표를 이유로 거래를 만들거나, 불완전한 이력·기업행동·PIT 근거를 실제 backtest 증거처럼 취급하거나, AI가 Hard Risk를 우회하면 안 된다.
@@ -13,57 +13,41 @@ KAsset Trader Core는 스크리너, 시세·뉴스·공시, 전략, AI 분석, P
 5. LIVE 주문은 별도 사용자 승인 전까지 열지 않는다.
 
 ## 전체 진행 상태
-- **운영 배포 완료**: 운영 이미지 source ref는 `dc012816`, public `/health`는 `{"status":"ok"}`다. Alembic은 `20260830_kr_lifecycle_ca (head)`까지 적용됐다.
-- **운영 백업 완료**: `/root/backups/kasset-daily/kasset-20260829T222212Z.dump.gz`, SHA-256 `e4eecec8da3261eea98887f9da38f00ee189e0379922638baeda4b9a29e4da00`.
-- **운영 cohort 고정**: KR `67f1059ab7e3a370ab5b9dd89ec3991ad4860d7e4560004674b4f02dda917547`, US `fd27bf6f66e9f73f0f725e2284969c69425c0d804f74f20a4e537788c86a3d02`; 각각 active 100종목이다. US TQQQ/SOXL은 강제 연속성 멤버이며 readiness/promotion 표본에서는 제외된다.
-- **일봉 적재 완료**: KR 99/100종목이 252봉 이상이고 신규 상장 `0126Z0`은 187봉이다. US 99/100종목이 252봉 이상이고 신규 상장 `SPCX`는 54봉이다. KOSPI와 SPY benchmark는 각각 400봉이다.
-- **캘린더·OHLC 결함 제거**: stale XKRX의 2025-12-31, 2026-06-03, 2026-07-17, 2026-08-17, 2026-12-31 오분류를 shared calendar에서 교정했다. Yahoo 완료봉은 exact session/previous/current gate를 유지하고 metadata 가격 반올림만 상대 허용오차로 처리한다.
-- **최종 운영 readiness**: KR은 거래일 누락 0, OHLC 이상 0, eligible 99다. US는 OHLC 이상 0, eligible 98이며 `SCCO`의 Yahoo 원천 2026-08-10 1봉 누락이 남아 있다. 양 시장 모두 신규 상장 history, 기업행동·상장폐지 PIT 근거, forward-only cohort, fallback-only source 때문에 promotion은 계속 차단된다.
-- **PIT/기업행동 차단**: 운영 KIS token 발급이 HTTP 403이다. 알려진 현재 종목만으로 과거 상장폐지 universe를 복원할 수 없고 KRX licensed archive 자격도 없어, 검증되지 않은 데이터를 생성하지 않았다.
-- **PAPER 자동화 신뢰경계 완료**: immutable strategy fingerprint, position cycle, claim lease/fencing, ambiguous submit reconciliation, selected AI shadow, benchmark window와 fold coverage를 구현했다.
+- **뉴스 번역 구현 완료·미배포**: 영문 우세 제목과 최대 4,000자 원문 범위를 한국어 제목/발췌로 번역해 `NewsAnalysisResult`에 저장한다. summary와 번역은 분리한다. 숫자·단위·언어·길이·schema를 검증하되 번역만 부적합하면 해당 필드를 null로 버리고 검증된 summary는 보존한다.
+- **신규 DB head**: `20260830_news_translation`은 `news_analysis_results`에 nullable `translated_title`, `translated_excerpt` 두 열만 추가하는 reversible migration이다. 운영 DB는 아직 이전 head `20260830_kr_lifecycle_ca`이므로 배포 전 migration 승인이 필요하다.
+- **KAsset API 연결 완료**: `/market/news`와 `/ai/daily-routine`은 최신 분석 row의 `translatedTitle`/`translatedExcerpt`를 bulk query로 제공한다. 기존 row와 가격 alert는 null, 원문 URL은 유지된다.
+- **NH PLUG 재발급 원인 판정**: 가장 유력한 원인은 VPS `/opt/kasset-nhplug` 영속 캐시가 Mac native `~/.nhplug`로 인계되지 않은 것이다. 추가 확정 결함은 공용 env key와 사용자 vault key가 단일 파일을 덮어쓰는 구조, blue/green cold miss의 process lock 부재다.
+- **NH PLUG 코드 교정 완료·미배포**: 기본 캐시는 owner fingerprint별 파일로 분리하고 기존 native 단일 cache를 무발급 원자 이관한다. POSIX는 owner별 `flock` 뒤 cache를 다시 확인해 동일 owner 동시 발급을 1회로 제한한다. 실 NH OAuth는 사용자 알림을 다시 유발할 수 있어 호출하지 않았다.
+- **중요 P0 미종결 — readiness 설명과 코드 불일치**: 현재 `selection_method='historical_pit'` 라벨만으로 PIT로 취급하고 promotion blocker는 `includes_delisted`와 list-date coverage를 필수로 보지 않는다. 기존 테스트도 `includes_delisted=False`인데 promotion ready를 기대한다. 이전 HANDOFF의 “상장폐지·PIT를 모두 fail-closed 평가” 문장은 실제 코드보다 강했고, 이 경계를 고치기 전 promotion을 승인하면 안 된다.
+- **기존 운영 데이터 상태 유지**: KR/US 각 100종목 cohort, KOSPI/SPY 400봉, KR eligible 99, US eligible 98이며 KIS 403, SCCO 1봉 누락, 신규 상장 history 부족은 그대로다.
 
 ## 이번 세션에서 한 일
-- 운영 DB를 gzip dump로 백업하고 clone migration round-trip 뒤 운영 head까지 migration했다.
-- Toss 최신 시가총액으로 KR/US 100종목 immutable cohort를 만들고, KR/US 일봉과 KOSPI/SPY benchmark를 최대 400봉 적재했다.
-- `kasset_research_cohorts`, cohort members, KR lifecycle/corporate-action coverage schema와 fail-closed readiness를 추가했다.
-- completed expected session, duplicate/future/stale/OHLC, adjusted-close, benchmark, lifecycle/PIT/corporate-action/fallback 근거를 시장별로 계산한다.
-- XKRX stale 휴장일을 shared session calendar로 수렴시켜 watcher, session API, KIS cache, KR sync, daily read, screener, forecast가 같은 세션 계약을 사용하게 했다.
-- Yahoo terminal NaN 완료봉은 provider metadata의 exact 정규장 종료, 직전 raw/adjusted close, current price, day bounds가 모두 결박될 때만 복구한다. BRK.A 실측 metadata 반올림은 `rel_tol=1e-6, abs_tol=0.01`로 처리하고 OHLC를 내부 정합 상태로 정규화했다.
-- 홈 지수 API는 완료된 일봉을 제공한다. 운영 smoke에서 SPX -0.25%, NASDAQ -0.52%, RUT -1.39%, SOX -3.47%였고 DJI는 원천 부재를 fail-closed로 표시했다. SPX 1주 상세는 2026-08-24~08-28 일봉 5개, 마지막 close 7711.76이었다.
+- `NewsAnalysisResult`와 migration에 nullable 번역 제목·발췌를 추가했다. 기존 row는 backfill 없이 null을 유지한다.
+- 공용 MCP-first structured AI transport를 재사용해 한글이 없는 영문 제목/본문만 번역한다. 본문은 모델 전달 전에 4,000자로 제한하고 번역 발췌는 6,000자 상한, 숫자·단위 누락/추가 금지, 한국어 출력 조건을 적용한다.
+- 일반 뉴스와 daily routine의 최신 분석 row를 `created_at DESC, id DESC`로 한 번에 읽어 summary와 두 번역 필드가 서로 다른 row에서 섞이지 않게 했다.
+- `$5 billion`과 `50억 달러`처럼 값이 같은 영문·한국어 scale 표현을 기준값으로 정규화한다. 잘못된 번역 필드는 null로 격하해 summary·sentiment 저장과 다음 배치 idempotency를 지킨다.
+- NH PLUG 기본 token cache를 raw key가 아닌 owner fingerprint별 파일로 분리했다. 유효한 legacy 단일 cache는 OAuth POST 없이 owner 파일로 이동하고 이관 실패 시에도 검증된 token을 재사용한다.
+- Mac/Linux에서는 owner cache별 process lock을 획득한 뒤 cache를 재검사한다. mode 교정 실패는 읽을 수 있는 token을 버리지 않고, lock 인프라 실패는 재발급으로 우회하지 않고 typed configuration error로 fail-closed한다.
+- 재조사에서 readiness의 historical PIT label 신뢰와 promotion blocker 누락을 확인했다. 이번 요청 범위에서는 거래 승격 로직을 바꾸지 않았으며 P0로 명시했다.
 
 검증:
 
-- 데이터/candle/session/readiness PostgreSQL 집중 스위트: **250 passed**.
-- 최종 휴장·Yahoo·readiness 회귀: **48 passed**, 추가 2026-06-03 휴장 회귀 **43 passed**.
-- `ruff format --check app/ tests/ research/ scripts/`, `ruff check ...`, `ty check app`: 통과.
-- 전체 `pytest -q` 수집은 Windows의 기존 `fcntl` 부재와 frozen research source hash 때문에 실패했다. 이번 KAsset 변경과 무관하며 같은 실패를 반복하지 않았다.
-- 운영 `/app/.build-vcs-ref`: `dc012816`; public health 통과.
-- 운영 BRK.A 재백필: 400봉 upsert, Yahoo fallback, OHLC normalization 성공.
-- 최종 운영 readiness: KR missing 0/anomaly 0/99 eligible, US missing 1/anomaly 0/98 eligible.
-- 독립 checker: `FINAL: PASS / OWNER: CHECKER`, blocker 0, major 0.
-
-주요 커밋:
-
-- `edf50e13` 초기 fail-closed readiness
-- `abb506d7` immutable cohorts와 benchmark
-- `5b2784a8` 강제 멤버 제외·fail-closed 보강
-- `003b3ed4` benchmark pagination·row count
-- `b6e2b4e9` Yahoo 완료봉 복구
-- `297eb39f` zero OHLC readiness
-- `9f743b82` shared session calendar·Yahoo OHLC 정합
-- `a1b600c0` 잔여 연말휴장·가격 반올림 보강
-- `dc012816` 2026 지방선거 KRX 휴장 보강
+- 번역·daily routine·market news·AI briefing·NH PLUG auth/client/orderbook 집중 스위트: **108 passed**.
+- Android와 맞춘 KAsset wire는 `translatedTitle`/`translatedExcerpt` camelCase로 검증했다.
+- 변경 Python `ruff format`, `ruff check`, 전체 `ty check app`: 통과.
+- `alembic heads`: `20260830_news_translation (head)`.
+- 독립 checker 최초 판정은 `REWORK`(blocker 0, major 3)였다. M1 번역 검증이 summary까지 폐기하는 문제와 M2 한글+Latin 브랜드 제목 오판은 `ACCEPTED` 후 수정했다. M3 lock 실패 시 process-lock을 포기하라는 제안은 중복 OAuth·secret 경계 약화 때문에 `REJECTED_WITH_EVIDENCE`하고, 대신 raw `OSError`를 typed fail-closed 오류로 바꿨다. 관련 최종 집중 테스트 108건이 통과했다.
+- 실 NH OAuth, 운영 migration, 운영 배포는 실행하지 않았다.
 
 ## 다음 세션이 바로 할 일
-1. KIS HTTP 403을 계정/허용 IP/앱 권한에서 해결하고, KRX 또는 라이선스된 PIT archive 자격을 확보한 뒤 상장폐지·기업행동 coverage를 다시 적재한다. 현재 데이터를 과거 PIT라고 승격하지 않는다.
-2. `SCCO` 2026-08-10 일봉은 신뢰할 수 있는 2차 원천으로만 보강한다. 인접 봉 복제나 보간은 금지한다.
-3. 신규 상장 `0126Z0`, `SPCX`는 실제 252개 완료 세션이 쌓이기 전까지 insufficient-history를 유지한다.
-4. 현재 forward-paper cohort의 effective date 이후 충분한 기간을 수집해 persisted backtest candidate를 만들고, evidence/hash 검수 뒤에만 `promotion-approve`를 실행한다.
-5. KRX 개장 중 APPROVAL 추천→승인→PAPER fill/reconcile을 검증한다. AUTO_PAPER는 승격 후 소액으로 duplicate submit, claim lease 회수, kill switch, partial/full exit, 재진입을 확인한다.
-6. XKRX 공급자 봉과 expected session 집합의 주기적 drift 경보를 추가하고, 2026-12-31은 경과 뒤 실제 공급자 데이터로 재확인한다.
+1. 사용자 배포 승인을 받은 뒤 운영 DB backup/precheck → `20260830_news_translation` migration → Core native 배포 순서로 적용한다.
+2. NH PLUG 운영 검증 전에 Mac의 legacy/owner cache 존재·권한·만료를 **내용 출력 없이** 확인한다. 유효 cache가 있으면 배포 후 owner 파일 이관을 확인하되, 만료/부재 상태에서 실 API를 호출하면 다시 발급 알림이 갈 수 있으므로 사용자 승인 없이 호출하지 않는다.
+3. 실제 영문 Reuters 등 신규 분석에서 번역 제목·발췌와 summary가 저장되고 두 KAsset API에 노출되는지 확인한다. 기존 row는 재수집/재분석 전까지 null이 정상이다.
+4. readiness에서 라벨만으로 historical PIT를 신뢰하지 말고 실제 persisted constituent history, delisted 포함, list-date coverage를 promotion blocker로 결박한다. `includes_delisted=False` promotion-ready 테스트는 fail-closed 기대값으로 교정한다.
+5. KIS HTTP 403, SCCO 2026-08-10, 신규 상장 `0126Z0`/`SPCX`, KRX APPROVAL→PAPER fill/reconcile, XKRX drift 경보는 기존 미종결 상태를 유지한다.
 
 ## 세션 이력
-- 2026-08-30: 운영 migration, KR/US 100종목 cohort·일봉·benchmark 적재, calendar/Yahoo 복구와 readiness 실측 완료.
+- 2026-08-30: 영문 뉴스 번역 제목/발췌, KAsset API 연결, NH PLUG owner cache·process lock 구현; readiness PIT 미종결 재판정.
+- 2026-08-30: 운영 migration, KR/US 100종목 cohort·일봉·benchmark 적재, calendar/Yahoo 복구와 readiness 실측.
 - 2026-08-30: PAPER promotion evidence/CLI, artifact fingerprint, position cycle, claim lease, AI shadow, migration CI gate 완료.
 - 2026-08-29: 결정론적 PAPER 자동화·exact-version 승격 gate, 추천 시장·일일 횟수, AI 공급자·뉴스 경계 완료.
-- 2026-08-29: DART 운영 수집·문서 fallback·일반 뉴스 AI 요약·5단계 PAPER 정책 완료.

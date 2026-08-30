@@ -101,6 +101,8 @@ class MarketNewsItem(AndroidWireModel):
     kind: MarketNewsKind
     title: str
     summary: str | None
+    translated_title: str | None = None
+    translated_excerpt: str | None = None
     source: str | None
     url: str
     published_at: str | None

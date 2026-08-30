@@ -93,6 +93,7 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 - 추천의 설명·검토만 AI provider를 사용한다.
 - 복잡한 후보/거래 검토는 MCP 직결을 우선하고 direct OpenAI-compatible API, OpenRouter 순으로 availability fallback한다.
 - 뉴스·공시 요약은 direct API 담당으로 두고 OpenRouter fallback을 사용한다. OpenRouter fallback 모델은 공식 slug `z-ai/glm-5.3-flash`다.
+- 일반 뉴스 structured output은 `summary`(한국어 2~4문장)와 `translated_title`, `translated_excerpt`를 분리한다. 번역 필드는 각 원문이 영문 우세일 때만 생성하며, 본문 앞부분 4,000자만 입력하고 번역 발췌는 6,000자 이하로 저장한다. 한국어 title/body의 대응 번역 필드와 본문이 없을 때의 `translated_excerpt`, 기존 분석 행의 두 필드는 `null`을 허용하고 원문 URL은 `/market/news`와 daily routine alert에 그대로 제공한다.
 - provider 429는 availability failure로 다음 configured provider에 넘긴다. 나머지 4xx·refusal·schema·safety 오류는 fail-closed한다.
 - 최종 선택되어 `AIRecommendation`으로 저장된 건은 provider/tier/exact model ID, normalized input hash, 허용된 validated response, confidence, 선택 사유를 `ai_shadow` evidence로 남긴다. raw prompt·secret·provider envelope는 저장하지 않는다. 통계 범위는 `persisted final selections only`이며 선택되지 않은 후보를 저장했다고 간주하지 않는다.
 

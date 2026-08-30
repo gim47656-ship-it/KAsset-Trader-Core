@@ -150,6 +150,13 @@ class _WatchSymbol:
     market: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedNewsAnalysis:
+    summary: str
+    translated_title: str | None
+    translated_excerpt: str | None
+
+
 async def _default_quote_loader(
     db: AsyncSession, market: str, symbols: Sequence[str]
 ) -> list[Quote]:
@@ -665,7 +672,7 @@ class DailyRoutineService:
                 )
             ).all()
         )
-        summaries = await self._load_validated_summaries(db, [row.id for row in rows])
+        analyses = await self._load_validated_analyses(db, [row.id for row in rows])
 
         counts: dict[RoutineKey, int] = {
             "RAPID_RISE": 0,
@@ -680,7 +687,10 @@ class DailyRoutineService:
             published_at = row.article_published_at
             if published_at is None:
                 continue
-            validated_summary = summaries.get(row.id)
+            validated_analysis = analyses.get(row.id)
+            validated_summary = (
+                validated_analysis.summary if validated_analysis is not None else None
+            )
             evidence_text = " ".join(
                 value for value in (row.title, validated_summary) if value
             )
@@ -712,6 +722,16 @@ class DailyRoutineService:
                     kind=kind,
                     headline=row.title,
                     summary=validated_summary if has_source_body else None,
+                    translated_title=(
+                        validated_analysis.translated_title
+                        if validated_analysis is not None
+                        else None
+                    ),
+                    translated_excerpt=(
+                        validated_analysis.translated_excerpt
+                        if validated_analysis is not None
+                        else None
+                    ),
                     symbol=(row.stock_symbol or None),
                     source=row.source,
                     url=row.url,
@@ -721,9 +741,9 @@ class DailyRoutineService:
         return alerts
 
     @staticmethod
-    async def _load_validated_summaries(
+    async def _load_validated_analyses(
         db: AsyncSession, article_ids: Sequence[int]
-    ) -> dict[int, str]:
+    ) -> dict[int, _ValidatedNewsAnalysis]:
         if not article_ids:
             return {}
         rows = (
@@ -731,6 +751,8 @@ class DailyRoutineService:
                 select(
                     NewsAnalysisResult.article_id,
                     NewsAnalysisResult.summary,
+                    NewsAnalysisResult.translated_title,
+                    NewsAnalysisResult.translated_excerpt,
                 )
                 .where(NewsAnalysisResult.article_id.in_(article_ids))
                 .order_by(
@@ -740,12 +762,24 @@ class DailyRoutineService:
                 )
             )
         ).all()
-        summaries: dict[int, str] = {}
-        for article_id, summary in rows:
-            normalized = _SPACE_RE.sub(" ", (summary or "").strip())
-            if normalized and article_id not in summaries:
-                summaries[int(article_id)] = normalized
-        return summaries
+        analyses: dict[int, _ValidatedNewsAnalysis] = {}
+        for article_id, summary, translated_title, translated_excerpt in rows:
+            normalized_summary = _SPACE_RE.sub(" ", (summary or "").strip())
+            if normalized_summary and article_id not in analyses:
+                analyses[int(article_id)] = _ValidatedNewsAnalysis(
+                    summary=normalized_summary,
+                    translated_title=(
+                        _SPACE_RE.sub(" ", translated_title.strip())
+                        if translated_title
+                        else None
+                    ),
+                    translated_excerpt=(
+                        _SPACE_RE.sub(" ", translated_excerpt.strip())
+                        if translated_excerpt
+                        else None
+                    ),
+                )
+        return analyses
 
 
 daily_routine_service = DailyRoutineService()

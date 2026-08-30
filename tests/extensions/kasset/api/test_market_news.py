@@ -75,6 +75,8 @@ def _analysis(
     *,
     summary: str,
     created_at: datetime,
+    translated_title: str | None = None,
+    translated_excerpt: str | None = None,
 ) -> NewsAnalysisResult:
     return NewsAnalysisResult(
         article_id=article_id,
@@ -82,6 +84,8 @@ def _analysis(
         sentiment=Sentiment.NEUTRAL,
         sentiment_score=None,
         summary=summary,
+        translated_title=translated_title,
+        translated_excerpt=translated_excerpt,
         key_points=[],
         topics=None,
         price_impact=None,
@@ -186,17 +190,29 @@ async def market_news_client(
     db_session.add_all(rows)
     await db_session.flush()
     same_news = next(row for row in rows if row.title == "동시각 뉴스")
+    older_news = next(row for row in rows if row.title == "이전 뉴스")
     db_session.add_all(
         [
             _analysis(
                 same_news.id,
                 summary="오래된 한국어 AI 요약이다. 이전 분석 결과다.",
                 created_at=datetime(2026, 8, 29, 2, 1),
+                translated_title="오래된 번역 제목",
+                translated_excerpt="오래된 번역 발췌",
             ),
             _analysis(
                 same_news.id,
                 summary="최신 한국어 AI 요약이다. 영속 분석 결과를 사용한다.",
                 created_at=datetime(2026, 8, 29, 2, 2),
+                translated_title="동시각 뉴스 번역 제목",
+                translated_excerpt=(
+                    "최신 한국어 번역 발췌다. 원문 링크는 별도로 유지된다."
+                ),
+            ),
+            _analysis(
+                older_news.id,
+                summary="기존 분석 행의 한국어 AI 요약이다.",
+                created_at=datetime(2026, 8, 29, 2, 1),
             ),
         ]
     )
@@ -301,6 +317,10 @@ async def test_kind_filters_split_actual_rows_and_never_expose_feed_source(
             "news",
             "disclosure",
         }
+        assert all(
+            {"translatedTitle", "translatedExcerpt"} <= set(item)
+            for item in payload["items"]
+        )
 
 
 @pytest.mark.asyncio
@@ -317,9 +337,20 @@ async def test_summary_uses_latest_bulk_analysis_for_news_and_verified_article_f
         "최신 한국어 AI 요약이다. 영속 분석 결과를 사용한다."
     )
     assert by_title["동시각 뉴스"]["summary"] != "뉴스 요약"
-    assert by_title["이전 뉴스"]["summary"] is None
+    assert by_title["동시각 뉴스"]["translatedTitle"] == "동시각 뉴스 번역 제목"
+    assert by_title["동시각 뉴스"]["translatedExcerpt"] == (
+        "최신 한국어 번역 발췌다. 원문 링크는 별도로 유지된다."
+    )
+    assert by_title["동시각 뉴스"]["url"].endswith("/same-news")
+    assert by_title["이전 뉴스"]["summary"] == "기존 분석 행의 한국어 AI 요약이다."
+    assert by_title["이전 뉴스"]["translatedTitle"] is None
+    assert by_title["이전 뉴스"]["translatedExcerpt"] is None
     assert by_title["후보 뉴스"]["summary"] is None
     assert by_title["동시각 공시"]["summary"] == "검증된 공시 요약"
+    assert by_title["후보 뉴스"]["translatedTitle"] is None
+    assert by_title["후보 뉴스"]["translatedExcerpt"] is None
+    assert by_title["동시각 공시"]["translatedTitle"] is None
+    assert by_title["동시각 공시"]["translatedExcerpt"] is None
 
 
 @pytest.mark.asyncio

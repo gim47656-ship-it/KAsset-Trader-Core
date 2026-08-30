@@ -101,9 +101,13 @@ class _FakeSession:
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> _FakeResult:
         if self._error is not None:
             raise self._error
-        entity = statement.column_descriptions[0]["entity"].__name__
+        descriptions = statement.column_descriptions
+        entity = descriptions[0]["entity"].__name__
         self.statements[entity] = statement
-        return _FakeResult(self._rows.get(entity, []))
+        rows = self._rows.get(entity, [])
+        if entity == "NewsAnalysisResult":
+            rows = [row[: len(descriptions)] for row in rows]
+        return _FakeResult(rows)
 
     async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any | None:
         return (await self.execute(statement, *args, **kwargs)).first()
@@ -292,6 +296,10 @@ def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(
                 kind="TRUMP_POLICY",
                 headline="Trump tariff policy changes",
                 summary=None,
+                translated_title="Trump 관세 정책 변경",
+                translated_excerpt=(
+                    "Trump 행정부는 저장된 영문 기사에서 관세 정책 변경을 밝혔다."
+                ),
                 source="Reuters",
                 occurred_at=now,
             )
@@ -309,6 +317,10 @@ def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(
             "kind": "TRUMP_POLICY",
             "headline": "Trump tariff policy changes",
             "summary": None,
+            "translatedTitle": "Trump 관세 정책 변경",
+            "translatedExcerpt": (
+                "Trump 행정부는 저장된 영문 기사에서 관세 정책 변경을 밝혔다."
+            ),
             "symbol": None,
             "source": "Reuters",
             "url": None,
@@ -340,8 +352,8 @@ def test_news_items_expose_stored_rows_persisted_symbols_and_stored_summary() ->
                 _related(11, symbol="000660", rank=3),
             ],
             "NewsAnalysisResult": [
-                (11, "저장된 분석 요약"),
-                (11, "오래된 분석 요약"),
+                (11, "저장된 분석 요약", None, None),
+                (11, "오래된 분석 요약", None, None),
             ],
         }
     )

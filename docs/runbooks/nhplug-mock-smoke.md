@@ -16,16 +16,16 @@
 
 공식 참고 구현은 [Access Token 전역 cache 안내](https://github.com/PLUG-OpenAPI/nhplug-sdk/tree/main/snippets/auth/token_cache)와 [`nh_token.py`](https://github.com/PLUG-OpenAPI/nhplug-sdk/blob/main/snippets/auth/token_cache/nh_token.py)다. SDK 전체를 의존성으로 추가하지 않고, 이 read-only client에 필요한 cache·재발급 계약만 적용한다. 공식 구현이 지적하듯 Access Token을 메모리에만 두면 프로세스를 시작할 때마다 재발급되고 매번 알림톡이 발생한다.
 
-- 기본 cache는 `~/.nhplug/token_cache.json`이다. 조회 순서는 **프로세스 메모리 → 파일 → 신규 발급**이다.
-- JSON에는 `base`, `owner_fingerprint`, `token`, `exp`만 저장한다. `owner_fingerprint`는 raw App Key와 고정 auth base 조합의 SHA-256이며 App Key 원문과 App Secret은 저장하지 않는다. `base`와 fingerprint가 모두 현재 client와 일치해야 재사용한다.
+- 기본 cache는 owner별 `~/.nhplug/token_cache.<owner_fingerprint>.json`이다. 조회 순서는 **프로세스 메모리 → owner 파일 → 유효한 legacy 단일 파일 → 신규 발급**이다. 기존 `~/.nhplug/token_cache.json`이 현재 owner에 유효하면 OAuth를 다시 발급하지 않고 owner 파일로 원자 이동한다.
+- JSON에는 `base`, `owner_fingerprint`, `token`, `exp`만 저장한다. `owner_fingerprint`는 raw App Key와 고정 auth base 조합의 SHA-256이며 App Key 원문과 App Secret은 저장하지 않는다. `base`와 fingerprint가 모두 현재 client와 일치해야 재사용한다. 서로 다른 공용·사용자 App Key는 각자의 owner 파일을 사용한다.
 - `exp`가 현재 시각보다 60초 넘게 남아 있어야 유효하다. JSON 손상, 필드·타입 오류, 다른 owner, 다른 auth base, 만료 또는 60초 이내 만료는 cache miss이며 신규 발급으로 진행한다.
-- cache parent는 mode `700`이고, 최종 cache 파일과 같은 디렉터리에 만드는 매번 다른 임시 파일은 모두 mode `600`이다. 임시 파일을 flush·`fsync`한 뒤 `os.replace`로 `token_cache.json`을 원자 교체한다. cache 파일에는 실제 Bearer token이 있으므로 공유·커밋·화면 출력·로그 첨부를 금지한다.
-- `get_access_token(force_refresh=True, failed_token=...)`는 refresh 직전에 메모리와 파일을 다시 확인한다. 다른 요청 또는 프로세스가 이미 `failed_token`과 다른 유효 토큰을 저장했다면 그것을 재사용한다. 최신 cache가 실패한 토큰과 같을 때만 해당 토큰을 폐기하고 재발급한다.
-- `revoke_access_token`이 성공하면 revoke한 토큰과 일치하는 메모리·파일 cache만 무효화한다. 경쟁 중 더 최신 토큰으로 바뀐 cache는 지우지 않는다.
+- cache parent는 mode `700`이고, 최종 owner cache와 같은 디렉터리에 만드는 매번 다른 임시 파일은 모두 mode `600`이다. 임시 파일을 flush·`fsync`한 뒤 `os.replace`로 owner 파일을 원자 교체한다. cache 파일에는 실제 Bearer token이 있으므로 공유·커밋·화면 출력·로그 첨부를 금지한다.
+- `get_access_token`은 owner cache별 process lock을 잡은 뒤 파일을 다시 확인한다. 동일 owner의 blue/green 프로세스가 동시에 cold miss해도 먼저 발급한 token을 뒤 프로세스가 재사용한다. `force_refresh=True, failed_token=...`도 다른 요청 또는 프로세스가 이미 저장한 다른 유효 token이 있으면 그것을 재사용한다.
+- `revoke_access_token`이 성공하면 revoke한 토큰과 일치하는 메모리·owner·legacy cache만 무효화한다. 경쟁 중 더 최신 토큰으로 바뀐 cache는 지우지 않는다.
 - data client는 HTTP `401` 또는 response body의 `IGW40043`만 토큰 무효로 분류한다. 첫 응답에서만 force refresh하고 동일한 path와 `Input_0`를 한 번 더 보낸다. 두 번째 `401`/`IGW40043`은 그대로 실패하며 세 번째 전송은 없다.
 - HTTP `429` 또는 `IGW42902`는 호출 한도 오류이지 토큰 오류가 아니다. 토큰을 폐기·재발급하지 말고 호출 간격을 조정한다. host·path·`acct_type=03` account 검사는 최초 전송과 토큰 refresh 후 재전송 각각의 `send` 직전에 다시 실행한다.
 
-cache 읽기·쓰기 실패는 자격증명 값을 오류나 로그에 넣지 않고 cache miss로 처리한다. 이 경우 신규 발급과 알림톡이 다시 발생할 수 있으므로 반복 알림이 보이면 파일 소유권·권한과 `~/.nhplug` 쓰기 가능 여부를 먼저 확인한다. cache 내용을 출력해서 진단하지 않는다.
+cache mode 교정이 실패해도 파일을 읽을 수 있으면 검증된 token을 재사용한다. cache 본문 읽기·쓰기 자체가 실패하면 자격증명 값을 오류나 로그에 넣지 않고 cache miss로 처리하며, 이 경우 신규 발급과 알림톡이 다시 발생할 수 있다. 반복 알림이 보이면 owner 파일의 소유권·권한과 `~/.nhplug` 쓰기 가능 여부를 먼저 확인하되 cache 내용을 출력하지 않는다.
 
 ## 보장 강도와 제거 불가 위험
 

@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import hmac
 import struct
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, case, desc, exists, func, literal, or_, select
@@ -41,6 +42,13 @@ _CURSOR_SIGNATURE_BYTES = 16
 _CURSOR_STRUCT = struct.Struct("!BBBqq")
 _NAIVE_EPOCH = datetime(1970, 1, 1)
 _MAX_BIGINT = 2**63 - 1
+
+
+@dataclass(frozen=True, slots=True)
+class _LatestNewsAnalysis:
+    summary: str
+    translated_title: str | None
+    translated_excerpt: str | None
 
 
 def _cursor_signature(payload: bytes) -> bytes:
@@ -164,11 +172,11 @@ def _published_at_wire(value: datetime | None) -> str | None:
     return iso_z(_naive_kst(value).replace(tzinfo=KST))
 
 
-async def _latest_news_summaries(
+async def _latest_news_analyses(
     db: AsyncSession,
     article_ids: list[int],
-) -> dict[int, str]:
-    """일반 뉴스의 최신 영속 분석 요약만 한 번에 읽는다."""
+) -> dict[int, _LatestNewsAnalysis]:
+    """일반 뉴스의 최신 영속 요약과 번역 필드를 한 번에 읽는다."""
 
     if not article_ids:
         return {}
@@ -176,6 +184,8 @@ async def _latest_news_summaries(
         select(
             NewsAnalysisResult.article_id.label("article_id"),
             NewsAnalysisResult.summary.label("summary"),
+            NewsAnalysisResult.translated_title.label("translated_title"),
+            NewsAnalysisResult.translated_excerpt.label("translated_excerpt"),
             func.row_number()
             .over(
                 partition_by=NewsAnalysisResult.article_id,
@@ -189,10 +199,22 @@ async def _latest_news_summaries(
         .where(NewsAnalysisResult.article_id.in_(article_ids))
         .subquery()
     )
-    statement = select(ranked.c.article_id, ranked.c.summary).where(
-        ranked.c.analysis_rank == 1
-    )
-    return dict((await db.execute(statement)).all())
+    statement = select(
+        ranked.c.article_id,
+        ranked.c.summary,
+        ranked.c.translated_title,
+        ranked.c.translated_excerpt,
+    ).where(ranked.c.analysis_rank == 1)
+    return {
+        int(article_id): _LatestNewsAnalysis(
+            summary=summary,
+            translated_title=translated_title,
+            translated_excerpt=translated_excerpt,
+        )
+        for article_id, summary, translated_title, translated_excerpt in (
+            await db.execute(statement)
+        ).all()
+    }
 
 
 async def list_market_news(
@@ -358,7 +380,7 @@ async def list_market_news(
             last_article.id,
         )
 
-    news_summaries = await _latest_news_summaries(
+    news_analyses = await _latest_news_analyses(
         db,
         [
             article.id
@@ -366,19 +388,26 @@ async def list_market_news(
             if article.feed_source not in DISCLOSURE_FEED_SOURCES
         ],
     )
-    return MarketNewsResponse(
-        items=[
+    items: list[MarketNewsItem] = []
+    for article, _rank in page:
+        is_disclosure = article.feed_source in DISCLOSURE_FEED_SOURCES
+        analysis = None if is_disclosure else news_analyses.get(article.id)
+        items.append(
             MarketNewsItem(
-                kind=(
-                    "disclosure"
-                    if article.feed_source in DISCLOSURE_FEED_SOURCES
-                    else "news"
-                ),
+                kind="disclosure" if is_disclosure else "news",
                 title=article.title,
                 summary=(
                     article.summary
-                    if article.feed_source in DISCLOSURE_FEED_SOURCES
-                    else news_summaries.get(article.id)
+                    if is_disclosure
+                    else analysis.summary
+                    if analysis is not None
+                    else None
+                ),
+                translated_title=(
+                    analysis.translated_title if analysis is not None else None
+                ),
+                translated_excerpt=(
+                    analysis.translated_excerpt if analysis is not None else None
                 ),
                 source=article.source,
                 url=article.url,
@@ -386,7 +415,5 @@ async def list_market_news(
                 symbol=article.stock_symbol,
                 stock_name=article.stock_name,
             )
-            for article, _rank in page
-        ],
-        next_cursor=next_cursor,
-    )
+        )
+    return MarketNewsResponse(items=items, next_cursor=next_cursor)

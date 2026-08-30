@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 AUTO_SUMMARY_BATCH_SIZE = 20
-MAX_SOURCE_BODY_CHARS = 8_000
+MAX_TRANSLATION_SOURCE_CHARS = 4_000
+MAX_TRANSLATED_TITLE_CHARS = 500
+MAX_TRANSLATED_EXCERPT_CHARS = 6_000
 MIN_SOURCE_BODY_CHARS = 40
 MIN_SOURCE_BODY_WORDS = 6
 CANDIDATE_SCAN_MULTIPLIER = 10
@@ -43,33 +45,89 @@ _SUMMARY_SCHEMA: dict[str, object] = {
             "minLength": 1,
             "maxLength": _SUMMARY_MAX_CHARS,
         },
+        "translated_title": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_TRANSLATED_TITLE_CHARS,
+                },
+                {"type": "null"},
+            ],
+        },
+        "translated_excerpt": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_TRANSLATED_EXCERPT_CHARS,
+                },
+                {"type": "null"},
+            ],
+        },
         "sentiment": {
             "type": "string",
             "enum": [member.value for member in Sentiment],
         },
         "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
     },
-    "required": ["summary", "sentiment", "confidence"],
+    "required": [
+        "summary",
+        "translated_title",
+        "translated_excerpt",
+        "sentiment",
+        "confidence",
+    ],
     "additionalProperties": False,
 }
 _SUMMARY_INSTRUCTIONS = (
     "입력의 title, source, article_content 또는 raw_excerpt에 명시된 사실만 사용하라. "
-    "외국어 기사는 자연스러운 한국어로 번역해 2~4문장으로 요약하라. 첫 문장에는 "
+    "summary는 번역문과 별도로 자연스러운 한국어 2~4문장으로 요약하라. 첫 문장에는 "
     "원문에 확인되는 핵심 사건과 주체를 쓰고, 수치·날짜·시장 반응 또는 투자자 영향은 "
-    "원문에 명시된 항목만 후속 문장에 포함하라. 원문의 숫자와 단위를 그대로 보존하고 "
+    "원문에 명시된 항목만 후속 문장에 포함하라. translated_title은 title이 영문 우세일 "
+    "때만 자연스러운 한국어 제목으로 번역하고, 아니면 null로 반환하라. "
+    "translated_excerpt는 article_content 또는 raw_excerpt가 있고 그 본문이 영문 "
+    "우세일 때만 제공된 최대 4,000자의 전체 범위를 문장 순서대로 한국어로 번역하라. "
+    "translated_excerpt를 요약하거나 범위 밖 사실을 보완하지 말고, 본문이 없거나 영문 "
+    "우세가 아니면 null로 반환하라. 모든 출력에서 원문의 숫자와 단위를 그대로 보존하고 "
     "계산, 환산, 추측, 사실 보완을 하지 마라. 원문에 없는 배경, 전망, 인과관계, "
-    "투자 권유, 매수·매도 추천, 목표주가를 쓰지 마라. '이 기사는', '이번 소식은'처럼 "
-    "내용 없는 서두나 항목 나열을 쓰지 말고, title이나 raw_excerpt를 복제하지 말고 "
-    "핵심 사실을 구체적으로 재서술하라. sentiment는 기사 서술의 정서만 positive, "
+    "투자 권유, 매수·매도 추천, 목표주가를 summary에 쓰지 마라. summary에 '이 기사는', "
+    "'이번 소식은'처럼 내용 없는 서두나 항목 나열을 쓰지 말고, title이나 본문을 복제하지 "
+    "말고 핵심 사실을 구체적으로 재서술하라. sentiment는 기사 서술의 정서만 positive, "
     "negative, neutral 중 하나로 분류하라."
 )
 _TITLE_ONLY_INSTRUCTIONS = (
-    "article_content와 raw_excerpt가 모두 없으면 title에 명시된 주체와 사건만 자연스러운 "
-    "한국어 한 문장으로 번역·재서술하라. 제목을 그대로 복사하지 말고 배경 설명, 원인, "
-    "수치, 영향 또는 전망을 추가하지 마라."
+    "article_content와 raw_excerpt가 모두 없으면 summary는 title에 명시된 주체와 사건만 "
+    "자연스러운 한국어 한 문장으로 번역·재서술하라. 제목을 그대로 복사하지 말고 배경 설명, "
+    "원인, 수치, 영향 또는 전망을 추가하지 마라. translated_excerpt는 null로 반환하라."
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-_NUMBER_RE = re.compile(r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%)?")
+_NUMBER_RE = re.compile(
+    r"(?<!\d)[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:\s*(?:%|percent(?:age)?s?|퍼센트))?",
+    re.IGNORECASE,
+)
+_PERCENT_SUFFIX_RE = re.compile(
+    r"(?:%|percent(?:age)?s?|퍼센트)$",
+    re.IGNORECASE,
+)
+_SCALED_QUANTITY_RE = re.compile(
+    r"(?P<number>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*"
+    r"(?P<scale>thousands?(?![A-Za-z])|millions?(?![A-Za-z])|"
+    r"billions?(?![A-Za-z])|trillions?(?![A-Za-z])|백만|십억|천|억|조)",
+    re.IGNORECASE,
+)
+_SCALE_FACTORS: dict[str, Decimal] = {
+    "thousand": Decimal("1000"),
+    "million": Decimal("1000000"),
+    "billion": Decimal("1000000000"),
+    "trillion": Decimal("1000000000000"),
+    "천": Decimal("1000"),
+    "백만": Decimal("1000000"),
+    "억": Decimal("100000000"),
+    "십억": Decimal("1000000000"),
+    "조": Decimal("1000000000000"),
+}
 _INVESTMENT_ADVICE_RE = re.compile(
     r"(?:매수|매도|투자)(?:를|가|는)?\s*(?:권고|권유|추천|해야)|"
     r"목표\s*주가|목표가"
@@ -80,6 +138,9 @@ _TEMPLATE_LANGUAGE_RE = re.compile(
 )
 _HANGUL_RE = re.compile(r"[가-힣]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
+_LATIN_HANGUL_BOUNDARY_RE = re.compile(
+    r"(?<=[A-Za-z])(?=[가-힣])|(?<=[가-힣])(?=[A-Za-z])"
+)
 _ENGLISH_MONTHS = (
     "january",
     "february",
@@ -94,6 +155,71 @@ _ENGLISH_MONTHS = (
     "november",
     "december",
 )
+_UNIT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "percentage-point",
+        re.compile(
+            r"\bpercentage(?:-| )points?\b|퍼센트\s*포인트|%\s*(?:p|포인트)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "basis-point",
+        re.compile(
+            r"\bbasis(?:-| )points?\b|\bbps?\b|베이시스\s*포인트",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "percent",
+        re.compile(r"%|\bpercent(?:age)?s?\b|퍼센트", re.IGNORECASE),
+    ),
+    (
+        "thousand",
+        re.compile(
+            r"\bthousands?\b|천(?=\s*(?:원|달러|유로|엔))",
+            re.IGNORECASE,
+        ),
+    ),
+    ("million", re.compile(r"\bmillions?\b|백만", re.IGNORECASE)),
+    ("billion", re.compile(r"\bbillions?\b|십억", re.IGNORECASE)),
+    (
+        "trillion",
+        re.compile(
+            r"\btrillions?\b|조(?=\s*(?:원|달러|유로|엔))",
+            re.IGNORECASE,
+        ),
+    ),
+    ("hundred-million", re.compile(r"억(?=\s*(?:원|달러|유로|엔))")),
+    (
+        "usd",
+        re.compile(
+            r"US\$|\$|\bUSD\b|\bU\.S\.\s*dollars?\b|\bdollars?\b|달러",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "krw",
+        re.compile(
+            r"₩|\bKRW\b|\bwon\b|(?<![가-힣])(?:천|만|백만|억|십억|조)?\s*원(?![가-힣])",
+            re.IGNORECASE,
+        ),
+    ),
+    ("eur", re.compile(r"€|\bEUR\b|\beuros?\b|유로", re.IGNORECASE)),
+    (
+        "jpy",
+        re.compile(
+            r"¥|\bJPY\b|\byen\b|(?<![가-힣])엔(?![가-힣])",
+            re.IGNORECASE,
+        ),
+    ),
+    ("gbp", re.compile(r"£|\bGBP\b|\bpounds?\b|파운드", re.IGNORECASE)),
+    ("barrel", re.compile(r"\bbarrels?\b|배럴", re.IGNORECASE)),
+    (
+        "metric-ton",
+        re.compile(r"\bmetric(?:-| )tons?\b|메트릭\s*톤", re.IGNORECASE),
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +231,10 @@ class NewsSummaryInput:
 
     @property
     def body(self) -> str:
-        return self.article_content or self.raw_excerpt or ""
+        article_content = _bounded_source_text(self.article_content)
+        if article_content:
+            return article_content
+        return _bounded_source_text(self.raw_excerpt)
 
     @property
     def source_text(self) -> str:
@@ -114,17 +243,25 @@ class NewsSummaryInput:
         )
 
     def to_payload(self) -> dict[str, object]:
+        article_content = _bounded_source_text(self.article_content) or None
+        raw_excerpt = (
+            None
+            if article_content is not None
+            else _bounded_source_text(self.raw_excerpt) or None
+        )
         return {
             "title": self.title,
             "source": self.source,
-            "article_content": self.article_content,
-            "raw_excerpt": self.raw_excerpt,
+            "article_content": article_content,
+            "raw_excerpt": raw_excerpt,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class GeneratedNewsSummary:
     summary: str
+    translated_title: str | None
+    translated_excerpt: str | None
     sentiment: Sentiment
     confidence: int
     model_name: str
@@ -159,8 +296,20 @@ def _normalized_text(value: str | None) -> str:
     return " ".join((value or "").split())
 
 
+def _bounded_source_text(value: str | None) -> str:
+    return _normalized_text((value or "")[:MAX_TRANSLATION_SOURCE_CHARS])
+
+
+def _is_english_dominant(value: str | None) -> bool:
+    normalized = value or ""
+    return (
+        _LATIN_RE.search(normalized) is not None
+        and _HANGUL_RE.search(normalized) is None
+    )
+
+
 def _usable_body(value: str | None, *, title: str, source: str | None) -> str | None:
-    normalized = _normalized_text(value)
+    normalized = _bounded_source_text(value)
     if not normalized:
         return None
     comparable = normalized.casefold()
@@ -180,7 +329,7 @@ def _usable_body(value: str | None, *, title: str, source: str | None) -> str | 
         return None
     if len(normalized.split()) < MIN_SOURCE_BODY_WORDS:
         return None
-    return normalized[:MAX_SOURCE_BODY_CHARS]
+    return normalized
 
 
 def _summary_input_for(article: NewsArticle) -> NewsSummaryInput | None:
@@ -210,11 +359,7 @@ def _summary_input_for(article: NewsArticle) -> NewsSummaryInput | None:
             article_content=None,
             raw_excerpt=excerpt,
         )
-    if (
-        not title
-        or _HANGUL_RE.search(title) is not None
-        or _LATIN_RE.search(title) is None
-    ):
+    if not title or not _is_english_dominant(title):
         return None
     return NewsSummaryInput(
         title=title,
@@ -225,10 +370,11 @@ def _summary_input_for(article: NewsArticle) -> NewsSummaryInput | None:
 
 
 def _normalized_number(raw: str) -> tuple[Decimal, bool] | None:
-    compact = raw.replace(",", "").replace(" ", "")
-    is_percent = compact.endswith("%")
+    compact = raw.replace(",", "").strip()
+    is_percent = _PERCENT_SUFFIX_RE.search(compact) is not None
     if is_percent:
-        compact = compact[:-1]
+        compact = _PERCENT_SUFFIX_RE.sub("", compact)
+    compact = compact.replace(" ", "")
     if compact.startswith("+"):
         compact = compact[1:]
     try:
@@ -237,13 +383,50 @@ def _normalized_number(raw: str) -> tuple[Decimal, bool] | None:
         return None
 
 
+def _normalize_scaled_quantities(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        raw_scale = match.group("scale").casefold()
+        scale = raw_scale[:-1] if raw_scale.endswith("s") else raw_scale
+        number = Decimal(match.group("number").replace(",", ""))
+        return format(number * _SCALE_FACTORS[scale], "f")
+
+    return _SCALED_QUANTITY_RE.sub(replace, text)
+
+
 def _number_set(text: str) -> set[tuple[Decimal, bool]]:
     numbers: set[tuple[Decimal, bool]] = set()
-    for match in _NUMBER_RE.finditer(text):
+    for match in _NUMBER_RE.finditer(_normalize_scaled_quantities(text)):
         normalized = _normalized_number(match.group(0))
         if normalized is not None:
             numbers.add(normalized)
     return numbers
+
+
+def _unit_set(text: str) -> set[str]:
+    quantity_normalized = _normalize_scaled_quantities(text)
+    boundary_normalized = _LATIN_HANGUL_BOUNDARY_RE.sub(" ", quantity_normalized)
+    return {
+        unit
+        for unit, pattern in _UNIT_PATTERNS
+        if pattern.search(boundary_normalized) is not None
+    }
+
+
+def _numbers_absent_from_source(
+    generated_text: str,
+    *,
+    source_text: str,
+) -> set[tuple[Decimal, bool]]:
+    source_numbers = _number_set(source_text)
+    return {
+        number
+        for number in _number_set(generated_text) - source_numbers
+        if not _is_calendar_month_translation(
+            number,
+            summary=generated_text,
+            source_text=source_text,
+        )
+    }
 
 
 def _is_calendar_month_translation(
@@ -306,20 +489,86 @@ def _validated_summary(summary: object, news: NewsSummaryInput) -> str:
     } or any(_duplicates_title(sentence, news.title) for sentence in sentences):
         raise ValueError("news summary duplicates raw input")
 
-    source_numbers = _number_set(news.source_text)
-    generated_numbers = _number_set(normalized)
-    invented_numbers = {
-        number
-        for number in generated_numbers - source_numbers
-        if not _is_calendar_month_translation(
-            number,
-            summary=normalized,
-            source_text=news.source_text,
-        )
-    }
-    if invented_numbers:
+    if _numbers_absent_from_source(normalized, source_text=news.source_text):
         raise ValueError("news summary contains numbers absent from source")
+    if _unit_set(normalized) - _unit_set(news.source_text):
+        raise ValueError("news summary contains units absent from source")
     return normalized
+
+
+def _validated_translation(
+    value: object,
+    *,
+    source_text: str,
+    field_name: str,
+    max_chars: int,
+) -> str | None:
+    expects_translation = bool(source_text) and _is_english_dominant(source_text)
+    if not expects_translation:
+        if value is not None:
+            raise ValueError(f"{field_name} must be null for non-English source")
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string for English source")
+    normalized = _normalized_text(value)
+    if not normalized or len(normalized) > max_chars:
+        raise ValueError(f"{field_name} length is invalid")
+    if _HANGUL_RE.search(normalized) is None:
+        raise ValueError(f"{field_name} must be written in Korean")
+    if _numbers_absent_from_source(normalized, source_text=source_text):
+        raise ValueError(f"{field_name} contains numbers absent from source")
+    if _number_set(source_text) - _number_set(normalized):
+        raise ValueError(f"{field_name} does not preserve source numbers")
+    source_units = _unit_set(source_text)
+    translated_units = _unit_set(normalized)
+    if translated_units - source_units:
+        raise ValueError(f"{field_name} contains units absent from source")
+    if source_units - translated_units:
+        raise ValueError(f"{field_name} does not preserve source units")
+    return normalized
+
+
+def _optional_validated_translation(
+    value: object,
+    *,
+    source_text: str,
+    field_name: str,
+    max_chars: int,
+) -> str | None:
+    try:
+        return _validated_translation(
+            value,
+            source_text=source_text,
+            field_name=field_name,
+            max_chars=max_chars,
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Discarding invalid %s while preserving news summary: %s", field_name, exc
+        )
+        return None
+
+
+def _validated_translations(
+    *,
+    translated_title: object,
+    translated_excerpt: object,
+    news: NewsSummaryInput,
+) -> tuple[str | None, str | None]:
+    return (
+        _optional_validated_translation(
+            translated_title,
+            source_text=news.title,
+            field_name="translated_title",
+            max_chars=MAX_TRANSLATED_TITLE_CHARS,
+        ),
+        _optional_validated_translation(
+            translated_excerpt,
+            source_text=news.body,
+            field_name="translated_excerpt",
+            max_chars=MAX_TRANSLATED_EXCERPT_CHARS,
+        ),
+    )
 
 
 def _validated_sentiment(value: object) -> Sentiment:
@@ -354,6 +603,11 @@ class OpenAiNewsSummaryGenerator:
     async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary:
         response = await self._request(news)
         summary = _validated_summary(response.get("summary"), news)
+        translated_title, translated_excerpt = _validated_translations(
+            translated_title=response.get("translated_title"),
+            translated_excerpt=response.get("translated_excerpt"),
+            news=news,
+        )
         sentiment = _validated_sentiment(response.get("sentiment"))
         confidence = _validated_confidence(response.get("confidence"))
         prompt = json.dumps(
@@ -366,6 +620,8 @@ class OpenAiNewsSummaryGenerator:
         )
         return GeneratedNewsSummary(
             summary=summary,
+            translated_title=translated_title,
+            translated_excerpt=translated_excerpt,
             sentiment=sentiment,
             confidence=confidence,
             model_name=str(getattr(response, "model_name", self._model)),
@@ -387,7 +643,13 @@ class OpenAiNewsSummaryGenerator:
             schema=_SUMMARY_SCHEMA,
             additional_instructions=_instructions_for(news),
         )
-        if set(response) != {"summary", "sentiment", "confidence"}:
+        if set(response) != {
+            "summary",
+            "translated_title",
+            "translated_excerpt",
+            "sentiment",
+            "confidence",
+        }:
             raise ValueError("news summary response shape is invalid")
         return response
 
@@ -553,6 +815,11 @@ async def _run_batch(
             started = time.monotonic()
             generated = await generator.summarize(news_input)
             summary = _validated_summary(generated.summary, news_input)
+            translated_title, translated_excerpt = _validated_translations(
+                translated_title=generated.translated_title,
+                translated_excerpt=generated.translated_excerpt,
+                news=news_input,
+            )
             sentiment = _validated_sentiment(generated.sentiment)
             confidence = _validated_confidence(generated.confidence)
             elapsed_ms = int((time.monotonic() - started) * 1_000)
@@ -564,6 +831,8 @@ async def _run_batch(
                     sentiment=sentiment,
                     sentiment_score=None,
                     summary=summary,
+                    translated_title=translated_title,
+                    translated_excerpt=translated_excerpt,
                     key_points=[
                         sentence.strip()
                         for sentence in _SENTENCE_SPLIT_RE.split(summary)
@@ -668,6 +937,9 @@ __all__ = [
     "AUTO_SUMMARY_BATCH_SIZE",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",
+    "MAX_TRANSLATED_EXCERPT_CHARS",
+    "MAX_TRANSLATED_TITLE_CHARS",
+    "MAX_TRANSLATION_SOURCE_CHARS",
     "GeneratedNewsSummary",
     "NewsSummaryBatchResult",
     "NewsSummaryGenerator",

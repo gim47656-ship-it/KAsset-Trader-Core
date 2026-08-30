@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
+from app.schemas.news import NewsAnalysisResultResponse
 from app.services.news_summary_service import (
+    MAX_TRANSLATED_EXCERPT_CHARS,
+    MAX_TRANSLATION_SOURCE_CHARS,
     GeneratedNewsSummary,
     NewsSummaryInput,
     OpenAiNewsSummaryGenerator,
+    _summary_input_for,
     summarize_pending_news,
 )
 
@@ -29,8 +34,14 @@ class FakeResponsesClient:
 
 
 class FakeSummaryGenerator:
-    def __init__(self, outcomes: dict[str, str | BaseException]) -> None:
+    def __init__(
+        self,
+        outcomes: dict[str, str | BaseException],
+        *,
+        translations: dict[str, tuple[str | None, str | None]] | None = None,
+    ) -> None:
         self.outcomes = outcomes
+        self.translations = translations or {}
         self.calls: list[NewsSummaryInput] = []
 
     async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary:
@@ -38,8 +49,13 @@ class FakeSummaryGenerator:
         outcome = self.outcomes[news.title]
         if isinstance(outcome, BaseException):
             raise outcome
+        translated_title, translated_excerpt = self.translations.get(
+            news.title, (None, None)
+        )
         return GeneratedNewsSummary(
             summary=outcome,
+            translated_title=translated_title,
+            translated_excerpt=translated_excerpt,
             sentiment=Sentiment.NEUTRAL,
             confidence=84,
             model_name="test-news-summary",
@@ -86,7 +102,12 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
             {
                 "summary": (
                     "회사는 2026년 7월 26일 분기 실적을 발표했다. "
-                    "매출은 96,221 million으로 집계됐다."
+                    "매출은 96,221백만으로 집계됐다."
+                ),
+                "translated_title": "회사의 분기 실적 발표",
+                "translated_excerpt": (
+                    "회사는 2026년 7월 26일에 끝난 기간의 분기 실적을 발표했다. "
+                    "매출은 96,221백만이었다."
                 ),
                 "sentiment": "neutral",
                 "confidence": 88,
@@ -107,6 +128,9 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
     result = await generator.summarize(news)
 
     assert result.summary.startswith("회사는 2026년 7월 26일")
+    assert result.translated_title == "회사의 분기 실적 발표"
+    assert result.translated_excerpt is not None
+    assert result.translated_excerpt.endswith("96,221백만이었다.")
     assert result.sentiment is Sentiment.NEUTRAL
     assert result.confidence == 88
     call = client.calls[0]
@@ -114,11 +138,53 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
     assert call["reasoning_effort"] == "low"
     assert call["schema_name"] == "kasset_news_summary"
     assert call["input_payload"] == news.to_payload()
+    assert set(call["schema"]["required"]) == {
+        "summary",
+        "translated_title",
+        "translated_excerpt",
+        "sentiment",
+        "confidence",
+    }
     assert call["schema"]["additionalProperties"] is False
+    assert (
+        call["schema"]["properties"]["translated_excerpt"]["anyOf"][0]["maxLength"]
+        == MAX_TRANSLATED_EXCERPT_CHARS
+    )
     assert "2~4문장" in call["additional_instructions"]
     assert "투자 권유" in call["additional_instructions"]
     assert "핵심 사건과 주체" in call["additional_instructions"]
     assert "투자자 영향" in call["additional_instructions"]
+    assert "translated_excerpt를 요약" in call["additional_instructions"]
+    assert "숫자와 단위" in call["additional_instructions"]
+    assert "범위 밖 사실" in call["additional_instructions"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_openai_generator_accepts_equivalent_korean_scale_translation() -> None:
+    response = {
+        "summary": "회사가 실적을 발표했다. 매출은 50억 달러였다.",
+        "translated_title": "회사 실적 발표",
+        "translated_excerpt": "회사는 매출이 50억 달러라고 발표했다.",
+        "sentiment": "neutral",
+        "confidence": 85,
+    }
+    generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient([response]),
+        model="gpt-5.6-luna",
+    )
+
+    result = await generator.summarize(
+        NewsSummaryInput(
+            title="Company reports results",
+            source="Example Wire",
+            article_content="The company reported results. Revenue was $5 billion.",
+            raw_excerpt=None,
+        )
+    )
+
+    assert result.summary == response["summary"]
+    assert result.translated_excerpt == response["translated_excerpt"]
 
 
 @pytest.mark.unit
@@ -128,9 +194,18 @@ async def test_openai_generator_translates_foreign_title_when_body_is_missing() 
         [
             {
                 "summary": "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다.",
+                "translated_title": "엔비디아 실적 발표 후 아시아 증시 혼조",
+                "translated_excerpt": None,
                 "sentiment": "neutral",
                 "confidence": 72,
-            }
+            },
+            {
+                "summary": "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다.",
+                "translated_title": "엔비디아 실적 발표 후 아시아 증시 혼조",
+                "translated_excerpt": "본문 없이 생성한 번역 발췌",
+                "sentiment": "neutral",
+                "confidence": 72,
+            },
         ]
     )
     generator = OpenAiNewsSummaryGenerator(client, model="gpt-5.6-luna")
@@ -144,7 +219,13 @@ async def test_openai_generator_translates_foreign_title_when_body_is_missing() 
     result = await generator.summarize(news)
 
     assert result.summary == "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다."
+    assert result.translated_title == "엔비디아 실적 발표 후 아시아 증시 혼조"
+    assert result.translated_excerpt is None
     assert "한국어 한 문장" in client.calls[0]["additional_instructions"]
+    rejected = await generator.summarize(news)
+    assert rejected.summary == result.summary
+    assert rejected.translated_title == result.translated_title
+    assert rejected.translated_excerpt is None
 
 
 @pytest.mark.unit
@@ -155,7 +236,15 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
     )
     copy_generator = OpenAiNewsSummaryGenerator(
         FakeResponsesClient(
-            [{"summary": raw_copy, "sentiment": "neutral", "confidence": 70}]
+            [
+                {
+                    "summary": raw_copy,
+                    "translated_title": None,
+                    "translated_excerpt": None,
+                    "sentiment": "neutral",
+                    "confidence": 70,
+                }
+            ]
         ),
         model="gpt-5.6-luna",
     )
@@ -173,6 +262,8 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
         [
             {
                 "summary": "회사는 신규 제품을 공개했다. 매출은 999억원으로 예상됐다.",
+                "translated_title": None,
+                "translated_excerpt": None,
                 "sentiment": "positive",
                 "confidence": 70,
             }
@@ -219,6 +310,8 @@ async def test_generator_rejects_template_language_and_multi_sentence_title_fall
                         "이 기사는 삼성전자의 공급 계약을 다룬다. "
                         "계약 기간은 2026년 9월부터 2029년 8월까지다."
                     ),
+                    "translated_title": None,
+                    "translated_excerpt": None,
                     "sentiment": "neutral",
                     "confidence": 70,
                 }
@@ -237,6 +330,8 @@ async def test_generator_rejects_template_language_and_multi_sentence_title_fall
                         "엔비디아가 분기 실적을 발표했다. "
                         "투자자들은 결과에 주목하고 있다."
                     ),
+                    "translated_title": "엔비디아 분기 실적 발표",
+                    "translated_excerpt": None,
                     "sentiment": "neutral",
                     "confidence": 60,
                 }
@@ -255,6 +350,240 @@ async def test_generator_rejects_template_language_and_multi_sentence_title_fall
         )
 
 
+@pytest.mark.unit
+def test_source_excerpt_caps_article_content_and_raw_excerpt_at_4000_characters() -> (
+    None
+):
+    capped_source = ("word " * 799) + "endxy"
+    source = capped_source + " FORBIDDEN TAIL"
+    assert len(capped_source) == MAX_TRANSLATION_SOURCE_CHARS
+
+    content_input = _summary_input_for(
+        _article(
+            url="https://news.test.invalid/source-cap/content",
+            title="Company publishes a detailed market update",
+            summary=None,
+            article_content=source,
+            published_at=datetime(2026, 8, 29, 12, 0),
+        )
+    )
+    excerpt_input = _summary_input_for(
+        _article(
+            url="https://news.test.invalid/source-cap/excerpt",
+            title="Company publishes another detailed market update",
+            summary=source,
+            published_at=datetime(2026, 8, 29, 12, 0),
+        )
+    )
+
+    assert content_input is not None
+    assert content_input.to_payload()["article_content"] == capped_source
+    assert content_input.to_payload()["raw_excerpt"] is None
+    assert excerpt_input is not None
+    assert excerpt_input.to_payload()["article_content"] is None
+    assert excerpt_input.to_payload()["raw_excerpt"] == capped_source
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_openai_generator_enforces_6000_character_translation_boundary() -> None:
+    client = FakeResponsesClient(
+        [
+            {
+                "summary": (
+                    "회사가 시장 전망을 발표했다. 경영진은 기존 계획을 유지했다."
+                ),
+                "translated_title": "회사의 시장 전망 발표",
+                "translated_excerpt": "가" * MAX_TRANSLATED_EXCERPT_CHARS,
+                "sentiment": "neutral",
+                "confidence": 80,
+            },
+            {
+                "summary": (
+                    "회사가 시장 전망을 발표했다. 경영진은 기존 계획을 유지했다."
+                ),
+                "translated_title": "회사의 시장 전망 발표",
+                "translated_excerpt": "가" * (MAX_TRANSLATED_EXCERPT_CHARS + 1),
+                "sentiment": "neutral",
+                "confidence": 80,
+            },
+        ]
+    )
+    generator = OpenAiNewsSummaryGenerator(client, model="gpt-5.6-luna")
+    news = NewsSummaryInput(
+        title="Company publishes its market outlook",
+        source="Example Wire",
+        article_content=(
+            "The company published its market outlook and retained its existing plan "
+            "after management reviewed current demand conditions."
+        ),
+        raw_excerpt=None,
+    )
+
+    accepted = await generator.summarize(news)
+
+    assert accepted.translated_excerpt is not None
+    assert len(accepted.translated_excerpt) == MAX_TRANSLATED_EXCERPT_CHARS
+    rejected = await generator.summarize(news)
+    assert rejected.summary
+    assert rejected.translated_excerpt is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generator_discards_translation_for_korean_source() -> None:
+    valid_response = {
+        "summary": "회사가 시장 전망을 발표했다. 경영진은 기존 계획을 유지했다.",
+        "translated_title": None,
+        "translated_excerpt": None,
+        "sentiment": "neutral",
+        "confidence": 80,
+    }
+    invalid_response = {
+        **valid_response,
+        "translated_title": "회사의 시장 전망 발표",
+    }
+    client = FakeResponsesClient([valid_response, invalid_response])
+    generator = OpenAiNewsSummaryGenerator(client, model="gpt-5.6-luna")
+    news = NewsSummaryInput(
+        title="회사의 시장 전망 발표",
+        source="테스트 뉴스",
+        article_content=(
+            "회사는 시장 전망을 발표하고 기존 계획을 유지했다. "
+            "경영진은 현재 수요 여건도 함께 설명했다."
+        ),
+        raw_excerpt=None,
+    )
+
+    accepted = await generator.summarize(news)
+
+    assert accepted.translated_title is None
+    assert accepted.translated_excerpt is None
+    rejected = await generator.summarize(news)
+    assert rejected.summary == valid_response["summary"]
+    assert rejected.translated_title is None
+    assert rejected.translated_excerpt is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generator_does_not_translate_korean_title_with_latin_brand_names() -> (
+    None
+):
+    response = {
+        "summary": "LG전자가 CES 참가 계획을 발표했다. 전시 제품군도 함께 소개했다.",
+        "translated_title": None,
+        "translated_excerpt": None,
+        "sentiment": "neutral",
+        "confidence": 80,
+    }
+    generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient([response]),
+        model="gpt-5.6-luna",
+    )
+
+    result = await generator.summarize(
+        NewsSummaryInput(
+            title="LG전자 CES 참가",
+            source="테스트 뉴스",
+            article_content=(
+                "LG전자는 CES 참가 계획을 발표했다. "
+                "회사는 현장에서 공개할 전시 제품군도 함께 소개했다."
+            ),
+            raw_excerpt=None,
+        )
+    )
+
+    assert result.summary == response["summary"]
+    assert result.translated_title is None
+    assert result.translated_excerpt is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_openai_generator_rejects_incomplete_structured_translation_shape() -> (
+    None
+):
+    generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient(
+            [
+                {
+                    "summary": (
+                        "회사가 시장 전망을 발표했다. 경영진은 기존 계획을 유지했다."
+                    ),
+                    "translated_title": "회사의 시장 전망 발표",
+                    "sentiment": "neutral",
+                    "confidence": 80,
+                }
+            ]
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    with pytest.raises(ValueError, match="response shape is invalid"):
+        await generator.summarize(
+            NewsSummaryInput(
+                title="Company publishes its market outlook",
+                source="Example Wire",
+                article_content=(
+                    "The company published its market outlook and retained its "
+                    "existing plan after reviewing current demand conditions."
+                ),
+                raw_excerpt=None,
+            )
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_body", "translated_excerpt"),
+    [
+        (
+            "The company reported revenue of 96,221 million "
+            "and maintained its outlook.",
+            "회사는 매출을 보고하고 기존 전망을 유지했다.",
+        ),
+        (
+            "The company reported revenue of 96,221 and maintained its outlook.",
+            "회사는 매출 96,221억원을 보고하고 기존 전망을 유지했다.",
+        ),
+    ],
+)
+async def test_openai_generator_discards_translation_number_or_unit_drift(
+    source_body: str,
+    translated_excerpt: str,
+) -> None:
+    generator = OpenAiNewsSummaryGenerator(
+        FakeResponsesClient(
+            [
+                {
+                    "summary": (
+                        "회사가 분기 매출을 발표했다. 경영진은 기존 전망을 유지했다."
+                    ),
+                    "translated_title": "회사 매출 보고서",
+                    "translated_excerpt": translated_excerpt,
+                    "sentiment": "neutral",
+                    "confidence": 80,
+                }
+            ]
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    result = await generator.summarize(
+        NewsSummaryInput(
+            title="Company revenue report",
+            source="Example Wire",
+            article_content=source_body,
+            raw_excerpt=None,
+        )
+    )
+
+    assert result.summary
+    assert result.translated_excerpt is None
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_idempotent(
@@ -267,7 +596,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     disclosure_url = f"https://news.test.invalid/{suffix}/disclosure"
     success = _article(
         url=success_url,
-        title="해외 기업 실적 발표",
+        title="Overseas company reports results",
         summary=(
             "The company reported quarterly operating results and maintained its guidance. "
             "Management also described demand conditions in its primary market."
@@ -303,11 +632,23 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     await db_session.commit()
     generator = FakeSummaryGenerator(
         {
-            "해외 기업 실적 발표": (
+            "Overseas company reports results": (
                 "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
             ),
             "공급 계약 발표": RuntimeError("fake provider failure"),
-        }
+        },
+        translations={
+            "Overseas company reports results": (
+                "해외 기업의 실적 발표",
+                "회사는 분기 영업 실적을 보고하고 가이던스를 유지했다. "
+                "경영진은 주력 시장의 수요 여건도 설명했다.",
+            ),
+            "공급 계약 발표": (
+                None,
+                "회사는 기존 고객과 공급 계약을 발표했다. "
+                "납품 시기는 계약 조건의 적용을 받는다.",
+            ),
+        },
     )
 
     first = await summarize_pending_news(
@@ -330,6 +671,14 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
     )
     assert stored.model_name == "test-news-summary"
+    assert stored.translated_title == "해외 기업의 실적 발표"
+    assert stored.translated_excerpt == (
+        "회사는 분기 영업 실적을 보고하고 가이던스를 유지했다. "
+        "경영진은 주력 시장의 수요 여건도 설명했다."
+    )
+    analysis_wire = NewsAnalysisResultResponse.model_validate(stored).model_dump()
+    assert analysis_wire["translated_title"] == stored.translated_title
+    assert analysis_wire["translated_excerpt"] == stored.translated_excerpt
     await db_session.refresh(success)
     await db_session.refresh(failed)
     await db_session.refresh(thin)
@@ -351,7 +700,9 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     assert second.summarized == 1
     assert second.skipped_insufficient == 1
     assert second.failed == 0
-    assert [call.title for call in generator.calls].count("해외 기업 실적 발표") == 1
+    assert [call.title for call in generator.calls].count(
+        "Overseas company reports results"
+    ) == 1
     assert [call.title for call in generator.calls].count("공급 계약 발표") == 2
     analysis_ids = list(
         (
@@ -475,3 +826,21 @@ def test_news_summary_task_is_registered_without_schedule() -> None:
     task = news_summary_tasks.summarize_news_task
     assert task.task_name == "news.articles.summarize"
     assert "schedule" not in task.labels
+
+
+@pytest.mark.unit
+def test_news_translation_migration_is_nullable_additive_and_reversible() -> None:
+    root = Path(__file__).resolve().parents[2]
+    migration = root / "alembic/versions/20260830_news_translation.py"
+    text = migration.read_text(encoding="utf-8")
+    upgrade = text.split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+    downgrade = text.split("def downgrade()", 1)[1]
+
+    assert 'revision = "20260830_news_translation"' in text
+    assert 'down_revision = "20260830_kr_lifecycle_ca"' in text
+    assert upgrade.count("op.add_column(") == 2
+    assert 'sa.Column("translated_title", sa.Text(), nullable=True)' in upgrade
+    assert 'sa.Column("translated_excerpt", sa.Text(), nullable=True)' in upgrade
+    assert "server_default" not in upgrade
+    assert 'op.drop_column("news_analysis_results", "translated_excerpt")' in downgrade
+    assert 'op.drop_column("news_analysis_results", "translated_title")' in downgrade
