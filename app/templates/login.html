@@ -13,7 +13,7 @@
         <p>Auto Trader에 오신 것을 환영합니다</p>
 
         {% if error %}
-        <div class="error-message">{{ error }}</div>
+        <div class="error-message" role="alert">{{ error }}</div>
         {% endif %}
 
         <form method="POST" action="/web-auth/login">
@@ -49,13 +49,15 @@
             <button type="submit" class="btn-primary">로그인</button>
         </form>
 
+        <div class="recovery-link">
+            <a href="/web-auth/forgot-password">비밀번호 복구</a>
+        </div>
+
         {% if google_client_id %}
         <div class="divider">또는</div>
 
-        {# Google Identity Services renders the button; its callback drops the
-           returned ID token into this hidden form, which posts same-origin so
-           the shared CSRF hidden field applies exactly like the password
-           form above. #}
+        {# Google 콜백이 반환한 ID token을 같은 origin의 hidden form으로 전달해
+           비밀번호 로그인과 동일한 CSRF 검증을 적용한다. #}
         <form method="POST" action="/web-auth/google" id="google-login-form">
             <input type="hidden" name="csrftoken" value="{{ request.state.csrftoken }}">
             {% if next %}
@@ -75,13 +77,13 @@
              data-logo_alignment="left"></div>
         {% endif %}
 
-        {% if not google_client_id %}
+        {% if web_registration_enabled %}
         <div class="divider">또는</div>
-        {% endif %}
 
         <div class="register-link">
             계정이 없으신가요? <a href="/web-auth/register">회원가입</a>
         </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

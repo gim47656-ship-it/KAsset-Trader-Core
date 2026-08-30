@@ -4,6 +4,7 @@ import pytest
 
 from app.auth.security import get_password_hash
 from app.auth.web_router import MAX_SESSIONS_PER_USER
+from app.core.config import settings
 from app.models.trading import User, UserRole
 
 
@@ -25,13 +26,26 @@ def test_login_page_render(auth_test_client):
     assert "로그인" in response.text
 
 
-def test_register_page_render(auth_test_client):
+def test_register_page_render(auth_test_client, monkeypatch):
+    monkeypatch.setattr(settings, "WEB_REGISTRATION_ENABLED", True)
     response = auth_test_client.get("/web-auth/register")
     if response.status_code != 200:
         print(f"Response: {response.text}")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "회원가입" in response.text
+
+
+def test_registration_is_fail_closed_and_hidden_by_default(
+    auth_test_client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "WEB_REGISTRATION_ENABLED", False)
+    login_response = auth_test_client.get("/web-auth/login")
+    register_response = auth_test_client.get("/web-auth/register")
+
+    assert register_response.status_code == 404
+    assert 'href="/web-auth/register"' not in login_response.text
 
 
 def test_web_login_success(auth_test_client, auth_mock_session):
@@ -298,10 +312,16 @@ class TestMultipleSessionLogin:
         mock_redis_client,
     ):
         """세션 검증 시 sismember로 Set 멤버십 확인"""
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = test_user
-        auth_mock_session.execute.return_value = mock_result
-        mock_auth_middleware_db.execute.return_value = mock_result
+        user_result = MagicMock()
+        user_result.scalar_one_or_none.return_value = test_user
+        version_result = MagicMock()
+        version_result.scalar_one_or_none.return_value = 0
+        auth_mock_session.execute.side_effect = [
+            user_result,
+            version_result,
+            user_result,
+        ]
+        mock_auth_middleware_db.execute.return_value = user_result
 
         # sismember가 True를 반환하도록 설정
         mock_redis_client.sismember = AsyncMock(return_value=True)

@@ -7,18 +7,39 @@ from typing import Annotated
 from urllib.parse import urlparse
 
 import redis.asyncio as redis
-from fastapi import APIRouter, Depends, Form, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import ValidationError
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.password_recovery import (
+    GENERIC_RECOVERY_MESSAGE,
+    consume_password_reset_code,
+    cooldown_retry_seconds,
+    issue_password_reset_code,
+    record_password_failure,
+    recovery_email_configured,
+    reset_password_throttle,
+    send_cooldown_email,
+    send_password_reset_email,
+    utc_now,
+)
 from app.auth.role_hierarchy import has_min_role
-from app.auth.schemas import UserCreate
+from app.auth.schemas import PasswordResetConfirm, UserCreate
 from app.auth.security import get_password_hash, verify_password
 from app.core.config import settings
 from app.core.db import get_db
@@ -44,6 +65,8 @@ USER_CACHE_TTL = 300  # 5 minutes
 MAX_SESSIONS_PER_USER = 5
 SESSION_HASH_KEY_PREFIX = "user_session"
 USER_CACHE_KEY_PREFIX = "user_cache"
+_INVALID_CREDENTIALS = "사용자명 또는 비밀번호가 올바르지 않습니다."
+_DUMMY_PASSWORD_HASH = get_password_hash("kasset-dummy-password-not-an-account-1!")
 
 
 def _session_hash_key(user_id: int) -> str:
@@ -58,21 +81,41 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def create_session_token(user_id: int) -> str:
-    """Create a secure session token for the user."""
-    token = session_serializer.dumps({"user_id": user_id})
+def create_session_token(user_id: int, session_version: int = 0) -> str:
+    """Create a secure session token for the user and credential generation."""
+    token = session_serializer.dumps(
+        {"user_id": user_id, "session_version": session_version}
+    )
     if isinstance(token, bytes):
         return token.decode("utf-8")
     return token
 
 
-def verify_session_token(token: str, max_age: int = SESSION_TTL) -> int | None:
-    """Verify session token and return user_id if valid."""
+def _verify_session_claims(
+    token: str, max_age: int = SESSION_TTL
+) -> tuple[int, int] | None:
     try:
         data = session_serializer.loads(token, max_age=max_age)
-        return data.get("user_id")
+        user_id = data.get("user_id")
+        session_version = data.get("session_version", 0)
+        if (
+            not isinstance(user_id, int)
+            or isinstance(user_id, bool)
+            or user_id <= 0
+            or not isinstance(session_version, int)
+            or isinstance(session_version, bool)
+            or session_version < 0
+        ):
+            return None
+        return user_id, session_version
     except (BadSignature, SignatureExpired):
         return None
+
+
+def verify_session_token(token: str, max_age: int = SESSION_TTL) -> int | None:
+    """Verify session token and return user_id if valid."""
+    claims = _verify_session_claims(token, max_age=max_age)
+    return claims[0] if claims else None
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -130,8 +173,25 @@ async def get_current_user_from_session(
     if not session_token:
         return None
 
-    user_id = verify_session_token(session_token)
-    if not user_id:
+    claims = _verify_session_claims(session_token)
+    if claims is None:
+        return None
+    user_id, session_version = claims
+
+    # Password reset increments this DB-backed generation. Check it on every
+    # request so old browser cookies stay revoked even if Redis invalidation
+    # was unavailable or a cached user record survived.
+    version_result = await db.execute(
+        select(User.web_session_version).where(
+            User.id == user_id,
+            User.is_active.is_(True),
+        )
+    )
+    current_session_version = version_result.scalar_one_or_none()
+    if (
+        current_session_version is None
+        or int(current_session_version) != session_version
+    ):
         return None
 
     # Check if user is blacklisted (session invalidated)
@@ -171,6 +231,7 @@ async def get_current_user_from_session(
                 role=UserRole[user_data["role"]],
                 is_active=user_data["is_active"],
                 hashed_password=user_data.get("hashed_password"),
+                web_session_version=user_data.get("web_session_version", 0),
             )
             if user.is_active:
                 return user
@@ -206,6 +267,7 @@ async def get_current_user_from_session(
                 "role": user.role.name,
                 "is_active": user.is_active,
                 "hashed_password": user.hashed_password,
+                "web_session_version": int(user.web_session_version or 0),
             }
             await redis_client.set(
                 user_cache_key, json.dumps(user_data), ex=USER_CACHE_TTL
@@ -289,6 +351,7 @@ def _login_page_response(
             # Empty keeps the Google button out of the page entirely, matching
             # the fail-closed behaviour of POST /web-auth/google.
             "google_client_id": settings.WEB_GOOGLE_OAUTH_CLIENT_ID.strip(),
+            "web_registration_enabled": settings.WEB_REGISTRATION_ENABLED,
         },
         status_code=status_code,
     )
@@ -313,7 +376,7 @@ async def _issue_web_session_response(
         user.username if user.username is not None else f"user-id:{user.id}"
     )
     username_hash = hashlib.sha256(log_identifier.encode()).hexdigest()[:16]
-    session_token = create_session_token(user.id)
+    session_token = create_session_token(user.id, int(user.web_session_version or 0))
     session_hash = _hash_session_token(session_token)
 
     redis_client = None
@@ -331,6 +394,7 @@ async def _issue_web_session_response(
             "role": user.role.name,
             "is_active": user.is_active,
             "hashed_password": user.hashed_password,
+            "web_session_version": int(user.web_session_version or 0),
         }
         session_count = await redis_client.scard(session_hash_key)
         if session_count >= MAX_SESSIONS_PER_USER:
@@ -408,60 +472,93 @@ async def login_page(
 @limiter.limit("5/minute")
 async def login(
     request: Request,
+    background_tasks: BackgroundTasks,
     username: Annotated[str, Form()],
     password: Annotated[str, Form()],
     next: str | None = Form(None),
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    """Handle login form submission with rate limiting (5 attempts/minute)."""
-    username_hash = hashlib.sha256(username.encode()).hexdigest()[:16]
-
-    # Get user by username
-    result = await db.execute(select(User).where(User.username == username))
+    """Handle password login with IP limiting and account-local cooldowns."""
+    normalized_username = username.strip()
+    username_hash = hashlib.sha256(normalized_username.encode()).hexdigest()[:16]
+    result = await db.execute(
+        select(User).where(User.username == normalized_username).with_for_update()
+    )
     user = result.scalar_one_or_none()
+    now = utc_now()
 
-    # Verify credentials
-    if not user or not user.hashed_password:
+    if user is None or not user.hashed_password:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         logger.warning(
-            "Web login failed: user not found or password missing",
+            "Web login failed",
             extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
+                request,
+                username_hash=username_hash,
+                event="web_login_failure",
+                reason="unknown_or_passwordless",
             ),
         )
         return _login_page_response(
             request,
             next_value=next,
-            error="사용자명 또는 비밀번호가 올바르지 않습니다.",
+            error=_INVALID_CREDENTIALS,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    if not verify_password(password, user.hashed_password):
+    retry_after = cooldown_retry_seconds(user, now=now)
+    if retry_after is not None:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         logger.warning(
-            "Web login failed: invalid password",
+            "Web login delayed by account cooldown",
             extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
+                request,
+                username_hash=username_hash,
+                event="web_login_cooldown",
+                retry_after_seconds=retry_after,
             ),
         )
         return _login_page_response(
             request,
             next_value=next,
-            error="사용자명 또는 비밀번호가 올바르지 않습니다.",
+            error=_INVALID_CREDENTIALS,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    if not user.is_active:
+    try:
+        password_matches = verify_password(password, user.hashed_password)
+    except (TypeError, ValueError):
+        password_matches = False
+
+    if not password_matches or not user.is_active:
+        transition = record_password_failure(user, now=now) if user.is_active else None
+        if transition is not None or user.failed_login_attempts:
+            await db.commit()
+        if transition is not None and user.email and recovery_email_configured():
+            background_tasks.add_task(send_cooldown_email, user.email, transition)
         logger.warning(
-            "Web login failed: inactive user",
+            "Web login failed",
             extra=_security_log_extra(
-                request, username_hash=username_hash, event="web_login_failure"
+                request,
+                username_hash=username_hash,
+                event="web_login_failure",
+                reason="invalid_credentials",
+                cooldown_level=transition.level if transition else None,
             ),
         )
         return _login_page_response(
             request,
             next_value=next,
-            error="비활성화된 계정입니다.",
+            error=_INVALID_CREDENTIALS,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
+
+    if (
+        user.failed_login_attempts
+        or user.login_cooldown_level
+        or user.login_cooldown_until is not None
+    ):
+        reset_password_throttle(user)
+        await db.commit()
 
     return await _issue_web_session_response(
         request, user, next_value=next, event_scope="web_login"
@@ -551,9 +648,176 @@ async def google_login(
     )
 
 
+def _forgot_password_response(
+    request: Request,
+    *,
+    email: str | None = None,
+    error: str | None = None,
+    success: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    return templates.TemplateResponse(
+        request=request,
+        name="forgot_password.html",
+        context={"email": email, "error": error, "success": success},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _reset_password_response(
+    request: Request,
+    *,
+    code: str | None = None,
+    error: str | None = None,
+    success: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    return templates.TemplateResponse(
+        request=request,
+        name="reset_password.html",
+        context={"code": code, "error": error, "success": success},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/forgot-password", response_class=HTMLResponse)
+async def forgot_password_page(request: Request) -> Response:
+    return _forgot_password_response(request)
+
+
+@router.post("/forgot-password")
+@limiter.limit("3/hour")
+async def forgot_password(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    email: Annotated[str, Form()],
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+) -> Response:
+    """Issue a single-use code without revealing whether the account exists."""
+    normalized_email = email.strip().lower()
+    email_hash = hashlib.sha256(normalized_email.encode()).hexdigest()[:16]
+    result = await db.execute(
+        select(User)
+        .where(
+            func.lower(User.email) == normalized_email,
+            User.is_active.is_(True),
+            User.hashed_password.is_not(None),
+        )
+        .limit(2)
+    )
+    matches = list(result.scalars().all())
+    user = matches[0] if len(matches) == 1 else None
+    delivery_scheduled = False
+
+    if user is not None and user.email and recovery_email_configured():
+        code = await issue_password_reset_code(db, user, now=utc_now())
+        recipient = user.email
+        await db.commit()
+        background_tasks.add_task(send_password_reset_email, recipient, code)
+        delivery_scheduled = True
+    else:
+        await db.rollback()
+
+    logger.info(
+        "Password recovery requested",
+        extra=_security_log_extra(
+            request,
+            email_hash=email_hash,
+            event="password_recovery_requested",
+            delivery_scheduled=delivery_scheduled,
+        ),
+    )
+    return _forgot_password_response(
+        request,
+        success=GENERIC_RECOVERY_MESSAGE,
+    )
+
+
+@router.get("/reset-password", response_class=HTMLResponse)
+async def reset_password_page(request: Request) -> Response:
+    return _reset_password_response(request)
+
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(
+    request: Request,
+    code: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    password_confirm: Annotated[str, Form()],
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+) -> Response:
+    if password != password_confirm:
+        return _reset_password_response(
+            request,
+            code=code,
+            error="비밀번호가 일치하지 않습니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        PasswordResetConfirm(password=password)
+    except ValidationError as exc:
+        error_message = "새 비밀번호가 보안 기준을 충족하지 않습니다."
+        if exc.errors():
+            error_message = str(exc.errors()[0].get("msg", error_message))
+            if error_message.startswith("Value error, "):
+                error_message = error_message[13:]
+        return _reset_password_response(
+            request,
+            code=code,
+            error=error_message,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = await consume_password_reset_code(
+        db,
+        code=code,
+        password_hash=get_password_hash(password),
+        now=utc_now(),
+    )
+    if user is None:
+        await db.rollback()
+        return _reset_password_response(
+            request,
+            error="복구 코드가 올바르지 않거나 만료되었습니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user_id = user.id
+    await db.commit()
+    try:
+        await invalidate_user_cache(user_id)
+    except Exception:
+        logger.warning(
+            "Password reset could not invalidate cached sessions for user_id=%s",
+            user_id,
+            exc_info=True,
+        )
+
+    logger.info(
+        "Password reset completed",
+        extra=_security_log_extra(
+            request,
+            user_id=user_id,
+            event="password_reset_success",
+        ),
+    )
+    response = _reset_password_response(
+        request,
+        success="비밀번호를 변경했습니다. 새 비밀번호로 로그인하세요.",
+    )
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
 @router.get("/register", response_class=HTMLResponse)
 async def register_page(request: Request):
-    """Display registration page."""
+    """Display registration page when explicit self-registration is enabled."""
+    if not settings.WEB_REGISTRATION_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return templates.TemplateResponse(
         request=request,
         name="register.html",
@@ -570,7 +834,9 @@ async def register(
     password_confirm: Annotated[str, Form()],
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    """Handle registration form submission."""
+    """Handle registration form submission when explicitly enabled."""
+    if not settings.WEB_REGISTRATION_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     # Validate password confirmation first
     if password != password_confirm:
         return templates.TemplateResponse(

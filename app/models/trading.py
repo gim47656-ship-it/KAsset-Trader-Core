@@ -5,9 +5,11 @@ from sqlalchemy import (
     TIMESTAMP,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Enum,
     ForeignKey,
     Index,
+    Integer,
     Interval,
     Numeric,
     String,
@@ -73,6 +75,20 @@ class Instrument(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "failed_login_attempts >= 0",
+            name="failed_login_attempts_nonnegative",
+        ),
+        CheckConstraint(
+            "login_cooldown_level BETWEEN 0 AND 5",
+            name="login_cooldown_level_range",
+        ),
+        CheckConstraint(
+            "web_session_version >= 0",
+            name="web_session_version_nonnegative",
+        ),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     email: Mapped[str | None] = mapped_column(Text, unique=True)
     username: Mapped[str | None] = mapped_column(Text, unique=True)
@@ -85,6 +101,18 @@ class User(Base):
     tz: Mapped[str] = mapped_column(Text, default="Asia/Seoul", nullable=False)
     base_currency: Mapped[str] = mapped_column(Text, default="KRW", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    login_cooldown_level: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    login_cooldown_until: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    web_session_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[str] = mapped_column(
         TIMESTAMP(timezone=True), server_default="now()"
     )
@@ -127,6 +155,33 @@ class RefreshToken(Base):
     )
 
     user: Mapped[User] = relationship("User", backref="refresh_tokens")
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        CheckConstraint("length(token_hash) = 64", name="token_hash_sha256"),
+        Index(
+            "ix_password_reset_tokens_user_created_at",
+            "user_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class UserChannel(Base):

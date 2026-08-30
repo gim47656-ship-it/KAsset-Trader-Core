@@ -128,10 +128,11 @@ def test_protected_route_with_auth(client, mock_session_local, mock_db_session):
     # Setup mock user
     user = User(id=1, username="testuser", is_active=True)
 
-    # Mock database query
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = user
-    mock_db_session.execute.return_value = mock_result
+    version_result = MagicMock()
+    version_result.scalar_one_or_none.return_value = 0
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+    mock_db_session.execute.side_effect = [version_result, user_result]
 
     # Create session token
     token = create_session_token(1)

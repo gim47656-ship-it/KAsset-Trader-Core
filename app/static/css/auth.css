@@ -27,7 +27,8 @@
 .auth-card p,
 .divider,
 .login-link,
-.register-link {
+.register-link,
+.recovery-link {
     color: var(--text-secondary);
 }
 
@@ -125,9 +126,19 @@
 }
 
 .login-link,
+.register-link,
+.recovery-link {
+    font-size: var(--fs-sm);
+}
+
+.login-link,
 .register-link {
     text-align: center;
-    font-size: var(--fs-sm);
+}
+
+.recovery-link {
+    margin-top: var(--sp-4);
+    text-align: right;
 }
 
 .login-link a,
@@ -137,8 +148,22 @@
     font-weight: var(--fw-semibold);
 }
 
+.recovery-link a {
+    color: var(--text-secondary);
+    font-weight: var(--fw-semibold);
+}
+
 .login-link a:hover,
-.register-link a:hover {
+.register-link a:hover,
+.recovery-link a:hover {
     color: var(--accent-hover);
     text-decoration: underline;
+}
+
+.btn-primary:focus-visible,
+.login-link a:focus-visible,
+.register-link a:focus-visible,
+.recovery-link a:focus-visible {
+    outline: solid var(--border-focus);
+    outline-offset: var(--sp-1);
 }

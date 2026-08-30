@@ -761,6 +761,28 @@ class Settings(BaseSettings):
     # it is rendered into the login page). No client secret is used.
     WEB_GOOGLE_OAUTH_CLIENT_ID: str = ""
 
+    # Password recovery email. Empty host/from/base URL keeps recovery
+    # fail-closed without weakening password login. The raw recovery code is
+    # never stored; only its SHA-256 digest reaches PostgreSQL.
+    AUTH_SMTP_HOST: str = ""
+    AUTH_SMTP_PORT: Annotated[int, Field(ge=1, le=65535)] = 587
+    AUTH_SMTP_USERNAME: str = ""
+    AUTH_SMTP_PASSWORD: SecretStr | None = None
+    AUTH_SMTP_FROM_EMAIL: str = ""
+    AUTH_SMTP_SECURITY: Literal["starttls", "ssl", "none"] = "starttls"
+    # Off by default. Enable only for a provider that cannot negotiate TLS 1.2+;
+    # this lowers OpenSSL's minimum protocol/cipher security for SMTP alone.
+    AUTH_SMTP_ALLOW_LEGACY_TLS: bool = False
+    AUTH_SMTP_TIMEOUT_SECONDS: Annotated[
+        float, Field(gt=0.0, le=30.0, allow_inf_nan=False)
+    ] = 10.0
+    AUTH_PASSWORD_RESET_BASE_URL: str = ""
+    AUTH_PASSWORD_RESET_TTL_MINUTES: Annotated[int, Field(ge=5, le=1440)] = 30
+
+    # Browser self-registration is not part of the production admin surface.
+    # Android account provisioning remains on its separate API.
+    WEB_REGISTRATION_ENABLED: bool = False
+
     PUBLIC_API_PATHS: Annotated[list[str], NoDecode] = []
 
     # news-ingestor machine-to-machine bulk ingest authentication

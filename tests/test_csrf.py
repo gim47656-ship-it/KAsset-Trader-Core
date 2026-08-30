@@ -5,6 +5,7 @@ import pytest
 from starlette.requests import Request
 
 from app.auth.security import get_password_hash
+from app.core.config import settings
 from app.middleware.csrf import TemplateFormCSRFMiddleware
 from app.models.trading import User
 
@@ -27,7 +28,11 @@ def test_login_page_sets_csrf_cookie_and_hidden_field(auth_test_client):
     assert 'name="csrftoken"' in response.text
 
 
-def test_register_page_sets_csrf_cookie_and_hidden_field(auth_test_client):
+def test_register_page_sets_csrf_cookie_and_hidden_field(
+    auth_test_client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "WEB_REGISTRATION_ENABLED", True)
     response = auth_test_client.get("/web-auth/register")
 
     assert response.status_code == 200
@@ -95,7 +100,9 @@ def test_login_with_valid_csrf_token_succeeds(
 def test_register_with_valid_csrf_token_reaches_handler(
     auth_test_client,
     auth_mock_session,
+    monkeypatch,
 ):
+    monkeypatch.setattr(settings, "WEB_REGISTRATION_ENABLED", True)
     empty_result = MagicMock()
     empty_result.scalar_one_or_none.return_value = None
     auth_mock_session.execute.side_effect = [empty_result, empty_result]

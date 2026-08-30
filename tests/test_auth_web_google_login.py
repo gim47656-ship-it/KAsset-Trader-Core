@@ -179,7 +179,9 @@ def test_google_login_issues_existing_web_session_cookie(
     # The cookie must be understood by the shared session reader that
     # require_admin() sits on top of.
     resolver_db = AsyncMock()
-    resolver_db.execute.return_value = result
+    version_result = MagicMock()
+    version_result.scalar_one_or_none.return_value = 0
+    resolver_db.execute.side_effect = [version_result, result]
     with (
         patch("app.auth.web_router.redis.from_url", return_value=redis_client),
         patch("app.auth.web_router.get_session_blacklist") as blacklist,
@@ -197,6 +199,23 @@ def test_google_login_issues_existing_web_session_cookie(
     assert resolved.role is UserRole.admin
     # The signed cookie decoded to this user's session set, not somebody else's.
     assert redis_client.sismember.await_args.args[0] == "user_session:4"
+
+
+def test_password_reset_session_generation_rejects_old_cookie() -> None:
+    stale_cookie = web_router.create_session_token(4, session_version=0)
+    resolver_db = AsyncMock()
+    version_result = MagicMock()
+    version_result.scalar_one_or_none.return_value = 1
+    resolver_db.execute.return_value = version_result
+
+    resolved = asyncio.run(
+        get_current_user_from_session(
+            _request_with_session(stale_cookie),
+            resolver_db,
+        )
+    )
+
+    assert resolved is None
 
 
 def test_google_login_issues_session_for_user_without_username_and_redacts_identifiers(
@@ -400,7 +419,7 @@ def test_login_page_and_google_route_fail_closed_when_unconfigured(
     assert page.status_code == 200
     assert "accounts.google.com/gsi/client" not in page.text
     assert 'action="/web-auth/google"' not in page.text
-    assert page.text.count('<div class="divider">또는</div>') == 1
+    assert page.text.count('<div class="divider">또는</div>') == 0
 
     response = auth_test_client.post(
         "/web-auth/google",

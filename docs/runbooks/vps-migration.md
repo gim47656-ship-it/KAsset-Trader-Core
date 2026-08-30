@@ -161,6 +161,31 @@ Caddy는 `/admin`, `/admin/*`, `/web-auth`, `/web-auth/*`를 일반 catch-all보
 Google OAuth client로 발급한다. 두 값을 같게 두면 Android용 id_token을 웹 로그인에
 재제출해도 `aud` 불일치로 거부되지 않아 클라이언트 경로 분리가 사라진다.
 
+비밀번호 관리자 계정은 `WEB_REGISTRATION_ENABLED=false`를 유지한 채 운영 DB에 별도로
+bootstrap한다. Android 자동매매 소유자 계정을 admin으로 바꾸지 않는다. 비밀번호 복구는
+다음 설정이 모두 유효할 때만 메일을 보내며, 응답은 계정 존재 여부와 관계없이 동일하다.
+
+```dotenv
+AUTH_SMTP_HOST=smtp.fmcity.com
+AUTH_SMTP_PORT=587
+AUTH_SMTP_USERNAME=<mailbox>
+AUTH_SMTP_PASSWORD=<server-only secret>
+AUTH_SMTP_FROM_EMAIL=<mailbox>
+AUTH_SMTP_SECURITY=starttls
+AUTH_SMTP_ALLOW_LEGACY_TLS=true
+AUTH_PASSWORD_RESET_BASE_URL=https://vm-naver-kasset.tail624c43.ts.net
+AUTH_PASSWORD_RESET_TTL_MINUTES=30
+WEB_REGISTRATION_ENABLED=false
+```
+
+`smtp.fmcity.com:587`은 2026-08-30 실측에서 STARTTLS를 광고했지만 TLS 1.2 협상은
+실패하고 TLS 1.0만 성공했다. 따라서 이 공급자에 한해
+`AUTH_SMTP_ALLOW_LEGACY_TLS=true`가 필요하다. 기본값은 `false`이며, 현대 TLS를 지원하는
+공급자로 바꾸면 즉시 `false`로 되돌린다. SMTP 비밀번호는 Git, 명령행 인자, 로그에 남기지
+않고 서버 `.env.kasset`에만 저장한다. 복구 링크의 원문 코드는 URL fragment에만 있고
+PostgreSQL에는 SHA-256 해시만 저장된다. 성공한 복구는 refresh token과 DB-backed web
+session generation을 함께 폐기한다.
+
 `KASSET_ADMIN_ALLOWED_IPS`는 공백으로 구분한 IP 또는 CIDR 목록이다. 기본값과 샘플값은
 tailnet IPv4 `100.64.0.0/10`과 IPv6 ULA `fd7a:115c:a1e0::/48`이다. 환경변수가 없거나
 빈 값이어도 Compose와 Caddyfile 양쪽의 기본값 때문에 두 tailnet 대역만 허용된다.
@@ -183,10 +208,11 @@ Caddy의 `{$ENV:default}` 치환은 Caddyfile 파싱 전에 일어나며 공백�
 
 현재 `slowapi`의 `get_remote_address`는 `request.client.host`를 key로 쓰고, Uvicorn은
 `--proxy-headers` 없이 기동한다. 따라서 Caddy를 경유한 애플리케이션 요청의 peer는 모두
-Caddy 컨테이너 IP 하나다. `/web-auth/login`과 `/web-auth/google`의 각 `5/minute` 제한은
-최종 사용자별이 아니라 **경로별 전역 단일 bucket**이다. allowlist 안의 한 사용자가 분당
-5회를 소모하면 다른 정상 사용자도 해당 경로에서 일시적으로 로그인하지 못한다. 인증 우회는
-아니지만 정상 로그인을 막을 수 있는 가용성 위험이다.
+Caddy 컨테이너 IP 하나다. `/web-auth/login`, `/web-auth/google`,
+`/web-auth/reset-password`의 각 `5/minute` 제한과 `/web-auth/forgot-password`의
+`3/hour` 제한은 최종 사용자별이 아니라 **경로별 전역 단일 bucket**이다. allowlist 안의
+한 사용자가 제한을 소모하면 다른 정상 사용자도 해당 경로에서 일시적으로 요청하지 못한다.
+인증 우회는 아니지만 로그인·복구를 막을 수 있는 가용성 위험이다.
 
 같은 이유로 현재 앱 보안 로그의 `client_ip`도 Caddy 컨테이너 IP로 고정되어 사용자 감사
 근거로 쓸 수 없다. 별도 변경에서 먼저 Caddy가 `X-Forwarded-For`를 연결 peer 값으로

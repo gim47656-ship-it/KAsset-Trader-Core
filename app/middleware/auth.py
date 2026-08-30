@@ -22,7 +22,7 @@ class AuthMiddleware:
     Middleware to protect web routes requiring authentication.
 
     Public routes (no authentication required):
-    - /web-auth/* (login, register, logout)
+    - /web-auth/* (login, recovery, optional register, logout)
     - /auth/* (API authentication endpoints)
     - /static/* (runtime CSS/font assets)
     - /health
@@ -34,6 +34,8 @@ class AuthMiddleware:
     # Base public paths (always accessible)
     BASE_PUBLIC_PATHS: ClassVar[list[str]] = [
         "/web-auth/login",
+        "/web-auth/forgot-password",
+        "/web-auth/reset-password",
         "/web-auth/register",
         "/web-auth/logout",
         "/auth/",

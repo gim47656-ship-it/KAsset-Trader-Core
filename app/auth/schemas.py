@@ -7,6 +7,18 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.models.trading import UserRole
 
 
+def _validate_password_strength(value: str) -> str:
+    if len(value) < 8:
+        raise ValueError("비밀번호는 최소 8자 이상이어야 합니다.")
+    if not any(character.isupper() for character in value):
+        raise ValueError("비밀번호에 대문자가 최소 1개 이상 포함되어야 합니다.")
+    if not any(character.isdigit() for character in value):
+        raise ValueError("비밀번호에 숫자가 최소 1개 이상 포함되어야 합니다.")
+    if not any(character in string.punctuation for character in value):
+        raise ValueError("비밀번호에 특수문자가 최소 1개 이상 포함되어야 합니다.")
+    return value
+
+
 class Token(BaseModel):
     """Token response schema."""
 
@@ -30,21 +42,20 @@ class UserCreate(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def validate_password_strength(cls, v: str) -> str:
+    def validate_password_strength(cls, value: str) -> str:
         """비밀번호 강도 검증: 최소 8자, 대문자, 숫자, 특수문자 포함."""
-        if len(v) < 8:
-            raise ValueError("비밀번호는 최소 8자 이상이어야 합니다.")
+        return _validate_password_strength(value)
 
-        if not any(c.isupper() for c in v):
-            raise ValueError("비밀번호에 대문자가 최소 1개 이상 포함되어야 합니다.")
 
-        if not any(c.isdigit() for c in v):
-            raise ValueError("비밀번호에 숫자가 최소 1개 이상 포함되어야 합니다.")
+class PasswordResetConfirm(BaseModel):
+    """Validate a new password without requiring registration identity fields."""
 
-        if not any(c in string.punctuation for c in v):
-            raise ValueError("비밀번호에 특수문자가 최소 1개 이상 포함되어야 합니다.")
+    password: str = Field(..., min_length=8)
 
-        return v
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, value: str) -> str:
+        return _validate_password_strength(value)
 
 
 class UserInDB(BaseModel):
