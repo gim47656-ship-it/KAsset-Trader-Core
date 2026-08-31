@@ -18,10 +18,11 @@ trading stack):
   does not provide (NULL cost, NULL realized P&L, AI usage the provider never
   reported) is also ``None`` — never silently coerced to ``0``.
 
-Query budget for one page load — 26 statements cold, 18 warm::
+Query budget for one page load — 28 statements cold, 20 warm::
 
     운영 상태          5  alembic_version (5분 캐시) + 활성 사용자/AI 모드/증권사/전역 kill switch
     AI 사용량          4  summarize_ai_usage() 합계 + provider/model/feature — 24시간
+    추천 수집/AI 판정 2  동일한 bounded cycle 원장 최근 24시간, 패널별 1회
     자동매매 funnel    2  추천 24시간 / PAPER 주문 24시간
     PAPER 포트폴리오   2  보유 포지션(계좌 한정) / 체결 30일
     체결 대사          1  최근 7일, broker별 1건
@@ -40,7 +41,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
@@ -654,6 +655,373 @@ async def _ai_usage_panel(ctx: OpsContext) -> OpsPanel:
         note=AI_COVERAGE_NOTE,
         window=_window_label(ctx.since_recent, ctx.now),
         source="review.ai_call_events (app/services/ai_usage_service.py)",
+    )
+
+
+# --------------------------------------------------------------------------
+# 3. 후보 수집과 AI 판정
+# --------------------------------------------------------------------------
+
+_AUTOMATION_CYCLE_SQL = """/* ops_dashboard:kasset_automation_cycles */
+SELECT id,
+       owner_user_id,
+       observed_at,
+       status,
+       skipped_reason,
+       candidate_count,
+       ranked_count,
+       candidate_exclusion_count,
+       strategy_evaluated_count,
+       strategy_actionable_count,
+       ai_reviewed_count,
+       ai_failure_count,
+       recommendation_count,
+       candidate_markets,
+       candidate_sources,
+       collection_policy,
+       ranked_candidates,
+       candidate_exclusions,
+       ai_review_rejections,
+       ai_review_outcomes
+FROM review.kasset_automation_cycle_events
+WHERE observed_at >= :since
+  AND observed_at <= :now
+ORDER BY observed_at DESC, id DESC
+LIMIT 100
+"""
+
+_REVIEW_REASON_LABELS = {
+    "accepted": "전략과 AI 합의 (accepted)",
+    "action_mismatch": "전략과 AI 방향 불일치 (action_mismatch)",
+    "low_confidence": "AI 확신도 50% 미만 (low_confidence)",
+    "expired": "판정 유효시간 만료 (expired)",
+    "provider_unavailable": "AI 제공사 연결 실패 (provider_unavailable)",
+    "ranking_unavailable": "랭킹 근거 없음 (ranking_unavailable)",
+}
+
+
+def _json_mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _json_sequence(value: object) -> Sequence[object]:
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return value
+    return ()
+
+
+def _count_breakdown(value: object) -> str:
+    mapping = _json_mapping(value)
+    if not mapping:
+        return "없음"
+    return ", ".join(f"{key} {_count(count)}" for key, count in sorted(mapping.items()))
+
+
+def _cycle_state(row: Mapping[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    skipped = str(row.get("skipped_reason") or "")
+    if status == "failed":
+        return f"실패 · {skipped or 'owner_cycle_failed'}"
+    if skipped:
+        return f"{'건너뜀' if status == 'skipped' else '완료'} · {skipped}"
+    return "완료"
+
+
+def _ranked_symbols(value: object) -> str:
+    symbols: list[str] = []
+    for item in _json_sequence(value):
+        if not isinstance(item, Mapping):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        market = str(item.get("market") or "").strip()
+        if symbol:
+            symbols.append(f"{symbol}({market})" if market else symbol)
+    return ", ".join(symbols) if symbols else "없음"
+
+
+def _exclusion_summary(value: object, total: object) -> str:
+    exclusions: list[str] = []
+    for item in _json_sequence(value):
+        if not isinstance(item, Mapping):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if symbol and reason:
+            exclusions.append(f"{symbol}: {reason}")
+    hidden = max(0, int(total or 0) - len(exclusions))
+    detail = ", ".join(exclusions) if exclusions else "없음"
+    return f"{detail}, … 외 {hidden}건" if hidden else detail
+
+
+def _policy_summary(value: object) -> str:
+    policy = _json_mapping(value)
+    if not policy:
+        return "수집 설정 미기록"
+    actions = "/".join(
+        str(item) for item in _json_sequence(policy.get("aiReviewActions"))
+    )
+    return (
+        f"후보 최대 {_count(policy.get('candidateLimit'))}개 · "
+        f"랭킹 목표 {_count(policy.get('minimumCandidateTarget'))}개 · "
+        f"전략 평가 상위 {_count(policy.get('strategyReviewLimit'))}개 · "
+        f"{actions or 'BUY/SELL'}만 AI 검토 · "
+        f"추천 최대 {_count(policy.get('recommendationLimit'))}개"
+    )
+
+
+def _pipeline_summary(row: Mapping[str, Any]) -> str:
+    return (
+        f"후보 {_count(row.get('candidate_count'))} → "
+        f"랭킹 {_count(row.get('ranked_count'))} → "
+        f"전략 평가 {_count(row.get('strategy_evaluated_count'))} → "
+        f"전략 합의 {_count(row.get('strategy_actionable_count'))} → "
+        f"AI 검토 {_count(row.get('ai_reviewed_count'))} → "
+        f"추천 {_count(row.get('recommendation_count'))}"
+    )
+
+
+async def _collection_panel(ctx: OpsContext) -> OpsPanel:
+    cycle_rows = await _rows(
+        ctx,
+        _AUTOMATION_CYCLE_SQL,
+        {"since": ctx.since_recent, "now": ctx.now},
+    )
+    if not cycle_rows:
+        return OpsPanel(
+            status=PanelStatus.IDLE,
+            summary="최근 24시간에 기록된 추천 수집 cycle이 없습니다.",
+            metrics=(
+                OpsMetric("수집 후보", "0"),
+                OpsMetric("랭킹 통과", "0"),
+                OpsMetric("수집 제외", "0"),
+                OpsMetric("전략 평가", "0"),
+                OpsMetric("전략 합의", "0"),
+                OpsMetric("마지막 수집", None, hint="수집 이력 없음"),
+            ),
+            columns=(
+                "수집 시각",
+                "결과",
+                "시장",
+                "수집 경로",
+                "단계별 흐름",
+                "상위 검토 종목",
+                "수집 제외",
+            ),
+            rows=(),
+            note=(
+                "추천 producer는 평일 KST 09:10~16:10에 매시 10분 실행됩니다. "
+                "AI prompt와 provider 원문 응답은 저장하지 않습니다."
+            ),
+            window=_window_label(ctx.since_recent, ctx.now),
+            source="review.kasset_automation_cycle_events",
+        )
+
+    latest = cycle_rows[0]
+    failures = sum(1 for row in cycle_rows if row.get("status") == "failed")
+    provider_failures = sum(int(row.get("ai_failure_count") or 0) for row in cycle_rows)
+    status = PanelStatus.WARN if failures or provider_failures else PanelStatus.OK
+    collection_rows = tuple(
+        OpsRow(
+            (
+                _ts(row.get("observed_at")),
+                _cycle_state(row),
+                _count_breakdown(row.get("candidate_markets")),
+                _count_breakdown(row.get("candidate_sources")),
+                _pipeline_summary(row),
+                _ranked_symbols(row.get("ranked_candidates")),
+                _exclusion_summary(
+                    row.get("candidate_exclusions"),
+                    row.get("candidate_exclusion_count"),
+                ),
+            )
+        )
+        for row in cycle_rows[:12]
+    )
+    return OpsPanel(
+        status=status,
+        summary=(
+            f"추천 수집 cycle {len(cycle_rows)}회 · "
+            f"{_policy_summary(latest.get('collection_policy'))}"
+        ),
+        metrics=(
+            OpsMetric(
+                "수집 후보",
+                _count(sum(int(row.get("candidate_count") or 0) for row in cycle_rows)),
+                hint="최근 24시간 cycle 합계",
+            ),
+            OpsMetric(
+                "랭킹 통과",
+                _count(sum(int(row.get("ranked_count") or 0) for row in cycle_rows)),
+            ),
+            OpsMetric(
+                "수집 제외",
+                _count(
+                    sum(
+                        int(row.get("candidate_exclusion_count") or 0)
+                        for row in cycle_rows
+                    )
+                ),
+            ),
+            OpsMetric(
+                "전략 평가",
+                _count(
+                    sum(
+                        int(row.get("strategy_evaluated_count") or 0)
+                        for row in cycle_rows
+                    )
+                ),
+            ),
+            OpsMetric(
+                "전략 합의",
+                _count(
+                    sum(
+                        int(row.get("strategy_actionable_count") or 0)
+                        for row in cycle_rows
+                    )
+                ),
+                hint="BUY/SELL로 합의해 AI에 보낸 후보",
+            ),
+            OpsMetric("마지막 수집", _ts(latest.get("observed_at"))),
+        ),
+        columns=(
+            "수집 시각",
+            "결과",
+            "시장",
+            "수집 경로",
+            "단계별 흐름",
+            "상위 검토 종목",
+            "수집 제외",
+        ),
+        rows=collection_rows,
+        note=(
+            "평일 KST 09:10~16:10, 매시 10분 실행입니다. 표는 최근 12회만 "
+            "보여주며 집계는 최근 24시간 최대 100회입니다."
+        ),
+        window=_window_label(ctx.since_recent, ctx.now),
+        source="review.kasset_automation_cycle_events",
+    )
+
+
+def _action_label(value: object) -> str | None:
+    if value is None:
+        return None
+    action = str(value).strip().upper()
+    return {
+        "BUY": "매수 (BUY)",
+        "SELL": "매도 (SELL)",
+        "HOLD": "보류 (HOLD)",
+        "IGNORE": "제외 (IGNORE)",
+        "REVIEW": "재검토 (REVIEW)",
+    }.get(action, action)
+
+
+def _confidence_percent(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        return f"{Decimal(str(value)) * Decimal('100'):.1f}%"
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _review_time(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _ts(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return value[:40]
+
+
+def _ai_route(outcome: Mapping[str, Any]) -> str | None:
+    parts = [
+        str(outcome.get(key)).strip()
+        for key in ("provider", "tier", "modelId")
+        if outcome.get(key)
+    ]
+    return " · ".join(parts) if parts else None
+
+
+async def _ai_reviews_panel(ctx: OpsContext) -> OpsPanel:
+    cycle_rows = await _rows(
+        ctx,
+        _AUTOMATION_CYCLE_SQL,
+        {"since": ctx.since_recent, "now": ctx.now},
+    )
+    outcomes: list[Mapping[str, Any]] = []
+    recommendation_count = 0
+    for cycle in cycle_rows:
+        recommendation_count += int(cycle.get("recommendation_count") or 0)
+        outcomes.extend(
+            item
+            for item in _json_sequence(cycle.get("ai_review_outcomes"))
+            if isinstance(item, Mapping)
+        )
+    rejected = [outcome for outcome in outcomes if outcome.get("reason") != "accepted"]
+    provider_failures = sum(
+        1 for outcome in outcomes if outcome.get("reason") == "provider_unavailable"
+    )
+    if provider_failures:
+        status = PanelStatus.WARN
+    elif outcomes:
+        status = PanelStatus.OK
+    else:
+        status = PanelStatus.IDLE
+
+    review_rows = tuple(
+        OpsRow(
+            (
+                str(outcome.get("symbol") or ""),
+                _market(outcome.get("market")),
+                _action_label(outcome.get("strategyAction")),
+                _action_label(outcome.get("aiAction")),
+                _confidence_percent(outcome.get("confidence")),
+                _REVIEW_REASON_LABELS.get(
+                    str(outcome.get("reason")),
+                    str(outcome.get("reason") or "판정 사유 없음"),
+                ),
+                _ai_route(outcome),
+                ", ".join(
+                    str(tag) for tag in _json_sequence(outcome.get("rationaleTags"))
+                )
+                or None,
+                _review_time(outcome.get("observedAt")),
+            )
+        )
+        for outcome in outcomes[:100]
+    )
+    return OpsPanel(
+        status=status,
+        summary=(
+            f"AI 후보 검토 {len(outcomes)}건 · 합의 "
+            f"{len(outcomes) - len(rejected)}건 · 거절 {len(rejected)}건"
+            if outcomes
+            else "최근 24시간 AI 검토 대상이 된 BUY/SELL 전략 후보가 없습니다."
+        ),
+        metrics=(
+            OpsMetric("AI 검토", _count(len(outcomes))),
+            OpsMetric("추천 생성", _count(recommendation_count)),
+            OpsMetric("AI 거절", _count(len(rejected))),
+        ),
+        columns=(
+            "종목",
+            "시장",
+            "전략 판정",
+            "AI 판정",
+            "확신도",
+            "사유",
+            "AI 경로",
+            "AI 근거",
+            "판정 시각",
+        ),
+        rows=review_rows,
+        note=(
+            "표는 최신 AI 판정 100건까지만 보여줍니다. "
+            "AI가 반환한 구조화 action·확신도·짧은 rationale tag만 표시합니다. "
+            "prompt, 원문 응답, API key와 토큰은 저장하거나 표시하지 않습니다."
+        ),
+        window=_window_label(ctx.since_recent, ctx.now),
+        source="review.kasset_automation_cycle_events.ai_review_outcomes",
     )
 
 
@@ -1382,6 +1750,8 @@ PanelBuilder = Callable[[OpsContext], Awaitable[OpsPanel]]
 PANEL_BUILDERS: tuple[tuple[str, str, PanelBuilder], ...] = (
     ("system", "운영 상태", _system_panel),
     ("ai_usage", "AI 연결과 사용량", _ai_usage_panel),
+    ("collection", "후보 수집과 전략 판정", _collection_panel),
+    ("ai_reviews", "AI 후보 판정 상세", _ai_reviews_panel),
     ("funnel", "자동매매 진행 흐름", _funnel_panel),
     ("paper_portfolio", "모의투자 포트폴리오", _paper_portfolio_panel),
     ("reconcile", "체결 내역 대조", _reconcile_panel),

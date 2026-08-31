@@ -18,10 +18,13 @@ from app.extensions.kasset.models import AndroidRuntimeState
 from app.models.trading import User, UserRole
 from app.models.user_settings import UserSetting
 from app.services import ops_dashboard
+from app.services.kasset_automation_audit import build_automation_cycle_event
 from app.services.ops_dashboard import (
     OpsContext,
     PanelStatus,
+    _ai_reviews_panel,
     _ai_usage_panel,
+    _collection_panel,
     _funnel_panel,
     _news_panel,
     _paper_portfolio_panel,
@@ -40,6 +43,8 @@ _NOW = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
 _SQL_PANELS = (
     ("system", _system_panel),
     ("ai_usage", _ai_usage_panel),
+    ("collection", _collection_panel),
+    ("ai_reviews", _ai_reviews_panel),
     ("funnel", _funnel_panel),
     ("paper_portfolio", _paper_portfolio_panel),
     ("reconcile", _reconcile_panel),
@@ -294,6 +299,100 @@ async def test_ai_panel_discloses_the_uninstrumented_paths(db_session):
     assert "구독형 CLI" in panel.note
     assert "AI MCP" in panel.note
     assert "0건이 곧 AI 미사용을 뜻하지 않습니다" in panel.note
+
+
+async def test_collection_and_ai_review_panels_explain_candidate_rejection(
+    db_session,
+):
+    db_session.add(
+        build_automation_cycle_event(
+            owner_user_id=4,
+            observed_at=_NOW,
+            finished_at=_NOW,
+            result={
+                "candidateCount": 100,
+                "rankedCount": 99,
+                "strategyEvaluatedCount": 12,
+                "strategyActionableCount": 1,
+                "aiReviewedCount": 1,
+                "aiFailureCount": 0,
+                "candidateMarkets": {"KR": 94, "US": 6},
+                "candidateSources": {"tvscreener_kr": 94, "watchlist": 9},
+                "collectionPolicy": {
+                    "candidateLimit": 100,
+                    "minimumCandidateTarget": 50,
+                    "strategyReviewLimit": 12,
+                    "recommendationLimit": 5,
+                    "aiReviewActions": ["BUY", "SELL"],
+                },
+                "rankedCandidates": [
+                    {
+                        "symbol": "003230",
+                        "market": "KR",
+                        "rankPosition": 1,
+                        "totalScore": "0.809801",
+                    }
+                ],
+                "candidateExclusions": [
+                    {
+                        "symbol": "0126Z0",
+                        "market": "KR",
+                        "exclusionReason": "insufficient_history",
+                    },
+                    *[
+                        {
+                            "symbol": f"X{index:04d}",
+                            "market": "KR",
+                            "exclusionReason": "insufficient_history",
+                        }
+                        for index in range(50)
+                    ],
+                ],
+                "aiReviewRejections": {"action_mismatch": 1},
+                "aiReviewOutcomes": [
+                    {
+                        "symbol": "003230",
+                        "market": "KR",
+                        "strategyAction": "BUY",
+                        "aiAction": "HOLD",
+                        "confidence": "0.72",
+                        "reason": "action_mismatch",
+                        "observedAt": "2026-08-30T03:00:00Z",
+                        "provider": "mcp",
+                        "tier": "terra",
+                        "modelId": "gpt-5.6-terra",
+                        "rationaleTags": ["breakout_not_confirmed"],
+                    }
+                ],
+                "recommendationIds": [],
+                "skipped": "no_ai_confirmed_signal",
+            },
+        )
+    )
+    await db_session.flush()
+    ctx = OpsContext(db=db_session, now=_NOW)
+
+    collection = await _collection_panel(ctx)
+    reviews = await _ai_reviews_panel(ctx)
+
+    assert collection.status is PanelStatus.OK
+    assert "후보 최대 100개" in collection.summary
+    assert collection.rows[0].cells[2] == "KR 94, US 6"
+    assert "003230(KR)" in str(collection.rows[0].cells[5])
+    assert "0126Z0: insufficient_history" in str(collection.rows[0].cells[6])
+    assert "외 1건" in str(collection.rows[0].cells[6])
+    assert reviews.status is PanelStatus.OK
+    assert reviews.summary == "AI 후보 검토 1건 · 합의 0건 · 거절 1건"
+    assert reviews.rows[0].cells[:6] == (
+        "003230",
+        "국내 (KR)",
+        "매수 (BUY)",
+        "보류 (HOLD)",
+        "72.0%",
+        "전략과 AI 방향 불일치 (action_mismatch)",
+    )
+    assert reviews.rows[0].cells[6] == "mcp · terra · gpt-5.6-terra"
+    assert reviews.rows[0].cells[7] == "breakout_not_confirmed"
 
 
 async def test_system_panel_reads_grouped_runtime_state_from_real_db(db_session):

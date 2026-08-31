@@ -87,6 +87,7 @@ from app.models.trading import InstrumentType, User, UserRole
 from app.services.ai_recommendations.service import AIRecommendationService
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
+from app.services.kasset_automation_audit import record_automation_cycle_event
 from app.services.symbol_news_store import load_symbol_news
 
 _RECOMMENDATION_LIMIT = 5
@@ -95,6 +96,19 @@ _OWNER_COOLDOWN = timedelta(hours=1)
 #: 검토 lane에 쓸 수 있는 route가 없어 cycle이 AI 없이 도는 상태의 사유.
 #: 정책 자체는 정상이므로 ``AiAvailability``의 사유 코드와 층을 구분한다.
 _AI_REVIEW_UNAVAILABLE = "review_routes_unavailable"
+
+
+def _collection_policy_payload(
+    config: CandidateRankerConfig,
+) -> dict[str, object]:
+    return {
+        "candidateLimit": config.candidate_limit,
+        "minimumCandidateTarget": config.minimum_candidate_target,
+        "strategyReviewLimit": config.strategy_review_limit,
+        "recommendationLimit": _RECOMMENDATION_LIMIT,
+        "aiReviewActions": [Action.BUY.value, Action.SELL.value],
+    }
+
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +151,36 @@ class ReviewedCandidate:
     event_score: Decimal
     score: Decimal
     ai_shadow: AiShadowObservation
+
+
+@dataclass(frozen=True, slots=True)
+class AIReviewOutcome:
+    symbol: str
+    market: str
+    strategy_action: str
+    ai_action: str | None
+    confidence: str | None
+    reason: str
+    observed_at: str
+    provider: str | None = None
+    tier: str | None = None
+    model_id: str | None = None
+    rationale_tags: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "market": self.market,
+            "strategyAction": self.strategy_action,
+            "aiAction": self.ai_action,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "observedAt": self.observed_at,
+            "provider": self.provider,
+            "tier": self.tier,
+            "modelId": self.model_id,
+            "rationaleTags": list(self.rationale_tags),
+        }
 
 
 async def _load_live_kr_candidates(
@@ -342,6 +386,7 @@ class AIRecommendationVerticalSlice:
             if item.ensemble.action in {Action.BUY, Action.SELL}
         ]
         reviewed: list[ReviewedCandidate] = []
+        review_outcomes: list[AIReviewOutcome] = []
         ai_failures = 0
         review_rejections: Counter[str] = Counter()
         for item in actionable:
@@ -349,15 +394,24 @@ class AIRecommendationVerticalSlice:
                 candidate_regime = item.regime
                 if candidate_regime is None:
                     continue
-                reviewed_item, rejection_reason = await self._review_candidate(
+                (
+                    reviewed_item,
+                    rejection_reason,
+                    review_outcome,
+                ) = await self._review_candidate(
                     owner_user_id,
                     item,
                     candidate_regime,
                 )
             except AiProviderUnavailable:
                 ai_failures += 1
-                review_rejections["provider_unavailable"] += 1
+                rejection_reason = "provider_unavailable"
+                review_rejections[rejection_reason] += 1
+                review_outcomes.append(
+                    self._review_outcome(item, reason=rejection_reason)
+                )
                 continue
+            review_outcomes.append(review_outcome)
             if rejection_reason is not None:
                 review_rejections[rejection_reason] += 1
             if reviewed_item is not None:
@@ -418,9 +472,11 @@ class AIRecommendationVerticalSlice:
                 len(ranking.ranked) >= self._ranker_config.minimum_candidate_target
             ),
             "strategyEvaluatedCount": len(evaluated),
-            "aiReviewedCount": len(reviewed),
+            "aiReviewedCount": len(review_outcomes),
             "aiFailureCount": ai_failures,
             "aiReviewRejections": dict(sorted(review_rejections.items())),
+            "aiReviewOutcomes": [outcome.as_dict() for outcome in review_outcomes],
+            "collectionPolicy": self._collection_policy(),
             "candleSync": candle_sync,
             "regime": (
                 next(iter(regimes.values())).regime.value
@@ -763,12 +819,14 @@ class AIRecommendationVerticalSlice:
         owner_user_id: int,
         item: EvaluatedCandidate,
         regime: RegimeAssessment,
-    ) -> tuple[ReviewedCandidate | None, str | None]:
+    ) -> tuple[ReviewedCandidate | None, str | None, AIReviewOutcome]:
         if self._ai_router is None:
-            return None, "provider_unavailable"
+            reason = "provider_unavailable"
+            return None, reason, self._review_outcome(item, reason=reason)
         ranking = item.factor_ranking
         if ranking is None or not ranking.included or ranking.valid_until is None:
-            return None, "ranking_unavailable"
+            reason = "ranking_unavailable"
+            return None, reason, self._review_outcome(item, reason=reason)
         events = await self._event_evidence(item.candidate)
         payload = {
             "symbol": item.candidate.symbol,
@@ -804,10 +862,28 @@ class AIRecommendationVerticalSlice:
             else Action.HOLD
         )
         if action != item.ensemble.action:
-            return None, "action_mismatch"
+            reason = "action_mismatch"
+            return (
+                None,
+                reason,
+                self._review_outcome(
+                    item,
+                    reason=reason,
+                    observation=shadow_observation,
+                ),
+            )
         confidence = Decimal(str(verdict.confidence))
         if not confidence.is_finite() or confidence < Decimal("0.50"):
-            return None, "low_confidence"
+            reason = "low_confidence"
+            return (
+                None,
+                reason,
+                self._review_outcome(
+                    item,
+                    reason=reason,
+                    observation=shadow_observation,
+                ),
+            )
         valid_until = min(
             (
                 result.valid_until.astimezone(UTC)
@@ -823,7 +899,16 @@ class AIRecommendationVerticalSlice:
             self._now + timedelta(hours=1),
         )
         if valid_until <= self._now:
-            return None, "expired"
+            reason = "expired"
+            return (
+                None,
+                reason,
+                self._review_outcome(
+                    item,
+                    reason=reason,
+                    observation=shadow_observation,
+                ),
+            )
         external = ExternalEvidence(
             source=f"model_router:{verdict.model_id}",
             symbol=item.candidate.symbol,
@@ -869,7 +954,42 @@ class AIRecommendationVerticalSlice:
                 ai_shadow=shadow_observation,
             ),
             None,
+            self._review_outcome(
+                item,
+                reason="accepted",
+                observation=shadow_observation,
+            ),
         )
+
+    def _review_outcome(
+        self,
+        item: EvaluatedCandidate,
+        *,
+        reason: str,
+        observation: AiShadowObservation | None = None,
+    ) -> AIReviewOutcome:
+        return AIReviewOutcome(
+            symbol=item.candidate.symbol,
+            market=item.candidate.ranker_market,
+            strategy_action=item.ensemble.action.value,
+            ai_action=observation.action if observation is not None else None,
+            confidence=observation.confidence if observation is not None else None,
+            reason=reason,
+            observed_at=(
+                observation.observed_at
+                if observation is not None
+                else _timestamp_text(self._now) or self._now.isoformat()
+            ),
+            provider=observation.provider if observation is not None else None,
+            tier=observation.tier if observation is not None else None,
+            model_id=observation.model_id if observation is not None else None,
+            rationale_tags=(
+                observation.rationale_tags if observation is not None else ()
+            ),
+        )
+
+    def _collection_policy(self) -> dict[str, object]:
+        return _collection_policy_payload(self._ranker_config)
 
     async def _persist_recommendation(
         self,
@@ -1120,6 +1240,22 @@ async def run_ai_recommendation_cycle_once(
                 "skipped": "owner_cycle_failed",
                 "errorClass": type(exc).__name__,
             }
+        result.setdefault(
+            "collectionPolicy",
+            _collection_policy_payload(DEFAULT_CANDIDATE_RANKER_CONFIG),
+        )
+        try:
+            await record_automation_cycle_event(
+                owner_user_id=owner_id,
+                observed_at=current,
+                finished_at=datetime.now(UTC),
+                result=result,
+            )
+        except Exception:
+            logger.exception(
+                "kasset AI recommendation cycle audit write failed: owner_user_id=%s",
+                owner_id,
+            )
         recommendation_ids = result.get("recommendationIds")
         produced = (
             len(recommendation_ids) if isinstance(recommendation_ids, list) else 0

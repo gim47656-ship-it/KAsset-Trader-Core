@@ -10,9 +10,19 @@ tests/brokers/kis/mock_scalping_exec/test_reservation.py
 tests/brokers/kis/mock_scalping_ws/test_import_guard.py
 tests/brokers/kis/mock_scalping_ws/test_smoke_cli.py
 tests/ci/test_file_shard_plan.py
+tests/extensions/kasset/ai/test_ai_call_ledger.py
+tests/extensions/kasset/ai/test_ai_runtime_config.py
+tests/extensions/kasset/ai_mcp_sidecar/test_ai_mcp_sidecar.py
 tests/extensions/kasset/api/test_market_quote_coverage.py
 tests/extensions/kasset/api/test_market_warmup.py
+tests/extensions/kasset/api/test_system_status.py
 tests/extensions/kasset/api/test_token_path_allowlist.py
+tests/extensions/kasset/automation/test_benchmark_relative_strength.py
+tests/extensions/kasset/automation/test_shadow_high_watermark.py
+tests/extensions/kasset/automation/test_shadow_loss_streak.py
+tests/extensions/kasset/automation/test_shadow_manifest.py
+tests/extensions/kasset/automation/test_shadow_selection.py
+tests/extensions/kasset/automation/test_shadow_setups.py
 tests/integration/services/test_forecast_read_window_candles.py
 tests/mcp_server/test_alpaca_paper_automated_orders.py
 tests/mcp_server/test_alpaca_paper_default_profile_gate.py
@@ -77,6 +87,7 @@ tests/scripts/test_haproxy_switch.py
 tests/scripts/test_kiwoom_mock_smoke_contract.py
 tests/scripts/test_native_deploy_rollback_split.py
 tests/scripts/test_post_watch_triage_reply.py
+tests/scripts/test_promote_user_to_admin.py
 tests/scripts/test_r4_p0_readiness.py
 tests/scripts/test_record_strategy_learning_event.py
 tests/scripts/test_rob837_reconcile_upbit_proposal.py
@@ -202,6 +213,7 @@ tests/services/spike_attribution/test_hooks.py
 tests/services/spike_attribution/test_precompute.py
 tests/services/spike_attribution/test_scoring.py
 tests/services/test_account_routing.py
+tests/services/test_ai_usage_service.py
 tests/services/test_alpaca_paper_lab_recovery_contract.py
 tests/services/test_alpaca_paper_ledger_claim.py
 tests/services/test_alpaca_paper_market_evidence.py
@@ -211,6 +223,7 @@ tests/services/test_analysis_artifact_service.py
 tests/services/test_analyst_consensus_snapshot_service.py
 tests/services/test_exchange_rate_service.py
 tests/services/test_halt_detection.py
+tests/services/test_kasset_automation_audit.py
 tests/services/test_kis_mock_holdings_reconciler.py
 tests/services/test_kis_mock_preopen_approval_bridge.py
 tests/services/test_live_place_provenance.py
@@ -227,6 +240,7 @@ tests/services/test_n8n_response_builder.py
 tests/services/test_news_text.py
 tests/services/test_nhplug_symbol_master_service.py
 tests/services/test_nxt_preflight.py
+tests/services/test_ops_dashboard.py
 tests/services/test_order_preview_session_service.py
 tests/services/test_paper_retrospective_pending.py
 tests/services/test_pending_reconciliation_service.py
@@ -260,6 +274,8 @@ tests/services/us_dual_paper/test_mcp_tools.py
 tests/services/us_dual_paper/test_packet_orchestrator.py
 tests/services/watch_trigger_repricing/test_e2e_db_poll_to_proposal.py
 tests/tasks/test_live_reconcile_tasks.py
+tests/test_admin_ai_routes.py
+tests/test_admin_ops_dashboard.py
 tests/test_advisory_draft_profiles_config.py
 tests/test_agent_callback.py
 tests/test_agent_callback_auth.py
@@ -267,8 +283,11 @@ tests/test_alpaca_clean_identity_binding.py
 tests/test_alpaca_paper_sell_close_smoke.py
 tests/test_analysis_screen_core.py
 tests/test_analyst_normalizer.py
+tests/test_auth_password_recovery.py
+tests/test_auth_web_google_login.py
 tests/test_build_financial_fundamentals_cli.py
 tests/test_build_invest_kr_fundamentals_snapshots_cli.py
+tests/test_build_kasset_research_cohort_cli.py
 tests/test_catalyst_guard.py
 tests/test_cio_quality_gate.py
 tests/test_cio_quality_gate_e2e.py
@@ -325,8 +344,12 @@ tests/test_investment_reports_mcp.py
 tests/test_investor_flow_snapshot_job.py
 tests/test_investor_flow_snapshot_tasks.py
 tests/test_json_safe.py
+tests/test_kasset_data_readiness_postgresql.py
+tests/test_kasset_research_cohort_models.py
+tests/test_kasset_research_cohort_service.py
 tests/test_kis_base_rate_limit.py
 tests/test_kis_circuit_breaker_dispatch.py
+tests/test_kis_corporate_actions_client.py
 tests/test_kis_mock_holdings_delta_smoke_cleanup.py
 tests/test_kis_mock_holdings_delta_smoke_cli.py
 tests/test_kis_mock_reconciliation_job_scope.py
@@ -338,6 +361,9 @@ tests/test_kiwoom_mock_config.py
 tests/test_kiwoom_mock_us_smoke_cli.py
 tests/test_kr_aliases_extension.py
 tests/test_kr_candles_sync.py
+tests/test_kr_lifecycle_action_migration.py
+tests/test_kr_lifecycle_action_models.py
+tests/test_kr_lifecycle_action_service.py
 tests/test_kr_market_ranking_collector.py
 tests/test_kr_news_symbol_mapping_freshness.py
 tests/test_live_reconcile_backfill_report_cli.py
@@ -416,6 +442,7 @@ tests/test_structured_evidence_summary.py
 tests/test_symbol_analysis_derived.py
 tests/test_symbol_mapping.py
 tests/test_symbol_universe_sector_preservation.py
+tests/test_sync_kr_lifecycle_actions_cli.py
 tests/test_toss_portfolio_service.py
 tests/test_toss_symbol_master_schema.py
 tests/test_toss_warnings_sync.py
@@ -440,6 +467,7 @@ tests/test_watch_triage_readonly_settings.py
 tests/test_websocket_healthcheck.py
 tests/test_yahoo_roe_rob440.py
 tests/test_yahoo_service_cache.py
+tests/unit/services/daily_candles/test_benchmark_fetcher.py
 tests/unit/services/daily_candles/test_constants.py
 tests/unit/services/daily_candles/test_kis_daily_fetcher.py
 tests/unit/tasks/test_daily_candles_tasks.py

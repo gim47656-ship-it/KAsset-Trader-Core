@@ -280,6 +280,30 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # KAsset Android and AI review tables are later than this
             # reconstructed boundary and already present in current metadata.
             await connection.execute(text("DROP TABLE review.ai_recommendations"))
+            # Append-only AI/automation operator ledgers are also post-boundary.
+            # Current metadata materializes them, so let their migrations rebuild
+            # both tables during each round trip.
+            for table in (
+                "kasset_automation_cycle_events",
+                "ai_call_events",
+            ):
+                await connection.execute(text(f"DROP TABLE review.{table}"))
+            for table in (
+                "kasset_shadow_loss_locks",
+                "kasset_shadow_daily_high_watermarks",
+                "kasset_ai_runtime_config",
+                "password_reset_tokens",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
+            for column in (
+                "login_cooldown_until",
+                "login_cooldown_level",
+                "web_session_version",
+                "failed_login_attempts",
+            ):
+                await connection.execute(
+                    text(f"ALTER TABLE users DROP COLUMN {column}")
+                )
             # Current KAsset automation tables are also post-boundary. Drop them
             # before the Android order tables they reference, then let the
             # 20260829/20260830 migration chain recreate the exact shapes.

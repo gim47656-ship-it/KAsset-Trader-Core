@@ -890,8 +890,8 @@ async def test_automation_cycle_reads_one_snapshot_and_passes_it_to_the_router(
     assert seen == [expected]
 
 
-def _cycle_session(monkeypatch: pytest.MonkeyPatch, owner_ids: list[int]) -> None:
-    """owner 목록만 돌려주는 최소 세션. cycle은 그 밖의 DB를 만지지 않는다."""
+def _cycle_session(monkeypatch: pytest.MonkeyPatch, owner_ids: list[int]):  # type: ignore[no-untyped-def]
+    """owner 목록만 돌려주고 독립 audit 쓰기는 관찰 가능한 mock으로 막는다."""
 
     from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock, MagicMock
@@ -907,7 +907,10 @@ def _cycle_session(monkeypatch: pytest.MonkeyPatch, owner_ids: list[int]) -> Non
     async def fake_session():
         yield session
 
+    audit = AsyncMock()
     monkeypatch.setattr(vertical_slice, "_session", fake_session)
+    monkeypatch.setattr(vertical_slice, "record_automation_cycle_event", audit)
+    return audit
 
 
 @pytest.mark.asyncio
@@ -990,7 +993,7 @@ async def test_automation_cycle_logs_the_owner_failure_stack_not_just_a_class_na
     from app.services import ai_runtime_config as runtime_config_service
 
     monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
-    _cycle_session(monkeypatch, [4])
+    audit = _cycle_session(monkeypatch, [4])
 
     async def snapshot(db):  # type: ignore[no-untyped-def]
         return default_snapshot()
@@ -1013,7 +1016,56 @@ async def test_automation_cycle_logs_the_owner_failure_stack_not_just_a_class_na
     assert owner["skipped"] == "owner_cycle_failed"
     assert owner["errorClass"] == "ValueError"
     assert result["recommendationCount"] == 0
+    audit.assert_awaited_once()
     assert "owner_user_id=4" in caplog.text
     # 스택과 원문 메시지가 로그에 남아야 운영에서 원인을 짚을 수 있다.
     assert "current source commit is unavailable" in caplog.text
     assert "Traceback" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_audit_failure_is_fail_open(
+    configured_ai, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.automation import vertical_slice
+    from app.services import ai_runtime_config as runtime_config_service
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    audit = _cycle_session(monkeypatch, [4])
+    audit.side_effect = RuntimeError("audit database unavailable")
+
+    async def snapshot(db):  # type: ignore[no-untyped-def]
+        return default_snapshot()
+
+    monkeypatch.setattr(runtime_config_service, "get_ai_runtime_snapshot", snapshot)
+    monkeypatch.setattr(
+        ai_factory, "build_model_router", lambda *, snapshot=None: object()
+    )
+
+    class _SuccessfulCycle:
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        async def run_owner(self, owner_user_id: int) -> dict[str, object]:
+            return {
+                "ownerUserId": owner_user_id,
+                "candidateCount": 100,
+                "recommendationIds": [],
+                "skipped": "no_ai_confirmed_signal",
+            }
+
+    monkeypatch.setattr(
+        vertical_slice, "AIRecommendationVerticalSlice", _SuccessfulCycle
+    )
+
+    with caplog.at_level("ERROR", logger=vertical_slice.__name__):
+        result = await vertical_slice.run_ai_recommendation_cycle_once()
+
+    owner = result["owners"][0]  # type: ignore[index]
+    assert owner["candidateCount"] == 100
+    assert owner["skipped"] == "no_ai_confirmed_signal"
+    assert result["candidateCount"] == 100
+    assert result["recommendationCount"] == 0
+    audit.assert_awaited_once()
+    assert "cycle audit write failed: owner_user_id=4" in caplog.text

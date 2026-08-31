@@ -197,6 +197,106 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
     assert ai_shadow["selected"] is True
 
 
+@pytest.mark.asyncio
+async def test_ai_action_mismatch_keeps_secret_free_review_outcome() -> None:
+    strategy = StrategyResult(
+        action=Action.BUY,
+        confidence=Decimal("0.80"),
+        entry=Decimal("100"),
+        stop=Decimal("98"),
+        target=Decimal("104"),
+        rationale=("breakout",),
+        evidence=(),
+        strategy=StrategyName.BREAKOUT,
+        version="1.0.0",
+        symbol="005930",
+        market="KRX",
+        as_of=_NOW,
+        valid_until=_NOW + timedelta(hours=1),
+    )
+    evaluated = EvaluatedCandidate(
+        candidate=TradingCandidate(
+            "005930",
+            "KRX",
+            "삼성전자",
+            "tvscreener_kr",
+        ),
+        strategy_results=(strategy,),
+        ensemble=WeightedEnsembleDecision(
+            action=Action.BUY,
+            score=Decimal("0.5"),
+            confidence=Decimal("0.8"),
+            agreeing=(strategy,),
+            votes=(),
+        ),
+        factor_ranking=CandidateRankResult(
+            symbol="005930",
+            market="KR",
+            total_score=Decimal("0.75"),
+            factor_scores=(),
+            penalties=(),
+            data_as_of=_NOW - timedelta(hours=1),
+            valid_until=_NOW + timedelta(hours=1),
+            exclusion_reason=None,
+            atr_14=Decimal("2"),
+            average_volume_20=Decimal("1000000"),
+            average_turnover_20=Decimal("100000000"),
+            evidence=(),
+            sources=("tvscreener_kr",),
+            is_held=False,
+            is_watchlisted=False,
+            eligible_for_new_buy=True,
+            rank_position=1,
+            ranked_total=100,
+        ),
+    )
+    verdict = SimpleNamespace(
+        input_hash="b" * 64,
+        provider="mcp",
+        tier="terra",
+        tier_used="terra",
+        model_id="gpt-5.6-terra",
+        action="HOLD",
+        risk="MEDIUM",
+        bullish_score=55,
+        bearish_score=45,
+        rationale_tags=["breakout_not_confirmed"],
+        confidence=0.72,
+    )
+    router = SimpleNamespace(analyze_for_owner=AsyncMock(return_value=verdict))
+    instance = AIRecommendationVerticalSlice(MagicMock(), router, now=_NOW)
+    instance._event_evidence = AsyncMock(return_value=())  # type: ignore[method-assign]
+
+    reviewed, rejection, outcome = await instance._review_candidate(  # noqa: SLF001
+        4,
+        evaluated,
+        RegimeAssessment(
+            regime=MarketRegime.BULL,
+            detail="trend",
+            breadth_above_sma20=Decimal("0.7"),
+            median_return20=Decimal("0.1"),
+            median_atr_ratio=Decimal("0.02"),
+            weights=weights_for_regime(MarketRegime.BULL),
+        ),
+    )
+
+    assert reviewed is None
+    assert rejection == "action_mismatch"
+    assert outcome.as_dict() == {
+        "symbol": "005930",
+        "market": "KR",
+        "strategyAction": "BUY",
+        "aiAction": "HOLD",
+        "confidence": "0.72",
+        "reason": "action_mismatch",
+        "observedAt": "2026-08-29T01:00:00Z",
+        "provider": "mcp",
+        "tier": "terra",
+        "modelId": "gpt-5.6-terra",
+        "rationaleTags": ["breakout_not_confirmed"],
+    }
+
+
 def test_strategy_artifact_lookup_failure_prevents_recommendation_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
