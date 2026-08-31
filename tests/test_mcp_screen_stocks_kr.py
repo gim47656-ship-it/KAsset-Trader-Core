@@ -331,6 +331,66 @@ async def test_normalize_kr_results_prefers_krx_canonical_name(
 
 
 @pytest.mark.asyncio
+async def test_normalize_kr_results_uses_persisted_universe_when_krx_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from app.services.krx import KRXSessionExpiredError
+
+    async def expired_fetch_stock_all_cached(*, market: str) -> list[dict[str, Any]]:
+        request = httpx.Request("POST", "https://example.invalid")
+        response = httpx.Response(400, text="LOGOUT", request=request)
+        raise KRXSessionExpiredError(
+            "KRX session expired after re-auth",
+            request=request,
+            response=response,
+        )
+
+    async def persisted_symbols(
+        exchanges: set[str],
+    ) -> list[tuple[str, str, str]]:
+        assert exchanges == {"KOSPI", "KOSDAQ"}
+        return [("005930", "삼성전자", "KOSPI")]
+
+    async def no_valuations(*, market: str) -> dict[str, dict[str, Any]]:
+        return {}
+
+    monkeypatch.setattr(
+        kr_screening,
+        "fetch_stock_all_cached",
+        expired_fetch_stock_all_cached,
+    )
+    monkeypatch.setattr(
+        kr_screening,
+        "list_active_kr_symbols_by_exchange",
+        persisted_symbols,
+    )
+    monkeypatch.setattr(
+        kr_screening,
+        "fetch_valuation_all_cached",
+        no_valuations,
+    )
+
+    rows = await kr_screening._normalize_kr_results(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "KRX:005930",
+                    "name": "Samsung Electronics",
+                    "price": 80_000,
+                }
+            ]
+        ),
+        market="kr",
+    )
+
+    assert rows[0]["symbol"] == "005930"
+    assert rows[0]["name"] == "삼성전자"
+    assert rows[0]["market"] == "KOSPI"
+
+
+@pytest.mark.asyncio
 @pytest.mark.unit
 async def test_fallback_uses_snapshot_when_available():
     snap = KrRankingSnapshotResult(

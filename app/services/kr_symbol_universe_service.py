@@ -601,6 +601,38 @@ async def get_kr_names_by_symbols(
         await session.close()
 
 
+async def _list_active_symbols_by_exchange_impl(
+    db: AsyncSession,
+    exchanges: set[str],
+) -> list[tuple[str, str, str]]:
+    if not exchanges:
+        return []
+    stmt = select(
+        KRSymbolUniverse.symbol,
+        KRSymbolUniverse.name,
+        KRSymbolUniverse.exchange,
+    ).where(
+        KRSymbolUniverse.exchange.in_(sorted(exchanges)),
+        KRSymbolUniverse.is_active.is_(True),
+    )
+    rows = (await db.execute(stmt)).all()
+    return [(row.symbol, row.name, row.exchange) for row in rows]
+
+
+async def list_active_kr_symbols_by_exchange(
+    exchanges: set[str],
+    db: AsyncSession | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return active ``(symbol, name, exchange)`` rows for persisted KR markets."""
+    if db is not None:
+        return await _list_active_symbols_by_exchange_impl(db, exchanges)
+    session = cast(AsyncSession, cast(object, AsyncSessionLocal()))
+    try:
+        return await _list_active_symbols_by_exchange_impl(session, exchanges)
+    finally:
+        await session.close()
+
+
 async def _list_active_symbol_names_impl(db: AsyncSession) -> list[tuple[str, str]]:
     stmt = select(KRSymbolUniverse.symbol, KRSymbolUniverse.name).where(
         KRSymbolUniverse.is_active.is_(True)
@@ -639,6 +671,7 @@ __all__ = [
     "get_kr_symbol_by_name",
     "is_nxt_eligible",
     "list_active_kr_symbol_names",
+    "list_active_kr_symbols_by_exchange",
     "search_kr_symbols",
     "sync_kr_symbol_universe",
 ]

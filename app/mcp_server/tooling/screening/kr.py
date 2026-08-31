@@ -34,6 +34,9 @@ from app.mcp_server.tooling.screening.tvscreener_support import (
     _can_use_tvscreener_stock_path,
     _get_tvscreener_stock_capability_snapshot,
 )
+from app.services.kr_symbol_universe_service import (
+    list_active_kr_symbols_by_exchange,
+)
 from app.services.krx import (
     KRXSessionExpiredError,
     classify_etf_category,
@@ -366,8 +369,38 @@ async def _normalize_kr_results(
     """
     market_codes, valuation_market = _kr_market_codes(market)
     universe_rows: list[dict[str, Any]] = []
-    for market_code in market_codes:
-        universe_rows.extend(await fetch_stock_all_cached(market=market_code))
+    try:
+        for market_code in market_codes:
+            universe_rows.extend(await fetch_stock_all_cached(market=market_code))
+    except KRXSessionExpiredError:
+        exchange_by_market_code = {
+            "STK": "KOSPI",
+            "KSQ": "KOSDAQ",
+            "KNX": "KONEX",
+        }
+        requested_exchanges = {
+            exchange_by_market_code[market_code]
+            for market_code in market_codes
+            if market_code in exchange_by_market_code
+        }
+        persisted_rows = await list_active_kr_symbols_by_exchange(requested_exchanges)
+        if not persisted_rows:
+            raise
+        universe_rows = [
+            {
+                "code": symbol,
+                "short_code": symbol,
+                "name": name,
+                "market": exchange,
+            }
+            for symbol, name, exchange in persisted_rows
+        ]
+        logger.warning(
+            "KRX universe session expired; normalized tvscreener rows against "
+            "persisted kr_symbol_universe exchanges=%s rows=%d",
+            sorted(requested_exchanges),
+            len(universe_rows),
+        )
 
     allowed_by_code: dict[str, dict[str, Any]] = {}
     for item in universe_rows:
