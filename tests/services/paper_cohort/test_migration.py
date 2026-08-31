@@ -284,6 +284,7 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # Current metadata materializes them, so let their migrations rebuild
             # both tables during each round trip.
             for table in (
+                "kasset_paper_execution_events",
                 "kasset_automation_cycle_events",
                 "ai_call_events",
             ):
@@ -331,6 +332,22 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # Remove the current-head shape so its migration owns each round trip.
             await connection.execute(
                 text("ALTER TABLE paper.paper_accounts DROP COLUMN initial_capital_usd")
+            )
+            # The P0 currency migration is also post-boundary; current metadata
+            # carries its per-currency snapshot columns and the relaxed
+            # nullability of the legacy mixed-currency columns.
+            await connection.execute(
+                text(
+                    "ALTER TABLE paper.paper_daily_snapshots "
+                    "DROP COLUMN equity_krw, "
+                    "DROP COLUMN equity_usd, "
+                    "DROP COLUMN daily_return_krw_pct, "
+                    "DROP COLUMN daily_return_usd_pct, "
+                    "DROP COLUMN valuation_complete_krw, "
+                    "DROP COLUMN valuation_complete_usd, "
+                    "ALTER COLUMN positions_value SET NOT NULL, "
+                    "ALTER COLUMN total_equity SET NOT NULL"
+                )
             )
             # The KAsset multi-user migration adds these case-insensitive
             # unique indexes; current metadata already materializes them, so

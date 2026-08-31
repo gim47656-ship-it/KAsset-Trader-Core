@@ -1,13 +1,28 @@
-"""Bounded, secret-free persistence for KAsset recommendation-cycle telemetry."""
+"""Bounded, secret-free persistence for KAsset automation evidence.
+
+Two append-only ledgers live here: the recommendation-cycle row and the PAPER
+execution-attempt row. Both are written in their own transaction so an
+observability failure can never change a trading decision, and both are joined
+by ``cycle_trace_id`` rather than by a foreign key for the same reason.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from uuid import uuid4
+
+from sqlalchemy import select
 
 from app.core.db import AsyncSessionLocal
+from app.models.ai_recommendations import AIRecommendation
 from app.models.kasset_automation_cycle_events import KAssetAutomationCycleEvent
+from app.models.kasset_paper_execution_events import (
+    KASSET_PAPER_EXECUTION_ORIGINS,
+    KASSET_PAPER_EXECUTION_STATUSES,
+    KAssetPaperExecutionEvent,
+)
 
 _EARLY_SKIP_REASONS = frozenset(
     {
@@ -21,6 +36,15 @@ _MAX_MAP_ITEMS = 16
 _MAX_REVIEW_OUTCOMES = 64
 _MAX_RANKED_CANDIDATES = 50
 _MAX_EXCLUSIONS = 50
+_MAX_RECOMMENDATION_IDS = 50
+_MAX_TRACE_TEXT = 64
+_MAX_REASON_TEXT = 256
+
+
+def new_cycle_trace_id() -> str:
+    """Mint one recommendation-cycle trace id for a single owner cycle."""
+
+    return f"cyc-{uuid4().hex}"
 
 
 def build_automation_cycle_event(
@@ -39,13 +63,18 @@ def build_automation_cycle_event(
 
     skipped_reason = _optional_text(result.get("skipped"), maximum=128)
     status = _status_for_result(skipped_reason, result.get("errorClass"))
-    recommendation_ids = result.get("recommendationIds")
+    raw_recommendation_ids = result.get("recommendationIds")
     recommendation_count = (
-        len(recommendation_ids) if isinstance(recommendation_ids, list | tuple) else 0
+        len(raw_recommendation_ids)
+        if isinstance(raw_recommendation_ids, list | tuple)
+        else 0
     )
 
     return KAssetAutomationCycleEvent(
         owner_user_id=int(owner_user_id),
+        cycle_trace_id=_optional_text(
+            result.get("cycleTraceId"), maximum=_MAX_TRACE_TEXT
+        ),
         observed_at=observed,
         finished_at=finished,
         status=status,
@@ -67,6 +96,7 @@ def build_automation_cycle_event(
         candidate_exclusions=_candidate_exclusions(result.get("candidateExclusions")),
         ai_review_rejections=_count_map(result.get("aiReviewRejections")),
         ai_review_outcomes=_review_outcomes(result.get("aiReviewOutcomes")),
+        recommendation_ids=_recommendation_ids(raw_recommendation_ids),
     )
 
 
@@ -86,6 +116,117 @@ async def record_automation_cycle_event(
         result=result,
     )
     async with AsyncSessionLocal() as db:
+        db.add(row)
+        await db.commit()
+
+
+def build_paper_execution_event(
+    *,
+    owner_user_id: int,
+    origin: str,
+    status: str,
+    reason: str,
+    recommendation_id: str,
+    observed_at: datetime,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    attempt_count: int = 0,
+    replayed: bool = False,
+    cycle_trace_id: str | None = None,
+    paper_order_id: str | None = None,
+    promotion_bypass_reason: str | None = None,
+) -> KAssetPaperExecutionEvent:
+    """Project one PAPER execution attempt into the closed append-only row shape."""
+
+    if origin not in KASSET_PAPER_EXECUTION_ORIGINS:
+        raise ValueError(f"unknown paper execution origin: {origin}")
+    if status not in KASSET_PAPER_EXECUTION_STATUSES:
+        raise ValueError(f"unknown paper execution status: {status}")
+    recommendation = _optional_text(recommendation_id, maximum=_MAX_TRACE_TEXT)
+    if recommendation is None:
+        raise ValueError("recommendation_id is required")
+    observed = _aware_utc(observed_at)
+    started = _aware_utc(started_at) if started_at is not None else observed
+    finished = _aware_utc(finished_at) if finished_at is not None else observed
+    if finished < started:
+        finished = started
+    return KAssetPaperExecutionEvent(
+        owner_user_id=int(owner_user_id),
+        recommendation_id=recommendation,
+        cycle_trace_id=_optional_text(cycle_trace_id, maximum=_MAX_TRACE_TEXT),
+        origin=origin,
+        status=status,
+        reason=_optional_text(reason, maximum=_MAX_REASON_TEXT) or "unspecified",
+        attempt_count=_nonnegative_int(attempt_count),
+        replayed=bool(replayed),
+        paper_order_id=_optional_text(paper_order_id, maximum=_MAX_TRACE_TEXT),
+        promotion_bypass_reason=_optional_text(promotion_bypass_reason, maximum=128),
+        started_at=started,
+        finished_at=finished,
+        observed_at=observed,
+    )
+
+
+async def record_paper_execution_event(
+    *,
+    owner_user_id: int,
+    origin: str,
+    status: str,
+    reason: str,
+    recommendation_id: str,
+    observed_at: datetime,
+    replayed: bool = False,
+    promotion_bypass_reason: str | None = None,
+) -> None:
+    """Commit one execution attempt in its own transaction.
+
+    The attempt count, resulting PAPER order, and cycle trace are read back from
+    the owner's recommendation row after the execution transaction settled, so
+    the ledger records what actually persisted instead of what was intended. The
+    read is owner-scoped: another owner's recommendation id resolves to nothing
+    rather than to that owner's execution state.
+    """
+
+    async with AsyncSessionLocal() as db:
+        recommendation = (
+            await db.scalars(
+                select(AIRecommendation).where(
+                    AIRecommendation.owner_user_id == int(owner_user_id),
+                    AIRecommendation.id == recommendation_id,
+                )
+            )
+        ).one_or_none()
+        row = build_paper_execution_event(
+            owner_user_id=owner_user_id,
+            origin=origin,
+            status=status,
+            reason=reason,
+            recommendation_id=recommendation_id,
+            observed_at=observed_at,
+            started_at=(
+                observed_at
+                if recommendation is None
+                else recommendation.paper_execution_claimed_at or observed_at
+            ),
+            finished_at=(
+                observed_at
+                if recommendation is None
+                else recommendation.paper_execution_completed_at or observed_at
+            ),
+            attempt_count=(
+                0
+                if recommendation is None
+                else recommendation.paper_execution_attempt_count
+            ),
+            replayed=replayed,
+            cycle_trace_id=(
+                None if recommendation is None else recommendation.cycle_trace_id
+            ),
+            paper_order_id=(
+                None if recommendation is None else recommendation.paper_order_id
+            ),
+            promotion_bypass_reason=promotion_bypass_reason,
+        )
         db.add(row)
         await db.commit()
 
@@ -207,9 +348,22 @@ def _review_outcomes(value: object) -> list[dict[str, object]]:
                 "tier": _optional_text(item.get("tier"), maximum=16),
                 "modelId": _optional_text(item.get("modelId"), maximum=256),
                 "rationaleTags": tags,
+                "recommendationId": _optional_text(
+                    item.get("recommendationId"), maximum=_MAX_TRACE_TEXT
+                ),
             }
         )
     return output
+
+
+def _recommendation_ids(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    return [
+        text
+        for item in list(value)[:_MAX_RECOMMENDATION_IDS]
+        if (text := _optional_text(item, maximum=_MAX_TRACE_TEXT)) is not None
+    ]
 
 
 def _sequence_count(value: object) -> int:
@@ -257,4 +411,10 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-__all__ = ["build_automation_cycle_event", "record_automation_cycle_event"]
+__all__ = [
+    "build_automation_cycle_event",
+    "build_paper_execution_event",
+    "new_cycle_trace_id",
+    "record_automation_cycle_event",
+    "record_paper_execution_event",
+]

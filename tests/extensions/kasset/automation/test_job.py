@@ -37,6 +37,7 @@ from app.extensions.kasset.automation.strategy_promotion_service import (
 )
 from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
 from app.models.ai_recommendations import AIRecommendation
+from app.models.kasset_paper_execution_events import KAssetPaperExecutionEvent
 from app.models.paper_trading import PaperAccount
 from app.models.trading import User, UserRole
 from app.tasks import TASKIQ_TASK_MODULES, kasset_paper_automation_tasks
@@ -1000,3 +1001,236 @@ async def test_after_hours_stale_reference_quote_is_not_blocked(
     finally:
         await _cleanup_paper_wiring(db_session, owner_id)
         await _cleanup_owner(db_session, username)
+
+
+async def _execution_events(
+    db_session: AsyncSession,
+    owner_id: int,
+) -> list[KAssetPaperExecutionEvent]:
+    await db_session.rollback()
+    return list(
+        await db_session.scalars(
+            select(KAssetPaperExecutionEvent)
+            .where(KAssetPaperExecutionEvent.owner_user_id == owner_id)
+            .order_by(KAssetPaperExecutionEvent.id)
+        )
+    )
+
+
+async def _cleanup_execution_events(db_session: AsyncSession, owner_id: int) -> None:
+    """실행 원장은 별도 트랜잭션으로 커밋되므로 명시적으로 되돌린다."""
+    await db_session.rollback()
+    await db_session.execute(
+        delete(KAssetPaperExecutionEvent).where(
+            KAssetPaperExecutionEvent.owner_user_id == owner_id
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_auto_paper_sweep_records_its_origin_recommendation_and_order(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """무인 sweep 한 건이 원장에 정확히 한 행으로, AUTO_PAPER로 남는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation.cycle_trace_id = "cyc-sweep-trace"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
+        assert outcome["status"] == "SUBMITTED"
+        events = await _execution_events(db_session, owner_id)
+        assert len(events) == 1
+        event = events[0]
+        assert event.origin == "AUTO_PAPER"
+        assert event.status == "SUBMITTED"
+        assert event.reason == "submitted"
+        assert event.recommendation_id == recommendation_id
+        assert event.attempt_count == 1
+        assert event.replayed is False
+        assert event.cycle_trace_id == "cyc-sweep-trace"
+        assert event.promotion_bypass_reason == PROMOTION_BYPASSED_BY_OWNER
+        stored_order_id = await db_session.scalar(
+            select(AIRecommendation.paper_order_id).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored_order_id is not None
+        assert event.paper_order_id == stored_order_id
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_approval_execution_records_the_approval_origin(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """사람이 누른 승인 실행은 같은 원장에 APPROVAL로 구분돼 남는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_approval_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        outcome = await run_approved_recommendation_once(
+            owner_id,
+            recommendation_id,
+            now=_NOW_IN_SESSION,
+        )
+
+        assert outcome.status == "SUBMITTED"
+        events = await _execution_events(db_session, owner_id)
+        assert [event.origin for event in events] == ["APPROVAL"]
+        assert events[0].status == "SUBMITTED"
+        assert events[0].recommendation_id == recommendation_id
+        assert events[0].attempt_count == 1
+        assert events[0].promotion_bypass_reason is None
+        # cycle 밖에서 만들어진 추천이므로 추적 id는 비어 있다.
+        assert events[0].cycle_trace_id is None
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_write_failure_cannot_change_the_execution_result(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """원장 쓰기가 터져도 체결과 반환 결과는 그대로여야 한다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.confidence = "0.9"
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_approval_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        async def _exploding_ledger(**_kwargs: object) -> None:
+            raise RuntimeError("ledger unavailable")
+
+        monkeypatch.setattr(job, "record_paper_execution_event", _exploding_ledger)
+
+        outcome = await run_approved_recommendation_once(
+            owner_id,
+            recommendation_id,
+            now=_NOW_IN_SESSION,
+        )
+
+        assert outcome.status == "SUBMITTED"
+        assert outcome.reason == "submitted"
+        assert outcome.recommendation_id == recommendation_id
+        assert await _owner_order_count(db_session, owner_id) == 1
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "SUCCEEDED"
+        assert await _execution_events(db_session, owner_id) == []
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_an_outcome_without_a_recommendation_is_not_recorded(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kill switch로 막힌 owner는 특정 추천을 실행하지 않았으므로 행이 없다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id)
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, kill_switch=True)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW)
+
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["recommendation_id"] is None
+        assert await _execution_events(db_session, owner_id) == []
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_never_reads_another_owners_execution_state(
+    db_session: AsyncSession,
+) -> None:
+    """다른 owner의 추천 id로 기록해도 그 owner의 실행 상태를 읽지 않는다."""
+    from app.services.kasset_automation_audit import record_paper_execution_event
+
+    owner_a_id, username_a = await _seed_owner(db_session)
+    owner_b_id, username_b = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_a_id)
+    recommendation.cycle_trace_id = "cyc-owner-a"
+    recommendation.paper_execution_attempt_count = 2
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+
+        await record_paper_execution_event(
+            owner_user_id=owner_b_id,
+            origin="AUTO_PAPER",
+            status="FAILED",
+            reason="claim_owner_mismatch",
+            recommendation_id=recommendation_id,
+            observed_at=_NOW,
+        )
+
+        events = await _execution_events(db_session, owner_b_id)
+        assert len(events) == 1
+        assert events[0].owner_user_id == owner_b_id
+        assert events[0].recommendation_id == recommendation_id
+        # owner A의 시도 횟수·추적 id가 owner B의 행으로 새지 않는다.
+        assert events[0].attempt_count == 0
+        assert events[0].cycle_trace_id is None
+        assert events[0].paper_order_id is None
+        assert await _execution_events(db_session, owner_a_id) == []
+    finally:
+        await _cleanup_execution_events(db_session, owner_a_id)
+        await _cleanup_execution_events(db_session, owner_b_id)
+        await _cleanup_owner(db_session, username_a)
+        await _cleanup_owner(db_session, username_b)

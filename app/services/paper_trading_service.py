@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -25,6 +28,158 @@ from app.models.trading import InstrumentType
 from app.services.brokers.upbit.client import fetch_multiple_current_prices
 
 logger = logging.getLogger(__name__)
+
+_ZERO = Decimal("0")
+
+# ---------------------------------------------------------------------------
+# Currency partitioning
+#
+# Paper accounts hold exactly two cash ledgers (``cash_krw``, ``cash_usd``), so
+# every reported money metric belongs to one of these currencies. Values from
+# different currencies are never added: there is no FX rate in the paper ledger
+# and inventing one would fabricate performance.
+# ---------------------------------------------------------------------------
+REPORTED_CURRENCIES: tuple[str, ...] = ("KRW", "USD")
+
+# Stable, redacted valuation failure codes. Provider exception text is
+# provider-controlled and may carry request detail, so it never reaches a
+# caller; it is logged by exception class name only.
+VALUATION_ERROR_QUOTE_UNAVAILABLE = "QUOTE_UNAVAILABLE"
+VALUATION_ERROR_QUOTE_INVALID = "QUOTE_INVALID"
+VALUATION_ERROR_COST_BASIS_UNAVAILABLE = "COST_BASIS_UNAVAILABLE"
+
+# Upbit's ticker response carries no provider timestamp, so a crypto quote has
+# no ``as_of``. Reporting the server clock instead would forge provenance.
+UPBIT_QUOTE_SOURCE = "UPBIT_TICKER"
+
+# A quote older than this is reported stale. The rule depends only on the
+# provider's own ``as_of`` and the observation moment, so two readers of the
+# same quote at the same moment always agree; an unknown ``as_of`` stays
+# unknown (``None``) instead of defaulting to fresh.
+PAPER_QUOTE_STALE_AFTER = timedelta(minutes=15)
+
+_SNAPSHOT_EQUITY_COLUMNS: dict[str, str] = {
+    "KRW": "equity_krw",
+    "USD": "equity_usd",
+}
+_SNAPSHOT_RETURN_COLUMNS: dict[str, str] = {
+    "KRW": "daily_return_krw_pct",
+    "USD": "daily_return_usd_pct",
+}
+_SNAPSHOT_COMPLETE_COLUMNS: dict[str, str] = {
+    "KRW": "valuation_complete_krw",
+    "USD": "valuation_complete_usd",
+}
+
+
+def position_currency(instrument_type: str, symbol: str) -> str:
+    """Settlement currency of a holding.
+
+    Mirrors the currency ``preview_order`` stamps on the resulting trade, so a
+    position and its trades always land in the same reporting bucket.
+    """
+    if instrument_type == "equity_us":
+        return "USD"
+    if instrument_type == "crypto" and symbol.startswith("USDT-"):
+        return "USDT"
+    return "KRW"
+
+
+def parse_quote_as_of(value: object) -> datetime | None:
+    """Provider quote timestamp as an aware datetime, or ``None`` if absent.
+
+    Never substitutes the current time: an unparseable or missing timestamp
+    stays missing so ``quote_is_stale`` reports unknown rather than fresh.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class PositionQuote:
+    """A price plus the provenance that proves where and when it came from."""
+
+    price: Decimal
+    source: str
+    as_of: datetime | None
+    session: str | None
+
+    def is_stale(self, *, now: datetime) -> bool | None:
+        if self.as_of is None:
+            return None
+        return (now - self.as_of) > PAPER_QUOTE_STALE_AFTER
+
+
+@dataclass(slots=True)
+class CurrencyValuation:
+    """Live-position valuation for a single currency.
+
+    ``positions_value``/``unrealized_pnl`` only accumulate positions that were
+    actually valued; ``valuation_complete`` tells a reader whether the totals
+    describe the whole currency or just part of it.
+    """
+
+    positions_count: int = 0
+    positions_valued: int = 0
+    positions_value: Decimal = _ZERO
+    total_invested: Decimal = _ZERO
+    unrealized_pnl: Decimal = _ZERO
+
+    @property
+    def valuation_complete(self) -> bool:
+        return self.positions_valued == self.positions_count
+
+
+def snapshot_equity(snapshot: PaperDailySnapshot, currency: str) -> Decimal | None:
+    column = _SNAPSHOT_EQUITY_COLUMNS.get(currency)
+    if column is None:
+        return None
+    value = getattr(snapshot, column, None)
+    return None if value is None else Decimal(str(value))
+
+
+def snapshot_is_currency_safe(snapshot: PaperDailySnapshot, currency: str) -> bool:
+    """Whether a snapshot row may enter this currency's equity series.
+
+    Pre-P0 rows only carry the mixed KRW+USD equity and are therefore never
+    safe; a P0 row is safe only if that currency was fully valued that day.
+    """
+    column = _SNAPSHOT_COMPLETE_COLUMNS.get(currency)
+    if column is None:
+        return False
+    if getattr(snapshot, column, None) is not True:
+        return False
+    return snapshot_equity(snapshot, currency) is not None
+
+
+def unsupported_currency_evidence(
+    *,
+    valuations: Mapping[str, CurrencyValuation],
+    trade_counts: Mapping[str, int] | None = None,
+) -> dict[str, dict[str, int]]:
+    """Counts of rows held in a currency the reporter does not report.
+
+    Such rows are never folded into KRW or USD — that would be exactly the
+    cross-currency arithmetic this module removes — but they must not vanish
+    silently either, so they are disclosed as bounded counts.
+    """
+    evidence: dict[str, dict[str, int]] = {}
+    for currency, valuation in valuations.items():
+        if currency in REPORTED_CURRENCIES:
+            continue
+        evidence.setdefault(currency, {})["positions"] = valuation.positions_count
+    for currency, count in (trade_counts or {}).items():
+        if currency in REPORTED_CURRENCIES:
+            continue
+        evidence.setdefault(currency, {})["trades"] = count
+    return evidence
 
 
 # ---------------------------------------------------------------------------
@@ -166,24 +321,45 @@ class PaperTradingService:
     # ------------------------------------------------------------------ #
     # Price fetch
     # ------------------------------------------------------------------ #
-    async def _fetch_current_price(self, symbol: str, instrument_type: str) -> Decimal:
+    async def _fetch_quote(self, symbol: str, instrument_type: str) -> PositionQuote:
+        """Current price plus the provider provenance that produced it.
+
+        Provenance is passed through verbatim — the resolver already records
+        which channel answered and when — so a reader can tell a live tick from
+        a stored close instead of trusting an undated number.
+        """
+        session: str | None = None
+        as_of: datetime | None = None
         if instrument_type in {"equity_kr", "equity_us"}:
             from app.extensions.kasset.api.krx_quotes import quote_for_market
 
             market = "KRX" if instrument_type == "equity_kr" else "US"
             quote = await quote_for_market(self.db, market=market, symbol=symbol)
             price = quote.price
+            source = quote.source
+            as_of = parse_quote_as_of(quote.as_of)
+            session = quote.session
         elif instrument_type == "crypto":
             prices = await fetch_multiple_current_prices([symbol])
             price = prices.get(symbol)
             if price is None:
                 raise ValueError(f"No price for {symbol}")
+            source = UPBIT_QUOTE_SOURCE
         else:
             raise ValueError(f"Unsupported instrument_type: {instrument_type}")
 
         if price is None:
             raise ValueError(f"Could not fetch current price for {symbol}")
-        return Decimal(str(price))
+        return PositionQuote(
+            price=Decimal(str(price)),
+            source=source,
+            as_of=as_of,
+            session=session,
+        )
+
+    async def _fetch_current_price(self, symbol: str, instrument_type: str) -> Decimal:
+        """Price-only view of ``_fetch_quote`` for the order pricing paths."""
+        return (await self._fetch_quote(symbol, instrument_type)).price
 
     @staticmethod
     def _validate_resolved_market_price(value: Decimal | float | int) -> Decimal:
@@ -243,12 +419,9 @@ class PaperTradingService:
         # Resolve market type and normalized symbol
         instrument_type, resolved_symbol = resolve_market_type(symbol, None)
 
-        # Currency detection
-        currency = "KRW"
-        if instrument_type == "equity_us":
-            currency = "USD"
-        elif instrument_type == "crypto" and resolved_symbol.startswith("USDT-"):
-            currency = "USDT"
+        # Currency detection — same rule the reporting side partitions by, so a
+        # trade and the position it builds always share one currency bucket.
+        currency = position_currency(instrument_type, resolved_symbol)
 
         # Determine price. A caller that already resolved and approved a market
         # reference price passes it in; re-fetching here would fill at a
@@ -479,17 +652,28 @@ class PaperTradingService:
     async def get_positions(
         self, account_id: int, *, market: str | None = None
     ) -> list[dict[str, Any]]:
+        """Live positions with per-row valuation and quote provenance.
+
+        Every row either carries the provenance of the quote it was valued with
+        (``quote_source``/``quote_as_of``/``quote_session``/``quote_is_stale``)
+        or a stable ``valuation_error`` code. Valuation fields stay ``None``
+        when the quote is missing or unusable — a position is never valued at
+        cost, at a stale-but-undisclosed price, or at a fabricated one.
+        """
         stmt = select(PaperPosition).where(PaperPosition.account_id == account_id)
         if market is not None:
             stmt = stmt.where(PaperPosition.instrument_type == market)
         result = await self.db.execute(stmt)
         positions = result.scalars().all()
 
-        out = []
+        observed_at = datetime.now(UTC)
+        out: list[dict[str, Any]] = []
         for p in positions:
-            item = {
+            instrument_type = p.instrument_type.value
+            item: dict[str, Any] = {
                 "symbol": p.symbol,
-                "instrument_type": p.instrument_type.value,
+                "instrument_type": instrument_type,
+                "currency": position_currency(instrument_type, p.symbol),
                 "quantity": p.quantity,
                 "avg_price": p.avg_price,
                 "total_invested": p.total_invested,
@@ -497,27 +681,47 @@ class PaperTradingService:
                 "evaluation_amount": None,
                 "unrealized_pnl": None,
                 "pnl_pct": None,
+                "quote_source": None,
+                "quote_as_of": None,
+                "quote_session": None,
+                "quote_is_stale": None,
+                "valuation_error": None,
             }
-            try:
-                cur_price = await self._fetch_current_price(
-                    p.symbol, p.instrument_type.value
-                )
-                eval_amt = _q_money(cur_price * p.quantity)
-                pnl = _q_money(eval_amt - p.total_invested)
-                pnl_pct = _q_pct((eval_amt / p.total_invested - 1) * 100)
-
-                item.update(
-                    {
-                        "current_price": cur_price,
-                        "evaluation_amount": eval_amt,
-                        "unrealized_pnl": pnl,
-                        "pnl_pct": pnl_pct,
-                    }
-                )
-            except Exception as exc:
-                item["price_error"] = str(exc)
-
             out.append(item)
+
+            try:
+                quote = await self._fetch_quote(p.symbol, instrument_type)
+            except Exception as exc:
+                # Provider text can carry request detail, so only the exception
+                # class reaches the log and only a stable code reaches callers.
+                logger.warning(
+                    "paper position quote unavailable (account=%s symbol=%s): %s",
+                    account_id,
+                    p.symbol,
+                    type(exc).__name__,
+                )
+                item["valuation_error"] = VALUATION_ERROR_QUOTE_UNAVAILABLE
+                continue
+
+            item["quote_source"] = quote.source
+            item["quote_as_of"] = quote.as_of
+            item["quote_session"] = quote.session
+            item["quote_is_stale"] = quote.is_stale(now=observed_at)
+
+            if not quote.price.is_finite() or quote.price <= 0:
+                item["valuation_error"] = VALUATION_ERROR_QUOTE_INVALID
+                continue
+
+            eval_amt = _q_money(quote.price * p.quantity)
+            item["current_price"] = quote.price
+            item["evaluation_amount"] = eval_amt
+            if p.total_invested > 0:
+                item["unrealized_pnl"] = _q_money(eval_amt - p.total_invested)
+                item["pnl_pct"] = _q_pct((eval_amt / p.total_invested - 1) * 100)
+            else:
+                # No cost basis to compare against; the market value stands but
+                # a profit rate would be invented.
+                item["valuation_error"] = VALUATION_ERROR_COST_BASIS_UNAVAILABLE
         return out
 
     async def get_position(self, account_id: int, symbol: str) -> dict[str, Any] | None:
@@ -579,53 +783,131 @@ class PaperTradingService:
             for t in trades
         ]
 
+    async def _evaluate_positions_by_currency(
+        self,
+        account_id: int,
+        *,
+        positions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, CurrencyValuation]:
+        """Valuation of live positions, bucketed by settlement currency.
+
+        Accepts an already-fetched position list so a caller that needs both the
+        rows and the totals pays for one round of quotes, not two.
+        """
+        rows = (
+            positions
+            if positions is not None
+            else await self.get_positions(account_id=account_id)
+        )
+        buckets: dict[str, CurrencyValuation] = {}
+        for row in rows:
+            currency = str(
+                row.get("currency")
+                or position_currency(
+                    str(row.get("instrument_type") or ""), str(row.get("symbol") or "")
+                )
+            )
+            bucket = buckets.setdefault(currency, CurrencyValuation())
+            bucket.positions_count += 1
+            bucket.total_invested += Decimal(str(row["total_invested"]))
+            evaluation = row.get("evaluation_amount")
+            unrealized = row.get("unrealized_pnl")
+            if evaluation is None or unrealized is None:
+                continue
+            bucket.positions_valued += 1
+            bucket.positions_value += Decimal(str(evaluation))
+            bucket.unrealized_pnl += Decimal(str(unrealized))
+        return buckets
+
+    @staticmethod
+    def _summary_metrics(currency: str, valuation: CurrencyValuation) -> dict[str, Any]:
+        """Holdings totals for one currency; ``None`` where they are unprovable.
+
+        A partially-valued currency reports no evaluated total at all rather
+        than a total that silently omits the positions it could not price.
+        """
+        complete = valuation.valuation_complete
+        total_pnl_pct = None
+        if complete and valuation.total_invested > 0:
+            total_pnl_pct = _q_pct(
+                (valuation.positions_value / valuation.total_invested - 1) * 100
+            )
+        return {
+            "currency": currency,
+            "positions_count": valuation.positions_count,
+            "positions_valued": valuation.positions_valued,
+            "valuation_complete": complete,
+            "total_invested": valuation.total_invested,
+            "total_evaluated": valuation.positions_value if complete else None,
+            "total_pnl": valuation.unrealized_pnl if complete else None,
+            "total_pnl_pct": total_pnl_pct,
+        }
+
     async def get_portfolio_summary(self, account_id: int) -> dict[str, Any]:
-        """Summarize entire portfolio performance."""
+        """Holdings summary, partitioned by settlement currency.
+
+        There is deliberately no portfolio-wide invested/evaluated/PnL total:
+        the account holds two independent cash ledgers and no FX rate, so any
+        single number would be a sum of unlike units.
+        """
         account = await self.get_account(account_id)
         if account is None:
             raise ValueError(f"Account {account_id} not found")
 
         positions = await self.get_positions(account_id)
-
-        total_invested = Decimal("0")
-        total_evaluated = Decimal("0")
-        total_pnl = Decimal("0")
-
-        for p in positions:
-            if p["evaluation_amount"] is not None:
-                total_invested += p["total_invested"]
-                total_evaluated += p["evaluation_amount"]
-                total_pnl += p["unrealized_pnl"]
-
-        total_pnl_pct = None
-        if total_invested > 0:
-            total_pnl_pct = _q_pct((total_evaluated / total_invested - 1) * 100)
+        valuations = await self._evaluate_positions_by_currency(
+            account_id, positions=positions
+        )
 
         return {
             "account_name": account.name,
             "cash_krw": account.cash_krw,
             "cash_usd": account.cash_usd,
-            "total_invested": total_invested,
-            "total_evaluated": total_evaluated,
-            "total_pnl": total_pnl,
-            "total_pnl_pct": total_pnl_pct,
             "positions_count": len(positions),
+            "currencies": {
+                currency: self._summary_metrics(
+                    currency, valuations.get(currency, CurrencyValuation())
+                )
+                for currency in REPORTED_CURRENCIES
+            },
+            "unsupported_currencies": unsupported_currency_evidence(
+                valuations=valuations
+            ),
         }
 
     # ------------------------------------------------------------------ #
     # Daily snapshot
     # ------------------------------------------------------------------ #
-    async def _evaluate_positions_value(self, account_id: int) -> Decimal:
-        """Sum evaluation_amount across live positions (raw KRW+USD)."""
-        positions = await self.get_positions(account_id=account_id)
-        total = Decimal("0")
-        for p in positions:
-            eval_amt = p.get("evaluation_amount")
-            if eval_amt is not None:
-                total += Decimal(str(eval_amt))
-        return _q_money(total)
+    @staticmethod
+    def _currency_daily_return_pct(
+        *,
+        currency: str,
+        prior: PaperDailySnapshot | None,
+        equity: Decimal,
+        valuation_complete: bool,
+    ) -> Decimal | None:
+        """Day-over-day return for one currency, or ``None`` if unprovable.
+
+        Both ends of the comparison must be currency-safe: a partially valued
+        today, or a prior row that is pre-P0 or itself partial, yields no
+        number rather than a return computed against a different basis.
+        """
+        if prior is None or not valuation_complete:
+            return None
+        if not snapshot_is_currency_safe(prior, currency):
+            return None
+        prior_equity = snapshot_equity(prior, currency)
+        if prior_equity is None or prior_equity <= 0:
+            return None
+        return _q_money((equity / prior_equity - Decimal("1")) * Decimal("100"))
 
     async def record_daily_snapshot(self, account_id: int) -> PaperDailySnapshot:
+        """Record today's equity per currency.
+
+        The legacy mixed-currency columns are left untouched: existing rows keep
+        their historical values and new rows leave them empty rather than
+        writing another KRW+USD sum.
+        """
         account = await self.get_account(account_id)
         if account is None:
             raise ValueError(f"Account {account_id} not found")
@@ -641,44 +923,56 @@ class PaperTradingService:
             )
         ).scalar_one_or_none()
 
-        positions_value = await self._evaluate_positions_value(account_id)
-        total_equity = _q_money(account.cash_krw + account.cash_usd + positions_value)
+        valuations = await self._evaluate_positions_by_currency(account_id)
+        cash = {"KRW": account.cash_krw, "USD": account.cash_usd}
+        equity: dict[str, Decimal] = {}
+        complete: dict[str, bool] = {}
+        for currency in REPORTED_CURRENCIES:
+            valuation = valuations.get(currency, CurrencyValuation())
+            equity[currency] = _q_money(cash[currency] + valuation.positions_value)
+            complete[currency] = valuation.valuation_complete
 
+        # Only P0-era rows can serve as a per-currency basis; a pre-P0 row has
+        # no per-currency equity at all.
         prior = (
             await self.db.execute(
                 select(PaperDailySnapshot)
                 .where(
                     PaperDailySnapshot.account_id == account_id,
                     PaperDailySnapshot.snapshot_date < today,
+                    PaperDailySnapshot.equity_krw.is_not(None),
                 )
                 .order_by(PaperDailySnapshot.snapshot_date.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
 
-        daily_return_pct: Decimal | None = None
-        if prior is not None and prior.total_equity > 0:
-            daily_return_pct = _q_money(
-                (total_equity / prior.total_equity - Decimal("1")) * Decimal("100")
+        values: dict[str, Any] = {
+            "cash_krw": account.cash_krw,
+            "cash_usd": account.cash_usd,
+            "equity_krw": equity["KRW"],
+            "equity_usd": equity["USD"],
+            "valuation_complete_krw": complete["KRW"],
+            "valuation_complete_usd": complete["USD"],
+        }
+        for currency in REPORTED_CURRENCIES:
+            values[_SNAPSHOT_RETURN_COLUMNS[currency]] = (
+                self._currency_daily_return_pct(
+                    currency=currency,
+                    prior=prior,
+                    equity=equity[currency],
+                    valuation_complete=complete[currency],
+                )
             )
 
         if existing_today is None:
             snapshot = PaperDailySnapshot(
-                account_id=account_id,
-                snapshot_date=today,
-                cash_krw=account.cash_krw,
-                cash_usd=account.cash_usd,
-                positions_value=positions_value,
-                total_equity=total_equity,
-                daily_return_pct=daily_return_pct,
+                account_id=account_id, snapshot_date=today, **values
             )
             self.db.add(snapshot)
         else:
-            existing_today.cash_krw = account.cash_krw
-            existing_today.cash_usd = account.cash_usd
-            existing_today.positions_value = positions_value
-            existing_today.total_equity = total_equity
-            existing_today.daily_return_pct = daily_return_pct
+            for column, value in values.items():
+                setattr(existing_today, column, value)
             snapshot = existing_today
 
         await self.db.commit()
@@ -704,8 +998,16 @@ class PaperTradingService:
         return [
             {
                 "date": s.snapshot_date.isoformat(),
-                "total_equity": s.total_equity,
-                "daily_return_pct": s.daily_return_pct,
+                "currencies": {
+                    currency: {
+                        "total_equity": snapshot_equity(s, currency),
+                        "daily_return_pct": getattr(
+                            s, _SNAPSHOT_RETURN_COLUMNS[currency]
+                        ),
+                        "valuation_complete": snapshot_is_currency_safe(s, currency),
+                    }
+                    for currency in REPORTED_CURRENCIES
+                },
             }
             for s in snaps
         ]
@@ -717,8 +1019,6 @@ class PaperTradingService:
     def _build_round_trips(trades: list[PaperTrade]) -> list[dict[str, Any]]:
         """Group raw trades into round trips per symbol until position is flat.
         Excludes open (unclosed) trips."""
-        from collections import defaultdict
-
         grouped: dict[str, list[tuple[int, PaperTrade]]] = defaultdict(list)
         for idx, t in enumerate(trades):
             grouped[t.symbol].append((idx, t))
@@ -814,33 +1114,123 @@ class PaperTradingService:
             return None
         return (mean / stdev) * math.sqrt(252)
 
+    @staticmethod
+    def _total_return_pct(
+        initial_capital: Decimal, total_equity: Decimal | None
+    ) -> float | None:
+        """Return against the currency's own opening capital.
+
+        ``None`` when today's equity is not provable. A currency the account
+        never funded and never used reports 0%, not a division by zero.
+        """
+        if total_equity is None:
+            return None
+        if initial_capital > 0:
+            return float(
+                (total_equity - initial_capital) / initial_capital * Decimal("100")
+            )
+        return 0.0 if total_equity == 0 else None
+
+    @classmethod
+    def _currency_performance(
+        cls,
+        *,
+        currency: str,
+        initial_capital: Decimal,
+        cash: Decimal,
+        valuation: CurrencyValuation,
+        trades: list[PaperTrade],
+        snapshots: list[PaperDailySnapshot],
+    ) -> dict[str, Any]:
+        """Performance metrics computed entirely within one currency."""
+        complete = valuation.valuation_complete
+        total_equity = _q_money(cash + valuation.positions_value) if complete else None
+
+        realized = sum(
+            (Decimal(t.realized_pnl) for t in trades if t.realized_pnl is not None),
+            _ZERO,
+        )
+
+        # A symbol trades in exactly one currency, so grouping the currency's
+        # own trades keeps every round trip single-currency by construction.
+        round_trips = cls._build_round_trips(trades)
+        total_trips = len(round_trips)
+        wins = sum(1 for trip in round_trips if trip["pnl"] > 0)
+        win_rate = (wins / total_trips * 100.0) if total_trips > 0 else 0.0
+        avg_holding_days = (
+            sum(trip["holding_days"] for trip in round_trips) / total_trips
+            if total_trips > 0
+            else 0.0
+        )
+
+        # Drawdown and Sharpe read only rows that carry this currency's own
+        # equity and were fully valued that day; pre-P0 mixed rows are skipped.
+        return_column = _SNAPSHOT_RETURN_COLUMNS[currency]
+        equity_curve: list[Decimal] = []
+        daily_returns: list[Decimal] = []
+        for snapshot in snapshots:
+            if not snapshot_is_currency_safe(snapshot, currency):
+                continue
+            equity = snapshot_equity(snapshot, currency)
+            if equity is None:
+                continue
+            equity_curve.append(equity)
+            daily_return = getattr(snapshot, return_column, None)
+            if daily_return is not None:
+                daily_returns.append(Decimal(str(daily_return)))
+
+        max_dd = cls._calc_max_drawdown_pct(equity_curve) if equity_curve else None
+        sharpe = cls._calc_sharpe_ratio(daily_returns) if daily_returns else None
+        total_return_pct = cls._total_return_pct(initial_capital, total_equity)
+
+        return {
+            "currency": currency,
+            "initial_capital": float(initial_capital),
+            "cash": float(cash),
+            "positions_count": valuation.positions_count,
+            "positions_valued": valuation.positions_valued,
+            "valuation_complete": complete,
+            "positions_value": (float(valuation.positions_value) if complete else None),
+            "total_equity": float(total_equity) if total_equity is not None else None,
+            "total_return_pct": (
+                round(total_return_pct, 4) if total_return_pct is not None else None
+            ),
+            "realized_pnl": float(realized),
+            "unrealized_pnl": float(valuation.unrealized_pnl) if complete else None,
+            "total_trades": total_trips,
+            "win_rate": round(win_rate, 2),
+            "avg_holding_days": round(avg_holding_days, 2),
+            "max_drawdown_pct": round(max_dd, 4) if max_dd is not None else None,
+            "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
+            "best_trade": (
+                max(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
+            ),
+            "worst_trade": (
+                min(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
+            ),
+            "snapshots_used": len(equity_curve),
+        }
+
     async def calculate_performance(
         self,
         account_id: int,
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> dict[str, Any]:
+        """Account performance, partitioned by settlement currency.
+
+        There is no combined figure: KRW and USD equity, PnL, drawdown, and
+        Sharpe are reported separately because the paper ledger holds no FX
+        rate, and a rate invented here would show returns that never happened.
+        """
         account = await self.get_account(account_id)
         if account is None:
             raise ValueError(f"Account {account_id} not found")
 
-        # Current equity (always "now")
-        positions_value = await self._evaluate_positions_value(account_id)
-        total_equity = account.cash_krw + account.cash_usd + positions_value
-        initial = Decimal(account.initial_capital)
-        total_return_pct = (
-            float((total_equity - initial) / initial * Decimal("100"))
-            if initial > 0
-            else 0.0
-        )
-
-        # Unrealized pnl — sum across live positions
         positions = await self.get_positions(account_id=account_id)
-        unrealized = Decimal("0")
-        for p in positions:
-            val = p.get("unrealized_pnl")
-            if val is not None:
-                unrealized += Decimal(str(val))
+        valuations = await self._evaluate_positions_by_currency(
+            account_id, positions=positions
+        )
 
         # Trades in period
         trade_stmt = select(PaperTrade).where(PaperTrade.account_id == account_id)
@@ -857,28 +1247,11 @@ class PaperTradingService:
         trade_stmt = trade_stmt.order_by(PaperTrade.executed_at.asc())
         trades = list((await self.db.execute(trade_stmt)).scalars().all())
 
-        realized = sum(
-            (Decimal(t.realized_pnl) for t in trades if t.realized_pnl is not None),
-            Decimal("0"),
-        )
+        trades_by_currency: dict[str, list[PaperTrade]] = defaultdict(list)
+        for trade in trades:
+            trades_by_currency[(trade.currency or "KRW").upper()].append(trade)
 
-        round_trips = self._build_round_trips(trades)
-        total_trips = len(round_trips)
-        wins = sum(1 for trip in round_trips if trip["pnl"] > 0)
-        win_rate = (wins / total_trips * 100.0) if total_trips > 0 else 0.0
-        avg_holding_days = (
-            sum(trip["holding_days"] for trip in round_trips) / total_trips
-            if total_trips > 0
-            else 0.0
-        )
-        best_trip = (
-            max(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
-        )
-        worst_trip = (
-            min(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
-        )
-
-        # Snapshots in period → sharpe + max drawdown
+        # Snapshots in period → per-currency sharpe + max drawdown
         snap_stmt = select(PaperDailySnapshot).where(
             PaperDailySnapshot.account_id == account_id
         )
@@ -887,31 +1260,50 @@ class PaperTradingService:
         if end_date is not None:
             snap_stmt = snap_stmt.where(PaperDailySnapshot.snapshot_date <= end_date)
         snap_stmt = snap_stmt.order_by(PaperDailySnapshot.snapshot_date.asc())
-        snaps = list((await self.db.execute(snap_stmt)).scalars().all())
+        snapshots = list((await self.db.execute(snap_stmt)).scalars().all())
 
-        equity_curve = [s.total_equity for s in snaps]
-        daily_returns = [
-            s.daily_return_pct for s in snaps if s.daily_return_pct is not None
-        ]
-        max_dd = self._calc_max_drawdown_pct(equity_curve) if equity_curve else None
-        sharpe = self._calc_sharpe_ratio(daily_returns) if daily_returns else None
+        initial = {
+            "KRW": Decimal(account.initial_capital),
+            "USD": Decimal(account.initial_capital_usd),
+        }
+        cash = {"KRW": account.cash_krw, "USD": account.cash_usd}
 
         return {
-            "total_return_pct": round(total_return_pct, 4),
-            "realized_pnl": float(realized),
-            "unrealized_pnl": float(unrealized),
-            "total_trades": total_trips,
-            "win_rate": round(win_rate, 2),
-            "avg_holding_days": round(avg_holding_days, 2),
-            "max_drawdown_pct": round(max_dd, 4) if max_dd is not None else None,
-            "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
-            "best_trade": best_trip,
-            "worst_trade": worst_trip,
+            "currencies": {
+                currency: self._currency_performance(
+                    currency=currency,
+                    initial_capital=initial[currency],
+                    cash=cash[currency],
+                    valuation=valuations.get(currency, CurrencyValuation()),
+                    trades=trades_by_currency.get(currency, []),
+                    snapshots=snapshots,
+                )
+                for currency in REPORTED_CURRENCIES
+            },
+            "unsupported_currencies": unsupported_currency_evidence(
+                valuations=valuations,
+                trade_counts={
+                    currency: len(rows) for currency, rows in trades_by_currency.items()
+                },
+            ),
         }
 
 
 __all__ = [
     "FEE_RATES",
-    "calculate_fee",
+    "PAPER_QUOTE_STALE_AFTER",
+    "REPORTED_CURRENCIES",
+    "UPBIT_QUOTE_SOURCE",
+    "VALUATION_ERROR_COST_BASIS_UNAVAILABLE",
+    "VALUATION_ERROR_QUOTE_INVALID",
+    "VALUATION_ERROR_QUOTE_UNAVAILABLE",
+    "CurrencyValuation",
     "PaperTradingService",
+    "PositionQuote",
+    "calculate_fee",
+    "parse_quote_as_of",
+    "position_currency",
+    "snapshot_equity",
+    "snapshot_is_currency_safe",
+    "unsupported_currency_evidence",
 ]

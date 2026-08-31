@@ -19,7 +19,9 @@ from app.models.paper_trading import (
 from app.models.trading import InstrumentType
 from app.services.paper_trading_service import (
     FEE_RATES,
+    VALUATION_ERROR_QUOTE_UNAVAILABLE,
     PaperTradingService,
+    PositionQuote,
     calculate_fee,
 )
 
@@ -598,7 +600,12 @@ class TestQueries:
         self, service, mock_db, monkeypatch, instrument_type, market
     ):
         quote_for_market = AsyncMock(
-            return_value=SimpleNamespace(price=Decimal("70123.45"))
+            return_value=SimpleNamespace(
+                price=Decimal("70123.45"),
+                source="PAPER_TOSS",
+                as_of="2026-08-31T05:00:00Z",
+                session="REGULAR",
+            )
         )
         monkeypatch.setattr(
             "app.extensions.kasset.api.krx_quotes.quote_for_market",
@@ -613,6 +620,28 @@ class TestQueries:
             market=market,
             symbol="005930",
         )
+
+    @pytest.mark.asyncio
+    async def test_fetch_quote_passes_provider_provenance_through(
+        self, service, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.extensions.kasset.api.krx_quotes.quote_for_market",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    price=Decimal("70123.45"),
+                    source="PAPER_CANDLES",
+                    as_of="2026-08-31T05:00:00Z",
+                    session="CLOSED",
+                )
+            ),
+        )
+
+        quote = await service._fetch_quote("005930", "equity_kr")
+
+        assert quote.source == "PAPER_CANDLES"
+        assert quote.as_of == datetime(2026, 8, 31, 5, 0, tzinfo=UTC)
+        assert quote.session == "CLOSED"
 
     @pytest.mark.asyncio
     async def test_get_positions_enriches_with_current_price(
@@ -630,14 +659,22 @@ class TestQueries:
         mock_db.execute = self._make_execute_mock([position])
         monkeypatch.setattr(
             service,
-            "_fetch_current_price",
-            AsyncMock(return_value=Decimal("70000")),
+            "_fetch_quote",
+            AsyncMock(
+                return_value=PositionQuote(
+                    price=Decimal("70000"),
+                    source="PAPER_TOSS",
+                    as_of=datetime.now(UTC),
+                    session="REGULAR",
+                )
+            ),
         )
 
         positions = await service.get_positions(account_id=1)
         assert len(positions) == 1
         p = positions[0]
         assert p["symbol"] == "005930"
+        assert p["currency"] == "KRW"
         assert p["quantity"] == pytest.approx(Decimal("10"))
         assert p["avg_price"] == pytest.approx(Decimal("60000"))
         assert p["current_price"] == pytest.approx(Decimal("70000"))
@@ -645,9 +682,13 @@ class TestQueries:
         assert p["unrealized_pnl"] == pytest.approx(Decimal("100000.0000"))
         # (70000 - 60000) / 60000 * 100 = 16.6666...
         assert p["pnl_pct"] == pytest.approx(Decimal("16.67"))
+        assert p["quote_source"] == "PAPER_TOSS"
+        assert p["quote_session"] == "REGULAR"
+        assert p["quote_is_stale"] is False
+        assert p["valuation_error"] is None
 
     @pytest.mark.asyncio
-    async def test_get_positions_swallows_price_errors(
+    async def test_get_positions_reports_stable_code_on_quote_failure(
         self, service, mock_db, monkeypatch
     ):
         position = PaperPosition(
@@ -662,13 +703,18 @@ class TestQueries:
         mock_db.execute = self._make_execute_mock([position])
         monkeypatch.setattr(
             service,
-            "_fetch_current_price",
-            AsyncMock(side_effect=RuntimeError("net down")),
+            "_fetch_quote",
+            AsyncMock(side_effect=RuntimeError("net down: token=abc123")),
         )
         positions = await service.get_positions(account_id=1)
         assert positions[0]["current_price"] is None
         assert positions[0]["evaluation_amount"] is None
-        assert positions[0]["price_error"] == "net down"
+        assert positions[0]["unrealized_pnl"] is None
+        assert positions[0]["pnl_pct"] is None
+        assert positions[0]["valuation_error"] == VALUATION_ERROR_QUOTE_UNAVAILABLE
+        # The provider's own text never reaches a caller.
+        assert "net down" not in repr(positions[0])
+        assert "price_error" not in positions[0]
 
     @pytest.mark.asyncio
     async def test_get_cash_balance(self, service, monkeypatch):
@@ -724,13 +770,12 @@ class TestPortfolioSummary:
         return PaperTradingService(mock_db)
 
     @pytest.mark.asyncio
-    async def test_summary_aggregates_invested_and_evaluated(
-        self, service, monkeypatch
-    ):
+    async def test_summary_keeps_currencies_apart(self, service, monkeypatch):
         account = PaperAccount(
             id=1,
             name="A",
             initial_capital=Decimal("10000000"),
+            initial_capital_usd=Decimal("1000"),
             cash_krw=Decimal("1000000"),
             cash_usd=Decimal("200"),
             is_active=True,
@@ -743,15 +788,19 @@ class TestPortfolioSummary:
                 return_value=[
                     {
                         "symbol": "005930",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
                         "total_invested": Decimal("600000"),
                         "evaluation_amount": Decimal("700000"),
                         "unrealized_pnl": Decimal("100000"),
                     },
                     {
-                        "symbol": "KRW-BTC",
-                        "total_invested": Decimal("300000"),
-                        "evaluation_amount": Decimal("280000"),
-                        "unrealized_pnl": Decimal("-20000"),
+                        "symbol": "AAPL",
+                        "instrument_type": "equity_us",
+                        "currency": "USD",
+                        "total_invested": Decimal("300"),
+                        "evaluation_amount": Decimal("280"),
+                        "unrealized_pnl": Decimal("-20"),
                     },
                 ]
             ),
@@ -759,14 +808,79 @@ class TestPortfolioSummary:
 
         summary = await service.get_portfolio_summary(account_id=1)
 
-        assert summary["total_invested"] == pytest.approx(Decimal("900000"))
-        assert summary["total_evaluated"] == pytest.approx(Decimal("980000"))
-        assert summary["total_pnl"] == pytest.approx(Decimal("80000"))
-        # 80000 / 900000 * 100 = 8.8888...
-        assert summary["total_pnl_pct"] == pytest.approx(Decimal("8.89"))
+        # No portfolio-wide money total exists to be a KRW+USD sum.
+        assert "total_invested" not in summary
+        assert "total_evaluated" not in summary
+        assert "total_pnl" not in summary
+        assert "total_pnl_pct" not in summary
+
+        krw = summary["currencies"]["KRW"]
+        assert krw["total_invested"] == pytest.approx(Decimal("600000"))
+        assert krw["total_evaluated"] == pytest.approx(Decimal("700000"))
+        assert krw["total_pnl"] == pytest.approx(Decimal("100000"))
+        # 100000 / 600000 * 100 = 16.6666...
+        assert krw["total_pnl_pct"] == pytest.approx(Decimal("16.67"))
+        assert krw["valuation_complete"] is True
+
+        usd = summary["currencies"]["USD"]
+        assert usd["total_invested"] == pytest.approx(Decimal("300"))
+        assert usd["total_evaluated"] == pytest.approx(Decimal("280"))
+        assert usd["total_pnl"] == pytest.approx(Decimal("-20"))
+        # -20 / 300 * 100 = -6.6666...
+        assert usd["total_pnl_pct"] == pytest.approx(Decimal("-6.67"))
+
         assert summary["cash_krw"] == pytest.approx(Decimal("1000000"))
         assert summary["cash_usd"] == pytest.approx(Decimal("200"))
         assert summary["positions_count"] == 2
+        assert summary["unsupported_currencies"] == {}
+
+    @pytest.mark.asyncio
+    async def test_summary_withholds_totals_for_partially_valued_currency(
+        self, service, monkeypatch
+    ):
+        account = PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("1000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+        monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            service,
+            "get_positions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "symbol": "005930",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("600000"),
+                        "evaluation_amount": Decimal("700000"),
+                        "unrealized_pnl": Decimal("100000"),
+                    },
+                    {
+                        "symbol": "000660",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("300000"),
+                        "evaluation_amount": None,
+                        "unrealized_pnl": None,
+                    },
+                ]
+            ),
+        )
+
+        krw = (await service.get_portfolio_summary(account_id=1))["currencies"]["KRW"]
+
+        assert krw["positions_count"] == 2
+        assert krw["positions_valued"] == 1
+        assert krw["valuation_complete"] is False
+        # A total covering only half the holdings would read as the whole.
+        assert krw["total_evaluated"] is None
+        assert krw["total_pnl"] is None
+        assert krw["total_pnl_pct"] is None
 
     @pytest.mark.asyncio
     async def test_summary_handles_empty_positions(self, service, monkeypatch):
@@ -782,11 +896,51 @@ class TestPortfolioSummary:
         monkeypatch.setattr(service, "get_positions", AsyncMock(return_value=[]))
 
         summary = await service.get_portfolio_summary(account_id=1)
-        assert summary["total_invested"] == pytest.approx(Decimal("0"))
-        assert summary["total_evaluated"] == pytest.approx(Decimal("0"))
-        assert summary["total_pnl"] == pytest.approx(Decimal("0"))
-        assert summary["total_pnl_pct"] is None
         assert summary["positions_count"] == 0
+        for currency in ("KRW", "USD"):
+            metrics = summary["currencies"][currency]
+            assert metrics["total_invested"] == pytest.approx(Decimal("0"))
+            assert metrics["total_evaluated"] == pytest.approx(Decimal("0"))
+            assert metrics["total_pnl"] == pytest.approx(Decimal("0"))
+            assert metrics["total_pnl_pct"] is None
+            assert metrics["valuation_complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_summary_discloses_unreported_currency_instead_of_folding_it(
+        self, service, monkeypatch
+    ):
+        account = PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("1000000"),
+            cash_krw=Decimal("1000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+        monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            service,
+            "get_positions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "symbol": "USDT-BTC",
+                        "instrument_type": "crypto",
+                        "currency": "USDT",
+                        "total_invested": Decimal("5000"),
+                        "evaluation_amount": Decimal("5500"),
+                        "unrealized_pnl": Decimal("500"),
+                    }
+                ]
+            ),
+        )
+
+        summary = await service.get_portfolio_summary(account_id=1)
+
+        # USDT is neither added to KRW nor silently dropped.
+        assert summary["currencies"]["KRW"]["positions_count"] == 0
+        assert summary["currencies"]["USD"]["positions_count"] == 0
+        assert summary["unsupported_currencies"] == {"USDT": {"positions": 1}}
 
 
 class TestDailySnapshots:
@@ -795,22 +949,42 @@ class TestDailySnapshots:
         return PaperTradingService(mock_db)
 
     @pytest.mark.asyncio
-    async def test_record_snapshot_creates_row_with_return_from_prior(
+    async def test_record_snapshot_records_equity_per_currency(
         self, service, mock_db, monkeypatch
     ):
         account = PaperAccount(
             id=1,
             name="A",
             initial_capital=Decimal("10000000"),
+            initial_capital_usd=Decimal("1000"),
             cash_krw=Decimal("5000000"),
-            cash_usd=Decimal("0"),
+            cash_usd=Decimal("400"),
             is_active=True,
         )
         monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
         monkeypatch.setattr(
             service,
             "get_positions",
-            AsyncMock(return_value=[{"evaluation_amount": Decimal("6000000")}]),
+            AsyncMock(
+                return_value=[
+                    {
+                        "symbol": "005930",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("5000000"),
+                        "evaluation_amount": Decimal("6000000"),
+                        "unrealized_pnl": Decimal("1000000"),
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "instrument_type": "equity_us",
+                        "currency": "USD",
+                        "total_invested": Decimal("500"),
+                        "evaluation_amount": Decimal("600"),
+                        "unrealized_pnl": Decimal("100"),
+                    },
+                ]
+            ),
         )
 
         prior = PaperDailySnapshot(
@@ -818,10 +992,11 @@ class TestDailySnapshots:
             account_id=1,
             snapshot_date=date(2026, 4, 12),
             cash_krw=Decimal("5000000"),
-            cash_usd=Decimal("0"),
-            positions_value=Decimal("5000000"),
-            total_equity=Decimal("10000000"),
-            daily_return_pct=None,
+            cash_usd=Decimal("400"),
+            equity_krw=Decimal("10000000"),
+            equity_usd=Decimal("800"),
+            valuation_complete_krw=True,
+            valuation_complete_usd=True,
         )
 
         scalars_none = MagicMock()
@@ -833,14 +1008,22 @@ class TestDailySnapshots:
         snapshot = await service.record_daily_snapshot(account_id=1)
 
         assert snapshot.cash_krw == pytest.approx(Decimal("5000000"))
-        assert snapshot.positions_value == pytest.approx(Decimal("6000000"))
-        assert snapshot.total_equity == pytest.approx(Decimal("11000000"))
-        assert snapshot.daily_return_pct == pytest.approx(Decimal("10.0000"))
+        assert snapshot.equity_krw == pytest.approx(Decimal("11000000"))
+        assert snapshot.equity_usd == pytest.approx(Decimal("1000"))
+        assert snapshot.valuation_complete_krw is True
+        assert snapshot.valuation_complete_usd is True
+        # 11,000,000 / 10,000,000 and 1,000 / 800 — each within its own currency.
+        assert snapshot.daily_return_krw_pct == pytest.approx(Decimal("10.0000"))
+        assert snapshot.daily_return_usd_pct == pytest.approx(Decimal("25.0000"))
+        # The mixed columns are left alone, not rewritten with a KRW+USD sum.
+        assert snapshot.total_equity is None
+        assert snapshot.positions_value is None
+        assert snapshot.daily_return_pct is None
         mock_db.add.assert_called_once()
         mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_record_snapshot_first_ever_has_null_return(
+    async def test_record_snapshot_first_ever_has_null_returns(
         self, service, mock_db, monkeypatch
     ):
         account = PaperAccount(
@@ -861,11 +1044,66 @@ class TestDailySnapshots:
         mock_db.execute = AsyncMock(side_effect=[scalars_none1, scalars_none2])
 
         snapshot = await service.record_daily_snapshot(account_id=1)
-        assert snapshot.daily_return_pct is None
-        assert snapshot.total_equity == pytest.approx(Decimal("10000000"))
+        assert snapshot.daily_return_krw_pct is None
+        assert snapshot.daily_return_usd_pct is None
+        assert snapshot.equity_krw == pytest.approx(Decimal("10000000"))
+        assert snapshot.equity_usd == pytest.approx(Decimal("0"))
 
     @pytest.mark.asyncio
-    async def test_calculate_daily_returns_filters_by_date_range(
+    async def test_record_snapshot_marks_partially_valued_currency_incomplete(
+        self, service, mock_db, monkeypatch
+    ):
+        account = PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("5000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+        monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            service,
+            "get_positions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "symbol": "005930",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("5000000"),
+                        "evaluation_amount": None,
+                        "unrealized_pnl": None,
+                    }
+                ]
+            ),
+        )
+
+        prior = PaperDailySnapshot(
+            id=10,
+            account_id=1,
+            snapshot_date=date(2026, 4, 12),
+            cash_krw=Decimal("5000000"),
+            cash_usd=Decimal("0"),
+            equity_krw=Decimal("10000000"),
+            equity_usd=Decimal("0"),
+            valuation_complete_krw=True,
+            valuation_complete_usd=True,
+        )
+        scalars_none = MagicMock()
+        scalars_none.scalar_one_or_none = MagicMock(return_value=None)
+        scalars_prior = MagicMock()
+        scalars_prior.scalar_one_or_none = MagicMock(return_value=prior)
+        mock_db.execute = AsyncMock(side_effect=[scalars_none, scalars_prior])
+
+        snapshot = await service.record_daily_snapshot(account_id=1)
+
+        assert snapshot.valuation_complete_krw is False
+        # An unpriced holding would make this a cash-only "50% drop".
+        assert snapshot.daily_return_krw_pct is None
+
+    @pytest.mark.asyncio
+    async def test_calculate_daily_returns_reports_each_currency(
         self, service, mock_db
     ):
         snaps = [
@@ -875,10 +1113,12 @@ class TestDailySnapshots:
                 snapshot_date=date(2026, 4, 10),
                 cash_krw=Decimal("0"),
                 cash_usd=Decimal("0"),
-                positions_value=Decimal("0"),
-                total_equity=Decimal("10000000"),
-                daily_return_pct=None,
+                equity_krw=Decimal("10000000"),
+                equity_usd=Decimal("1000"),
+                valuation_complete_krw=True,
+                valuation_complete_usd=True,
             ),
+            # Pre-P0 row: only the mixed columns exist, so no currency is safe.
             PaperDailySnapshot(
                 id=2,
                 account_id=1,
@@ -904,13 +1144,33 @@ class TestDailySnapshots:
         assert rows == [
             {
                 "date": "2026-04-10",
-                "total_equity": Decimal("10000000"),
-                "daily_return_pct": None,
+                "currencies": {
+                    "KRW": {
+                        "total_equity": Decimal("10000000"),
+                        "daily_return_pct": None,
+                        "valuation_complete": True,
+                    },
+                    "USD": {
+                        "total_equity": Decimal("1000"),
+                        "daily_return_pct": None,
+                        "valuation_complete": True,
+                    },
+                },
             },
             {
                 "date": "2026-04-11",
-                "total_equity": Decimal("10100000"),
-                "daily_return_pct": Decimal("1.0000"),
+                "currencies": {
+                    "KRW": {
+                        "total_equity": None,
+                        "daily_return_pct": None,
+                        "valuation_complete": False,
+                    },
+                    "USD": {
+                        "total_equity": None,
+                        "daily_return_pct": None,
+                        "valuation_complete": False,
+                    },
+                },
             },
         ]
 
@@ -1070,65 +1330,114 @@ class TestCalculatePerformance:
     def service(self, mock_db):
         return PaperTradingService(mock_db)
 
+    @staticmethod
+    def _trade(**kw):
+        defaults = {
+            "account_id": 1,
+            "instrument_type": InstrumentType.equity_kr,
+            "order_type": "market",
+            "fee": Decimal("0"),
+            "currency": "KRW",
+            "reason": None,
+            "realized_pnl": None,
+        }
+        defaults.update(kw)
+        return PaperTrade(**defaults)
+
+    @staticmethod
+    def _p0_snapshot(**kw):
+        defaults = {
+            "account_id": 1,
+            "cash_krw": Decimal("0"),
+            "cash_usd": Decimal("0"),
+            "valuation_complete_krw": True,
+            "valuation_complete_usd": True,
+        }
+        defaults.update(kw)
+        return PaperDailySnapshot(**defaults)
+
     @pytest.mark.asyncio
     async def test_full_performance_all_period(self, service, mock_db, monkeypatch):
         account = PaperAccount(
             id=1,
             name="A",
             initial_capital=Decimal("10000000"),
+            initial_capital_usd=Decimal("1000"),
             cash_krw=Decimal("5000000"),
-            cash_usd=Decimal("0"),
+            cash_usd=Decimal("400"),
             is_active=True,
         )
         monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
         monkeypatch.setattr(
             service,
-            "_evaluate_positions_value",
-            AsyncMock(return_value=Decimal("6000000")),
-        )
-        monkeypatch.setattr(
-            service,
             "get_positions",
             AsyncMock(
                 return_value=[
-                    {"unrealized_pnl": Decimal("500000")},
-                    {"unrealized_pnl": Decimal("-100000")},
+                    {
+                        "symbol": "A",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("5500000"),
+                        "evaluation_amount": Decimal("6000000"),
+                        "unrealized_pnl": Decimal("500000"),
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "instrument_type": "equity_us",
+                        "currency": "USD",
+                        "total_invested": Decimal("700"),
+                        "evaluation_amount": Decimal("600"),
+                        "unrealized_pnl": Decimal("-100"),
+                    },
                 ]
             ),
         )
 
         trades = [
-            PaperTrade(
+            self._trade(
                 id=1,
-                account_id=1,
                 symbol="A",
-                instrument_type=InstrumentType.equity_kr,
                 side="buy",
-                order_type="market",
                 quantity=Decimal("10"),
                 price=Decimal("60000"),
                 total_amount=Decimal("600000"),
                 fee=Decimal("90"),
-                currency="KRW",
-                reason=None,
-                realized_pnl=None,
                 executed_at=datetime(2026, 4, 1, tzinfo=UTC),
             ),
-            PaperTrade(
+            self._trade(
                 id=2,
-                account_id=1,
                 symbol="A",
-                instrument_type=InstrumentType.equity_kr,
                 side="sell",
-                order_type="market",
                 quantity=Decimal("10"),
                 price=Decimal("70000"),
                 total_amount=Decimal("700000"),
                 fee=Decimal("1365"),
-                currency="KRW",
-                reason=None,
                 realized_pnl=Decimal("98635"),
                 executed_at=datetime(2026, 4, 6, tzinfo=UTC),
+            ),
+            # A USD round trip in the same period must not touch KRW metrics.
+            self._trade(
+                id=3,
+                symbol="AAPL",
+                instrument_type=InstrumentType.equity_us,
+                currency="USD",
+                side="buy",
+                quantity=Decimal("2"),
+                price=Decimal("100"),
+                total_amount=Decimal("200"),
+                executed_at=datetime(2026, 4, 1, tzinfo=UTC),
+            ),
+            self._trade(
+                id=4,
+                symbol="AAPL",
+                instrument_type=InstrumentType.equity_us,
+                currency="USD",
+                side="sell",
+                quantity=Decimal("2"),
+                price=Decimal("90"),
+                total_amount=Decimal("180"),
+                realized_pnl=Decimal("-20"),
+                executed_at=datetime(2026, 4, 3, tzinfo=UTC),
             ),
         ]
         scalars_trades = MagicMock()
@@ -1137,35 +1446,27 @@ class TestCalculatePerformance:
         trade_result.scalars.return_value = scalars_trades
 
         snaps = [
-            PaperDailySnapshot(
+            self._p0_snapshot(
                 id=1,
-                account_id=1,
                 snapshot_date=date(2026, 4, 1),
-                cash_krw=Decimal("0"),
-                cash_usd=Decimal("0"),
-                positions_value=Decimal("0"),
-                total_equity=Decimal("10000000"),
-                daily_return_pct=None,
+                equity_krw=Decimal("10000000"),
+                equity_usd=Decimal("1000"),
             ),
-            PaperDailySnapshot(
+            self._p0_snapshot(
                 id=2,
-                account_id=1,
                 snapshot_date=date(2026, 4, 2),
-                cash_krw=Decimal("0"),
-                cash_usd=Decimal("0"),
-                positions_value=Decimal("0"),
-                total_equity=Decimal("10100000"),
-                daily_return_pct=Decimal("1.0"),
+                equity_krw=Decimal("10100000"),
+                equity_usd=Decimal("1010"),
+                daily_return_krw_pct=Decimal("1.0"),
+                daily_return_usd_pct=Decimal("1.0"),
             ),
-            PaperDailySnapshot(
+            self._p0_snapshot(
                 id=3,
-                account_id=1,
                 snapshot_date=date(2026, 4, 3),
-                cash_krw=Decimal("0"),
-                cash_usd=Decimal("0"),
-                positions_value=Decimal("0"),
-                total_equity=Decimal("9950000"),
-                daily_return_pct=Decimal("-1.49"),
+                equity_krw=Decimal("9950000"),
+                equity_usd=Decimal("995"),
+                daily_return_krw_pct=Decimal("-1.49"),
+                daily_return_usd_pct=Decimal("-1.49"),
             ),
         ]
         snap_scalars = MagicMock()
@@ -1177,21 +1478,38 @@ class TestCalculatePerformance:
 
         perf = await service.calculate_performance(account_id=1)
 
-        assert perf["total_return_pct"] == pytest.approx(10.0)
-        assert perf["realized_pnl"] == pytest.approx(98635.0)
-        assert perf["unrealized_pnl"] == pytest.approx(400000.0)
-        assert perf["total_trades"] == 1
-        assert perf["win_rate"] == pytest.approx(100.0)
-        assert perf["avg_holding_days"] == pytest.approx(5.0)
-        assert perf["max_drawdown_pct"] is not None
-        assert round(perf["max_drawdown_pct"], 2) == pytest.approx(1.49)
-        assert perf["sharpe_ratio"] is not None
-        assert perf["best_trade"] is not None
-        assert perf["best_trade"]["symbol"] == "A"
-        assert perf["worst_trade"] is not None
+        # No combined figure exists at the top level.
+        assert set(perf) == {"currencies", "unsupported_currencies"}
+        assert set(perf["currencies"]) == {"KRW", "USD"}
+
+        krw = perf["currencies"]["KRW"]
+        # 5,000,000 cash + 6,000,000 positions vs 10,000,000 opening capital.
+        assert krw["total_equity"] == pytest.approx(11000000.0)
+        assert krw["total_return_pct"] == pytest.approx(10.0)
+        assert krw["realized_pnl"] == pytest.approx(98635.0)
+        assert krw["unrealized_pnl"] == pytest.approx(500000.0)
+        assert krw["total_trades"] == 1
+        assert krw["win_rate"] == pytest.approx(100.0)
+        assert krw["avg_holding_days"] == pytest.approx(5.0)
+        assert round(krw["max_drawdown_pct"], 2) == pytest.approx(1.49)
+        assert krw["sharpe_ratio"] is not None
+        assert krw["best_trade"]["symbol"] == "A"
+        assert krw["worst_trade"]["symbol"] == "A"
+        assert krw["snapshots_used"] == 3
+
+        usd = perf["currencies"]["USD"]
+        # 400 cash + 600 positions vs 1,000 opening capital.
+        assert usd["total_equity"] == pytest.approx(1000.0)
+        assert usd["total_return_pct"] == pytest.approx(0.0)
+        assert usd["realized_pnl"] == pytest.approx(-20.0)
+        assert usd["unrealized_pnl"] == pytest.approx(-100.0)
+        assert usd["total_trades"] == 1
+        assert usd["win_rate"] == pytest.approx(0.0)
+        assert usd["best_trade"]["symbol"] == "AAPL"
+        assert perf["unsupported_currencies"] == {}
 
     @pytest.mark.asyncio
-    async def test_performance_no_trades_returns_zero_rates(
+    async def test_performance_skips_pre_p0_mixed_snapshots(
         self, service, mock_db, monkeypatch
     ):
         account = PaperAccount(
@@ -1203,9 +1521,100 @@ class TestCalculatePerformance:
             is_active=True,
         )
         monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
-        monkeypatch.setattr(
-            service, "_evaluate_positions_value", AsyncMock(return_value=Decimal("0"))
+        monkeypatch.setattr(service, "get_positions", AsyncMock(return_value=[]))
+
+        legacy = [
+            PaperDailySnapshot(
+                id=1,
+                account_id=1,
+                snapshot_date=date(2026, 4, 1),
+                cash_krw=Decimal("0"),
+                cash_usd=Decimal("0"),
+                positions_value=Decimal("0"),
+                total_equity=Decimal("10000000"),
+                daily_return_pct=Decimal("1.0"),
+            ),
+            PaperDailySnapshot(
+                id=2,
+                account_id=1,
+                snapshot_date=date(2026, 4, 2),
+                cash_krw=Decimal("0"),
+                cash_usd=Decimal("0"),
+                positions_value=Decimal("0"),
+                total_equity=Decimal("5000000"),
+                daily_return_pct=Decimal("-50.0"),
+            ),
+        ]
+        empty_trades = MagicMock()
+        empty_trades.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
+        snap_result = MagicMock()
+        snap_result.scalars.return_value = MagicMock(all=MagicMock(return_value=legacy))
+        mock_db.execute = AsyncMock(side_effect=[empty_trades, snap_result])
+
+        krw = (await service.calculate_performance(account_id=1))["currencies"]["KRW"]
+
+        # The legacy rows carry a 50% mixed-currency drawdown; none of it may
+        # leak into a per-currency metric.
+        assert krw["snapshots_used"] == 0
+        assert krw["max_drawdown_pct"] is None
+        assert krw["sharpe_ratio"] is None
+
+    @pytest.mark.asyncio
+    async def test_performance_withholds_metrics_for_unvalued_currency(
+        self, service, mock_db, monkeypatch
+    ):
+        account = PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("5000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
         )
+        monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            service,
+            "get_positions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "symbol": "005930",
+                        "instrument_type": "equity_kr",
+                        "currency": "KRW",
+                        "total_invested": Decimal("5000000"),
+                        "evaluation_amount": None,
+                        "unrealized_pnl": None,
+                    }
+                ]
+            ),
+        )
+        empty = MagicMock()
+        empty.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))
+        mock_db.execute = AsyncMock(return_value=empty)
+
+        krw = (await service.calculate_performance(account_id=1))["currencies"]["KRW"]
+
+        assert krw["valuation_complete"] is False
+        assert krw["positions_valued"] == 0
+        assert krw["positions_value"] is None
+        assert krw["total_equity"] is None
+        # Cash-only equity would look like a 50% loss.
+        assert krw["total_return_pct"] is None
+        assert krw["unrealized_pnl"] is None
+
+    @pytest.mark.asyncio
+    async def test_performance_no_trades_returns_zero_rates_per_currency(
+        self, service, mock_db, monkeypatch
+    ):
+        account = PaperAccount(
+            id=1,
+            name="A",
+            initial_capital=Decimal("10000000"),
+            cash_krw=Decimal("10000000"),
+            cash_usd=Decimal("0"),
+            is_active=True,
+        )
+        monkeypatch.setattr(service, "get_account", AsyncMock(return_value=account))
         monkeypatch.setattr(service, "get_positions", AsyncMock(return_value=[]))
 
         empty = MagicMock()
@@ -1213,16 +1622,19 @@ class TestCalculatePerformance:
         mock_db.execute = AsyncMock(return_value=empty)
 
         perf = await service.calculate_performance(account_id=1)
-        assert perf["total_return_pct"] == pytest.approx(0.0)
-        assert perf["realized_pnl"] == pytest.approx(0.0)
-        assert perf["unrealized_pnl"] == pytest.approx(0.0)
-        assert perf["total_trades"] == 0
-        assert perf["win_rate"] == pytest.approx(0.0)
-        assert perf["avg_holding_days"] == pytest.approx(0.0)
-        assert perf["max_drawdown_pct"] is None
-        assert perf["sharpe_ratio"] is None
-        assert perf["best_trade"] is None
-        assert perf["worst_trade"] is None
+        for currency in ("KRW", "USD"):
+            metrics = perf["currencies"][currency]
+            # An unfunded currency reports 0%, never a division by zero.
+            assert metrics["total_return_pct"] == pytest.approx(0.0)
+            assert metrics["realized_pnl"] == pytest.approx(0.0)
+            assert metrics["unrealized_pnl"] == pytest.approx(0.0)
+            assert metrics["total_trades"] == 0
+            assert metrics["win_rate"] == pytest.approx(0.0)
+            assert metrics["avg_holding_days"] == pytest.approx(0.0)
+            assert metrics["max_drawdown_pct"] is None
+            assert metrics["sharpe_ratio"] is None
+            assert metrics["best_trade"] is None
+            assert metrics["worst_trade"] is None
 
     @pytest.mark.asyncio
     async def test_performance_missing_account_raises(self, service, monkeypatch):

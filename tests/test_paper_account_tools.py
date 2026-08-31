@@ -46,6 +46,25 @@ def _make_account(**overrides) -> PaperAccount:
     return PaperAccount(**defaults)
 
 
+def _empty_currency_summary() -> dict[str, object]:
+    return {
+        "positions_count": 0,
+        "currencies": {
+            "KRW": {
+                "currency": "KRW",
+                "total_evaluated": Decimal("0"),
+                "total_pnl_pct": Decimal("0"),
+            },
+            "USD": {
+                "currency": "USD",
+                "total_evaluated": Decimal("0"),
+                "total_pnl_pct": Decimal("0"),
+            },
+        },
+        "unsupported_currencies": {},
+    }
+
+
 def test_serialize_account_basic_fields() -> None:
     acc = _make_account()
     out = _serialize_account(acc)
@@ -56,36 +75,45 @@ def test_serialize_account_basic_fields() -> None:
     assert out["cash_usd"] == pytest.approx(0.0)
     assert out["strategy_name"] is None
     assert out["created_at"] == "2026-04-13T10:00:00+00:00"
-    # Summary fields absent when not provided
     assert "positions_count" not in out
-    assert "total_evaluated_krw" not in out
-    assert "total_pnl_pct" not in out
+    assert "currencies" not in out
+    assert "unsupported_currencies" not in out
+    assert "summary_error" not in out
 
 
-def test_serialize_account_with_summary() -> None:
+def test_serialize_account_with_currency_safe_summary() -> None:
     acc = _make_account()
     out = _serialize_account(
         acc,
-        positions_count=3,
-        total_evaluated=Decimal("98500000"),
-        total_pnl_pct=Decimal("-1.50"),
+        summary={
+            "positions_count": 3,
+            "currencies": {
+                "KRW": {
+                    "currency": "KRW",
+                    "total_evaluated": Decimal("98500000"),
+                    "total_pnl_pct": Decimal("-1.50"),
+                },
+                "USD": {
+                    "currency": "USD",
+                    "total_evaluated": Decimal("5100"),
+                    "total_pnl_pct": Decimal("2.00"),
+                },
+            },
+            "unsupported_currencies": {},
+        },
     )
     assert out["positions_count"] == 3
-    assert out["total_evaluated_krw"] == pytest.approx(98_500_000.0)
-    assert out["total_pnl_pct"] == pytest.approx(-1.5)
+    assert out["currencies"]["KRW"]["total_evaluated"] == pytest.approx(98_500_000)
+    assert out["currencies"]["USD"]["total_evaluated"] == pytest.approx(5_100)
+    assert out["unsupported_currencies"] == {}
 
 
-def test_serialize_account_none_totals_become_null() -> None:
+def test_serialize_account_reports_unavailable_summary_without_false_zero() -> None:
     acc = _make_account()
-    out = _serialize_account(
-        acc,
-        positions_count=0,
-        total_evaluated=None,
-        total_pnl_pct=None,
-    )
-    assert out["positions_count"] == 0
-    assert out["total_evaluated_krw"] is None
-    assert out["total_pnl_pct"] is None
+    out = _serialize_account(acc, summary_error="SUMMARY_UNAVAILABLE")
+    assert out["summary_error"] == "SUMMARY_UNAVAILABLE"
+    assert "positions_count" not in out
+    assert "currencies" not in out
 
 
 class _SessionCtx:
@@ -178,17 +206,7 @@ async def test_list_paper_accounts_with_strategy_filter(monkeypatch) -> None:
     ) as svc_cls:
         svc = svc_cls.return_value
         svc.list_accounts = AsyncMock(side_effect=_list)
-        svc.get_portfolio_summary = AsyncMock(
-            return_value={
-                "total_invested": Decimal("0"),
-                "total_evaluated": Decimal("100000000"),
-                "total_pnl": Decimal("0"),
-                "total_pnl_pct": Decimal("0.00"),
-                "cash_krw": acc.cash_krw,
-                "cash_usd": acc.cash_usd,
-                "positions_count": 0,
-            }
-        )
+        svc.get_portfolio_summary = AsyncMock(return_value=_empty_currency_summary())
 
         tools = build_tools()
         result = await tools["list_paper_accounts"](strategy_name="momentum")
@@ -231,22 +249,36 @@ async def test_list_paper_accounts_returns_enriched(monkeypatch) -> None:
 
     summaries = {
         1: {
-            "total_invested": Decimal("0"),
-            "total_evaluated": Decimal("98500000"),
-            "total_pnl": Decimal("-1500000"),
-            "total_pnl_pct": Decimal("-1.50"),
-            "cash_krw": acc1.cash_krw,
-            "cash_usd": acc1.cash_usd,
             "positions_count": 3,
+            "currencies": {
+                "KRW": {
+                    "currency": "KRW",
+                    "total_evaluated": Decimal("98500000"),
+                    "total_pnl_pct": Decimal("-1.50"),
+                },
+                "USD": {
+                    "currency": "USD",
+                    "total_evaluated": Decimal("0"),
+                    "total_pnl_pct": Decimal("0"),
+                },
+            },
+            "unsupported_currencies": {},
         },
         2: {
-            "total_invested": Decimal("0"),
-            "total_evaluated": Decimal("5100"),
-            "total_pnl": Decimal("100"),
-            "total_pnl_pct": Decimal("2.00"),
-            "cash_krw": acc2.cash_krw,
-            "cash_usd": acc2.cash_usd,
             "positions_count": 1,
+            "currencies": {
+                "KRW": {
+                    "currency": "KRW",
+                    "total_evaluated": Decimal("0"),
+                    "total_pnl_pct": Decimal("0"),
+                },
+                "USD": {
+                    "currency": "USD",
+                    "total_evaluated": Decimal("5100"),
+                    "total_pnl_pct": Decimal("2.00"),
+                },
+            },
+            "unsupported_currencies": {},
         },
     }
 
@@ -268,11 +300,12 @@ async def test_list_paper_accounts_returns_enriched(monkeypatch) -> None:
     first = result["accounts"][0]
     assert first["id"] == 1
     assert first["positions_count"] == 3
-    assert first["total_evaluated_krw"] == pytest.approx(98_500_000.0)
-    assert first["total_pnl_pct"] == pytest.approx(-1.5)
+    assert first["currencies"]["KRW"]["total_evaluated"] == pytest.approx(98_500_000.0)
+    assert first["currencies"]["KRW"]["total_pnl_pct"] == pytest.approx(-1.5)
     second = result["accounts"][1]
     assert second["id"] == 2
     assert second["cash_usd"] == pytest.approx(5000.0)
+    assert second["currencies"]["USD"]["total_evaluated"] == pytest.approx(5100.0)
 
 
 @pytest.mark.asyncio
@@ -397,17 +430,7 @@ async def test_paper_account_full_flow(monkeypatch) -> None:
         svc = svc_cls.return_value
         svc.create_account = AsyncMock(return_value=created)
         svc.list_accounts = AsyncMock(return_value=[created])
-        svc.get_portfolio_summary = AsyncMock(
-            return_value={
-                "total_invested": Decimal("0"),
-                "total_evaluated": Decimal("100000000"),
-                "total_pnl": Decimal("0"),
-                "total_pnl_pct": Decimal("0.00"),
-                "cash_krw": created.cash_krw,
-                "cash_usd": created.cash_usd,
-                "positions_count": 0,
-            }
-        )
+        svc.get_portfolio_summary = AsyncMock(return_value=_empty_currency_summary())
         svc.get_account_by_name = AsyncMock(return_value=created)
         svc.reset_account = AsyncMock(return_value=after_reset)
         svc.delete_account = AsyncMock(return_value=True)

@@ -49,6 +49,19 @@ def _utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
 
+#: 추적 id의 저장 상한. 초과값을 자르면 cycle join identity가 바뀌므로 거절한다.
+_CYCLE_TRACE_MAX = 64
+
+
+def _normalized_cycle_trace_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    trace = value.strip()
+    if not trace or len(trace) > _CYCLE_TRACE_MAX:
+        raise RecommendationValidationError("cycle_trace_id_invalid")
+    return trace
+
+
 class AIRecommendationService:
     MAX_LIMIT = 100
     PAPER_EXECUTION_LEASE = timedelta(minutes=5)
@@ -59,10 +72,19 @@ class AIRecommendationService:
         session: AsyncSession,
         *,
         clock: Callable[[], datetime] = _utc_now,
+        cycle_trace_id: str | None = None,
     ) -> None:
+        """``cycle_trace_id``는 이 writer가 만드는 추천의 출처 표시다.
+
+        추천 cycle이 owner 하나를 돌 때마다 그 cycle의 추적 id를 넣어 만들면,
+        이 서비스로 저장되는 추천마다 같은 값이 찍힌다. cycle 밖에서 쓰는
+        호출자는 넣지 않으며 그때 추천의 추적 id는 NULL로 남는다.
+        """
+
         self._session = session
         self._repository = AIRecommendationRepository(session)
         self._clock = clock
+        self._cycle_trace_id = _normalized_cycle_trace_id(cycle_trace_id)
 
     async def create_recommendation(
         self,
@@ -78,6 +100,7 @@ class AIRecommendationService:
             raise RecommendationValidationError("owner_user_id_invalid")
         row = AIRecommendation(
             owner_user_id=owner_id,
+            cycle_trace_id=self._cycle_trace_id,
             action=draft.action.value,
             decision=RecommendationDecision.PENDING.value,
             market=draft.market,

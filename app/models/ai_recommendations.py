@@ -136,6 +136,10 @@ class AIRecommendation(Base):
             "AND length(btrim(paper_execution_error)) > 0)",
             name="paper_execution_coherent",
         ),
+        CheckConstraint(
+            "cycle_trace_id IS NULL OR length(btrim(cycle_trace_id)) > 0",
+            name="cycle_trace_nonempty",
+        ),
         ForeignKeyConstraint(
             ["owner_user_id", "paper_order_id"],
             [
@@ -157,6 +161,12 @@ class AIRecommendation(Base):
             "id",
             postgresql_ops={"created_at": "DESC"},
         ),
+        Index(
+            "ix_ai_recommendations_owner_cycle_trace",
+            "owner_user_id",
+            "cycle_trace_id",
+            postgresql_where=text("cycle_trace_id IS NOT NULL"),
+        ),
         {"schema": "review"},
     )
 
@@ -170,6 +180,10 @@ class AIRecommendation(Base):
         primary_key=True,
         default=lambda: f"rec-{uuid.uuid4()}",
     )
+    #: 이 추천을 만든 추천 cycle의 추적 id. cycle 원장·PAPER 실행 원장과 같은
+    #: 값으로 이어진다. 감사 원장 쓰기 실패가 추천을 무효화할 수 없도록 외래키를
+    #: 두지 않으며, cycle 밖에서 만들어진 추천은 NULL로 남는다.
+    cycle_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     decision: Mapped[str] = mapped_column(
         Text,

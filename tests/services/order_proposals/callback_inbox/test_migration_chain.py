@@ -104,6 +104,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "kasset_ai_runtime_config",
     "kasset_shadow_daily_high_watermarks",
     "kasset_shadow_loss_locks",
+    "review.kasset_paper_execution_events",
     "review.kasset_automation_cycle_events",
     "review.telegram_callback_recovery_cursor",
     "review.telegram_callback_inbox",
@@ -176,6 +177,22 @@ async def scratch_database() -> AsyncIterator[str]:
                     text(
                         "ALTER TABLE paper.paper_accounts "
                         "DROP COLUMN initial_capital_usd"
+                    )
+                )
+                # The P0 currency migration is also later than this boundary;
+                # current metadata carries its per-currency snapshot columns and
+                # the relaxed nullability of the legacy mixed-currency columns.
+                await connection.execute(
+                    text(
+                        "ALTER TABLE paper.paper_daily_snapshots "
+                        "DROP COLUMN equity_krw, "
+                        "DROP COLUMN equity_usd, "
+                        "DROP COLUMN daily_return_krw_pct, "
+                        "DROP COLUMN daily_return_usd_pct, "
+                        "DROP COLUMN valuation_complete_krw, "
+                        "DROP COLUMN valuation_complete_usd, "
+                        "ALTER COLUMN positions_value SET NOT NULL, "
+                        "ALTER COLUMN total_equity SET NOT NULL"
                     )
                 )
                 # The KAsset multi-user migration adds these case-insensitive

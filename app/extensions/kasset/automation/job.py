@@ -50,8 +50,52 @@ from app.models.ai_recommendations import (
     RecommendationExecutionStatus,
 )
 from app.services.ai_recommendations.service import AIRecommendationService
+from app.services.kasset_automation_audit import record_paper_execution_event
 
 logger = logging.getLogger(__name__)
+
+
+#: 실행 원장에 남기는 출처. 무인 sweep과 사람이 누른 승인 실행을 구분한다.
+AUTO_PAPER_EXECUTION_ORIGIN = "AUTO_PAPER"
+APPROVAL_EXECUTION_ORIGIN = "APPROVAL"
+
+
+async def _record_execution_event(
+    *,
+    owner_user_id: int,
+    origin: str,
+    outcome: PaperExecutionOutcome,
+    now: datetime,
+) -> None:
+    """실행 시도 하나를 원장에 남긴다. 원장 실패는 주문 결과를 바꾸지 않는다.
+
+    추천을 특정하지 못한 결과(운용 모드 차단, 후보 없음)는 남기지 않는다. 그런
+    결과는 sweep마다 반복되므로 원장을 무한히 키우고, 특정 추천의 실행 이력을
+    설명해 주지도 않는다.
+    """
+
+    recommendation_id = outcome.recommendation_id
+    if recommendation_id is None:
+        return
+    try:
+        await record_paper_execution_event(
+            owner_user_id=owner_user_id,
+            origin=origin,
+            status=outcome.status,
+            reason=outcome.reason,
+            recommendation_id=recommendation_id,
+            observed_at=now,
+            replayed=outcome.replayed,
+            promotion_bypass_reason=outcome.promotion_bypass_reason,
+        )
+    except Exception:
+        logger.exception(
+            "kasset paper execution audit write failed: owner_user_id=%s "
+            "recommendation_id=%s origin=%s",
+            owner_user_id,
+            recommendation_id,
+            origin,
+        )
 
 
 def _is_reclaimable_execution_claim(
@@ -697,6 +741,12 @@ async def run_paper_automation_once(
                 status="FAILED",
                 reason=f"owner_sweep_failed:{type(exc).__name__}",
             )
+        await _record_execution_event(
+            owner_user_id=owner_id,
+            origin=AUTO_PAPER_EXECUTION_ORIGIN,
+            outcome=outcome,
+            now=current,
+        )
         outcomes.append(
             {
                 "owner_user_id": owner_id,
@@ -736,12 +786,24 @@ async def run_approved_recommendation_once(
             paper_orders=OwnerScopedPaperOrders(now=current),
             db=db,
         )
-        return await consumer.run_once(now=current)
+        outcome = await consumer.run_once(now=current)
+    # 실행 트랜잭션이 끝난 뒤 별도 세션으로 원장을 남긴다. 그래야 원장이 이
+    # 실행의 확정 결과(시도 횟수·주문 id)를 읽고, 원장 실패가 이 반환값을
+    # 바꾸지 못한다.
+    await _record_execution_event(
+        owner_user_id=owner_user_id,
+        origin=APPROVAL_EXECUTION_ORIGIN,
+        outcome=outcome,
+        now=current,
+    )
+    return outcome
 
 
 __all__ = [
     "STALE_QUOTE_BLOCK_REASON",
     "STALE_QUOTE_UNRESOLVED_REASON",
+    "APPROVAL_EXECUTION_ORIGIN",
+    "AUTO_PAPER_EXECUTION_ORIGIN",
     "OwnerScopedPaperOrders",
     "OwnerScopedRecommendationService",
     "RuntimeStateSafetyGate",
