@@ -705,3 +705,148 @@ class KAssetShadowDailyHighWatermark(Base):
     )
 
 
+class KAssetShadowLossLock(Base):
+    """소유자·계좌·시장·범위별 손실 연속 SHADOW 관찰 상태."""
+
+    __tablename__ = "kasset_shadow_loss_locks"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(account_key) <> ''",
+            name="ck_kasset_shadow_loss_lock_account_key_nonempty",
+        ),
+        CheckConstraint(
+            "market IN ('KRX', 'US')",
+            name="ck_kasset_shadow_loss_lock_market_valid",
+        ),
+        CheckConstraint(
+            "lock_scope IN ('GLOBAL', 'SYMBOL')",
+            name="ck_kasset_shadow_loss_lock_scope_valid",
+        ),
+        CheckConstraint(
+            "(lock_scope = 'GLOBAL' AND symbol = '') OR "
+            "(lock_scope = 'SYMBOL' AND btrim(symbol) <> '')",
+            name="ck_kasset_shadow_loss_lock_symbol_scope",
+        ),
+        CheckConstraint(
+            "mode = 'SHADOW'",
+            name="ck_kasset_shadow_loss_lock_mode_shadow",
+        ),
+        CheckConstraint(
+            "status = 'valid'",
+            name="ck_kasset_shadow_loss_lock_status_valid",
+        ),
+        CheckConstraint(
+            "streak_count >= 0 AND loss_limit > 0",
+            name="ck_kasset_shadow_loss_lock_counts_valid",
+        ),
+        CheckConstraint(
+            "("
+            "streak_count = 0 "
+            "AND newest_loss_id IS NULL "
+            "AND newest_loss_transaction_id IS NULL "
+            "AND newest_loss_trade_id IS NULL "
+            "AND newest_loss_at IS NULL "
+            "AND expires_at IS NULL"
+            ") OR ("
+            "streak_count > 0 "
+            "AND newest_loss_id IS NOT NULL "
+            "AND newest_loss_transaction_id IS NOT NULL "
+            "AND newest_loss_trade_id IS NOT NULL "
+            "AND newest_loss_at IS NOT NULL "
+            "AND expires_at IS NOT NULL"
+            ")",
+            name="ck_kasset_shadow_loss_lock_newest_consistent",
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at > newest_loss_at",
+            name="ck_kasset_shadow_loss_lock_expiration_valid",
+        ),
+        CheckConstraint(
+            "buy_locked = ("
+            "streak_count >= loss_limit "
+            "AND expires_at IS NOT NULL "
+            "AND expires_at > evaluated_at"
+            ")",
+            name="ck_kasset_shadow_loss_lock_buy_state_consistent",
+        ),
+        CheckConstraint(
+            "btrim(lock_reason) <> '' "
+            "AND btrim(config_fingerprint) <> '' "
+            "AND btrim(schema_version) <> '' "
+            "AND btrim(evidence_version) <> ''",
+            name="ck_kasset_shadow_loss_lock_metadata_nonempty",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'",
+            name="ck_kasset_shadow_loss_lock_evidence_object",
+        ),
+        Index(
+            "ix_kasset_shadow_loss_lock_owner_expiration",
+            "owner_user_id",
+            "expires_at",
+        ),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    market: Mapped[str] = mapped_column(Text, primary_key=True)
+    lock_scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    streak_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    loss_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    newest_loss_id: Mapped[int | None] = mapped_column(BigInteger)
+    newest_loss_transaction_id: Mapped[str | None] = mapped_column(Text)
+    newest_loss_trade_id: Mapped[str | None] = mapped_column(Text)
+    newest_loss_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    buy_locked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    lock_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_version: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="valid",
+        server_default="valid",
+    )
+    mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="SHADOW",
+        server_default="SHADOW",
+    )
+    evidence: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
