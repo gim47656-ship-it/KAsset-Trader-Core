@@ -44,6 +44,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        VCS_REF: ${VCS_REF:-}
+        GITHUB_SHA: ${VCS_REF:-unknown}
     env_file:
       - *kasset-runtime-env-file
       - .env.nhplug-mock.native

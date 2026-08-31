@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
@@ -17,6 +18,11 @@ from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.ai.base import AiProviderUnavailable
 from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
+from app.extensions.kasset.ai.runtime_config import (
+    AiLane,
+    build_ai_availability,
+    build_ai_route_catalog,
+)
 from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.ai_shadow import (
     AiShadowObservation,
@@ -74,6 +80,12 @@ from app.services.symbol_news_store import load_symbol_news
 
 _RECOMMENDATION_LIMIT = 5
 _OWNER_COOLDOWN = timedelta(hours=1)
+
+#: 검토 lane에 쓸 수 있는 route가 없어 cycle이 AI 없이 도는 상태의 사유.
+#: 정책 자체는 정상이므로 ``AiAvailability``의 사유 코드와 층을 구분한다.
+_AI_REVIEW_UNAVAILABLE = "review_routes_unavailable"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -957,10 +969,19 @@ async def run_ai_recommendation_cycle_once(
     *,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    """Operator/task entrypoint; generates review rows but never calls a broker."""
+    """Operator/task entrypoint; generates review rows but never calls a broker.
+
+    TaskIQ는 반환값을 로그로 남기지 않는다. 그래서 이 함수가 직접 cycle의 시작·
+    owner별 결과·종료를 남긴다. 그러지 않으면 "스케줄러가 태스크를 보냈다"는
+    사실만 남고 왜 추천이 하나도 나오지 않았는지 운영 로그로 알 수 없다.
+    """
 
     current = _aware_utc(now or datetime.now(UTC))
     if not settings.KASSET_MARKET_EVENTS_ENABLED:
+        logger.info(
+            "kasset AI recommendation cycle disabled: "
+            "KASSET_MARKET_EVENTS_ENABLED=false"
+        )
         return {"enabled": False, "owners": [], "candidateCount": 0}
     from app.extensions.kasset.ai.factory import build_model_router
     from app.services.ai_runtime_config import get_ai_runtime_snapshot
@@ -980,12 +1001,39 @@ async def run_ai_recommendation_cycle_once(
             ).all()
         )
 
-    try:
-        ai_router: OpenAiModelRouter | None = build_model_router(snapshot=snapshot)
-    except AiProviderUnavailable:
+    # 같은 snapshot에서 유효 가용성을 계산한다. catalog는 설정만 읽는 순수
+    # 함수이므로 DB를 다시 건드리지 않는다(cycle당 정책 조회는 여전히 1회).
+    availability = build_ai_availability(snapshot, build_ai_route_catalog())
+
+    # 이 cycle의 첫 분석은 candidate_review -> terra다. 다른 review lane만
+    # 살아 있으면 router 객체는 만들 수 있어도 실제 후보를 한 건도 처리하지 못한다.
+    # 따라서 cycle 가용성은 시작 lane을 기준으로 보고한다.
+    if availability.lane_usable(AiLane.REVIEW_TERRA):
+        try:
+            ai_router: OpenAiModelRouter | None = build_model_router(snapshot=snapshot)
+        except AiProviderUnavailable:
+            ai_router = None
+    else:
         ai_router = None
+    ai_unavailable_reason = (
+        None
+        if ai_router is not None
+        else availability.unavailable_reason or _AI_REVIEW_UNAVAILABLE
+    )
+
+    logger.info(
+        "kasset AI recommendation cycle start: owners=%d ai_available=%s "
+        "ai_policy_source=%s ai_usable_lanes=%s ai_unavailable_reason=%s",
+        len(owner_ids),
+        ai_router is not None,
+        availability.source,
+        sorted(lane.value for lane in availability.usable_lanes),
+        ai_unavailable_reason,
+    )
+
     owners: list[dict[str, object]] = []
     total_candidates = 0
+    total_recommendations = 0
     for raw_owner_id in owner_ids:
         owner_id = int(raw_owner_id)
         try:
@@ -997,6 +1045,12 @@ async def run_ai_recommendation_cycle_once(
                     live_candidates_cache=live_candidates_cache,
                 ).run_owner(owner_id)
         except Exception as exc:
+            # 스택 없이 errorClass만 담아 돌려주면 TaskIQ가 그 dict를 버리는
+            # 순간 원인이 사라진다. 원장에는 요약을, 로그에는 스택을 남긴다.
+            logger.exception(
+                "kasset AI recommendation cycle owner failed: owner_user_id=%s",
+                owner_id,
+            )
             result = {
                 "ownerUserId": owner_id,
                 "candidateCount": 0,
@@ -1004,13 +1058,38 @@ async def run_ai_recommendation_cycle_once(
                 "skipped": "owner_cycle_failed",
                 "errorClass": type(exc).__name__,
             }
+        recommendation_ids = result.get("recommendationIds")
+        produced = (
+            len(recommendation_ids) if isinstance(recommendation_ids, list) else 0
+        )
         total_candidates += int(result.get("candidateCount", 0))
+        total_recommendations += produced
+        logger.info(
+            "kasset AI recommendation cycle owner=%s skipped=%s candidates=%s "
+            "reviewed=%s recommendations=%d",
+            owner_id,
+            result.get("skipped"),
+            result.get("candidateCount", 0),
+            result.get("aiReviewedCount"),
+            produced,
+        )
         owners.append(result)
+
+    logger.info(
+        "kasset AI recommendation cycle done: owners=%d candidates=%d "
+        "recommendations=%d",
+        len(owners),
+        total_candidates,
+        total_recommendations,
+    )
     return {
         "enabled": True,
         "owners": owners,
         "candidateCount": total_candidates,
+        "recommendationCount": total_recommendations,
         "aiAvailable": ai_router is not None,
+        "aiPolicySource": availability.source,
+        "aiUnavailableReason": ai_unavailable_reason,
     }
 
 

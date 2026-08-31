@@ -23,11 +23,13 @@ from app.extensions.kasset.ai.runtime_config import (
     LANE_LABELS,
     LANE_ROUTE_IDS,
     REASON_LABELS,
+    AiAvailability,
     AiLane,
     AiRouteCatalogEntry,
     AiRouteId,
     AiRoutePolicyError,
     AiRuntimeSnapshot,
+    build_ai_availability,
     build_ai_route_catalog,
     default_snapshot,
     fail_closed_snapshot,
@@ -103,6 +105,20 @@ async def get_ai_runtime_snapshot(db: AsyncSession) -> AiRuntimeSnapshot:
         updated_by_user_id=row.updated_by_user_id,
         source="persisted",
         lanes=freeze_route_policy(lanes),
+    )
+
+
+async def get_ai_availability(db: AsyncSession) -> AiAvailability:
+    """앱과 ``/system/status``가 쓰는 유효 AI 가용성.
+
+    정책 singleton 한 건(PK 조회)과 설정 catalog만 읽는다. 원장 집계는 하지
+    않으므로 앱이 자주 호출하는 상태 엔드포인트에 부담을 주지 않는다. route별
+    최근 성공 시각은 운영자용 계측이므로 ``build_ai_routes_view``에만 둔다.
+    """
+
+    return build_ai_availability(
+        await get_ai_runtime_snapshot(db),
+        build_ai_route_catalog(),
     )
 
 
@@ -317,5 +333,6 @@ __all__ = [
     "AiRoutePolicyRevisionConflict",
     "apply_ai_routes_update",
     "build_ai_routes_view",
+    "get_ai_availability",
     "get_ai_runtime_snapshot",
 ]

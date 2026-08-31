@@ -154,6 +154,11 @@ async def test_get_filters_orders_limits_and_preserves_android_shape(
             created_at=_NOW,
             decided_at=_NOW + timedelta(minutes=1),
         ),
+        _recommendation(
+            "expired-pending",
+            created_at=_NOW - timedelta(days=2),
+            valid_until=_NOW - timedelta(seconds=1),
+        ),
     )
     app = _app(db_session)
 

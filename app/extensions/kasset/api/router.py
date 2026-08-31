@@ -47,7 +47,6 @@ from app.extensions.kasset.api.orderbook_store import (
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
-    AiStatus,
     AmendRequest,
     Balance,
     FillsResponse,
@@ -67,7 +66,7 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.api.schemas import (
-    AiRelayStatus,
+    AiAvailabilityStatus,
     Broker,
     BrokersResponse,
     BrokerVerifyResponse,
@@ -122,6 +121,7 @@ from app.schemas.ai_recommendations import (
     PaperOrderResult,
     PromotionBypassRequest,
 )
+from app.services.ai_runtime_config import get_ai_availability
 from app.services.brokers.toss.market_calendar import (
     TossKrMarketDay,
     TossSessionWindow,
@@ -483,11 +483,7 @@ async def _build_system_status(
             )
             for broker in registered
         ],
-        ai_relay=AiRelayStatus(
-            configured=False,
-            reachable=False,
-            message="AI Relay가 연결되지 않았습니다.",
-        ),
+        ai=await _ai_availability_status(db),
     )
 
 
@@ -1106,14 +1102,28 @@ async def update_ai_daily_routine(
     )
 
 
-@router.get("/ai/status", response_model=AiStatus)
+@router.get("/ai/status", response_model=AiAvailabilityStatus)
 async def ai_status(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
-) -> AiStatus:
-    return AiStatus(
-        relay_configured=False,
-        reachable=False,
-        message="AI 릴레이가 연결되지 않았습니다.",
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AiAvailabilityStatus:
+    return await _ai_availability_status(db)
+
+
+async def _ai_availability_status(db: AsyncSession) -> AiAvailabilityStatus:
+    """저장된 route 정책과 서버 설정에서 유효 AI 가용성을 만든다.
+
+    선택 사항인 MCP relay가 없어도 direct API나 OpenRouter가 설정되어 있으면
+    사용 가능이다. 쓸 수 있는 경로가 없으면 fail closed로 사용 불가와 그 이유를
+    한국어로 그대로 전달한다. Secret과 내부 URL은 포함하지 않는다.
+    """
+
+    availability = await get_ai_availability(db)
+    return AiAvailabilityStatus(
+        configured=availability.configured,
+        available=availability.available,
+        unavailable_reason=availability.unavailable_reason,
+        message=availability.message,
     )
 
 

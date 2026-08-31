@@ -208,10 +208,3 @@ class KillSwitchRequest(AndroidWireModel):
 
 class TradingModeRequest(AndroidWireModel):
     mode: str
-
-
-class AiStatus(AndroidWireModel):
-    relay_configured: bool
-    reachable: bool
-    last_checked_at: str | None = None
-    message: str

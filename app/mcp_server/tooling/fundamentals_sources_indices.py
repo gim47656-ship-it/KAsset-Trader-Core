@@ -667,18 +667,47 @@ def _select_completed_us_session_rows(
     )
 
 
+def _completed_session_bar_as_of(
+    frame: pd.DataFrame,
+    *,
+    completed_as_of: datetime.datetime | None,
+) -> datetime.datetime | None:
+    """고른 최신 봉이 완료 정규장 봉이면 그 세션 종료 시각을 돌려준다.
+
+    진행 중 세션이라도 공급자가 당일 봉을 아직 만들지 않았으면 최신 봉은 직전
+    완료 정규장 봉이다. 그때만 기준 시각을 증명할 수 있다. 당일 형성 중인 봉이면
+    증명할 시각이 없으므로 ``None``이고, 없는 근거를 만들지 않는다.
+    """
+    if completed_as_of is None or frame.empty:
+        return None
+    if _batch_session_date(frame.index[-1]) != (
+        completed_as_of.astimezone(_US_EASTERN).date()
+    ):
+        return None
+    return completed_as_of.astimezone(datetime.UTC)
+
+
 async def _fetch_indices_us_current_batch(
     symbols: list[str],
     *,
     completed_as_of: datetime.datetime | None = None,
     completed_symbols: Collection[str] | None = None,
+    pin_completed_session: bool = True,
 ) -> list[dict[str, Any]]:
     """Fetch multiple US index rows through one daily download.
 
-    완료 세션 대상은 공통 선택기로 target 확정 봉과 직전 세션을 고른다. target
+    ``completed_symbols``는 일봉이 US 정규장 세션을 따르는 심볼이다(원자재·금리
+    선물은 CME 세션이라 여기 들어오지 않는다). 그 심볼을 ``pin_completed_session``
+    으로 고정하면 공통 선택기가 target 확정 봉과 직전 세션을 고른다. target
     ``Close``만 비면 Yahoo metadata의 regular end/price/previousClose를 일봉과
     대조해 검증된 종가만 복구한다. 조건이 하나라도 맞지 않으면 unavailable이며
     더 오래된 행을 현재값으로 승격하지 않는다.
+
+    진행 중 세션(``pin_completed_session=False``)은 고정하지 않고 같은 일봉
+    프레임의 최신 두 봉을 쓴다. 현재값·등락·등락률이 한 프레임에서 나오므로
+    실시간 값에 다른 세션의 등락률이 붙지 않는다. 최신 봉이 완료 정규장 봉이면
+    그 세션 종료 시각을 기준 시각으로 싣고, 당일 형성 중인 봉이면 증명할 시각이
+    없으므로 비운다.
     """
 
     normalized_symbols = [symbol.strip().upper() for symbol in symbols]
@@ -729,30 +758,40 @@ async def _fetch_indices_us_current_batch(
         str,
         tuple[pd.DataFrame, datetime.datetime | None],
     ] = {}
+    # 완료봉으로 고정한 심볼. metadata 복구와 예비 티커 규칙이 이 판정에 달려 있다.
+    pinned_symbols: set[str] = set()
     for symbol, _name, yf_ticker in definitions:
-        use_completed_session = completed_date is not None and (
+        follows_us_regular_session = completed_date is not None and (
             completed_symbol_set is None or symbol in completed_symbol_set
         )
         ticker_frame = _batch_ticker_frame(frame, yf_ticker)
-        if use_completed_session:
+        if follows_us_regular_session and pin_completed_session:
             assert completed_as_of is not None
+            pinned_symbols.add(symbol)
             selected_by_symbol[symbol] = _select_completed_us_session_rows(
                 ticker_frame,
                 completed_as_of=completed_as_of,
             )
         elif "close" in ticker_frame.columns:
+            live_rows = (
+                ticker_frame.loc[ticker_frame["close"].notna()].sort_index().tail(2)
+            )
             selected_by_symbol[symbol] = (
-                ticker_frame.loc[ticker_frame["close"].notna()].sort_index().tail(2),
-                None,
+                live_rows,
+                _completed_session_bar_as_of(
+                    live_rows,
+                    completed_as_of=completed_as_of,
+                )
+                if follows_us_regular_session
+                else None,
             )
         else:
             selected_by_symbol[symbol] = (pd.DataFrame(), None)
-    if completed_as_of is not None:
+    if completed_as_of is not None and pinned_symbols:
         missing_completed = [
             (symbol, yf_ticker)
             for symbol, _name, yf_ticker in definitions
-            if (completed_symbol_set is None or symbol in completed_symbol_set)
-            and selected_by_symbol[symbol][0].empty
+            if symbol in pinned_symbols and selected_by_symbol[symbol][0].empty
         ]
 
         async def recover(yf_ticker: str) -> pd.DataFrame:
@@ -783,16 +822,13 @@ async def _fetch_indices_us_current_batch(
                 )
 
     # 주 티커가 값을 못 준 심볼 중 예비 티커를 선언한 것만 한 번 더 시도한다.
-    # 완료 세션 대상은 metadata 복구 규칙이 따로 있으므로 건드리지 않는다.
+    # 완료봉으로 고정한 심볼은 metadata 복구 규칙이 따로 있으므로 건드리지 않는다.
     fallback_targets = [
         (symbol, name, _INDEX_META[symbol]["yf_fallback_ticker"])
         for symbol, name, _yf_ticker in definitions
         if selected_by_symbol[symbol][0].empty
         and "yf_fallback_ticker" in _INDEX_META.get(symbol, {})
-        and not (
-            completed_date is not None
-            and (completed_symbol_set is None or symbol in completed_symbol_set)
-        )
+        and symbol not in pinned_symbols
     ]
     fallback_rows: dict[str, dict[str, Any]] = {}
     if fallback_targets:
@@ -813,9 +849,6 @@ async def _fetch_indices_us_current_batch(
 
     rows: list[dict[str, Any]] = []
     for symbol, name, _yf_ticker in definitions:
-        use_completed_session = completed_date is not None and (
-            completed_symbol_set is None or symbol in completed_symbol_set
-        )
         valid, selected_as_of = selected_by_symbol[symbol]
         if valid.empty:
             fallback_row = fallback_rows.get(symbol)
@@ -868,14 +901,15 @@ async def _fetch_indices_us_current_batch(
                     if symbol in evidence_by_symbol
                     else "yfinance"
                 ),
+                # 기준 시각과 완료봉 표기는 고른 봉이 완료 정규장 봉임을
+                # 증명했을 때만 붙는다. 진행 중 세션의 형성 중인 봉에는 증명할
+                # 시각이 없으므로 둘 다 비운다.
                 **(
-                    {"quote_asof": selected_as_of.isoformat()}
-                    if use_completed_session and selected_as_of is not None
-                    else {}
-                ),
-                **(
-                    {"data_state": DATA_STATE_MARKET_CLOSED}
-                    if use_completed_session
+                    {
+                        "quote_asof": selected_as_of.isoformat(),
+                        "data_state": DATA_STATE_MARKET_CLOSED,
+                    }
+                    if selected_as_of is not None
                     else {}
                 ),
                 **({"unavailable": True} if current is None else {}),

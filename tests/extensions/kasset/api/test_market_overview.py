@@ -253,10 +253,10 @@ def _fx_snapshot() -> OpenErApiUsdSnapshot:
 def _stub_sessions(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    kr: str = "REGULAR",
-    us: str = "REGULAR",
+    kr: str | None = "REGULAR",
+    us: str | None = "REGULAR",
 ) -> None:
-    async def resolve(market: str, *, moment: datetime | None = None) -> str:
+    async def resolve(market: str, *, moment: datetime | None = None) -> str | None:
         del moment
         return us if market == "US" else kr
 
@@ -652,6 +652,133 @@ def test_us_completed_selector_requires_the_exact_previous_session() -> None:
     assert selected_as_of is None
 
 
+def _us_batch_frame(dates: list[str], closes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Open": [close - 5.0 for close in closes],
+            "High": [close + 10.0 for close in closes],
+            "Low": [close - 10.0 for close in closes],
+            "Close": closes,
+            "Volume": [1000.0] * len(closes),
+        },
+        index=pd.to_datetime(dates),
+    )
+
+
+def _stub_us_download(monkeypatch: pytest.MonkeyPatch, frame: pd.DataFrame) -> None:
+    @contextmanager
+    def traced_session() -> Iterator[object]:
+        yield object()
+
+    monkeypatch.setattr(index_sources.yf, "download", lambda *_a, **_kw: frame)
+    monkeypatch.setattr(index_sources, "yfinance_tracing_session", traced_session)
+
+
+@pytest.mark.asyncio
+async def test_day_session_pairs_forming_value_and_rate_from_one_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """진행 중 해외 세션: 현재값과 등락률이 같은 프레임의 두 봉에서 나온다.
+
+    운영 관측(artifact://50)에서는 sessionState=DAY_MARKET인데 값·등락률·기준
+    시각이 직전 완료 정규장(08-28)에 묶여 있었다. 형성 중인 봉이 있으면 그 봉과
+    같은 프레임의 직전 종가만으로 등락을 만들고, 다른 세션 값을 섞지 않는다.
+    """
+    _stub_us_download(
+        monkeypatch,
+        _us_batch_frame(
+            ["2026-08-27", "2026-08-28", "2026-08-31"],
+            [7675.70, 7711.76, 7760.40],
+        ),
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["SPX"],
+        completed_as_of=_US_COMPLETED_END,
+        completed_symbols=("SPX",),
+        pin_completed_session=False,
+    )
+
+    assert rows[0]["current"] == 7760.40
+    assert rows[0]["previous_close"] == 7711.76
+    assert rows[0]["change"] == round(7760.40 - 7711.76, 2)
+    assert rows[0]["change_pct"] == round((7760.40 - 7711.76) / 7711.76 * 100, 2)
+    # 형성 중인 봉에는 증명할 기준 시각이 없다. 직전 완료 세션 종료 시각을
+    # 실시간 값에 붙이지 않는다.
+    assert "quote_asof" not in rows[0]
+    assert "data_state" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_day_session_stamps_the_completed_bar_it_actually_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """공급자가 아직 당일 봉을 만들지 않았으면 고른 봉이 완료 정규장 봉이다."""
+    _stub_us_download(
+        monkeypatch,
+        _us_batch_frame(["2026-08-27", "2026-08-28"], [7675.70, 7711.76]),
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["SPX"],
+        completed_as_of=_US_COMPLETED_END,
+        completed_symbols=("SPX",),
+        pin_completed_session=False,
+    )
+
+    assert rows[0]["current"] == 7711.76
+    assert rows[0]["previous_close"] == 7675.70
+    assert rows[0]["quote_asof"] == "2026-08-28T20:00:00+00:00"
+    assert rows[0]["data_state"] == DATA_STATE_MARKET_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_day_session_leaves_change_null_without_a_same_frame_previous_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """같은 스냅샷의 직전 종가가 없으면 등락을 만들지 않는다."""
+    _stub_us_download(
+        monkeypatch,
+        _us_batch_frame(["2026-08-31"], [7760.40]),
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["SPX"],
+        completed_as_of=_US_COMPLETED_END,
+        completed_symbols=("SPX",),
+        pin_completed_session=False,
+    )
+
+    assert rows[0]["current"] == 7760.40
+    assert rows[0]["previous_close"] is None
+    assert rows[0]["change"] is None
+    assert rows[0]["change_pct"] is None
+    assert "unavailable" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_commodity_bars_never_borrow_the_us_regular_session_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CME 세션 심볼은 US 정규장 종료 시각을 기준 시각으로 쓰지 않는다."""
+    _stub_us_download(
+        monkeypatch,
+        _us_batch_frame(["2026-08-27", "2026-08-28"], [83.40, 84.59]),
+    )
+
+    rows = await index_sources._fetch_indices_us_current_batch(
+        ["WTI"],
+        completed_as_of=_US_COMPLETED_END,
+        completed_symbols=("SPX",),
+        pin_completed_session=False,
+    )
+
+    assert rows[0]["current"] == 84.59
+    assert rows[0]["previous_close"] == 83.40
+    assert "quote_asof" not in rows[0]
+    assert "data_state" not in rows[0]
+
+
 @pytest.mark.asyncio
 async def test_fixed_weekend_overview_and_detail_share_friday_completed_bar(
     monkeypatch: pytest.MonkeyPatch,
@@ -721,11 +848,14 @@ async def test_fixed_weekend_overview_and_detail_share_friday_completed_bar(
         symbols: tuple[str, ...],
         *,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
         assert completed_as_of_by_market == {
             "KRX": _KR_COMPLETED_END,
             "US": _US_COMPLETED_END,
         }
+        # 두 시장 모두 CLOSED이므로 완료봉 고정이 유지된다.
+        assert live_markets == frozenset()
         return {
             "indices": [
                 completed_rows[symbol] for symbol in symbols if symbol in completed_rows
@@ -738,11 +868,13 @@ async def test_fixed_weekend_overview_and_detail_share_friday_completed_bar(
         period: str,
         count: int,
         completed_as_of_by_market: dict[str, datetime] | None = None,
+        live_markets: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         assert (period, count) == ("day", 5)
         market = "KRX" if symbol == "KOSPI" else "US"
         expected_end = _KR_COMPLETED_END if market == "KRX" else _US_COMPLETED_END
         assert completed_as_of_by_market == {market: expected_end}
+        assert live_markets == frozenset()
         return {
             "indices": [completed_rows[symbol]],
             "history": [
@@ -809,6 +941,166 @@ async def test_fixed_weekend_overview_and_detail_share_friday_completed_bar(
         and Decimal(detail.summary.change_rate) < 0
         for detail in details[1:]
     )
+
+
+@pytest.mark.parametrize(
+    ("kr_session", "us_session", "expected_live"),
+    [
+        ("REGULAR", "DAY_MARKET", frozenset({"KRX", "US"})),
+        ("PRE_MARKET", "CLOSED", frozenset({"KRX"})),
+        ("AFTER_MARKET", "REGULAR", frozenset({"KRX", "US"})),
+        ("CLOSED", "CLOSED", frozenset()),
+        (None, None, frozenset()),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_ended_sessions_pin_the_index_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    kr_session: str | None,
+    us_session: str | None,
+    expected_live: frozenset[str],
+) -> None:
+    """세션 판정이 지수 소스 선택의 유일한 근거다.
+
+    캘린더를 읽지 못한 미확인(None) 상태는 진행 중이라고 단정하지 않고 기존
+    완료봉 고정(=근거 없으면 값을 만들지 않는 경로)을 유지한다.
+    """
+    seen: list[frozenset[str]] = []
+
+    async def capture(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
+    ) -> dict[str, Any]:
+        del symbols, completed_as_of_by_market
+        seen.append(live_markets)
+        return {"indices": []}
+
+    _stub_sessions(monkeypatch, kr=kr_session, us=us_session)
+    monkeypatch.setattr(mod, "handle_get_market_index_current_batch", capture)
+    monkeypatch.setattr(mod, "fetch_multiple_tickers", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
+    )
+    monkeypatch.setattr(mod, "_toss_indicator_points", AsyncMock(return_value={}))
+
+    await mod._build_market_overview()
+
+    assert seen == [expected_live, expected_live]
+
+
+@pytest.mark.parametrize("kr_session", ["REGULAR", "PRE_MARKET", "AFTER_MARKET"])
+@pytest.mark.asyncio
+async def test_live_krx_index_keeps_value_rate_and_asof_from_one_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    kr_session: str,
+) -> None:
+    """진행 중 KRX 세션: 값·등락·등락률·기준 시각이 같은 네이버 스냅샷에서 온다.
+
+    운영 재현(artifact://50): sessionState=REGULAR인데 asOf가 2026-08-28,
+    changeRate가 그 완료 세션 값이었다. 세션 표기만 현재로 바뀐 스냅샷을 다시
+    만들지 않는다.
+    """
+    live_rows = {
+        "KOSPI": {
+            "symbol": "KOSPI",
+            "current": 6842.10,
+            "change": 53.22,
+            "change_pct": 0.78,
+            "quote_asof": "2026-08-31T09:31:00+09:00",
+            "data_state": DATA_STATE_FRESH,
+            "source": "naver",
+        },
+        "KOSDAQ": {
+            "symbol": "KOSDAQ",
+            "current": 841.05,
+            "change": 2.64,
+            "change_pct": 0.31,
+            "quote_asof": "2026-08-31T09:31:00+09:00",
+            "data_state": DATA_STATE_FRESH,
+            "source": "naver",
+        },
+    }
+
+    async def live_batch(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
+    ) -> dict[str, Any]:
+        del completed_as_of_by_market
+        assert "KRX" in live_markets
+        return {
+            "indices": [live_rows[symbol] for symbol in symbols if symbol in live_rows]
+        }
+
+    _stub_sessions(monkeypatch, kr=kr_session, us="CLOSED")
+    monkeypatch.setattr(mod, "handle_get_market_index_current_batch", live_batch)
+    monkeypatch.setattr(mod, "fetch_multiple_tickers", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
+    )
+    monkeypatch.setattr(mod, "_toss_indicator_points", AsyncMock(return_value={}))
+
+    overview = await mod._build_market_overview()
+    kospi = next(item for item in overview.indices if item.symbol == "KOSPI")
+
+    assert (kospi.price, kospi.change_amount, kospi.change_rate) == (
+        "6842.1",
+        "53.22",
+        "0.78",
+    )
+    assert kospi.as_of == "2026-08-31T00:31:00Z"
+    assert kospi.session_state == kr_session
+    # 기준 시각이 직전 완료 정규장에 묶여 있지 않다.
+    assert kospi.as_of != "2026-08-28T06:30:00Z"
+
+
+@pytest.mark.asyncio
+async def test_live_krx_index_change_stays_null_when_the_snapshot_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """공급자 스냅샷에 등락이 없으면 만들지 않는다(퍼센트 위조 금지)."""
+
+    async def live_batch(
+        symbols: tuple[str, ...],
+        *,
+        completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
+    ) -> dict[str, Any]:
+        del completed_as_of_by_market, live_markets
+        return {
+            "indices": [
+                {
+                    "symbol": symbol,
+                    "current": 6842.10,
+                    "change": None,
+                    "change_pct": None,
+                    "quote_asof": "2026-08-31T09:31:00+09:00",
+                    "data_state": DATA_STATE_FRESH,
+                    "source": "naver",
+                }
+                for symbol in symbols
+                if symbol == "KOSPI"
+            ]
+        }
+
+    _stub_sessions(monkeypatch, kr="REGULAR", us="CLOSED")
+    monkeypatch.setattr(mod, "handle_get_market_index_current_batch", live_batch)
+    monkeypatch.setattr(mod, "fetch_multiple_tickers", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        mod, "get_open_er_api_usd_snapshot", AsyncMock(return_value=_fx_snapshot())
+    )
+    monkeypatch.setattr(mod, "_toss_indicator_points", AsyncMock(return_value={}))
+
+    overview = await mod._build_market_overview()
+    kospi = next(item for item in overview.indices if item.symbol == "KOSPI")
+
+    assert kospi.price == "6842.1"
+    assert kospi.change_amount is None
+    assert kospi.change_rate is None
+    assert kospi.status == "available"
 
 
 def test_overview_quantizes_live_provider_precision_without_exponent_notation() -> None:
@@ -1065,8 +1357,9 @@ async def test_overview_returns_all_fixed_entries_when_both_source_groups_fail(
         symbols: tuple[str, ...],
         *,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
-        del completed_as_of_by_market
+        del completed_as_of_by_market, live_markets
         raise RuntimeError(f"indices failed: {symbols}")
 
     async def fail_fx() -> OpenErApiUsdSnapshot:
@@ -1137,8 +1430,9 @@ async def test_overview_marks_a_bounded_source_group_timeout_without_losing_othe
         symbols: tuple[str, ...],
         *,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
-        del completed_as_of_by_market
+        del completed_as_of_by_market, live_markets
         await asyncio.Event().wait()
         raise AssertionError(symbols)
 
@@ -1182,11 +1476,13 @@ async def test_overview_keeps_krx_rows_when_us_batch_times_out(
         symbols: tuple[str, ...],
         *,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
         assert completed_as_of_by_market == {
             "KRX": _KR_COMPLETED_END,
             "US": _US_COMPLETED_END,
         }
+        assert live_markets == frozenset({"KRX", "US"})
         if symbols == mod._OVERVIEW_KRX_SYMBOLS:
             return {
                 "indices": [
@@ -1242,7 +1538,9 @@ async def test_overview_cache_is_fifteen_seconds_and_refresh_is_single_flight(
         symbols: tuple[str, ...],
         *,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
+        del live_markets
         nonlocal calls
         assert symbols in {
             mod._OVERVIEW_KRX_SYMBOLS,

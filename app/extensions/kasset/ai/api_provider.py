@@ -223,7 +223,7 @@ class OpenAiResponsesClient:
         # attempt row is opened one level up, in the availability router.
         report_ai_attempt_http_status(response.status_code)
 
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code in {408, 429} or response.status_code >= 500:
             raise AiProviderUnavailable(
                 f"{self._name} unavailable: HTTP {response.status_code}"
             )

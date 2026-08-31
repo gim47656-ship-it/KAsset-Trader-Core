@@ -77,10 +77,20 @@ COPY scripts/ ./scripts/
 COPY static/ ./static/
 COPY --from=frontend-builder /build/dist /app/frontend/invest/dist
 
-# tmp 디렉토리 생성 및 권한 설정
-RUN printf '%s' "$VCS_REF" > /app/.build-vcs-ref && \
-    mkdir -p /app/tmp && \
-    chown -R appuser:appuser /app/tmp && \
+# 소스 커밋을 이미지에 박아 넣는다. 런타임에는 git이 없으므로 여기서 채우지
+# 않으면 전략 artifact identity가 fail closed로 막힌다(추천 cycle 전체 중단).
+# 그래서 빈 값이나 축약 SHA는 이미지를 만들지 않고 빌드를 실패시킨다.
+RUN set -eu; \
+    case "${#VCS_REF}" in \
+      40|64) : ;; \
+      *) echo "VCS_REF must be a full git object id (40 or 64 hex chars); got '${VCS_REF}'" >&2; exit 1 ;; \
+    esac; \
+    case "$VCS_REF" in \
+      *[!0-9a-f]*) echo "VCS_REF must be lowercase hex; got '${VCS_REF}'" >&2; exit 1 ;; \
+    esac; \
+    printf '%s' "$VCS_REF" > /app/.build-vcs-ref; \
+    mkdir -p /app/tmp; \
+    chown -R appuser:appuser /app/tmp; \
     chmod 755 /app/tmp
 
 # 전체 앱 디렉토리 권한 설정

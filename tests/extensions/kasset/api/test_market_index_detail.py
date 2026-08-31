@@ -48,6 +48,16 @@ def clear_index_detail_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _stub_closed_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """세션을 CLOSED로 덮는다. 완료봉 고정 경로는 끝난 세션에서만 돈다."""
+
+    async def session_state(market: str, *, moment: datetime | None = None) -> str:
+        del market, moment
+        return "CLOSED"
+
+    monkeypatch.setattr(mod.krx_quotes, "resolve_market_session_state", session_state)
+
+
 async def _session_override() -> object:
     return SimpleNamespace(user=SimpleNamespace(id=101, role="trader", is_active=True))
 
@@ -114,11 +124,13 @@ async def test_index_detail_maps_each_public_range(
 
     assert response.summary.symbol == "SPX"
     assert response.summary.range == range_
+    # 세션이 REGULAR이므로 완료봉으로 고정하지 않는다(cutoff는 기준 시각 증명용).
     source.assert_awaited_once_with(
         symbol="SPX",
         period=period,
         count=count,
         completed_as_of_by_market={"US": _US_COMPLETED_END},
+        live_markets=frozenset({"US"}),
     )
 
 
@@ -158,6 +170,7 @@ async def test_new_us_indices_are_whitelisted_for_every_public_range(
         period=period,
         count=count,
         completed_as_of_by_market={"US": _US_COMPLETED_END},
+        live_markets=frozenset({"US"}),
     )
 
 
@@ -220,6 +233,7 @@ async def test_indicator_detail_carries_kind_unit_group_and_ranges(
         period="day",
         count=20,
         completed_as_of_by_market=None,
+        live_markets=frozenset(),
     )
 
 
@@ -306,6 +320,7 @@ async def test_intraday_detail_keeps_every_bar_of_the_same_day(
         period="10m",
         count=144,
         completed_as_of_by_market=None,
+        live_markets=frozenset(),
     )
 
 
@@ -490,6 +505,7 @@ def test_index_detail_http_contract_is_camel_case_decimal_and_sorted(
 def test_index_detail_uses_completed_kr_close_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_closed_sessions(monkeypatch)
     result = {
         "indices": [
             {
@@ -511,11 +527,59 @@ def test_index_detail_uses_completed_kr_close_timestamp(
 
     assert response.status_code == 200
     assert response.json()["summary"]["asOf"] == "2026-08-28T06:30:00Z"
+    # 끝난 세션만 완료봉으로 고정한다.
     source.assert_awaited_once_with(
         symbol="KOSPI",
         period="day",
         count=5,
         completed_as_of_by_market={"KRX": _KR_COMPLETED_END},
+        live_markets=frozenset(),
+    )
+
+
+def test_live_kr_index_detail_does_not_pin_to_the_completed_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """진행 중 KRX 세션의 상세는 공급자 현재 스냅샷을 쓴다.
+
+    운영 관측: sessionState=REGULAR인데 값·등락·기준 시각이 직전 거래일 완료봉에
+    묶여 있었다. 세션 표기만 현재로 바뀐 스냅샷을 다시 만들지 않는다.
+    """
+    result = {
+        "indices": [
+            {
+                "symbol": "KOSPI",
+                "current": 6842.10,
+                "change": 53.22,
+                "change_pct": 0.78,
+                "quote_asof": "2026-08-31T09:31:00+09:00",
+                "data_state": DATA_STATE_FRESH,
+                "source": "naver",
+            }
+        ],
+        "history": [],
+    }
+    source = AsyncMock(return_value=result)
+    monkeypatch.setattr(mod, "handle_get_market_index", source)
+
+    with _client() as client:
+        response = client.get("/api/v1/market/indices/KOSPI?range=1W")
+
+    summary = response.json()["summary"]
+    assert (summary["price"], summary["changeAmount"], summary["changeRate"]) == (
+        "6842.1",
+        "53.22",
+        "0.78",
+    )
+    assert summary["asOf"] == "2026-08-31T00:31:00Z"
+    assert summary["sessionState"] == "REGULAR"
+    assert summary["status"] == "available"
+    source.assert_awaited_once_with(
+        symbol="KOSPI",
+        period="day",
+        count=5,
+        completed_as_of_by_market={"KRX": _KR_COMPLETED_END},
+        live_markets=frozenset({"KRX"}),
     )
 
 
@@ -609,12 +673,14 @@ async def test_index_detail_cache_is_keyed_single_flight_for_fifteen_seconds(
         period: str,
         count: int,
         completed_as_of_by_market: dict[str, datetime],
+        live_markets: frozenset[str],
     ) -> dict[str, Any]:
         expected_market = "KRX" if symbol in {"KOSPI", "KOSDAQ"} else "US"
         expected_end = (
             _KR_COMPLETED_END if expected_market == "KRX" else _US_COMPLETED_END
         )
         assert completed_as_of_by_market == {expected_market: expected_end}
+        assert live_markets == frozenset({expected_market})
         calls.append((symbol, period, count))
         await asyncio.sleep(0)
         return _index_result(symbol)

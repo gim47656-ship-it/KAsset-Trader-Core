@@ -281,6 +281,7 @@ async def test_single_index_completed_summary_keeps_existing_range_history(
         ["SPX"],
         completed_as_of=completed_end,
         completed_symbols=("SPX",),
+        pin_completed_session=True,
     )
     live.assert_not_awaited()
     history.assert_awaited_once_with(
@@ -420,6 +421,138 @@ async def test_single_kr_index_uses_completed_close_not_live_quote(
     )
     assert result["indices"] == [completed_row]
     assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_live_kr_market_uses_the_provider_snapshot_for_summary_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """진행 중 KRX 세션은 완료봉으로 고정하지 않는다.
+
+    요약과 이력이 모두 현재 스냅샷을 쓰므로 값·등락·기준 시각이 한 세션에서
+    나오고, 차트 마지막 점이 요약보다 한 세션 뒤처지지 않는다.
+    """
+    completed_end = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
+    # ROB-731 lag 판정은 실시간 시계와 비교한다. 기준 시각을 현재로 두어 그
+    # 판정이 진행 중 세션 행에도 그대로 적용되는지 본다.
+    live_quote_asof = handler.now_kst().isoformat()
+    live_row = {
+        "symbol": "KOSPI",
+        "current": 6842.10,
+        "change": 53.22,
+        "change_pct": 0.78,
+        "quote_asof": live_quote_asof,
+        "source": "naver",
+    }
+    live = AsyncMock(return_value=live_row)
+    completed = AsyncMock(
+        side_effect=AssertionError("completed close must not be used while live")
+    )
+    history_rows = [{"date": "2026-08-31", "close": 6842.10}]
+    history = AsyncMock(return_value=history_rows)
+    monkeypatch.setattr(handler, "_fetch_index_kr_completed", completed)
+    monkeypatch.setattr(handler, "_fetch_index_kr_current", live)
+    monkeypatch.setattr(handler, "_fetch_index_kr_history", history)
+    monkeypatch.setattr(handler, "kr_market_data_state", lambda: "fresh")
+
+    result = await handler.handle_get_market_index(
+        symbol="KOSPI",
+        period="day",
+        count=5,
+        completed_as_of_by_market={"KRX": completed_end},
+        live_markets=frozenset({"KRX"}),
+    )
+
+    completed.assert_not_awaited()
+    live.assert_awaited_once_with("KOSPI", "코스피")
+    history.assert_awaited_once_with("KOSPI", 5, "day")
+    assert result["indices"][0]["current"] == 6842.10
+    assert result["indices"][0]["change_pct"] == 0.78
+    assert result["indices"][0]["quote_asof"] == live_quote_asof
+    # 진행 중 세션 행도 세션 신선도 판정을 그대로 받는다.
+    assert result["indices"][0]["data_state"] == "fresh"
+    assert result["history"] == history_rows
+
+
+@pytest.mark.asyncio
+async def test_live_kr_batch_uses_the_provider_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_end = datetime(2026, 8, 28, 6, 30, tzinfo=UTC)
+
+    async def kr_current(code: str, name: str) -> dict[str, Any]:
+        del name
+        return {
+            "symbol": code,
+            "current": 6842.10,
+            "change": 53.22,
+            "change_pct": 0.78,
+            "quote_asof": handler.now_kst().isoformat(),
+            "source": "naver",
+        }
+
+    completed = AsyncMock(
+        side_effect=AssertionError("completed close must not be used while live")
+    )
+    monkeypatch.setattr(handler, "_fetch_index_kr_current", kr_current)
+    monkeypatch.setattr(handler, "_fetch_index_kr_completed", completed)
+    monkeypatch.setattr(handler, "kr_market_data_state", lambda: "fresh")
+
+    result = await handler.handle_get_market_index_current_batch(
+        ["KOSPI"],
+        completed_as_of_by_market={"KRX": completed_end},
+        live_markets=frozenset({"KRX"}),
+    )
+
+    completed.assert_not_awaited()
+    assert result["indices"][0]["change_pct"] == 0.78
+    assert result["indices"][0]["data_state"] == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_live_us_batch_stops_pinning_but_keeps_the_regular_session_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """진행 중 US 세션은 완료봉 고정을 끄고 정규장 세션 범위만 넘긴다."""
+    completed_end = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
+    batch = AsyncMock(return_value=[{"symbol": "SPX", "current": 7760.40}])
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", batch)
+
+    result = await handler.handle_get_market_index_current_batch(
+        ["SPX", "VIX"],
+        completed_as_of_by_market={"US": completed_end},
+        live_markets=frozenset({"US"}),
+    )
+
+    batch.assert_awaited_once_with(
+        ["SPX", "VIX"],
+        completed_as_of=completed_end,
+        completed_symbols=("SPX",),
+        pin_completed_session=False,
+    )
+    assert result["indices"][0]["current"] == 7760.40
+
+
+@pytest.mark.asyncio
+async def test_live_us_market_without_a_completed_window_keeps_the_live_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """진행 중인데 캘린더가 완료 창을 못 주면 값을 버리지 않는다(고정 근거만 없다)."""
+    batch = AsyncMock(return_value=[{"symbol": "SPX", "current": 7760.40}])
+    monkeypatch.setattr(handler, "_fetch_indices_us_current_batch", batch)
+
+    live = await handler.handle_get_market_index_current_batch(
+        ["SPX"],
+        completed_as_of_by_market={},
+        live_markets=frozenset({"US"}),
+    )
+    assert live["indices"][0]["current"] == 7760.40
+
+    closed = await handler.handle_get_market_index_current_batch(
+        ["SPX"],
+        completed_as_of_by_market={},
+    )
+    assert closed["indices"][0]["unavailable"] is True
 
 
 @pytest.mark.asyncio

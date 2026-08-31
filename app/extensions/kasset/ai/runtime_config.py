@@ -16,7 +16,7 @@ model을 입력하는 경로는 존재하지 않으며, 정책에는 route ID만
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -181,6 +181,36 @@ REASON_LABELS: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 
+#: 검토 tier(``luna``/``terra``/``sol``)가 정책을 읽어오는 lane.
+#: 추천 cycle이 실제로 호출하는 경로이므로 cycle 게이트의 기준이 된다.
+AI_REVIEW_LANES: Final[tuple[AiLane, ...]] = (
+    AiLane.REVIEW_LUNA,
+    AiLane.REVIEW_TERRA,
+    AiLane.REVIEW_SOL,
+)
+
+#: 앱 AI 기능이 실제로 의존하는 lane 전체(요약 + 검토).
+#:
+#: ``compat_skill``은 운영 caller가 없으므로 유효 가용성 판정에서 제외한다.
+#: 정책에는 그대로 남지만 앱이 보는 AI 상태를 좌우하지 않는다.
+AI_APP_LANES: Final[tuple[AiLane, ...]] = (AiLane.SUMMARY_LUNA, *AI_REVIEW_LANES)
+
+
+#: 유효 AI 가용성의 사용 불가 사유 코드. route 단위 사유와 층이 다르다.
+#:
+#: * ``policy_unreadable`` — 정책이 손상되었거나 조회 자체가 실패(fail closed)
+#: * ``no_active_route`` — 앱 lane에 활성 route가 하나도 없음(명시적 비활성화)
+#: * ``routes_unavailable`` — 활성 route는 있으나 현재 설정으로 전부 호출 불가
+REASON_POLICY_UNREADABLE: Final = "policy_unreadable"
+REASON_NO_ACTIVE_ROUTE: Final = "no_active_route"
+REASON_ROUTES_UNAVAILABLE: Final = "routes_unavailable"
+
+#: 정책을 신뢰할 수 없는 snapshot 출처. 이 상태에서는 무조건 사용 불가다.
+_UNREADABLE_POLICY_SOURCES: Final[frozenset[str]] = frozenset(
+    {"invalid", "unavailable"}
+)
+
+
 #: ``review.ai_call_events`` 원장에 attempt 행이 남는 lane.
 #:
 #: 요약/검토 lane은 ``AvailabilityRoutedJsonClient``를 통과하므로 attempt slot이
@@ -245,6 +275,36 @@ class AiRuntimeSnapshot:
         """lane의 순서화된 route ID. 비활성 lane은 빈 tuple(호출 차단)."""
 
         return self.lanes.get(AiLane(lane), ())
+
+
+@dataclass(frozen=True, slots=True)
+class AiAvailability:
+    """앱과 시스템 상태가 쓰는 **유효** AI 가용성.
+
+    "선택 사항인 MCP relay가 붙었는지"가 아니라 "지금 정책에 활성인 route로 실제
+    호출이 가능한지"를 말한다. direct API나 OpenRouter 하나만 설정되어 있어도
+    사용 가능이며, 쓸 수 있는 route가 하나도 없으면 fail closed로 사용 불가다.
+
+    credential, base URL, 명령 원문은 어떤 필드에도 들어가지 않는다.
+    """
+
+    source: AiPolicySource
+    configured: bool
+    available: bool
+    unavailable_reason: str | None
+    #: 사용자에게 그대로 보여줄 한국어 설명.
+    message: str
+    usable_lanes: frozenset[AiLane]
+
+    def lane_usable(self, lane: AiLane) -> bool:
+        """해당 lane에 지금 호출 가능한 route가 있는지."""
+
+        return lane in self.usable_lanes
+
+    def any_lane_usable(self, lanes: Iterable[AiLane]) -> bool:
+        """주어진 lane 중 하나라도 호출 가능한지."""
+
+        return any(lane in self.usable_lanes for lane in lanes)
 
 
 def ai_route_provider(route_id: AiRouteId) -> AiProviderName:
@@ -415,6 +475,83 @@ def build_ai_route_catalog() -> Mapping[AiRouteId, AiRouteCatalogEntry]:
     return MappingProxyType(entries)
 
 
+def build_ai_availability(
+    snapshot: AiRuntimeSnapshot,
+    catalog: Mapping[AiRouteId, AiRouteCatalogEntry],
+) -> AiAvailability:
+    """정책 snapshot과 catalog에서 유효 AI 가용성을 계산한다.
+
+    lane 하나라도 "정책에 활성이고 현재 설정으로 사용 가능한" route를 가지면 AI를
+    쓸 수 있다고 본다. 판정 기준은 관리자 화면(``build_ai_routes_view``)이 route
+    단위로 노출하는 ``available``과 같으므로 두 화면이 어긋나지 않는다.
+    """
+
+    if snapshot.source in _UNREADABLE_POLICY_SOURCES:
+        return AiAvailability(
+            source=snapshot.source,
+            configured=False,
+            available=False,
+            unavailable_reason=REASON_POLICY_UNREADABLE,
+            message="AI 경로 설정을 읽을 수 없어 AI 기능을 사용할 수 없습니다.",
+            usable_lanes=frozenset(),
+        )
+
+    usable: set[AiLane] = set()
+    configured = False
+    reasons: list[str] = []
+    active_routes = 0
+    for lane in AI_APP_LANES:
+        for route_id in snapshot.routes(lane):
+            entry = catalog[route_id]
+            active_routes += 1
+            configured = configured or entry.configured
+            if entry.available:
+                usable.add(lane)
+            elif (
+                entry.unavailable_reason is not None
+                and entry.unavailable_reason not in reasons
+            ):
+                reasons.append(entry.unavailable_reason)
+
+    if active_routes == 0:
+        return AiAvailability(
+            source=snapshot.source,
+            configured=False,
+            available=False,
+            unavailable_reason=REASON_NO_ACTIVE_ROUTE,
+            message="사용할 AI 경로가 설정되어 있지 않습니다.",
+            usable_lanes=frozenset(),
+        )
+
+    if not usable:
+        detail = " ".join(
+            label for reason in reasons if (label := REASON_LABELS.get(reason))
+        )
+        return AiAvailability(
+            source=snapshot.source,
+            configured=configured,
+            available=False,
+            unavailable_reason=REASON_ROUTES_UNAVAILABLE,
+            message=f"설정된 AI 경로를 지금 사용할 수 없습니다. {detail}".strip(),
+            usable_lanes=frozenset(),
+        )
+
+    unusable_labels = [LANE_LABELS[lane] for lane in AI_APP_LANES if lane not in usable]
+    return AiAvailability(
+        source=snapshot.source,
+        configured=True,
+        available=True,
+        unavailable_reason=None,
+        message=(
+            "AI를 사용할 수 있습니다."
+            if not unusable_labels
+            else "AI 일부 기능만 사용할 수 있습니다. 사용할 수 없는 기능: "
+            + ", ".join(unusable_labels)
+        ),
+        usable_lanes=frozenset(usable),
+    )
+
+
 def normalize_route_policy(
     raw: object,
     *,
@@ -506,6 +643,8 @@ def serialize_route_policy(
 
 
 __all__ = [
+    "AI_APP_LANES",
+    "AI_REVIEW_LANES",
     "DEFAULT_ROUTE_POLICY",
     "LANE_LABELS",
     "LANE_ROUTE_IDS",
@@ -515,8 +654,12 @@ __all__ = [
     "REASON_MISSING_MCP_URL",
     "REASON_MISSING_MODEL",
     "REASON_MISSING_SUBSCRIPTION_CMD",
+    "REASON_NO_ACTIVE_ROUTE",
+    "REASON_POLICY_UNREADABLE",
+    "REASON_ROUTES_UNAVAILABLE",
     "ROUTE_LABELS",
     "SUBSCRIPTION_MODEL_LABEL",
+    "AiAvailability",
     "AiLane",
     "AiPolicySource",
     "AiProviderName",
@@ -526,6 +669,7 @@ __all__ = [
     "AiRoutePolicyError",
     "AiRuntimeSnapshot",
     "ai_route_provider",
+    "build_ai_availability",
     "build_ai_route_catalog",
     "default_snapshot",
     "fail_closed_snapshot",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -129,6 +129,7 @@ async def handle_get_market_index(
     count: int = 20,
     *,
     completed_as_of_by_market: Mapping[str, datetime] | None = None,
+    live_markets: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """지수 현재 요약과 범위 이력을 조회한다.
 
@@ -137,10 +138,16 @@ async def handle_get_market_index(
     증명하지 못하면 현재값과 이력을 unavailable로 두며, 진행 중·미래·더 오래된
     봉으로 대체하지 않는다.
 
+    ``live_markets``에 든 시장은 진행 중 세션이므로 완료봉으로 고정하지 않고
+    공급자의 현재 스냅샷을 쓴다. 현재값과 등락·등락률·기준 시각이 같은 스냅샷에서
+    나오게 하려는 것이다(실시간 값에 직전 정규장 등락률을 붙이지 않는다). 이력도
+    같은 판정을 따라 진행 중 세션 봉을 잘라내지 않는다.
+
     ``period``가 ``INDEX_INTRADAY_PERIOD``면 이력이 분봉이 되고 ``date``에 날짜
     라벨이 아니라 UTC timestamp가 실린다. 분봉은 완료 세션 cutoff와 결합하지
     않는다(진행 중 세션을 보는 것이 목적이다).
     """
+    live = frozenset(live_markets or ())
     period = (period or "day").strip().lower()
     if period not in ("day", "week", "month", INDEX_INTRADAY_PERIOD):
         raise ValueError(
@@ -184,9 +191,11 @@ async def handle_get_market_index(
             if meta["source"] == "naver":
 
                 async def load_kr_current() -> dict[str, Any]:
-                    if completed_as_of_by_market is None:
-                        return await _fetch_index_kr_current(
-                            meta["naver_code"], meta["name"]
+                    if completed_as_of_by_market is None or "KRX" in live:
+                        return _tag_kr_index_data_state(
+                            await _fetch_index_kr_current(
+                                meta["naver_code"], meta["name"]
+                            )
                         )
                     completed_as_of = completed_as_of_by_market.get("KRX")
                     if completed_as_of is None:
@@ -198,7 +207,7 @@ async def handle_get_market_index(
                     )
 
                 async def load_kr_history() -> list[dict[str, Any]]:
-                    if completed_as_of_by_market is None:
+                    if completed_as_of_by_market is None or "KRX" in live:
                         return await _fetch_index_kr_history(
                             meta["naver_code"], capped_count, period
                         )
@@ -216,8 +225,6 @@ async def handle_get_market_index(
                     load_kr_current(),
                     load_kr_history(),
                 )
-                if completed_as_of_by_market is None:
-                    current_data = _tag_kr_index_data_state(current_data)
                 return {"indices": [current_data], "history": history}
             if meta["source"] == "coingecko":
                 current_data = await _fetch_index_crypto_current(
@@ -249,18 +256,32 @@ async def handle_get_market_index(
                         meta["yf_ticker"], meta["name"], sym
                     )
                 completed_as_of = completed_as_of_by_market.get("US")
+                us_live = "US" in live
                 if completed_as_of is None:
-                    return unavailable_current()
+                    if not us_live:
+                        return unavailable_current()
+                    # 진행 중 세션인데 캘린더가 완료 창을 주지 못한 경우다. 고정할
+                    # 근거가 없으므로 공급자 현재가를 그대로 쓴다.
+                    return await _fetch_index_us_current(
+                        meta["yf_ticker"], meta["name"], sym
+                    )
+                # 진행 중 세션에서도 홈 격자와 같은 배치 선택기를 쓴다. 상세와
+                # 홈이 같은 프레임에서 값·등락·기준 시각을 뽑게 하려는 것이다.
                 rows = await _fetch_indices_us_current_batch(
                     [sym],
                     completed_as_of=completed_as_of,
                     completed_symbols=(sym,),
+                    pin_completed_session=not us_live,
                 )
                 return rows[0] if rows else unavailable_current()
 
             async def load_us_history() -> list[dict[str, Any]]:
                 fallback_yf_ticker = meta.get("yf_fallback_ticker")
-                if completed_as_of_by_market is None or period == INDEX_INTRADAY_PERIOD:
+                if (
+                    completed_as_of_by_market is None
+                    or period == INDEX_INTRADAY_PERIOD
+                    or "US" in live
+                ):
                     return await _fetch_index_us_history(
                         meta["yf_ticker"],
                         capped_count,
@@ -287,10 +308,14 @@ async def handle_get_market_index(
             return _error_payload(source=meta["source"], message=str(exc), symbol=sym)
 
     if completed_as_of_by_market is None:
-        return await handle_get_market_index_current_batch(_DEFAULT_INDICES)
+        return await handle_get_market_index_current_batch(
+            _DEFAULT_INDICES,
+            live_markets=live,
+        )
     return await handle_get_market_index_current_batch(
         _DEFAULT_INDICES,
         completed_as_of_by_market=completed_as_of_by_market,
+        live_markets=live,
     )
 
 
@@ -298,6 +323,7 @@ async def handle_get_market_index_current_batch(
     symbols: Sequence[str],
     *,
     completed_as_of_by_market: Mapping[str, datetime] | None = None,
+    live_markets: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """다중 심볼 지수 조회. yfinance 심볼은 단일 배치 다운로드로 묶는다.
 
@@ -305,7 +331,12 @@ async def handle_get_market_index_current_batch(
     넘기는 home/detail 호출은 같은 provider 선택기를 쓰며, target 완료봉과 그
     직전 세션을 모두 증명하거나 검증된 metadata 종가를 복구한 경우만 허용한다.
     캘린더 cutoff가 없거나 근거가 맞지 않으면 값을 만들지 않는다.
+
+    ``live_markets``에 든 시장은 진행 중 세션이므로 완료봉으로 고정하지 않는다.
+    그 시장의 행은 값·등락·등락률·기준 시각이 모두 공급자의 한 스냅샷에서 나오며,
+    같은 스냅샷의 직전 종가를 증명하지 못하면 등락을 비운다.
     """
+    live = frozenset(live_markets or ())
     normalized = [str(symbol).strip().upper() for symbol in symbols]
     unsupported = sorted(
         {
@@ -329,8 +360,10 @@ async def handle_get_market_index_current_batch(
 
     async def load_kr(symbol: str) -> dict[str, Any]:
         meta = _INDEX_META[symbol]
-        if completed_as_of_by_market is None:
-            return await _fetch_index_kr_current(meta["naver_code"], meta["name"])
+        if completed_as_of_by_market is None or "KRX" in live:
+            return _tag_kr_index_data_state(
+                await _fetch_index_kr_current(meta["naver_code"], meta["name"])
+            )
         completed_as_of = completed_as_of_by_market.get("KRX")
         if completed_as_of is None:
             return {
@@ -351,8 +384,13 @@ async def handle_get_market_index_current_batch(
             symbol for symbol in us_symbols if symbol in _DEFAULT_INDICES
         )
         completed_as_of = completed_as_of_by_market.get("US")
+        us_live = "US" in live
         if completed_as_of is None:
             rows = await _fetch_indices_us_current_batch(us_symbols)
+            if us_live:
+                # 진행 중 세션인데 캘린더가 완료 창을 주지 못한 경우다. 고정할
+                # 근거가 없으므로 공급자 현재 스냅샷을 그대로 쓴다.
+                return rows
             return [
                 (
                     {
@@ -369,6 +407,7 @@ async def handle_get_market_index_current_batch(
             us_symbols,
             completed_as_of=completed_as_of,
             completed_symbols=completed_symbols,
+            pin_completed_session=not us_live,
         )
 
     results = await asyncio.gather(
@@ -382,11 +421,7 @@ async def handle_get_market_index_current_batch(
         if isinstance(result, BaseException):
             rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
         elif isinstance(result, dict):
-            rows_by_symbol[symbol] = (
-                _tag_kr_index_data_state(result)
-                if completed_as_of_by_market is None
-                else result
-            )
+            rows_by_symbol[symbol] = result
         else:
             rows_by_symbol[symbol] = {"symbol": symbol, "error": str(result)}
 

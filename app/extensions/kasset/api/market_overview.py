@@ -246,6 +246,14 @@ def _build_index_detail_definitions() -> dict[str, _IndexDetailDefinition]:
 
 _INDEX_DETAIL_DEFINITIONS = _build_index_detail_definitions()
 _SessionStates = dict[str, MarketSessionState | None]
+# 진행 중 세션. 이 상태의 시장은 완료 정규장 봉으로 고정하지 않고 공급자의 현재
+# 스냅샷을 쓴다. 완료봉 고정은 CLOSED 화면에서 값·등락·기준 시각을 한 세션으로
+# 묶어 주지만, 진행 중 세션에 그대로 걸면 세션 표기만 현재로 바뀐 직전 정규장
+# 스냅샷이 남는다(운영 관측: sessionState=REGULAR인데 asOf가 직전 거래일).
+# CLOSED와 미확인(None)은 기존 고정 규칙을 유지한다.
+_LIVE_SESSION_STATES: frozenset[MarketSessionState] = frozenset(
+    {"REGULAR", "PRE_MARKET", "AFTER_MARKET", "DAY_MARKET"}
+)
 
 _cache: dict[str, object] = {}
 _lock: asyncio.Lock | None = None
@@ -415,6 +423,13 @@ async def _session_snapshot(
             MarketOverviewSession(market="US", state=us_state),
         ],
         states,
+    )
+
+
+def _live_markets(sessions: _SessionStates) -> frozenset[str]:
+    """진행 중 세션인 시장 키. 지수 소스 선택의 유일한 근거다."""
+    return frozenset(
+        market for market, state in sessions.items() if state in _LIVE_SESSION_STATES
     )
 
 
@@ -982,7 +997,7 @@ async def _completed_index_snapshot() -> tuple[
     _SessionStates,
     MarketOverviewErrorCode | None,
 ]:
-    """완료 정규장 cutoff를 home/detail 공통 지수 선택기에 전달한다."""
+    """진행 중 세션은 공급자 현재 스냅샷, 끝난 세션은 완료봉 cutoff를 쓴다."""
     moment = datetime.now(UTC)
     sessions, session_states = await _session_snapshot(moment=moment)
     kr_window, us_window = await asyncio.gather(
@@ -994,12 +1009,14 @@ async def _completed_index_snapshot() -> tuple[
         for market, window in (("KRX", kr_window), ("US", us_window))
         if window is not None
     }
+    live_markets = _live_markets(session_states)
 
     async def load_group(symbols: tuple[str, ...]) -> object:
         return await asyncio.wait_for(
             handle_get_market_index_current_batch(
                 symbols,
                 completed_as_of_by_market=completed_as_of_by_market,
+                live_markets=live_markets,
             ),
             timeout=INDEX_SOURCE_TIMEOUT_SECONDS,
         )
@@ -1212,7 +1229,11 @@ async def _build_market_index_detail(
     # 거래되므로 cutoff를 걸면 값이 통째로 사라진다. 그런 심볼은 None을 넘겨
     # 공급자의 실시간 경로를 그대로 쓴다.
     completed_as_of_by_market: dict[str, datetime] | None = None
+    live_markets: frozenset[str] = frozenset()
     if not intraday and definition.kind == "INDEX":
+        # 진행 중 세션이면 완료봉으로 고정하지 않는다. 홈 격자와 같은 판정을
+        # 쓰므로 상세와 홈이 서로 다른 세션 스냅샷을 보여 주지 않는다.
+        live_markets = _live_markets(session_states) & {definition.market}
         completed_window = await get_latest_completed_regular_window_from_toss(
             "kr" if definition.market == "KRX" else "us",
             moment,
@@ -1229,6 +1250,7 @@ async def _build_market_index_detail(
                 period=period,
                 count=count,
                 completed_as_of_by_market=completed_as_of_by_market,
+                live_markets=live_markets,
             )
         )
     except Exception:

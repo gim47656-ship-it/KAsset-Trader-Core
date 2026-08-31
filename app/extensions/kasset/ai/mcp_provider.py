@@ -166,7 +166,9 @@ class McpStructuredJsonClient:
             ) from exc
         except Exception as exc:
             status_code = self._http_status_from_exception(exc)
-            if status_code is not None and (status_code == 429 or status_code >= 500):
+            if status_code is not None and (
+                status_code in {408, 429} or status_code >= 500
+            ):
                 raise AiProviderUnavailable(
                     f"MCP provider unavailable: HTTP {status_code}"
                 ) from exc
@@ -220,7 +222,7 @@ class McpStructuredJsonClient:
     @staticmethod
     def _raise_for_status(response: httpx.Response, *, phase: str) -> None:
         status_code = response.status_code
-        if status_code == 429 or status_code >= 500:
+        if status_code in {408, 429} or status_code >= 500:
             raise AiProviderUnavailable(
                 f"MCP provider unavailable during {phase}: HTTP {status_code}"
             )

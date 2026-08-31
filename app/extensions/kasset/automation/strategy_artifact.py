@@ -57,6 +57,19 @@ _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _BUILD_VCS_REF_PATH = Path("/app/.build-vcs-ref")
 
+#: 배포가 소스 커밋을 주입하는 환경변수. 앞쪽이 우선한다.
+#:
+#: ``KASSET_SOURCE_COMMIT``은 이미지를 다시 빌드하지 않고도 운영 배포가 즉시
+#: 채울 수 있는 경로다. ``GITHUB_SHA``는 CI 빌드가 넣어 주는 기존 키다.
+_SOURCE_COMMIT_ENV_VARS: tuple[str, ...] = ("KASSET_SOURCE_COMMIT", "GITHUB_SHA")
+
+#: fail-closed 오류가 그대로 달고 나가는 조치 안내. 로그를 보는 사람이 "무엇을
+#: 채워야 하는지"를 스택만 보고 알 수 있어야 한다.
+_SOURCE_COMMIT_REMEDY = (
+    "deployed image must embed its source commit: rebuild with "
+    "--build-arg VCS_REF=<full git sha> or set KASSET_SOURCE_COMMIT"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class StrategyCodeFile:
@@ -210,9 +223,22 @@ def _code_file(root: Path, relative: str) -> StrategyCodeFile:
 
 
 def _source_commit(root: Path) -> str:
-    env_commit = _normalize_source_commit(os.getenv("GITHUB_SHA"))
-    if env_commit is not None:
-        return env_commit
+    """배포된 이미지에 박힌 불변 소스 커밋. 없으면 fail closed다.
+
+    해석 순서는 (1) ``KASSET_SOURCE_COMMIT``/``GITHUB_SHA`` 환경변수, (2) 빌드가
+    써 넣은 ``/app/.build-vcs-ref``, (3) **로컬 개발 체크아웃에서만**
+    ``git rev-parse``다.
+
+    런타임 이미지에는 git이 없고 있어야 할 이유도 없다. 그래서 ``.git``이
+    보이지 않으면 subprocess를 시도조차 하지 않고, ``FileNotFoundError``를
+    "커밋을 알 수 없다"로 뭉개는 대신 무엇을 채워야 하는지 말하는 오류로 끝낸다.
+    trust fingerprint 의미는 그대로다 — 커밋은 여전히 40/64자 hex object id다.
+    """
+
+    for env_name in _SOURCE_COMMIT_ENV_VARS:
+        env_commit = _normalize_source_commit(os.getenv(env_name))
+        if env_commit is not None:
+            return env_commit
 
     try:
         build_ref = _BUILD_VCS_REF_PATH.read_text(encoding="utf-8")
@@ -221,6 +247,11 @@ def _source_commit(root: Path) -> str:
     build_commit = _normalize_source_commit(build_ref)
     if build_commit is not None:
         return build_commit
+
+    if not (root / ".git").exists():
+        raise ValueError(
+            f"current source commit is unavailable; {_SOURCE_COMMIT_REMEDY}"
+        )
 
     try:
         completed = subprocess.run(
@@ -232,7 +263,9 @@ def _source_commit(root: Path) -> str:
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("current source commit is unavailable") from exc
+        raise ValueError(
+            f"current source commit is unavailable; {_SOURCE_COMMIT_REMEDY}"
+        ) from exc
     commit = _normalize_source_commit(completed.stdout)
     if commit is None:
         raise ValueError("current source commit is not a full Git object id")

@@ -25,12 +25,18 @@ from app.extensions.kasset.ai.factory import (
 )
 from app.extensions.kasset.ai.model_router import AnalysisKind
 from app.extensions.kasset.ai.runtime_config import (
+    AI_APP_LANES,
+    AI_REVIEW_LANES,
     DEFAULT_ROUTE_POLICY,
     LANE_ROUTE_IDS,
+    REASON_NO_ACTIVE_ROUTE,
+    REASON_POLICY_UNREADABLE,
+    REASON_ROUTES_UNAVAILABLE,
     AiLane,
     AiRouteId,
     AiRoutePolicyError,
     AiRuntimeSnapshot,
+    build_ai_availability,
     build_ai_route_catalog,
     default_snapshot,
     fail_closed_snapshot,
@@ -102,6 +108,116 @@ def _snapshot(lanes: dict[AiLane, tuple[AiRouteId, ...]]) -> AiRuntimeSnapshot:
         source="persisted",
         lanes=freeze_route_policy(merged),
     )
+
+
+# ---- 유효 AI 가용성 ----
+
+
+def test_availability_is_true_when_direct_api_works_and_the_relay_is_absent(
+    configured_ai, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """운영에서 실제로 벌어진 상황: MCP만 미설정, direct/OpenRouter는 정상.
+
+    선택 사항인 relay 하나가 빠졌다고 AI 전체를 사용 불가로 보고하면 안 된다.
+    """
+
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "")
+
+    availability = build_ai_availability(default_snapshot(), build_ai_route_catalog())
+
+    assert availability.available is True
+    assert availability.configured is True
+    assert availability.unavailable_reason is None
+    assert availability.message == "AI를 사용할 수 있습니다."
+    assert availability.usable_lanes == frozenset(AI_APP_LANES)
+    assert availability.any_lane_usable(AI_REVIEW_LANES) is True
+
+
+def test_availability_ignores_the_compat_skill_lane(configured_ai) -> None:
+    """``compat_skill``은 운영 caller가 없으므로 판정에 들어오지 않는다."""
+
+    availability = build_ai_availability(default_snapshot(), build_ai_route_catalog())
+
+    assert AiLane.COMPAT_SKILL not in availability.usable_lanes
+
+
+def test_availability_fails_closed_when_no_route_is_usable(
+    configured_ai, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "")
+
+    availability = build_ai_availability(default_snapshot(), build_ai_route_catalog())
+
+    assert availability.available is False
+    assert availability.configured is True
+    assert availability.unavailable_reason == REASON_ROUTES_UNAVAILABLE
+    assert availability.usable_lanes == frozenset()
+    assert availability.any_lane_usable(AI_REVIEW_LANES) is False
+    assert availability.message.startswith("설정된 AI 경로를 지금 사용할 수 없습니다.")
+    assert "서버에 API 키가 설정되어 있지 않습니다." in availability.message
+
+
+@pytest.mark.parametrize("source", ["invalid", "unavailable"])
+def test_availability_fails_closed_when_the_policy_cannot_be_trusted(
+    configured_ai, source: str
+) -> None:
+    availability = build_ai_availability(
+        fail_closed_snapshot(source),  # type: ignore[arg-type]
+        build_ai_route_catalog(),
+    )
+
+    assert availability.available is False
+    assert availability.configured is False
+    assert availability.unavailable_reason == REASON_POLICY_UNREADABLE
+    assert availability.message == (
+        "AI 경로 설정을 읽을 수 없어 AI 기능을 사용할 수 없습니다."
+    )
+
+
+def test_availability_reports_an_explicitly_disabled_policy_separately(
+    configured_ai,
+) -> None:
+    """빈 lane은 손상이 아니라 운영자의 명시적 비활성화다. 사유를 구분해서 말한다."""
+
+    availability = build_ai_availability(_snapshot({}), build_ai_route_catalog())
+
+    assert availability.available is False
+    assert availability.configured is False
+    assert availability.unavailable_reason == REASON_NO_ACTIVE_ROUTE
+    assert availability.message == "사용할 AI 경로가 설정되어 있지 않습니다."
+
+
+def test_availability_names_the_lanes_it_cannot_serve(configured_ai) -> None:
+    """요약만 살아 있으면 "사용 가능"이지만 무엇이 빠졌는지 함께 말한다."""
+
+    availability = build_ai_availability(
+        _snapshot({AiLane.SUMMARY_LUNA: (AiRouteId.DIRECT_LUNA,)}),
+        build_ai_route_catalog(),
+    )
+
+    assert availability.available is True
+    assert availability.usable_lanes == frozenset({AiLane.SUMMARY_LUNA})
+    assert availability.any_lane_usable(AI_REVIEW_LANES) is False
+    assert availability.message.startswith("AI 일부 기능만 사용할 수 있습니다.")
+    assert "1차 검토 (빠른 판단)" in availability.message
+
+
+def test_availability_never_leaks_credentials_or_urls(configured_ai) -> None:
+    catalog = build_ai_route_catalog()
+    snapshots = (
+        default_snapshot(),
+        _snapshot({}),
+        fail_closed_snapshot("invalid"),
+    )
+    messages = [build_ai_availability(item, catalog).message for item in snapshots]
+
+    blob = " ".join(messages)
+    for secret in _SECRETS:
+        assert secret not in blob
+    assert "invalid" not in blob
+    assert "model-" not in blob
 
 
 # ---- catalog: secret-free 계약 ----
@@ -772,3 +888,132 @@ async def test_automation_cycle_reads_one_snapshot_and_passes_it_to_the_router(
     assert result["owners"] == []
     assert len(reads) == 1
     assert seen == [expected]
+
+
+def _cycle_session(monkeypatch: pytest.MonkeyPatch, owner_ids: list[int]) -> None:
+    """owner 목록만 돌려주는 최소 세션. cycle은 그 밖의 DB를 만지지 않는다."""
+
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.extensions.kasset.automation import vertical_slice
+
+    session = AsyncMock()
+    owner_result = MagicMock()
+    owner_result.all.return_value = owner_ids
+    session.scalars = AsyncMock(return_value=owner_result)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield session
+
+    monkeypatch.setattr(vertical_slice, "_session", fake_session)
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_logs_its_disabled_short_circuit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """TaskIQ는 반환 dict를 로그로 남기지 않는다. 그래서 cycle이 직접 남긴다."""
+
+    from app.extensions.kasset.automation import vertical_slice
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", False)
+
+    with caplog.at_level("INFO", logger=vertical_slice.__name__):
+        result = await vertical_slice.run_ai_recommendation_cycle_once()
+
+    assert result == {"enabled": False, "owners": [], "candidateCount": 0}
+    assert "KASSET_MARKET_EVENTS_ENABLED=false" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_requires_its_starting_terra_lane(
+    configured_ai, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """summary/luna가 살아 있어도 시작 lane인 terra가 없으면 cycle은 사용 불가다.
+
+    예전에는 review lane 중 하나만 살아 있으면 ``aiAvailable=true``였지만,
+    실제 첫 분석 ``candidate_review``는 terra에서 시작하므로 후보를 처리하지 못했다.
+    """
+
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.automation import vertical_slice
+    from app.services import ai_runtime_config as runtime_config_service
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    _cycle_session(monkeypatch, [])
+
+    disabled_reviews = _snapshot(
+        {
+            AiLane.SUMMARY_LUNA: (AiRouteId.DIRECT_LUNA,),
+            AiLane.REVIEW_LUNA: (AiRouteId.DIRECT_LUNA,),
+        }
+    )
+
+    async def snapshot(db):  # type: ignore[no-untyped-def]
+        return disabled_reviews
+
+    monkeypatch.setattr(runtime_config_service, "get_ai_runtime_snapshot", snapshot)
+
+    built: list[object] = []
+
+    def never_build(*, snapshot=None):  # type: ignore[no-untyped-def]
+        built.append(snapshot)
+        raise AssertionError("router must not be built without a usable review route")
+
+    monkeypatch.setattr(ai_factory, "build_model_router", never_build)
+
+    with caplog.at_level("INFO", logger=vertical_slice.__name__):
+        result = await vertical_slice.run_ai_recommendation_cycle_once()
+
+    assert built == []
+    assert result["aiAvailable"] is False
+    assert result["aiUnavailableReason"] == "review_routes_unavailable"
+    assert result["aiPolicySource"] == "persisted"
+    assert "ai_available=False" in caplog.text
+    assert "ai_usable_lanes=['review_luna', 'summary_luna']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_logs_the_owner_failure_stack_not_just_a_class_name(
+    configured_ai, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """운영 회귀: owner 예외가 ``errorClass``만 남고 원인이 사라졌다.
+
+    ``current_strategy_artifact()``의 ``ValueError``가 정확히 이 경로로 삼켜져
+    09:10 cycle이 왜 죽었는지 로그로 알 수 없었다.
+    """
+
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.automation import vertical_slice
+    from app.services import ai_runtime_config as runtime_config_service
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    _cycle_session(monkeypatch, [4])
+
+    async def snapshot(db):  # type: ignore[no-untyped-def]
+        return default_snapshot()
+
+    monkeypatch.setattr(runtime_config_service, "get_ai_runtime_snapshot", snapshot)
+    monkeypatch.setattr(
+        ai_factory, "build_model_router", lambda *, snapshot=None: object()
+    )
+
+    class _Exploding:
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise ValueError("current source commit is unavailable; embed VCS_REF")
+
+    monkeypatch.setattr(vertical_slice, "AIRecommendationVerticalSlice", _Exploding)
+
+    with caplog.at_level("ERROR", logger=vertical_slice.__name__):
+        result = await vertical_slice.run_ai_recommendation_cycle_once()
+
+    owner = result["owners"][0]  # type: ignore[index]
+    assert owner["skipped"] == "owner_cycle_failed"
+    assert owner["errorClass"] == "ValueError"
+    assert result["recommendationCount"] == 0
+    assert "owner_user_id=4" in caplog.text
+    # 스택과 원문 메시지가 로그에 남아야 운영에서 원인을 짚을 수 있다.
+    assert "current source commit is unavailable" in caplog.text
+    assert "Traceback" in caplog.text

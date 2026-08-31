@@ -155,7 +155,7 @@ async def test_mcp_calls_configured_tool_with_strict_schema_contract(
     assert "secret-token" not in request.content.decode()
 
 
-@pytest.mark.parametrize("status", [500, 503])
+@pytest.mark.parametrize("status", [408, 500, 503])
 @pytest.mark.asyncio
 async def test_mcp_retryable_http_status_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
@@ -193,7 +193,7 @@ async def test_mcp_rate_limit_status_is_unavailable(
         )
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 408])
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
 @pytest.mark.asyncio
 async def test_mcp_nonretryable_and_auth_statuses_fail_closed(
     monkeypatch: pytest.MonkeyPatch,

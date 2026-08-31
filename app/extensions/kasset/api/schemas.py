@@ -340,10 +340,17 @@ class SystemBrokerStatus(AndroidWireModel):
     last_verified_at: str | None = None
 
 
-class AiRelayStatus(AndroidWireModel):
+class AiAvailabilityStatus(AndroidWireModel):
+    """유효 AI 가용성. 선택 사항인 MCP relay 하나의 연결 여부가 아니다.
+
+    ``configured``는 서버에 AI 경로가 설정되어 있는지, ``available``은 지금 실제로
+    호출할 수 있는 경로가 있는지다. ``message``는 앱이 그대로 보여주는 한국어
+    설명이고, API key·URL·명령 원문은 어떤 필드에도 담지 않는다.
+    """
+
     configured: bool
-    reachable: bool
-    last_checked_at: str | None = None
+    available: bool
+    unavailable_reason: str | None = None
     message: str
 
 
@@ -356,7 +363,7 @@ class SystemStatus(AndroidWireModel):
     live_trading_enabled: bool
     kill_switch_enabled: bool
     brokers: list[SystemBrokerStatus]
-    ai_relay: AiRelayStatus
+    ai: AiAvailabilityStatus
     last_quote_at: str | None = None
 
 

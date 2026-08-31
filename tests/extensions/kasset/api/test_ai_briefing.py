@@ -15,9 +15,11 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
@@ -77,6 +79,11 @@ class _FakeResult:
         return list(self._rows)
 
     def first(self) -> Any | None:
+        return self._rows[0] if self._rows else None
+
+    def scalar_one_or_none(self) -> Any | None:
+        if len(self._rows) > 1:
+            raise RuntimeError("expected at most one fake row")
         return self._rows[0] if self._rows else None
 
     def scalar_one(self) -> Any:
@@ -507,10 +514,91 @@ def test_briefing_query_only_accepts_advisory_unexpired_account_free_reports() -
 
 def test_existing_ai_status_route_still_exists_next_to_the_briefing_route() -> None:
     with _client() as client:
-        paths = client.app.openapi()["paths"]
-        status_response = client.get("/api/v1/ai/status")
+        schema = client.app.openapi()
 
+    paths = schema["paths"]
     assert "get" in paths["/api/v1/ai/status"]
     assert "get" in paths["/api/v1/ai/briefing"]
-    assert status_response.status_code == 200
-    assert status_response.json()["relayConfigured"] is False
+
+    # `/system/status`의 `ai`와 `/ai/status`는 **같은 스키마**를 쓴다. 두 화면이 서로
+    # 다른 AI 상태 모양을 읽던 시절(`configured` vs `relayConfigured`)로 돌아가지 않게
+    # 계약 수준에서 못박는다.
+    ai_status_ref = paths["/api/v1/ai/status"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]["$ref"]
+    assert ai_status_ref.endswith("/AiAvailabilityStatus")
+    system_ai = schema["components"]["schemas"]["SystemStatus"]["properties"]["ai"]
+    assert system_ai["$ref"] == ai_status_ref
+
+
+def test_ai_status_reports_available_when_direct_api_works_without_the_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영 실제 상태: MCP relay는 미설정이고 direct API/OpenRouter만 설정되어 있다.
+
+    예전 라우트는 이 상황에서도 ``relayConfigured=false``를 상수로 돌려주어 앱이 AI를
+    영구 차단했다. 이제는 정책에 활성인 route의 실제 사용 가능 여부를 본다.
+    """
+
+    _configure_direct_api_only(monkeypatch)
+
+    with _client() as client:
+        body = client.get("/api/v1/ai/status").json()
+
+    assert body == {
+        "configured": True,
+        "available": True,
+        "unavailableReason": None,
+        "message": "AI를 사용할 수 있습니다.",
+    }
+
+
+def test_ai_status_fails_closed_with_a_korean_reason_when_no_route_is_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_direct_api_only(monkeypatch)
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
+
+    with _client() as client:
+        body = client.get("/api/v1/ai/status").json()
+
+    assert body["configured"] is True
+    assert body["available"] is False
+    assert body["unavailableReason"] == "routes_unavailable"
+    assert body["message"].startswith("설정된 AI 경로를 지금 사용할 수 없습니다.")
+    assert "서버에 API 키가 설정되어 있지 않습니다." in body["message"]
+
+
+def test_ai_status_never_leaks_credentials_or_internal_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_direct_api_only(monkeypatch)
+
+    with _client() as client:
+        blob = client.get("/api/v1/ai/status").text
+
+    for secret in ("direct-secret-key", "openrouter-secret-key"):
+        assert secret not in blob
+    assert "direct.invalid" not in blob
+    assert "router.invalid" not in blob
+
+
+def _configure_direct_api_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """direct API + OpenRouter는 설정되고 선택 사항인 MCP/구독은 비어 있는 서버."""
+
+    monkeypatch.setattr(settings, "KASSET_AI_API_BASE_URL", "https://direct.invalid/v1")
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("direct-secret-key"))
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_LUNA", "model-luna")
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "model-terra")
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_SOL", "model-sol")
+    monkeypatch.setattr(
+        settings, "KASSET_AI_OPENROUTER_BASE_URL", "https://router.invalid/api/v1"
+    )
+    monkeypatch.setattr(
+        settings, "KASSET_AI_OPENROUTER_API_KEY", SecretStr("openrouter-secret-key")
+    )
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL_FLASH", "model-flash")
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_MODEL_PRO", "model-pro")
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "")
+    monkeypatch.setattr(settings, "KASSET_AI_SUBSCRIPTION_CMD", "")

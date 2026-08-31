@@ -202,6 +202,7 @@ class AIRecommendationService:
             owner_user_id,
             status=status,
             limit=limit,
+            now=self._normalized_now(self._clock()),
         )
 
     async def decide(

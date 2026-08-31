@@ -93,7 +93,7 @@ scp old:/root/backups/kasset-daily/kasset-<최신>.dump.gz /root/
 # 4) 새 서버 기동 + 복원
 cd /opt/kasset-trader-core
 # 신규 설치이거나 기존 env에 KASSET_ADMIN_EDGE_KEY가 없으면 §9.1 절차로 먼저 생성
-docker compose --env-file .env.kasset -f docker-compose.kasset.yml build api
+VCS_REF="$(git rev-parse HEAD)" docker compose --env-file .env.kasset -f docker-compose.kasset.yml build api
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d db redis
 /usr/local/sbin/kasset-db-restore.sh /root/kasset-<최신>.dump.gz
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp caddy

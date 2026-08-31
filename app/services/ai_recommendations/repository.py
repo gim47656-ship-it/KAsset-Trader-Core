@@ -48,6 +48,7 @@ class AIRecommendationRepository:
         *,
         status: RecommendationStatusGroup,
         limit: int,
+        now: datetime,
     ) -> list[AIRecommendation]:
         if status == "PENDING":
             decision_filter = (
@@ -60,15 +61,21 @@ class AIRecommendationRepository:
                     RecommendationDecision.REJECTED,
                 )
             )
-        statement = (
-            select(AIRecommendation)
-            .where(
-                AIRecommendation.owner_user_id == owner_user_id,
-                decision_filter,
-            )
-            .order_by(AIRecommendation.created_at.desc(), AIRecommendation.id.desc())
-            .limit(limit)
+        statement = select(AIRecommendation).where(
+            AIRecommendation.owner_user_id == owner_user_id,
+            decision_filter,
         )
+        if status == "PENDING":
+            statement = statement.where(
+                or_(
+                    AIRecommendation.valid_until.is_(None),
+                    AIRecommendation.valid_until > now,
+                )
+            )
+        statement = statement.order_by(
+            AIRecommendation.created_at.desc(),
+            AIRecommendation.id.desc(),
+        ).limit(limit)
         return list((await self._session.scalars(statement)).all())
 
     async def resolve_pending(

@@ -118,8 +118,16 @@ async def run_research_run_refresh(
     }
 
     if not settings.research_run_refresh_enabled:
+        # Deliberately off. This ROB-26 job is a read-only decision-ledger refresh
+        # and is NOT the KAsset AI recommendation producer -- that one is
+        # `kasset_market_events.run` -> `run_ai_recommendation_cycle_once()`.
+        # Enabling this flag does not make AI recommendations appear.
         logger.info(
-            "research_run_refresh disabled; skipping (%s/%s)", stage, market_scope
+            "research_run_refresh disabled by config; skipping (%s/%s) "
+            "-- legacy read-only decision-ledger refresh, not the AI "
+            "recommendation producer",
+            stage,
+            market_scope,
         )
         return {**base, "status": "disabled", "reason": "research_run_refresh_disabled"}
 

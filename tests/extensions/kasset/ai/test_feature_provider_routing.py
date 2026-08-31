@@ -189,14 +189,16 @@ async def test_candidate_review_uses_mcp_before_direct_and_openrouter(
     }
 
 
+@pytest.mark.parametrize("status", [408, 503])
 @pytest.mark.asyncio
 async def test_trade_review_availability_falls_back_mcp_direct_openrouter(
     monkeypatch: pytest.MonkeyPatch,
+    status: int,
 ) -> None:
     transport = _DispatchTransport(
         {
-            "mcp.test": [httpx.Response(503)],
-            "direct.test": [httpx.Response(503)],
+            "mcp.test": [httpx.Response(status)],
+            "direct.test": [httpx.Response(status)],
             "openrouter.test": [_responses_result(_verdict())],
         }
     )

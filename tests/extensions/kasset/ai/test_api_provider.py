@@ -133,7 +133,7 @@ async def test_provider_preserves_run_skill_contract_over_responses_api(
     assert request.headers["Authorization"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("status", [500, 503])
+@pytest.mark.parametrize("status", [408, 500, 503])
 @pytest.mark.asyncio
 async def test_retryable_statuses_raise_unavailable(
     monkeypatch: pytest.MonkeyPatch,
@@ -157,7 +157,7 @@ async def test_rate_limit_status_raises_unavailable(
         await OpenAiCompatibleProvider(_profile()).run_skill(_REQUEST)
 
 
-@pytest.mark.parametrize("status", [400, 408])
+@pytest.mark.parametrize("status", [400])
 @pytest.mark.asyncio
 async def test_nonretryable_4xx_includes_redacted_response_excerpt(
     monkeypatch: pytest.MonkeyPatch,

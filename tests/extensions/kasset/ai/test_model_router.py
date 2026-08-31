@@ -437,7 +437,7 @@ async def test_missing_openrouter_key_does_not_attempt_fallback(
     assert fallback.requests == []
 
 
-@pytest.mark.parametrize("status", [400, 408])
+@pytest.mark.parametrize("status", [400])
 @pytest.mark.asyncio
 async def test_primary_nonretryable_4xx_does_not_attempt_fallback(
     monkeypatch: pytest.MonkeyPatch,

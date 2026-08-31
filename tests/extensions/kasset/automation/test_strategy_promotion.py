@@ -555,6 +555,7 @@ def test_artifact_loads_deployment_lineage_without_git_or_git_metadata(
         build_ref_path,
     )
     monkeypatch.setattr(strategy_artifact_module.subprocess, "run", missing_git)
+    monkeypatch.delenv("KASSET_SOURCE_COMMIT", raising=False)
     monkeypatch.setenv("GITHUB_SHA", " \t ")
 
     build_ref_artifact = load_current_strategy_artifact(repo_root=tmp_path)
@@ -566,6 +567,68 @@ def test_artifact_loads_deployment_lineage_without_git_or_git_metadata(
     assert build_ref_artifact.source_commit == "b" * 40
     assert github_artifact.source_commit == "a" * 40
     assert build_ref_artifact.fingerprint == github_artifact.fingerprint
+    missing_git.assert_not_called()
+
+
+def test_artifact_accepts_the_deploy_supplied_source_commit_over_the_build_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``KASSET_SOURCE_COMMIT``은 이미지를 다시 빌드하지 않고 lineage를 복구한다."""
+
+    for relative in STRATEGY_CODE_PATHS:
+        code_path = tmp_path / relative
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text(f"# {relative}\n", encoding="utf-8")
+
+    build_ref_path = tmp_path / ".build-vcs-ref"
+    build_ref_path.write_text(f"{'B' * 40}\n", encoding="utf-8")
+    missing_git = Mock(side_effect=FileNotFoundError("git"))
+    monkeypatch.setattr(strategy_artifact_module, "_BUILD_VCS_REF_PATH", build_ref_path)
+    monkeypatch.setattr(strategy_artifact_module.subprocess, "run", missing_git)
+    # 배포 이미지가 실제로 들고 있던 값: CI가 아니므로 ARG 기본값 그대로다.
+    monkeypatch.setenv("GITHUB_SHA", "unknown")
+    monkeypatch.setenv("KASSET_SOURCE_COMMIT", f"  {'C' * 64}\n")
+
+    artifact = load_current_strategy_artifact(repo_root=tmp_path)
+
+    assert artifact.source_commit == "c" * 64
+    missing_git.assert_not_called()
+
+
+def test_artifact_fails_closed_with_a_remedy_when_the_image_embeds_no_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영 회귀: git 없는 런타임 이미지 + 빈 ``.build-vcs-ref`` + ``GITHUB_SHA=unknown``.
+
+    이 조합이 ``current_strategy_artifact()``를 ``ValueError``로 터뜨려 09:10 추천
+    cycle의 owner 전체가 ``owner_cycle_failed``로 죽었다. git을 런타임에 설치하는
+    대신, 무엇을 채워야 하는지 말하는 오류로 끝내고 subprocess는 시도하지 않는다.
+    """
+
+    for relative in STRATEGY_CODE_PATHS:
+        code_path = tmp_path / relative
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text(f"# {relative}\n", encoding="utf-8")
+
+    empty_build_ref = tmp_path / ".build-vcs-ref"
+    empty_build_ref.write_text("", encoding="utf-8")
+    missing_git = Mock(side_effect=FileNotFoundError("git"))
+    monkeypatch.setattr(
+        strategy_artifact_module, "_BUILD_VCS_REF_PATH", empty_build_ref
+    )
+    monkeypatch.setattr(strategy_artifact_module.subprocess, "run", missing_git)
+    monkeypatch.delenv("KASSET_SOURCE_COMMIT", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", "unknown")
+
+    with pytest.raises(ValueError) as raised:
+        load_current_strategy_artifact(repo_root=tmp_path)
+
+    message = str(raised.value)
+    assert "--build-arg VCS_REF" in message
+    assert "KASSET_SOURCE_COMMIT" in message
+    # git이 없는 이미지에서 subprocess를 시도하지 않는다는 것이 이 수정의 핵심이다.
     missing_git.assert_not_called()
 
 
