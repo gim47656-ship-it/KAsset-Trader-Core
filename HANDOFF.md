@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-08-31 (P0 실행 추적·통화별 성과·시세 provenance를 운영 배포하고 merge-tree 전체 CI 통과)
+갱신: 2026-08-31 (미국장 10분 AI cycle·중복 방지·USD 원화 참고 평가를 운영 배포)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 안전 계약은 owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인·promotion, 주문 idempotency를 보존하는 것이다. LIVE 주문 경로와 안전장치 우회는 추가하지 않는다.
@@ -7,49 +7,49 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 후보별 Benchmark RS는 기존 Candidate Ranker의 활성 입력으로 연결돼 순위·추천에 영향을 줄 수 있다. First Pullback/NR7/Inside Day, High-Watermark, Loss-Streak, Soft Top-K/Sector Cap은 관찰용 SHADOW evidence만 계산한다. 이 SHADOW 기능의 활성값은 모두 기본 `false`, `promotionEligible=false`이며 주문 입력으로 사용하지 않는다. AI MCP sidecar도 내부 구독형 AI 실행만 제공하고 주문·DB·Redis·broker 도구를 노출하지 않는다.
 
 ## 전체 진행 상태
-- `origin/main`은 PR #5 merge commit `253bb71302cab5f48559d36da92fd860e5cc59cb`이다.
-- 운영 실행 이미지는 `kasset-trader-core:253bb713`, image id `sha256:f8514a2a58b90e53b595fba138929e99475fb76655ea8cf533b0c8b734545060`이다.
-- 운영 migration은 `20260831_p0_currency (head)`까지 적용됐다.
-- API, worker, scheduler, 거래 MCP, AI MCP가 새 이미지로 기동됐다. API/MCP/AI MCP health는 healthy이고 worker/scheduler는 running이다.
-- 운영은 `TRADING_ENABLED=true`, `LIVE_TRADING_ENABLED=false`, `AI_PAPER_AUTO_EXECUTION_ENABLED=true`, 모든 owner runtime은 `PAPER`다. Kill Switch, Hard Risk, promotion bypass는 바꾸지 않았다.
-- 추천 cycle→추천→PAPER 실행 event→주문을 `cycle_trace_id`와 owner scope로 추적할 수 있다. AUTO_PAPER와 APPROVAL 결과는 append-only `review.kasset_paper_execution_events`에 기록한다.
-- PAPER 보유·스냅샷·성과는 KRW/USD를 합산하지 않는다. 미국 주식만 USD, 국내 주식과 crypto는 실제 현금 원장과 같은 KRW 버킷이다.
-- 보유 평가에는 실제 quote source/as-of/session/staleness를 함께 내리고, 입증할 시세가 없으면 평가 숫자 대신 안정된 `valuation_error`와 null을 반환한다.
-- Google News 동기화와 KRW 10,000,000원/USD 10,000달러 독립 초기자금은 계속 운영 중이다.
+- `origin/main`은 PR #7 merge commit `328d5ba838ef86d288758d9c58eabf80011c20db`이다.
+- 운영 실행 이미지는 `kasset-trader-core:328d5ba8`, image id `sha256:a3954dc886071324a6fc1aefa02fc471a25051c9e249814dc9f56835f230978a`다.
+- API, worker, scheduler, 거래 MCP, AI MCP가 새 이미지로 기동됐다. 내부·외부 API health는 `{"status":"ok"}`이고 API container는 healthy/restart 0이다.
+- 운영은 `TRADING_ENABLED=true`, `LIVE_TRADING_ENABLED=false`, `AI_PAPER_AUTO_EXECUTION_ENABLED=true`, owner 4 runtime은 `PAPER`다. Kill Switch, Hard Risk, promotion bypass는 바꾸지 않았다.
+- KR/US AI recommendation cycle은 각 거래소 현지시각 09:00~15:59 평일에 10분 주기다. 실제 정규장 gate가 KR 09:00, US 09:30부터 후보/AI를 허용한다.
+- 미국 schedule은 `America/New_York` timezone이므로 EST/EDT를 자동 반영한다. 같은 cycle이 10분을 넘겨도 PostgreSQL session advisory lock이 다음 worker 진입을 차단한다.
+- owner별 설정 시장과 현재 정규장 시장이 불일치하면 `no_configured_regular_market_open`, 전체 휴장이면 `no_regular_market_open`으로 감사 원장에 구분한다.
+- PAPER USD 포지션은 native USD 값을 바꾸지 않는다. Toss 또는 open.er-api의 fresh USD→KRW Decimal quote와 유효구간이 완전할 때만 `market_value_krw_reference`를 내려준다.
+- owner 4의 현재 PAPER 포지션은 0건이다. 자연 추천이 실제 보유를 만들기 전에는 USD 원화 참고값 두 시점 관측 대상이 없다.
+- Core의 test/lint/type/build는 로컬 workstation에서 실행하지 않는 규칙을 이 저장소 `AGENTS.md`에 추가했다. 기본 검증은 GitHub Actions, 서버는 격리된 test 환경만 허용한다.
 
 ## 이번 세션에서 한 일
-- 자동 추천 cycle에 재시작 후에도 유지되는 `cycle_trace_id`를 추가하고 추천·실행 원장까지 전달했다. 원장 조회는 `owner_user_id AND recommendation_id`로 제한해 다른 owner의 주문·attempt 상태를 읽지 않는다.
-- AUTO_PAPER와 승인 실행의 `IDLE/BLOCKED/REJECTED/SUBMITTED/FAILED` 결과를 별도 세션의 append-only 원장에 기록했다. 감사 기록 실패가 실제 PAPER 체결 결과를 되돌리거나 바꾸지 않게 격리했다.
-- PAPER 포지션·계좌 summary·daily snapshot·performance를 KRW/USD별로 분리했다. 혼합 통화 legacy 컬럼은 보존하되 신규 계산에서 사용하지 않는다.
-- reviewer가 찾은 USDT 포지션의 cash/reporting 불일치를 수정했다. crypto는 실제로 `cash_krw`에서 정산되므로 wire·성과도 KRW로 고정했다. 운영 과거 `paper_trades.currency='USDT'` 행은 0건이었다.
-- 시세 provenance를 `quote_source`, `quote_as_of`, `quote_session`, `quote_is_stale`로 노출했다. provider timestamp가 없거나 파싱되지 않으면 현재 시각을 만들어 넣지 않고 null로 둔다.
-- migration `20260831_p0_trace`와 `20260831_p0_currency`를 추가했다. 실제 PostgreSQL upgrade/downgrade/upgrade CI가 단일 head를 검증한다.
-- main 보호를 PR 필수, 관리자 포함, strict, force-push/delete 금지, required checks `ci-required`·`migration (PostgreSQL 15)`·`frontend`로 설정했다.
-- GitHub가 이 저장소의 `pull_request` workflow event를 만들지 않아 required checks를 PR merge ref에 자동 연결하지 못했다. 동일 부모·동일 tree `43752bbf`인 synthetic merge commit을 전체 CI로 검증한 뒤 required status-check gate만 잠시 제거해 PR #5를 병합하고 즉시 원래 strict 규칙을 복원했다. 원인 수정 전에는 같은 절차를 반복하지 말고 PR event 미발생부터 조사한다.
+- scheduler를 KR `Asia/Seoul`, US `America/New_York` 기준 각각 `*/10 9-15 * * 1-5`로 바꾸고, cycle 진입점에 기존 거래소 calendar 기반 정규장 gate를 추가했다.
+- 다중 TaskIQ worker/재시작 사이에서도 한 cycle만 돌도록 PostgreSQL `pg_try_advisory_lock`을 task 전체 수명 동안 유지한다. lock contention은 `cycle_already_running`으로 무작업 종료한다.
+- owner 추천 시장과 열린 시장의 교집합만 candidate loader에 전달한다. 닫힌 시장은 AI policy/provider/router와 후보 수집을 건드리지 않는다.
+- Toss USD/KRW quote를 우선 검증하고 실패하면 open.er-api로 fallback하는 상세 환율 snapshot을 추가했다. pair, Decimal 양수/finite, source, timezone, as-of/valid-until, stale을 모두 fail-closed 검증한다.
+- positions 응답에 nullable KRW 참고값·환율·provider·유효구간·stale/error를 추가했다. 응답당 환율은 1회만 받고, market value가 없는 USD 행은 다른 행의 FX provenance를 빌리지 않는다.
+- 독립 checker가 찾은 3개 MAJOR를 수정했다: Android 빈 그래프 30초 요청 폭주를 5분 주기/동시성 5로 제한, pause/resume timer 유지, 10분 Core cycle의 분산 single-flight 보장.
+- checker의 8개 MINOR도 반영했다. source를 `Literal["toss","open_er_api"]`로 제한하고, 초 단위 직렬화에서 사라지는 FX 유효구간을 거부하며, owner-market skip을 분리하고 API candle 문서를 실제 range 계약으로 수정했다.
+- 운영 SSH 기본 경로를 `~/.ssh/config`의 `kasset-prod` alias로 고정했다. Tailnet hostname을 쓰되 기존 공인 IP host key와 동일한 ED25519 key를 `HostKeyAlias`로 검증한다.
 
-검증 결과:
-- 로컬 P0 집중 테스트 `53 passed`, 통화·평가 회귀 `29 passed`, CI 결함 회귀 `3 passed + 1 passed`; Ruff와 `ty check app --error-on-warning` 통과.
-- GitHub Actions head run `33397032852`과 동일 merge tree run `33398251289` 모두 migration, lint, taskiq exact-cover/smoke, test 4 shards, frontend, security, `ci-required`가 통과했다.
-- 독립 checker 1차 MAJOR(USDT cash/reporting 불일치)를 수정했고 delta 재검수는 `FINAL: PASS`, 신규 finding 없음이다.
-- Android/API 계약 문서는 `KAsset-Trader/docs/API-CONTRACT.md`, commit `1e33bb6e`에 반영했다.
+검증:
+- GitHub Actions run `33406351976`: lint/formatter/ty, migration round-trip, TaskIQ worker/scheduler smoke, test 4 shards, frontend, security, `ci-required` 전부 통과.
+- Android 전체 unit test와 debug APK build는 `BUILD SUCCESSFUL`(44 tasks). Samsung `SM-S926N`에서 미국 `TQQQ` 포함 관심목록 그래프를 실제 확인했다.
+- 독립 checker 최초 판정은 `REWORK`였다. 모든 MAJOR/MINOR 조치와 통합 CI 후 Main 최종 판정은 `FINAL: PASS`, `OWNER: MAIN`이다.
+- GitHub `pull_request` event 미발생 결함 때문에 workflow_dispatch의 실제 성공 run을 동일 head status에 연결했다. required app 제한만 병합 순간 `null`로 전환했고, 병합 직후 strict=true와 GitHub Actions app id `15368` required 3종을 정확히 복원했다.
 
-운영 배포·실측:
-- 배포 전 backup: `/root/backups/kasset-daily/kasset-20260831T134952Z.dump.gz`, 5,106,099 bytes, SHA-256 `5ce207f993a98f46ce069008d4aa9ed929b52e94e2cd8b7effb19e724c43d981`; `gzip -t`와 container `pg_restore -l` 통과.
-- 운영 DB revision은 `20260831_p0_currency`; `review.kasset_paper_execution_events` 생성과 snapshot 통화별 6개 nullable 컬럼을 확인했다.
-- API/MCP/AI MCP healthy, worker/scheduler running, 내부 `/health`와 외부 `https://175-45-201-51.sslip.io/health`가 `{"status":"ok"}`를 반환했다.
-- ledger는 배포 직후 0행이다. 다음 자연 cycle/승인부터 쌓여야 하며 P1에서 강제 실행 없이 관측한다.
+운영 배포:
+- server checkout은 `328d5ba8`로 fast-forward했고 `.env.kasset.pre-p1-328d5ba8`를 남겼다.
+- 새 image를 server에서 빌드해 API/MCP/AI MCP/worker/scheduler만 교체했다. DB/Redis/Caddy는 재기동하지 않았다.
+- 운영 scheduler container에서 schedule label 두 개(`Asia/Seoul`, `America/New_York`)를 직접 출력해 확인했다.
+- 15:20:00 UTC(11:20 EDT) scheduler가 `kasset_market_events.run`을 자연 발행했다. owner 4는 열린 시장 `US`, 후보 7(전부 watchlist), rank 7, actionable 0, AI 검토 0, 추천 0으로 15:20:07에 정상 종료했다. 원장 trace는 `cyc-2b2e49a56cb64c3fb2361642d29ee23f`, skip은 `no_dynamic_ensemble_signal`이다.
 
 ## 다음 세션이 바로 할 일
-1. P1은 한국 정규장 중 자연 PAPER 보유로 관측한다. 08:50 KST 전 owner 4가 `AUTO_PAPER/PAPER`, `LIVE_TRADING_ENABLED=false`, Kill Switch/Hard Risk 유지인지 확인한다.
-2. 09:05 KST 시세 provider 상태를 확인하고 09:10 이후 자연 cycle을 기다린다. cycle/threshold/promotion/order를 강제로 만들지 않는다.
-3. 자연 추천이 실행되면 `cycle_trace_id`로 cycle→recommendation→execution event→order→trade→position을 owner 4 범위에서 조인한다. 실패·거부도 원장에 한 행으로 남는지 확인한다.
-4. 동일 자연 보유를 5초 이상 간격의 서로 다른 두 시세에서 읽어 source/as-of/session/staleness와 평가식·통화 버킷을 대조한다. candle fallback이나 출처 불명 시세를 실시간으로 인정하지 않고, 입증 실패는 숫자 0이 아니라 null이어야 한다.
-5. `record_daily_snapshot`/`calculate_daily_returns` 운영 호출자는 아직 확인되지 않았다. 스케줄 연결 전에는 통화별 drawdown·Sharpe·daily return이 null인 것이 정상이다.
-6. GitHub `pull_request` Actions event가 0건인 원인을 별도 수정해야 한다. main 보호 규칙은 현재 strict/PR-required/required-checks 상태로 복원돼 있다.
+1. 미국 정규장 자연 10분 cycle은 15:20 UTC에 검증됐다. 이후 actionable/추천이 생길 때까지 owner 4 원장의 `candidate_markets.US`, AI 검토 수와 안정된 skip 사유를 관측하되 강제 cycle/주문/임계값 완화는 금지다.
+2. 자연 PAPER 보유가 생기면 5초 이상 간격의 두 시점에서 native USD 평가, KRW 참고값, FX source/as-of/valid-until/stale을 대조한다.
+3. 추천이 자동 실행되면 `cycle_trace_id`로 cycle→recommendation→execution event→order→trade→position을 owner 4 범위에서 조인한다. `LIVE_TRADING_ENABLED=false`는 유지한다.
+4. GitHub `pull_request` Actions event가 0건인 원인을 수정해야 한다. 현재 branch protection은 strict, required contexts `ci-required`·`migration (PostgreSQL 15)`·`frontend`, app id `15368`로 복원돼 있다.
+5. `record_daily_snapshot`/`calculate_daily_returns` 운영 호출자는 아직 확인되지 않았다. 스케줄 연결 전 통화별 drawdown·Sharpe·daily return null은 정상이다.
 
 ## 세션 이력
-- 2026-08-31: P0 cycle/실행 추적 원장, KRW/USD 성과 분리, 시세 provenance를 운영 배포하고 checker·merge-tree 전체 CI·health를 통과.
-- 2026-08-31: PAPER 실시간 평가·USD 자금·뉴스 동기화·AI malformed 응답 격리를 운영 배포하고 자연 cycle/웨일 대시보드/17-job GitHub Actions를 검증.
-- 2026-08-31: 국내 스크리너 KRX 세션 만료 fallback 배포, 운영 150종목 복구, 추천·AI·PAPER consumer 실측.
+- 2026-08-31: 미국장 10분 AI cycle, 분산 single-flight, 검증된 USD 원화 참고 평가를 운영 image `328d5ba8`로 배포.
+- 2026-08-31: P0 cycle/실행 추적 원장, KRW/USD 성과 분리, 시세 provenance를 운영 배포하고 전체 CI 통과.
+- 2026-08-31: PAPER 실시간 평가·USD 자금·뉴스 동기화·AI malformed 응답 격리를 운영 배포.
+- 2026-08-31: 국내 스크리너 KRX 세션 만료 fallback 배포, 운영 150종목 복구.
 - 2026-08-31: Benchmark RS Ranker 연결, Setup/Risk/Portfolio SHADOW, 내부 MCP sidecar 구현.
-- 2026-08-30: 관리자·복구 운영 배포, owner 4 AUTO_PAPER 준비.
