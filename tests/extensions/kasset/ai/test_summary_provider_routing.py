@@ -103,6 +103,11 @@ async def test_news_summary_ignores_configured_mcp_and_uses_direct_api(
                         "테스트 기업이 신제품을 공개했다. "
                         "회사는 공급 확대 계획을 밝혔다."
                     ),
+                    "translated_title": "테스트 기업의 신제품 공개",
+                    "translated_excerpt": (
+                        "테스트 기업이 신제품을 공개하고 고객에 대한 공급을 확대할 "
+                        "계획이라고 밝혔다."
+                    ),
                     "sentiment": "neutral",
                     "confidence": 88,
                 }
@@ -143,6 +148,11 @@ async def test_news_summary_falls_back_direct_to_openrouter_and_audits_model(
                     "summary": (
                         "테스트 기업이 신제품을 공개했다. "
                         "회사는 공급 확대 계획을 밝혔다."
+                    ),
+                    "translated_title": "테스트 기업의 신제품 공개",
+                    "translated_excerpt": (
+                        "테스트 기업이 신제품을 공개하고 고객에 대한 공급을 확대할 "
+                        "계획이라고 밝혔다."
                     ),
                     "sentiment": "neutral",
                     "confidence": 82,
@@ -239,6 +249,10 @@ async def test_summary_refusal_fails_closed_without_openrouter(
             _response(
                 {
                     "summary": "사용되지 않는다. 사용되지 않는다.",
+                    "translated_title": "테스트 제목",
+                    "translated_excerpt": (
+                        "요약 입력을 위한 충분히 상세한 기사 본문이다."
+                    ),
                     "sentiment": "neutral",
                     "confidence": 50,
                 }
@@ -278,6 +292,10 @@ async def test_summary_schema_failure_does_not_fallback(
             _response(
                 {
                     "summary": "테스트 기업이 신제품을 공개했다. 공급 확대 계획도 밝혔다.",
+                    "translated_title": "테스트 제목",
+                    "translated_excerpt": (
+                        "요약 입력을 위한 충분히 상세한 기사 본문이다."
+                    ),
                     "sentiment": "neutral",
                     "confidence": 75,
                     "extra": "not allowed",
@@ -353,6 +371,10 @@ async def test_summary_429_falls_back_to_openrouter(
                         "테스트 기업이 신제품을 공개했다. "
                         "회사는 공급 확대 계획을 밝혔다."
                     ),
+                    "translated_title": "테스트 제목",
+                    "translated_excerpt": (
+                        "요약 입력을 위한 충분히 상세한 기사 본문이다."
+                    ),
                     "sentiment": "neutral",
                     "confidence": 75,
                 }
@@ -392,6 +414,10 @@ async def test_summary_safety_validation_does_not_fallback(
                     "summary": (
                         "테스트 기업 매수를 추천한다. 회사는 공급 확대 계획을 밝혔다."
                     ),
+                    "translated_title": "테스트 제목",
+                    "translated_excerpt": (
+                        "요약 입력을 위한 충분히 상세한 기사 본문이다."
+                    ),
                     "sentiment": "positive",
                     "confidence": 75,
                 }
@@ -403,6 +429,10 @@ async def test_summary_safety_validation_does_not_fallback(
             _response(
                 {
                     "summary": "사용되지 않는다. 사용되지 않는다.",
+                    "translated_title": "테스트 제목",
+                    "translated_excerpt": (
+                        "요약 입력을 위한 충분히 상세한 기사 본문이다."
+                    ),
                     "sentiment": "neutral",
                     "confidence": 50,
                 }
@@ -445,6 +475,11 @@ async def test_summary_skips_unconfigured_direct_provider(
                     "summary": (
                         "테스트 기업이 신제품을 공개했다. "
                         "회사는 공급 확대 계획을 밝혔다."
+                    ),
+                    "translated_title": "테스트 기업의 신제품 공개",
+                    "translated_excerpt": (
+                        "테스트 기업이 신제품을 공개하고 고객에 대한 공급을 확대할 "
+                        "계획이라고 밝혔다."
                     ),
                     "sentiment": "neutral",
                     "confidence": 77,

@@ -28,8 +28,19 @@ PARENT_REVISION = "20260824_s257_rung_reason"
 PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
 
 _BOUNDARY_TABLES = (
+    "review.kasset_automation_cycle_events",
+    "review.ai_call_events",
     "review.ai_recommendations",
     "review.kasset_strategy_promotions",
+    "kasset_research_cohort_members",
+    "kasset_research_cohorts",
+    "kasset_corporate_action_fetch_coverage",
+    "kr_corporate_action_evidence",
+    "kr_stock_lifecycle_observations",
+    "kasset_shadow_loss_locks",
+    "kasset_shadow_daily_high_watermarks",
+    "kasset_ai_runtime_config",
+    "password_reset_tokens",
     "kasset_paper_position_states",
     "kasset_ai_daily_routine_settings",
     "kasset_android_paper_orders",
@@ -114,6 +125,34 @@ async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
             # The nickname aliases migration is also later than this boundary.
             await connection.execute(
                 text("ALTER TABLE instruments DROP COLUMN aliases")
+            )
+            # Current-head metadata also contains the later authentication,
+            # PAPER capital, KR lifecycle, and translated-news additions.
+            for column in (
+                "login_cooldown_until",
+                "login_cooldown_level",
+                "web_session_version",
+                "failed_login_attempts",
+            ):
+                await connection.execute(
+                    text(f"ALTER TABLE users DROP COLUMN {column}")
+                )
+            await connection.execute(
+                text("ALTER TABLE paper.paper_accounts DROP COLUMN initial_capital_usd")
+            )
+            await connection.execute(
+                text(
+                    "ALTER TABLE kr_symbol_universe "
+                    "DROP COLUMN std_pdno, "
+                    "ALTER COLUMN listing_status TYPE VARCHAR(20)"
+                )
+            )
+            await connection.execute(
+                text(
+                    "ALTER TABLE news_analysis_results "
+                    "DROP COLUMN translated_title, "
+                    "DROP COLUMN translated_excerpt"
+                )
             )
 
         stamped = _alembic(env, "stamp", PARENT_REVISION)

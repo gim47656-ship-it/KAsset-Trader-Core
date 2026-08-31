@@ -21,6 +21,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.config import settings
+from app.core.db import engine
 from app.extensions.kasset.ai.runtime_config import (
     DEFAULT_ROUTE_POLICY,
     AiLane,
@@ -38,6 +39,9 @@ from app.services.ai_runtime_config import (
     build_ai_routes_view,
     get_ai_runtime_snapshot,
 )
+from tests._run_owned_database import validate_run_owned_database_url
+
+validate_run_owned_database_url(engine.url)
 
 ROUTES_PATH = "/admin/ops/ai-routes"
 

@@ -169,6 +169,7 @@ async def test_settings_round_trip_writes_only_canonical_fields(
     await runtime_state.update_policy(
         db_session,
         owner_id,
+        max_order_ratio=Decimal("0.35"),
         max_symbol_ratio=Decimal("1"),
     )
     limits = AITradingLimits(
@@ -208,6 +209,7 @@ async def test_settings_round_trip_writes_only_canonical_fields(
         assert loaded.limits.max_buys_per_day == 7
         assert loaded.limits.max_sells_per_day == 18
         assert loaded.limits.max_orders_per_day == 25
+        assert Decimal(state.max_order_ratio) == Decimal("0.35")
         assert Decimal(state.max_symbol_ratio) == Decimal("1")
         assert loaded.executions == ()
         assert row is not None

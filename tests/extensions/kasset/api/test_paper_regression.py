@@ -28,10 +28,16 @@ from app.services.paper_trading_service import PaperTradingService
 
 
 class FakeSession:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        expected_position_queries: list[tuple[int, InstrumentType]] | None = None,
+    ) -> None:
         self.added: list[object] = []
         self.commit_count = 0
         self.rollback_count = 0
+        self.execute_count = 0
+        self._expected_position_queries = list(expected_position_queries or [])
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -44,6 +50,33 @@ class FakeSession:
 
     async def refresh(self, value: object) -> None:
         return None
+
+    async def execute(self, statement: object) -> "PreviewRows":
+        if not self._expected_position_queries:
+            raise AssertionError("Unexpected FakeSession.execute() call")
+
+        descriptions = getattr(statement, "column_descriptions", ())
+        column_names = tuple(item.get("name") for item in descriptions)
+        entities = tuple(item.get("entity") for item in descriptions)
+        expected_account_id, expected_instrument_type = self._expected_position_queries[
+            0
+        ]
+        params = tuple(statement.compile().params.values())
+        if (
+            column_names != ("symbol", "quantity", "avg_price")
+            or any(entity is not PaperPosition for entity in entities)
+            or len(params) != 2
+            or expected_account_id not in params
+            or expected_instrument_type not in params
+        ):
+            raise AssertionError(
+                "FakeSession.execute() only accepts the expected PaperPosition "
+                "cost-basis query"
+            )
+
+        self._expected_position_queries.pop(0)
+        self.execute_count += 1
+        return PreviewRows([])
 
 
 def _request(
@@ -986,7 +1019,6 @@ async def test_market_order_fills_at_submit_reference_price(
     execute_order -> preview_order -> PaperTrade`는 실제 코드가 돈다.
     """
     monkeypatch.setattr(settings, "TRADING_ENABLED", True)
-    db = FakeSession()
     owner_id = 101
     reference_price = Decimal("71234")
     account = PaperAccount(
@@ -997,6 +1029,7 @@ async def test_market_order_fills_at_submit_reference_price(
         cash_usd=Decimal("0"),
         is_active=True,
     )
+    db = FakeSession(expected_position_queries=[(account.id, InstrumentType.equity_kr)])
 
     async def only_quote_source(_db: object, *, market: str, symbol: str) -> Quote:
         # 이 경로의 유일한 시세 공급자. 기준가는 여기서만 나온다.
@@ -1081,3 +1114,4 @@ async def test_market_order_fills_at_submit_reference_price(
     assert Decimal(envelope.risk.reference_price) == trade.price
     assert Decimal(envelope.risk.estimated_amount) == trade.total_amount
     assert Decimal(envelope.order.average_fill_price or "0") == trade.price
+    assert db.execute_count == 1

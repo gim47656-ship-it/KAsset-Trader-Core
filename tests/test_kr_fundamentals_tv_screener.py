@@ -835,9 +835,10 @@ async def test_undervalued_breakout_per_pbr_and_new_high_recency(db_session):
     52-week high made within 20 KRX *trading* sessions (week_high_52_date recency via
     XKRX, holiday-aware), NOT price/52w-high proximity.
 
-    Partition date is _SD = 2026-06-04. high-date 2026-05-25 → 8 trading sessions
-    (passes); 2026-04-01 → 43 sessions (excluded); NULL / future high-dates are
-    fail-closed excluded.
+    Partition date is _SD = 2026-06-04. High-date 2026-05-04 is exactly 20 trading
+    sessions old and passes the inclusive boundary; 2026-04-30 is 21 sessions old
+    and is excluded. The confirmed 2026-06-03 KRX closure is not counted.
+    NULL / future high-dates are fail-closed excluded.
     """
     await _cleanup(db_session)
     sym_pass = f"{_PREFIX}B0"
@@ -854,10 +855,10 @@ async def test_undervalued_breakout_per_pbr_and_new_high_recency(db_session):
                 change_rate=Decimal("1.0"),
                 volume=Decimal("700000"),
                 market_cap=Decimal("9000000000000"),
-                per=Decimal("8"),  # 0 < per <= 10
-                pbr=Decimal("0.8"),  # 0 < pbr <= 1
+                per=Decimal("10"),  # inclusive upper boundary
+                pbr=Decimal("1"),  # inclusive upper boundary
                 week_high_52=Decimal("10000"),
-                week_high_52_date=dt.date(2026, 5, 25),  # 8 trading days <= 20 → recent
+                week_high_52_date=dt.date(2026, 5, 4),  # exactly 20 sessions → pass
                 sector="Industrials",
                 industry="Machinery",
             ),
@@ -868,9 +869,7 @@ async def test_undervalued_breakout_per_pbr_and_new_high_recency(db_session):
                 pbr=Decimal("0.7"),
                 price=Decimal("9000"),
                 week_high_52=Decimal("10000"),
-                week_high_52_date=dt.date(
-                    2026, 4, 1
-                ),  # 43 trading days > 20 → excluded
+                week_high_52_date=dt.date(2026, 4, 30),  # 21 sessions → excluded
             ),
             _snap(
                 sym_high_pbr,
@@ -920,13 +919,13 @@ async def test_undervalued_breakout_per_pbr_and_new_high_recency(db_session):
     assert [r["symbol"] for r in result.rows] == [sym_pass]
     row = result.rows[0]
     # ROB-430 PR-②: the honest signal fields. proximity stays as an emitted column.
-    assert row["week_high_52_date"] == "2026-05-25"
-    # ROB-432: 8 KRX trading sessions between 2026-05-25 (a holiday) and 2026-06-04.
-    assert row["new_high_age_trading_days"] == 8
+    assert row["week_high_52_date"] == "2026-05-04"
+    # Exact inclusive boundary; the confirmed 2026-06-03 KRX closure is excluded.
+    assert row["new_high_age_trading_days"] == 20
     assert row["high_52w_proximity"] == pytest.approx(0.97)
     assert row["week_high_52"] == 10000.0
-    assert row["per"] == 8.0
-    assert row["pbr"] == 0.8
+    assert row["per"] == 10.0
+    assert row["pbr"] == 1.0
     assert row["category"] == "Machinery"
     assert row["name"] == "저평가탈출"
     # The excluded rows record a reason (fail-closed, never silent pass).
