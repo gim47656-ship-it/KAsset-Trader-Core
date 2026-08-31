@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ from app.jobs.google_news_rss_ingestion import load_google_news_symbols
 from app.models.news import NewsArticle, NewsIngestionRun
 from app.models.symbol_master import SymbolMaster
 from app.models.symbol_news_relevance import SymbolNewsRelevance
+from app.services import truth_social_ingestion
 from app.services.google_news_ingestion import GoogleNewsSymbol, ingest_google_news_rss
 from app.services.google_news_rss import (
     GOOGLE_NEWS_FEED_SOURCE,
@@ -25,7 +27,19 @@ from app.services.google_news_rss import (
     normalize_us_company_name,
     parse_google_news_rss,
 )
-from app.tasks import TASKIQ_TASK_MODULES, google_news_rss_ingestion_tasks
+from app.services.truth_social_ingestion import (
+    TRUTH_SOCIAL_ACCOUNT,
+    TRUTH_SOCIAL_ACCOUNT_ID,
+    TRUTH_SOCIAL_FEED_SOURCE,
+    TRUTH_SOCIAL_PROFILE_URL,
+    TruthSocialError,
+    ingest_truth_social,
+)
+from app.tasks import (
+    TASKIQ_TASK_MODULES,
+    google_news_rss_ingestion_tasks,
+    truth_social_tasks,
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +107,48 @@ async def _run(db_session, run_uuid: str) -> NewsIngestionRun:
         )
     ).scalar_one()
 
+
+class FakeTruthSocialClient:
+    def __init__(self, *payloads: object) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict[str, Any]] = []
+
+    async def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, str],
+    ) -> httpx.Response:
+        self.calls.append({"url": url, "params": dict(params)})
+        request = httpx.Request("GET", url, params=params)
+        return httpx.Response(200, json=self.payloads.pop(0), request=request)
+
+
+def _truth_account() -> dict[str, object]:
+    return {
+        "id": TRUTH_SOCIAL_ACCOUNT_ID,
+        "acct": TRUTH_SOCIAL_ACCOUNT,
+        "url": TRUTH_SOCIAL_PROFILE_URL,
+        "verified": True,
+    }
+
+
+def _truth_status(
+    status_id: str,
+    content: str,
+    *,
+    reblog: object | None = None,
+) -> dict[str, object]:
+    return {
+        "id": status_id,
+        "url": f"{TRUTH_SOCIAL_PROFILE_URL}/{status_id}",
+        "created_at": "2026-08-31T10:00:00.000Z",
+        "visibility": "public",
+        "reblog": reblog,
+        "content": f"<p>{escape(content)}</p>",
+        "account": _truth_account(),
+        "card": None,
+    }
 
 def test_market_locale_and_market_specific_query_are_pure() -> None:
     kr = market_config("KR")
@@ -629,3 +685,102 @@ def test_google_news_task_is_registered_without_recurring_schedule() -> None:
     task = google_news_rss_ingestion_tasks.ingest_google_news_rss_task
     assert task.task_name == "news.google_news.ingest"
     assert "schedule" not in task.labels
+
+
+@pytest.mark.asyncio
+async def test_truth_social_rejects_official_account_identity_mismatch(
+    db_session,
+) -> None:
+    mismatched = _truth_account()
+    mismatched["id"] = "1"
+
+    with pytest.raises(TruthSocialError, match="identity mismatch"):
+        await ingest_truth_social(
+            db_session,
+            http_client=FakeTruthSocialClient(mismatched),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_truth_social_persists_only_market_posts_and_hands_off_summary(
+    db_session,
+    monkeypatch,
+) -> None:
+    relevant_id = str(uuid.uuid4().int)
+    irrelevant_id = str(uuid.uuid4().int)
+    boosted_id = str(uuid.uuid4().int)
+    statuses = [
+        _truth_status(
+            relevant_id,
+            "I will impose a 25% tariff on imported semiconductor chips.",
+        ),
+        _truth_status(irrelevant_id, "Happy birthday to a great friend."),
+        _truth_status(
+            boosted_id,
+            "Federal Reserve rate decision.",
+            reblog={"id": "someone-else"},
+        ),
+    ]
+    summary_calls: list[list[str]] = []
+
+    async def fake_summary(_db, urls):
+        captured = list(urls)
+        summary_calls.append(captured)
+        return SimpleNamespace(
+            status="success",
+            summarized=len(captured),
+            failed=0,
+        )
+
+    monkeypatch.setattr(
+        truth_social_ingestion,
+        "summarize_ingested_news",
+        fake_summary,
+    )
+    first = await ingest_truth_social(
+        db_session,
+        http_client=FakeTruthSocialClient(_truth_account(), statuses),
+    )
+    second = await ingest_truth_social(
+        db_session,
+        http_client=FakeTruthSocialClient(_truth_account(), statuses),
+    )
+
+    url = f"{TRUTH_SOCIAL_PROFILE_URL}/{relevant_id}"
+    article = (
+        await db_session.execute(select(NewsArticle).where(NewsArticle.url == url))
+    ).scalar_one()
+    link_count = await db_session.scalar(
+        select(func.count())
+        .select_from(SymbolNewsRelevance)
+        .where(SymbolNewsRelevance.article_id == article.id)
+    )
+    assert first.fetched == 3
+    assert first.relevant == 1
+    assert (first.inserted, first.updated, first.skipped) == (1, 0, 2)
+    assert (second.inserted, second.updated, second.skipped) == (0, 0, 3)
+    assert first.summary_status == "success"
+    assert summary_calls == [[url], [url]]
+    assert article.market == "us"
+    assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
+    assert article.source == "Donald J. Trump · Truth Social"
+    assert "tariff" in (article.article_content or "")
+    assert link_count == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(NewsArticle)
+            .where(NewsArticle.feed_source == TRUTH_SOCIAL_FEED_SOURCE)
+        )
+        == 1
+    )
+
+
+def test_truth_social_task_is_registered_with_ten_minute_schedule() -> None:
+    assert truth_social_tasks in TASKIQ_TASK_MODULES
+    task = truth_social_tasks.ingest_truth_social_task
+    assert task.task_name == "news.truth_social.ingest"
+    assert task.labels.get("schedule") == [
+        {"cron": "2,12,22,32,42,52 * * * *", "cron_offset": "UTC"}
+    ]

@@ -168,7 +168,7 @@ services:
     env_file:
       - *kasset-runtime-env-file
       - .env.nhplug-mock.native
-    command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", "--workers", "1"]
+    command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", "app.tasks.invest_screener_snapshot_tasks", "app.tasks.news_summary_tasks", "app.tasks.truth_social_tasks", "--workers", "1"]
     depends_on:
       db:
         condition: service_healthy
@@ -185,7 +185,7 @@ services:
     env_file:
       - *kasset-runtime-env-file
       - .env.nhplug-mock.native
-    command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks"]
+    command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks", "app.tasks.invest_screener_snapshot_tasks", "app.tasks.news_summary_tasks", "app.tasks.truth_social_tasks"]
     depends_on:
       redis:
         condition: service_healthy

@@ -316,6 +316,19 @@ async def test_balance_keeps_usd_cash_separate_from_krw_totals(
             ]
         ),
     )
+    now = datetime.now(UTC)
+    quote_fetch = AsyncMock(
+        return_value=UsdKrwExchangeRateQuote(
+            rate=1500.0,
+            mid_rate=1500.0,
+            source="toss",
+            valid_from=now - timedelta(minutes=1),
+            valid_until=now + timedelta(minutes=1),
+            rate_decimal=Decimal("1500.00"),
+            mid_rate_decimal=Decimal("1500.00"),
+        )
+    )
+    monkeypatch.setattr(paper_api, "get_usd_krw_rate_details", quote_fetch)
     balance = await paper_account_adapter.balance(
         db,
         owner_user_id=101,  # type: ignore[arg-type]
@@ -325,6 +338,7 @@ async def test_balance_keeps_usd_cash_separate_from_krw_totals(
     assert balance.total_assets == "10500000"
     assert balance.unrealized_pnl == "25000"
     assert balance.realized_pnl == "1500"
+    assert balance.fx_rate == "1500.00"
     assert [(line.currency, line.cash) for line in balance.cash] == [
         ("KRW", "10000000"),
         ("USD", "10000"),
@@ -357,6 +371,11 @@ async def test_balance_does_not_report_false_zero_when_krw_quote_fails(
             ]
         ),
     )
+    monkeypatch.setattr(
+        paper_api,
+        "get_usd_krw_rate_details",
+        AsyncMock(side_effect=RuntimeError("provider unavailable")),
+    )
 
     balance = await paper_account_adapter.balance(
         db,
@@ -366,6 +385,7 @@ async def test_balance_does_not_report_false_zero_when_krw_quote_fails(
     assert balance.evaluation_amount is None
     assert balance.total_assets is None
     assert balance.unrealized_pnl is None
+    assert balance.fx_rate is None
 
 
 def _position_row(

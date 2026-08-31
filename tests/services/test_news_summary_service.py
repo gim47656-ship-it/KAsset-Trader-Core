@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.schemas.news import NewsAnalysisResultResponse
+from app.services import news_summary_service
 from app.services.news_summary_service import (
     MAX_TRANSLATED_EXCERPT_CHARS,
     MAX_TRANSLATION_SOURCE_CHARS,
@@ -19,6 +20,7 @@ from app.services.news_summary_service import (
     NewsSummaryInput,
     OpenAiNewsSummaryGenerator,
     _summary_input_for,
+    summarize_ingested_news,
     summarize_pending_news,
 )
 
@@ -716,6 +718,122 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     assert len(analysis_ids) == 2
 
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exists(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex
+    url = f"https://news.test.invalid/{suffix}/repair-translation"
+    article = _article(
+        url=url,
+        title="Company announces semiconductor investment",
+        summary="The company announced a new semiconductor investment plan.",
+        published_at=datetime(2026, 8, 29, 12, 0),
+    )
+    db_session.add(article)
+    await db_session.flush()
+    db_session.add(
+        NewsAnalysisResult(
+            article_id=article.id,
+            model_name="old-incomplete-analysis",
+            sentiment=Sentiment.NEUTRAL,
+            sentiment_score=None,
+            summary="회사가 신규 반도체 투자 계획을 발표했다.",
+            translated_title=None,
+            translated_excerpt=None,
+            key_points=[],
+            topics=None,
+            price_impact=None,
+            price_impact_score=None,
+            confidence=70,
+            analysis_quality="high",
+            prompt="old prompt",
+            raw_response="{}",
+            processing_time_ms=1,
+            created_at=datetime(2026, 8, 29, 12, 1),
+            updated_at=None,
+        )
+    )
+    await db_session.commit()
+    generator = FakeSummaryGenerator(
+        {
+            article.title: "회사가 신규 반도체 투자 계획을 발표했다.",
+        },
+        translations={
+            article.title: (
+                "회사의 반도체 투자 계획 발표",
+                "회사는 신규 반도체 투자 계획을 발표했다.",
+            )
+        },
+    )
+
+    first = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[url],
+        generator=generator,
+    )
+    second = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[url],
+        generator=generator,
+    )
+
+    analyses = list(
+        (
+            await db_session.scalars(
+                select(NewsAnalysisResult)
+                .where(NewsAnalysisResult.article_id == article.id)
+                .order_by(NewsAnalysisResult.created_at.asc())
+            )
+        ).all()
+    )
+    assert first.summarized == 1
+    assert second.skipped_existing == 1
+    assert len(generator.calls) == 1
+    assert len(analyses) == 2
+    assert analyses[-1].translated_title == "회사의 반도체 투자 계획 발표"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ingested_news_summary_chunks_every_persisted_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_pending(_db, *, article_urls, **_kwargs):
+        urls = list(article_urls)
+        calls.append(urls)
+        return SimpleNamespace(
+            selected=len(urls),
+            summarized=len(urls),
+            skipped_existing=0,
+            skipped_insufficient=0,
+            failed=0,
+            status="success",
+            failed_article_ids=(),
+            skipped_article_ids=(),
+        )
+
+    monkeypatch.setattr(
+        news_summary_service,
+        "summarize_pending_news",
+        fake_pending,
+    )
+    urls = [f"https://news.test.invalid/chunk/{index}" for index in range(45)]
+
+    result = await summarize_ingested_news(object(), urls)
+
+    assert [len(chunk) for chunk in calls] == [20, 20, 5]
+    assert result.selected == 45
+    assert result.summarized == 45
+    assert result.status == "success"
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_google_ingestion_invokes_summary_only_after_persistence(
@@ -819,13 +937,15 @@ async def test_backfill_job_forwards_bounded_scope(
 
 
 @pytest.mark.unit
-def test_news_summary_task_is_registered_without_schedule() -> None:
+def test_news_summary_task_is_registered_with_recurring_schedule() -> None:
     from app.tasks import TASKIQ_TASK_MODULES, news_summary_tasks
 
     assert news_summary_tasks in TASKIQ_TASK_MODULES
     task = news_summary_tasks.summarize_news_task
     assert task.task_name == "news.articles.summarize"
-    assert "schedule" not in task.labels
+    assert task.labels.get("schedule") == [
+        {"cron": "*/5 * * * *", "cron_offset": "UTC"}
+    ]
 
 
 @pytest.mark.unit

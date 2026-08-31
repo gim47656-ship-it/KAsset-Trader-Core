@@ -146,6 +146,19 @@ class PaperAccountAdapter:
         account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
         positions = await service.get_positions(account.id)
+        observed_at = datetime.now(UTC)
+        has_usd_exposure = Decimal(account.cash_usd) != 0 or any(
+            item["instrument_type"] == "equity_us" for item in positions
+        )
+        fx_snapshot = (
+            await self._load_krw_reference_snapshot(
+                observed_at=observed_at,
+                purpose="PAPER 자산 합산용",
+            )
+            if has_usd_exposure
+            else self._empty_krw_reference()
+        )
+        fx_rate = fx_snapshot.get("_rate_decimal")
         kr_positions = [
             item for item in positions if item["instrument_type"] == "equity_kr"
         ]
@@ -208,7 +221,8 @@ class PaperAccountAdapter:
                 decimal_text(unrealized) if unrealized is not None else None
             ),
             realized_pnl=decimal_text(realized),
-            updated_at=iso_z(),
+            fx_rate=decimal_text(fx_rate) if isinstance(fx_rate, Decimal) else None,
+            updated_at=iso_z(observed_at),
         )
 
     @staticmethod
@@ -306,6 +320,19 @@ class PaperAccountAdapter:
         snapshot["_rate_decimal"] = rate
         return snapshot
 
+    async def _load_krw_reference_snapshot(
+        self,
+        *,
+        observed_at: datetime,
+        purpose: str,
+    ) -> dict[str, object | None]:
+        try:
+            quote = await get_usd_krw_rate_details()
+        except Exception as exc:
+            logger.warning("%s USD/KRW 환율을 가져오지 못했습니다: %s", purpose, exc)
+            return self._empty_krw_reference(_FX_QUOTE_UNAVAILABLE)
+        return self._krw_reference_snapshot(quote, now=observed_at)
+
     @classmethod
     def _position_krw_reference(
         cls,
@@ -357,19 +384,10 @@ class PaperAccountAdapter:
             and item.get("evaluation_amount") is not None
             for item in raw_positions
         ):
-            try:
-                quote = await get_usd_krw_rate_details()
-            except Exception as exc:
-                logger.warning(
-                    "PAPER 원화 참고용 USD/KRW 환율을 가져오지 못했습니다: %s",
-                    exc,
-                )
-                fx_snapshot = self._empty_krw_reference(_FX_QUOTE_UNAVAILABLE)
-            else:
-                fx_snapshot = self._krw_reference_snapshot(
-                    quote,
-                    now=observed_at,
-                )
+            fx_snapshot = await self._load_krw_reference_snapshot(
+                observed_at=observed_at,
+                purpose="PAPER 원화 참고용",
+            )
 
         now = iso_z(observed_at)
         return PositionsResponse(

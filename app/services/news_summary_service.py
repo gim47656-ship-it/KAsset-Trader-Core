@@ -36,7 +36,6 @@ MAX_TRANSLATED_EXCERPT_CHARS = 6_000
 MIN_SOURCE_BODY_CHARS = 40
 MIN_SOURCE_BODY_WORDS = 6
 CANDIDATE_SCAN_MULTIPLIER = 10
-AUTO_SUMMARY_CANDIDATE_LIMIT = 200
 _SUMMARY_MAX_CHARS = 1_200
 
 _SUMMARY_SCHEMA: dict[str, object] = {
@@ -694,6 +693,16 @@ def _validate_scope(
             raise ValueError("feed_source must select ordinary news, not disclosures")
 
 
+def _has_complete_korean_analysis():
+    return exists().where(
+        NewsAnalysisResult.article_id == NewsArticle.id,
+        NewsAnalysisResult.summary.op("~")(_HANGUL_RE.pattern),
+        or_(
+            NewsArticle.title.op("~")(_HANGUL_RE.pattern),
+            NewsAnalysisResult.translated_title.op("~")(_HANGUL_RE.pattern),
+        ),
+    )
+
 async def _candidate_ids(
     db: AsyncSession,
     *,
@@ -711,7 +720,7 @@ async def _candidate_ids(
                 NewsArticle.feed_source.is_(None),
                 NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
             ),
-            ~exists().where(NewsAnalysisResult.article_id == NewsArticle.id),
+            ~_has_complete_korean_analysis(),
         )
         .order_by(
             case(
@@ -793,12 +802,20 @@ async def _run_batch(
                 skipped_existing += 1
                 await db.rollback()
                 continue
-            existing_id = await db.scalar(
+            complete_conditions = [
+                NewsAnalysisResult.article_id == article_id,
+                NewsAnalysisResult.summary.op("~")(_HANGUL_RE.pattern),
+            ]
+            if not _HANGUL_RE.search(article.title):
+                complete_conditions.append(
+                    NewsAnalysisResult.translated_title.op("~")(_HANGUL_RE.pattern)
+                )
+            complete_analysis_id = await db.scalar(
                 select(NewsAnalysisResult.id)
-                .where(NewsAnalysisResult.article_id == article_id)
+                .where(*complete_conditions)
                 .limit(1)
             )
-            if existing_id is not None:
+            if complete_analysis_id is not None:
                 processed += 1
                 skipped_existing += 1
                 await db.rollback()
@@ -933,18 +950,63 @@ async def summarize_ingested_news(
     db: AsyncSession,
     article_urls: Sequence[str],
 ) -> NewsSummaryBatchResult:
-    """한 수집 회차의 최신 일반 뉴스만 비용 상한 안에서 자동 요약한다."""
+    """한 수집 회차의 모든 고유 일반 뉴스를 제한된 chunk로 빠짐없이 처리한다."""
 
-    bounded_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_CANDIDATE_LIMIT]
-    return await summarize_pending_news(
-        db,
-        batch_size=AUTO_SUMMARY_BATCH_SIZE,
-        article_urls=bounded_urls,
+    unique_urls = tuple(dict.fromkeys(article_urls))
+    results: list[NewsSummaryBatchResult] = []
+    for offset in range(0, len(unique_urls), AUTO_SUMMARY_BATCH_SIZE):
+        result = await summarize_pending_news(
+            db,
+            batch_size=AUTO_SUMMARY_BATCH_SIZE,
+            article_urls=unique_urls[offset : offset + AUTO_SUMMARY_BATCH_SIZE],
+        )
+        results.append(result)
+        if result.status == "unconfigured":
+            break
+    if not results:
+        return NewsSummaryBatchResult(
+            status="success",
+            selected=0,
+            summarized=0,
+            skipped_existing=0,
+            skipped_insufficient=0,
+            failed=0,
+        )
+
+    selected = sum(result.selected for result in results)
+    summarized = sum(result.summarized for result in results)
+    skipped_existing = sum(result.skipped_existing for result in results)
+    skipped_insufficient = sum(result.skipped_insufficient for result in results)
+    failed_ids = tuple(
+        article_id for result in results for article_id in result.failed_article_ids
+    )
+    skipped_ids = tuple(
+        article_id for result in results for article_id in result.skipped_article_ids
+    )
+    if any(result.status == "unconfigured" for result in results):
+        status: Literal["success", "partial", "failed", "unconfigured"] = (
+            "partial" if summarized else "unconfigured"
+        )
+    else:
+        status = _batch_status(
+            summarized=summarized,
+            skipped_existing=skipped_existing,
+            skipped_insufficient=skipped_insufficient,
+            failed=len(failed_ids),
+        )
+    return NewsSummaryBatchResult(
+        status=status,
+        selected=selected,
+        summarized=summarized,
+        skipped_existing=skipped_existing,
+        skipped_insufficient=skipped_insufficient,
+        failed=len(failed_ids),
+        failed_article_ids=failed_ids,
+        skipped_article_ids=skipped_ids,
     )
 
 
 __all__ = [
-    "AUTO_SUMMARY_CANDIDATE_LIMIT",
     "AUTO_SUMMARY_BATCH_SIZE",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",

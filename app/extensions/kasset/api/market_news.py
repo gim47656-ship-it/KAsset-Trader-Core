@@ -25,7 +25,10 @@ from app.extensions.kasset.api.schemas import (
 )
 from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.symbol_news_relevance import SymbolNewsRelevance
-from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
+from app.services.disclosures.feed_sources import (
+    DISCLOSURE_FEED_SOURCES,
+    SEC_FEED_SOURCE,
+)
 from app.services.disclosures.quality import (
     DART_HIGH_VALUE_TITLE_TERMS,
     DART_LOW_INFORMATION_TITLE_TERMS,
@@ -172,6 +175,26 @@ def _published_at_wire(value: datetime | None) -> str | None:
     return iso_z(_naive_kst(value).replace(tzinfo=KST))
 
 
+def _localized_disclosure_title(article: NewsArticle) -> str | None:
+    if article.feed_source != SEC_FEED_SOURCE or any(
+        "가" <= character <= "힣" for character in article.title
+    ):
+        return None
+    form = article.title.partition("—")[0].strip()
+    subject = article.stock_name or article.stock_symbol or "미국 기업"
+    return f"{subject} {form} 공시"
+
+
+def _complete_korean_news_analysis():
+    return exists().where(
+        NewsAnalysisResult.article_id == NewsArticle.id,
+        NewsAnalysisResult.summary.op("~")("[가-힣]"),
+        or_(
+            NewsArticle.title.op("~")("[가-힣]"),
+            NewsAnalysisResult.translated_title.op("~")("[가-힣]"),
+        ),
+    )
+
 async def _latest_news_analyses(
     db: AsyncSession,
     article_ids: list[int],
@@ -196,7 +219,15 @@ async def _latest_news_analyses(
             )
             .label("analysis_rank"),
         )
-        .where(NewsAnalysisResult.article_id.in_(article_ids))
+        .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
+        .where(
+            NewsAnalysisResult.article_id.in_(article_ids),
+            NewsAnalysisResult.summary.op("~")("[가-힣]"),
+            or_(
+                NewsArticle.title.op("~")("[가-힣]"),
+                NewsAnalysisResult.translated_title.op("~")("[가-힣]"),
+            ),
+        )
         .subquery()
     )
     statement = select(
@@ -314,6 +345,23 @@ async def list_market_news(
                 NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
             )
         )
+    is_disclosure = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
+    is_ordinary_news = or_(
+        NewsArticle.feed_source.is_(None),
+        NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
+    )
+    statement = statement.where(
+        or_(
+            and_(
+                is_disclosure,
+                NewsArticle.summary.op("~")("[가-힣]"),
+            ),
+            and_(
+                is_ordinary_news,
+                _complete_korean_news_analysis(),
+            ),
+        )
+    )
 
     day_bucket = func.date_trunc("day", NewsArticle.article_published_at)
     if cursor is not None:
@@ -404,7 +452,11 @@ async def list_market_news(
                     else None
                 ),
                 translated_title=(
-                    analysis.translated_title if analysis is not None else None
+                    _localized_disclosure_title(article)
+                    if is_disclosure
+                    else analysis.translated_title
+                    if analysis is not None
+                    else None
                 ),
                 translated_excerpt=(
                     analysis.translated_excerpt if analysis is not None else None

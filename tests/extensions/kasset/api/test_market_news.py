@@ -164,6 +164,7 @@ async def market_news_client(
             feed_source="dart",
             published_at=None,
             source="DART",
+            summary="시각 없는 공시 한국어 요약",
         ),
         _article(
             prefix=prefix,
@@ -189,6 +190,7 @@ async def market_news_client(
     ]
     db_session.add_all(rows)
     await db_session.flush()
+    other_market_news = next(row for row in rows if row.title == "다른 시장 뉴스")
     same_news = next(row for row in rows if row.title == "동시각 뉴스")
     older_news = next(row for row in rows if row.title == "이전 뉴스")
     db_session.add_all(
@@ -212,6 +214,11 @@ async def market_news_client(
             _analysis(
                 older_news.id,
                 summary="기존 분석 행의 한국어 AI 요약이다.",
+                created_at=datetime(2026, 8, 29, 2, 1),
+            ),
+            _analysis(
+                other_market_news.id,
+                summary="다른 시장 뉴스의 한국어 AI 요약이다.",
                 created_at=datetime(2026, 8, 29, 2, 1),
             ),
         ]
@@ -257,7 +264,7 @@ async def market_news_client(
     seed = _NewsSeed(
         symbol=symbol,
         same_time_titles=frozenset({"동시각 공시", "동시각 뉴스"}),
-        news_titles=frozenset({"동시각 뉴스", "이전 뉴스", "후보 뉴스"}),
+        news_titles=frozenset({"동시각 뉴스", "이전 뉴스"}),
         disclosure_titles=frozenset({"동시각 공시", "시각 없는 공시"}),
         null_title="시각 없는 공시",
         kst_title="동시각 공시",
@@ -345,10 +352,7 @@ async def test_summary_uses_latest_bulk_analysis_for_news_and_verified_article_f
     assert by_title["이전 뉴스"]["summary"] == "기존 분석 행의 한국어 AI 요약이다."
     assert by_title["이전 뉴스"]["translatedTitle"] is None
     assert by_title["이전 뉴스"]["translatedExcerpt"] is None
-    assert by_title["후보 뉴스"]["summary"] is None
-    assert by_title["동시각 공시"]["summary"] == "검증된 공시 요약"
-    assert by_title["후보 뉴스"]["translatedTitle"] is None
-    assert by_title["후보 뉴스"]["translatedExcerpt"] is None
+    assert "후보 뉴스" not in by_title
     assert by_title["동시각 공시"]["translatedTitle"] is None
     assert by_title["동시각 공시"]["translatedExcerpt"] is None
 
@@ -461,12 +465,13 @@ async def test_every_disclosure_provider_maps_to_disclosure_kind(
         _article(
             prefix=uuid4().hex,
             slug="us-disclosure",
-            title="미국 공시",
+            title="10-K — Example Corp",
             symbol=seed.symbol,
             market="us",
             feed_source="sec",
             published_at=datetime(2026, 8, 29, 1, 0),
             source="SEC EDGAR",
+            summary="미국 연차보고서의 검증된 한국어 공시 요약",
         )
     )
     await db_session.commit()
@@ -481,15 +486,17 @@ async def test_every_disclosure_provider_maps_to_disclosure_kind(
 
     all_items = (await us_page("all"))["items"]
     by_title = {item["title"]: item["kind"] for item in all_items}
-    assert by_title["미국 공시"] == "disclosure"
+    assert by_title["10-K — Example Corp"] == "disclosure"
     assert by_title["다른 시장 뉴스"] == "news"
 
     disclosure_items = (await us_page("disclosure"))["items"]
     news_items = (await us_page("news"))["items"]
     disclosure_titles = {item["title"] for item in disclosure_items}
     news_titles = {item["title"] for item in news_items}
-    assert disclosure_titles == {"미국 공시"}
+    assert disclosure_titles == {"10-K — Example Corp"}
     assert news_titles == {"다른 시장 뉴스"}
+    translated = disclosure_items[0]["translatedTitle"]
+    assert translated == "테스트종목 10-K 공시"
 
 
 @pytest.mark.asyncio
@@ -508,6 +515,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         feed_source="dart",
         published_at=published_at,
         source="DART",
+        summary="중요 공급계약 공시의 검증된 한국어 요약",
     )
     routine = _article(
         prefix=prefix,
@@ -517,6 +525,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         feed_source="dart",
         published_at=published_at,
         source="DART",
+        summary="주주총회 공시의 검증된 한국어 요약",
     )
     low_information = _article(
         prefix=prefix,
@@ -526,6 +535,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         feed_source="dart",
         published_at=published_at,
         source="DART",
+        summary="기업집단 현황 공시의 검증된 한국어 요약",
     )
     unlisted = _article(
         prefix=prefix,
@@ -535,6 +545,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         feed_source="dart",
         published_at=published_at,
         source="DART",
+        summary="유상증자 공시의 검증된 한국어 요약",
     )
     analyzed_news = _article(
         prefix=prefix,
@@ -554,6 +565,24 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         published_at=datetime(2099, 8, 29, 11, 0),
         source="Example Wire",
     )
+    untranslated_foreign = _article(
+        prefix=prefix,
+        slug="untranslated-foreign",
+        title="Federal Reserve signals policy change",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2099, 8, 29, 12, 0),
+        source="Example Wire",
+    )
+    translated_foreign = _article(
+        prefix=prefix,
+        slug="translated-foreign",
+        title="Company announces semiconductor investment",
+        symbol=None,
+        feed_source="google_news",
+        published_at=datetime(2099, 8, 29, 11, 30),
+        source="Example Wire",
+    )
     db_session.add_all(
         [
             important,
@@ -562,15 +591,30 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
             unlisted,
             analyzed_news,
             title_only_news,
+            untranslated_foreign,
+            translated_foreign,
         ]
     )
     await db_session.flush()
-    db_session.add(
-        _analysis(
-            analyzed_news.id,
-            summary="상장사가 실제 계약 조건을 발표했다. 원문 수치를 확인한 요약이다.",
-            created_at=datetime(2099, 8, 29, 10, 1),
-        )
+    db_session.add_all(
+        [
+            _analysis(
+                analyzed_news.id,
+                summary="상장사가 실제 계약 조건을 발표했다. 원문 수치를 확인한 요약이다.",
+                created_at=datetime(2099, 8, 29, 10, 1),
+            ),
+            _analysis(
+                untranslated_foreign.id,
+                summary="연방준비제도가 정책 변경 가능성을 시사했다.",
+                created_at=datetime(2099, 8, 29, 12, 1),
+            ),
+            _analysis(
+                translated_foreign.id,
+                summary="회사가 신규 반도체 투자 계획을 발표했다.",
+                created_at=datetime(2099, 8, 29, 11, 31),
+                translated_title="회사의 반도체 투자 계획 발표",
+            ),
+        ]
     )
     await db_session.commit()
 
@@ -607,13 +651,21 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
 
         global_news = await client.get(
             "/api/v1/market/news",
-            params={"market": "KRX", "kind": "news", "limit": 2},
+            params={"market": "KRX", "kind": "news", "limit": 50},
         )
         assert global_news.status_code == 200
-        assert [item["title"] for item in global_news.json()["items"]] == [
+        news_items = global_news.json()["items"]
+        news_by_title = {item["title"]: item for item in news_items}
+        assert set(news_by_title) == {
             analyzed_news.title,
-            title_only_news.title,
-        ]
+            translated_foreign.title,
+        }
+        assert (
+            news_by_title[translated_foreign.title]["translatedTitle"]
+            == "회사의 반도체 투자 계획 발표"
+        )
+        assert untranslated_foreign.title not in news_by_title
+        assert title_only_news.title not in news_by_title
 
         symbol_response = await _page(client, seed, kind="disclosure", limit=20)
         symbol_titles = {item["title"] for item in symbol_response.json()["items"]}

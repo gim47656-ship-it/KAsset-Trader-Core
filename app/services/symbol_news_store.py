@@ -158,16 +158,17 @@ async def count_feed_article_changes(
 async def upsert_feed_articles(
     db: AsyncSession,
     market: str,
-    symbol: str,
+    symbol: str | None,
     items: list[FeedArticleInput],
     *,
     feed_source: str,
     commit: bool = True,
 ) -> int:
-    """URL 기준 기사 upsert와 후보 종목의 pending 관련도 링크를 함께 쓴다.
+    """URL 기준 기사 upsert와 선택적 후보 종목의 pending 관련도 링크를 함께 쓴다.
 
-    충돌 기사는 ID와 최초 RSS 발췌를 유지하고 제목·출처를 갱신한다. 새 원문은
-    기존 ``article_content``가 비어 있을 때만 채운다. 반환값은 새로 만든
+    ``symbol=None``은 시장 전체 feed를 article로만 저장한다. 충돌 기사는 ID와 최초
+    RSS 발췌를 유지하고 제목·출처를 갱신한다. 새 원문은 기존
+    ``article_content``가 비어 있을 때만 채운다. 반환값은 새로 만든
     ``symbol_news_relevance`` pending 링크 수다.
     """
     if not items:
@@ -223,27 +224,28 @@ async def upsert_feed_articles(
     url_to_id = {url: article_id for article_id, url in id_rows.all()}
 
     link_values = []
-    for item in deduplicated.values():
-        article_id = url_to_id.get(item.url)
-        if (
-            article_id is None
-        ):  # insert race lost and url missing — skip, next call heals
-            continue
-        link_values.append(
-            {
-                "article_id": article_id,
-                "market": market,
-                "symbol": symbol,
-                "feed_source": feed_source,
-                "first_seen_at": now,
-                "status": "pending",
-                "hints": build_relevance_hints(
-                    symbol=symbol, market=market, title=item.title
-                ),
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
+    if symbol is not None:
+        for item in deduplicated.values():
+            article_id = url_to_id.get(item.url)
+            if (
+                article_id is None
+            ):  # insert race lost and url missing — skip, next call heals
+                continue
+            link_values.append(
+                {
+                    "article_id": article_id,
+                    "market": market,
+                    "symbol": symbol,
+                    "feed_source": feed_source,
+                    "first_seen_at": now,
+                    "status": "pending",
+                    "hints": build_relevance_hints(
+                        symbol=symbol, market=market, title=item.title
+                    ),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
     new_links = 0
     if link_values:
         result = await db.execute(
