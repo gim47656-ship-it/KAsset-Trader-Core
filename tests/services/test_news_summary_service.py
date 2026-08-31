@@ -796,7 +796,7 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
         ).all()
     )
     assert first.summarized == 1
-    assert second.skipped_existing == 1
+    assert second.selected == 0
     assert len(generator.calls) == 1
     assert len(analyses) == 2
     assert analyses[-1].translated_title == "회사의 반도체 투자 계획 발표"
