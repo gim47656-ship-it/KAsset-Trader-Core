@@ -14,12 +14,12 @@ from app.services.brokers.kis.constants import TOKEN_EXPIRED_CODES
 
 _KIS_INDEX_DAILY_PATH = "/uapi/domestic-stock/v1/quotations/inquire-index-daily-price"
 _KIS_INDEX_DAILY_TR_ID = "FHPUP02120000"
-_KIS_INDEX_CODE_BY_SYMBOL = {"KOSPI": "0001"}
+_KIS_INDEX_CODE_BY_SYMBOL = {"KOSPI": "0001", "KOSDAQ": "1001"}
 _KIS_INDEX_MAX_PAGES = 20
 _NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{symbol}/price"
 _NAVER_PAGE_SIZE = 60
 _NAVER_HEADERS = {"User-Agent": "Mozilla/5.0"}
-_SUPPORTED_KR_BENCHMARKS = frozenset({"KOSPI"})
+_SUPPORTED_KR_BENCHMARKS = frozenset(_KIS_INDEX_CODE_BY_SYMBOL)
 
 
 class _Response(Protocol):

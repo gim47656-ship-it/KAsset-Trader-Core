@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
@@ -27,6 +28,9 @@ from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.ai_shadow import (
     AiShadowObservation,
     build_ai_shadow_observation,
+)
+from app.extensions.kasset.automation.benchmark_relative_strength import (
+    load_candidate_benchmark_returns,
 )
 from app.extensions.kasset.automation.candidate_ranker import (
     DEFAULT_CANDIDATE_RANKER_CONFIG,
@@ -276,12 +280,19 @@ class AIRecommendationVerticalSlice:
             ]
         )
         bars_by_candidate = await self._load_candidate_bars(recommendation_candidates)
+        benchmark_returns = await load_candidate_benchmark_returns(
+            self._db,
+            [candidate.ranker_key for candidate in candidates],
+            as_of=self._now,
+            maximum_age=self._ranker_config.maximum_bar_age,
+        )
         metadata = tuple(_candidate_metadata(candidate) for candidate in candidates)
         ranking = self._ranker.rank(
             metadata,
             bars_by_candidate,
             as_of=self._now,
             allowed_markets=allowed_markets,
+            benchmark_returns_60_by_candidate=benchmark_returns,
         )
         ranks_for_review = ranking.for_strategy_review(
             self._ranker_config.strategy_review_limit
@@ -316,19 +327,23 @@ class AIRecommendationVerticalSlice:
         ]
         reviewed: list[ReviewedCandidate] = []
         ai_failures = 0
+        review_rejections: Counter[str] = Counter()
         for item in actionable:
             try:
                 candidate_regime = item.regime
                 if candidate_regime is None:
                     continue
-                reviewed_item = await self._review_candidate(
+                reviewed_item, rejection_reason = await self._review_candidate(
                     owner_user_id,
                     item,
                     candidate_regime,
                 )
             except AiProviderUnavailable:
                 ai_failures += 1
+                review_rejections["provider_unavailable"] += 1
                 continue
+            if rejection_reason is not None:
+                review_rejections[rejection_reason] += 1
             if reviewed_item is not None:
                 reviewed.append(reviewed_item)
 
@@ -369,6 +384,7 @@ class AIRecommendationVerticalSlice:
             "strategyEvaluatedCount": len(evaluated),
             "aiReviewedCount": len(reviewed),
             "aiFailureCount": ai_failures,
+            "aiReviewRejections": dict(sorted(review_rejections.items())),
             "candleSync": candle_sync,
             "regime": (
                 next(iter(regimes.values())).regime.value
@@ -704,12 +720,12 @@ class AIRecommendationVerticalSlice:
         owner_user_id: int,
         item: EvaluatedCandidate,
         regime: RegimeAssessment,
-    ) -> ReviewedCandidate | None:
+    ) -> tuple[ReviewedCandidate | None, str | None]:
         if self._ai_router is None:
-            return None
+            return None, "provider_unavailable"
         ranking = item.factor_ranking
         if ranking is None or not ranking.included or ranking.valid_until is None:
-            return None
+            return None, "ranking_unavailable"
         events = await self._event_evidence(item.candidate)
         payload = {
             "symbol": item.candidate.symbol,
@@ -745,10 +761,10 @@ class AIRecommendationVerticalSlice:
             else Action.HOLD
         )
         if action != item.ensemble.action:
-            return None
+            return None, "action_mismatch"
         confidence = Decimal(str(verdict.confidence))
         if not confidence.is_finite() or confidence < Decimal("0.50"):
-            return None
+            return None, "low_confidence"
         valid_until = min(
             (
                 result.valid_until.astimezone(UTC)
@@ -764,7 +780,7 @@ class AIRecommendationVerticalSlice:
             self._now + timedelta(hours=1),
         )
         if valid_until <= self._now:
-            return None
+            return None, "expired"
         external = ExternalEvidence(
             source=f"model_router:{verdict.model_id}",
             symbol=item.candidate.symbol,
@@ -800,13 +816,16 @@ class AIRecommendationVerticalSlice:
             + confidence * Decimal("0.15")
             + event_score * Decimal("0.10")
         ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
-        return ReviewedCandidate(
-            evaluated=item,
-            external=external,
-            events=events,
-            event_score=event_score,
-            score=score,
-            ai_shadow=shadow_observation,
+        return (
+            ReviewedCandidate(
+                evaluated=item,
+                external=external,
+                events=events,
+                event_score=event_score,
+                score=score,
+                ai_shadow=shadow_observation,
+            ),
+            None,
         )
 
     async def _persist_recommendation(
@@ -1066,11 +1085,12 @@ async def run_ai_recommendation_cycle_once(
         total_recommendations += produced
         logger.info(
             "kasset AI recommendation cycle owner=%s skipped=%s candidates=%s "
-            "reviewed=%s recommendations=%d",
+            "reviewed=%s review_rejections=%s recommendations=%d",
             owner_id,
             result.get("skipped"),
             result.get("candidateCount", 0),
             result.get("aiReviewedCount"),
+            result.get("aiReviewRejections"),
             produced,
         )
         owners.append(result)

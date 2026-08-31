@@ -7,12 +7,16 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
 from typing import Any, Literal, cast
 
+from app.extensions.kasset.automation.benchmark_relative_strength import (
+    compute_benchmark_return_60_from_bars,
+)
 from app.extensions.kasset.automation.candidate_ranker import (
+    BenchmarkReturn,
     CandidateKey,
     CandidateMetadata,
     CandidateRanker,
@@ -514,6 +518,11 @@ def run_portfolio_backtest(
             histories,
             as_of=timestamp,
             allowed_markets=_SUPPORTED_MARKETS,
+            benchmark_returns_60=_rolling_benchmark_returns(
+                normalized_benchmarks,
+                as_of=timestamp,
+                maximum_age=active_ranker.config.maximum_bar_age,
+            ),
         )
         ranking_decisions += 1
         exclusion_counts.update(
@@ -988,6 +997,27 @@ def _normalize_benchmarks(
             bars, field_name=f"benchmark[{market}]", allow_empty=True
         )
     return normalized
+
+
+def _rolling_benchmark_returns(
+    benchmarks: Mapping[MarketKey, Sequence[PriceBar]],
+    *,
+    as_of: datetime,
+    maximum_age: timedelta,
+) -> dict[str, BenchmarkReturn]:
+    output: dict[str, BenchmarkReturn] = {}
+    for market, bars in benchmarks.items():
+        benchmark_symbol = "KOSPI" if market == "KR" else "SPY"
+        result = compute_benchmark_return_60_from_bars(
+            tuple(bar for bar in bars if bar.timestamp <= as_of),
+            market=market,
+            benchmark_symbol=benchmark_symbol,
+            as_of=as_of,
+            maximum_age=maximum_age,
+        )
+        if result is not None:
+            output[market] = result
+    return output
 
 
 def _normalize_bars(

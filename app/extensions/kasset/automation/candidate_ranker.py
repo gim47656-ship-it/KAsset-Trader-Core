@@ -115,14 +115,16 @@ class BenchmarkReturn:
     market: MarketKey
     return_60: Decimal
     data_as_of: datetime
+    benchmark_symbol: str | None = None
 
     def __post_init__(self) -> None:
         market = str(self.market).strip().upper()
         if market not in _SUPPORTED_MARKETS:
             raise ValueError("benchmark market must be KR or US")
+        symbol = str(self.benchmark_symbol or "").strip().upper() or None
         object.__setattr__(self, "market", market)
         object.__setattr__(self, "return_60", _decimal(self.return_60))
-
+        object.__setattr__(self, "benchmark_symbol", symbol)
 
 @dataclass(frozen=True, slots=True)
 class CandidateMetadata:
@@ -331,11 +333,19 @@ class CandidateRanker:
         as_of: datetime,
         allowed_markets: frozenset[str] = _SUPPORTED_MARKETS,
         benchmark_returns_60: Mapping[str, BenchmarkReturn] | None = None,
+        benchmark_returns_60_by_candidate: (
+            Mapping[CandidateKey, BenchmarkReturn] | None
+        ) = None,
     ) -> CandidateRankingBatch:
         current = _aware_utc(as_of, "as_of")
         allowed = normalize_allowed_markets(allowed_markets)
         benchmark = _normalized_benchmarks(
             benchmark_returns_60,
+            as_of=current,
+            maximum_age=self.config.maximum_bar_age,
+        )
+        candidate_benchmark = _normalized_candidate_benchmarks(
+            benchmark_returns_60_by_candidate,
             as_of=current,
             maximum_age=self.config.maximum_bar_age,
         )
@@ -369,7 +379,10 @@ class CandidateRanker:
         ranked = [
             self._score(
                 item,
-                benchmark_return=benchmark.get(item.metadata.market),
+                benchmark_return=(
+                    candidate_benchmark.get(item.metadata.key)
+                    or benchmark.get(item.metadata.market)
+                ),
                 cross_sectional_score=cross_sectional[item.metadata.key],
             )
             for item in prepared
@@ -574,7 +587,7 @@ class CandidateRanker:
         self,
         item: _PreparedCandidate,
         *,
-        benchmark_return: Decimal | None,
+        benchmark_return: BenchmarkReturn | None,
         cross_sectional_score: Decimal,
     ) -> CandidateRankResult:
         if benchmark_return is None:
@@ -582,7 +595,7 @@ class CandidateRanker:
             relative_strength_score = cross_sectional_score
             strength_source = "cross_sectional_60_session_percentile"
         else:
-            relative_strength_raw = item.momentum_60 - benchmark_return
+            relative_strength_raw = item.momentum_60 - benchmark_return.return_60
             relative_strength_score = _scaled_return(relative_strength_raw)
             strength_source = "benchmark_excess_60_session_return"
 
@@ -697,6 +710,24 @@ class CandidateRanker:
                 "benchmark is preferred; cross-section is deterministic fallback",
             ),
         )
+        if benchmark_return is not None:
+            evidence += (
+                RankEvidence(
+                    "relative_strength_benchmark",
+                    benchmark_return.benchmark_symbol or benchmark_return.market,
+                    "benchmark identity used for 60-session excess return",
+                ),
+                RankEvidence(
+                    "relative_strength_benchmark_return_60",
+                    _text(benchmark_return.return_60),
+                    "completed benchmark 60-session return",
+                ),
+                RankEvidence(
+                    "relative_strength_benchmark_data_as_of",
+                    _timestamp_text(benchmark_return.data_as_of) or "",
+                    "latest completed benchmark observation",
+                ),
+            )
         return CandidateRankResult(
             symbol=item.metadata.symbol,
             market=item.metadata.market,
@@ -778,8 +809,8 @@ def _normalized_benchmarks(
     *,
     as_of: datetime,
     maximum_age: timedelta,
-) -> dict[str, Decimal]:
-    normalized: dict[str, Decimal] = {}
+) -> dict[str, BenchmarkReturn]:
+    normalized: dict[str, BenchmarkReturn] = {}
     for market, value in (values or {}).items():
         key = str(market).strip().upper()
         try:
@@ -794,7 +825,37 @@ def _normalized_benchmarks(
             or as_of - data_as_of >= maximum_age
         ):
             continue
-        normalized[key] = value.return_60
+        normalized[key] = value
+    return normalized
+
+
+def _normalized_candidate_benchmarks(
+    values: Mapping[CandidateKey, BenchmarkReturn] | None,
+    *,
+    as_of: datetime,
+    maximum_age: timedelta,
+) -> dict[CandidateKey, BenchmarkReturn]:
+    normalized: dict[CandidateKey, BenchmarkReturn] = {}
+    for raw_key, value in (values or {}).items():
+        try:
+            market, raw_symbol = raw_key
+        except (TypeError, ValueError):
+            continue
+        key = (str(market).strip().upper(), str(raw_symbol).strip().upper())
+        try:
+            data_as_of = _aware_utc(value.data_as_of, "benchmark data_as_of")
+        except ValueError:
+            continue
+        if (
+            key[0] not in _SUPPORTED_MARKETS
+            or not key[1]
+            or value.market != key[0]
+            or not value.return_60.is_finite()
+            or data_as_of > as_of
+            or as_of - data_as_of >= maximum_age
+        ):
+            continue
+        normalized[key] = value
     return normalized
 
 

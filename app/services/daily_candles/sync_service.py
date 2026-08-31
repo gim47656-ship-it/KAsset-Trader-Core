@@ -216,11 +216,18 @@ class DailyCandleSyncService:
         await self._repository.session.rollback()
 
     async def sync_benchmark(
-        self, *, market: MarketKey, horizon_bars: int
+        self,
+        *,
+        market: MarketKey,
+        horizon_bars: int,
+        symbol: str | None = None,
     ) -> SyncOneResult:
         """후보 유니버스와 분리된 시장별 벤치마크를 동기화한다."""
 
+        normalized_symbol = str(symbol or "").strip().upper()
         if market == MarketKey.US:
+            if normalized_symbol and normalized_symbol != "SPY":
+                raise ValueError(f"지원하지 않는 US 벤치마크입니다: {symbol!r}")
             return await self.sync_one(
                 target=SyncTarget(
                     market=MarketKey.US,
@@ -231,12 +238,14 @@ class DailyCandleSyncService:
             )
         if market != MarketKey.KR:
             raise ValueError(f"일봉 벤치마크가 없는 시장입니다: {market}")
+        if normalized_symbol not in {"", "KOSPI", "KOSDAQ"}:
+            raise ValueError(f"지원하지 않는 KR 벤치마크입니다: {symbol!r}")
         if self._kis_kr_benchmark is None and self._naver_kr_benchmark is None:
             raise RuntimeError("KR 벤치마크 fetcher가 설정되지 않았습니다")
 
         target = SyncTarget(
             market=MarketKey.KR,
-            symbol="KOSPI",
+            symbol=normalized_symbol or "KOSPI",
             partition="KRX",
         )
         fallback_used = self._kis_kr_benchmark is None
@@ -253,7 +262,8 @@ class DailyCandleSyncService:
                     raise
                 fallback_used = True
                 logger.warning(
-                    "KIS KOSPI 일봉 조회 실패, Naver 대체 경로 사용: %s",
+                    "KIS %s 일봉 조회 실패, Naver 대체 경로 사용: %s",
+                    target.symbol,
                     exc,
                 )
             else:
@@ -273,8 +283,9 @@ class DailyCandleSyncService:
                     fallback_used = True
                     frame = None
                     logger.warning(
-                        "KIS KOSPI 완료 일봉 수 부족, Naver 대체 경로 사용 "
+                        "KIS %s 완료 일봉 수 부족, Naver 대체 경로 사용 "
                         "requested=%d",
+                        target.symbol,
                         horizon_bars,
                     )
 
