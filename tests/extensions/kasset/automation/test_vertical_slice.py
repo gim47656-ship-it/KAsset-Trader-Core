@@ -338,6 +338,7 @@ async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
         "tier": "terra",
         "modelId": "gpt-5.6-terra",
         "rationaleTags": ["breakout_not_confirmed"],
+        "recommendationId": None,
     }
 
 
