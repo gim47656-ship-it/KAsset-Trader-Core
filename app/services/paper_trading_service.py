@@ -72,17 +72,14 @@ _SNAPSHOT_COMPLETE_COLUMNS: dict[str, str] = {
 }
 
 
-def position_currency(instrument_type: str, symbol: str) -> str:
-    """Settlement currency of a holding.
+def position_currency(instrument_type: str) -> str:
+    """Cash-ledger currency used to settle and report a holding.
 
-    Mirrors the currency ``preview_order`` stamps on the resulting trade, so a
-    position and its trades always land in the same reporting bucket.
+    US equities debit the USD ledger. Every other supported paper instrument,
+    including crypto pairs, debits the KRW ledger in ``execute_order`` and must
+    stay in that same reporting bucket.
     """
-    if instrument_type == "equity_us":
-        return "USD"
-    if instrument_type == "crypto" and symbol.startswith("USDT-"):
-        return "USDT"
-    return "KRW"
+    return "USD" if instrument_type == "equity_us" else "KRW"
 
 
 def parse_quote_as_of(value: object) -> datetime | None:
@@ -421,7 +418,7 @@ class PaperTradingService:
 
         # Currency detection — same rule the reporting side partitions by, so a
         # trade and the position it builds always share one currency bucket.
-        currency = position_currency(instrument_type, resolved_symbol)
+        currency = position_currency(instrument_type)
 
         # Determine price. A caller that already resolved and approved a market
         # reference price passes it in; re-fetching here would fill at a
@@ -673,7 +670,7 @@ class PaperTradingService:
             item: dict[str, Any] = {
                 "symbol": p.symbol,
                 "instrument_type": instrument_type,
-                "currency": position_currency(instrument_type, p.symbol),
+                "currency": position_currency(instrument_type),
                 "quantity": p.quantity,
                 "avg_price": p.avg_price,
                 "total_invested": p.total_invested,
@@ -803,9 +800,7 @@ class PaperTradingService:
         for row in rows:
             currency = str(
                 row.get("currency")
-                or position_currency(
-                    str(row.get("instrument_type") or ""), str(row.get("symbol") or "")
-                )
+                or position_currency(str(row.get("instrument_type") or ""))
             )
             bucket = buckets.setdefault(currency, CurrencyValuation())
             bucket.positions_count += 1

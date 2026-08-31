@@ -166,16 +166,15 @@ class TestCurrencyMigration:
 
 class TestPositionCurrency:
     @pytest.mark.parametrize(
-        ("instrument_type", "symbol", "expected"),
+        ("instrument_type", "expected"),
         [
-            ("equity_kr", "005930", "KRW"),
-            ("equity_us", "AAPL", "USD"),
-            ("crypto", "KRW-BTC", "KRW"),
-            ("crypto", "USDT-BTC", "USDT"),
+            ("equity_kr", "KRW"),
+            ("equity_us", "USD"),
+            ("crypto", "KRW"),
         ],
     )
-    def test_settlement_currency(self, instrument_type, symbol, expected):
-        assert position_currency(instrument_type, symbol) == expected
+    def test_cash_ledger_currency(self, instrument_type, expected):
+        assert position_currency(instrument_type) == expected
 
     def test_reported_currencies_match_the_account_cash_ledgers(self):
         assert REPORTED_CURRENCIES == ("KRW", "USD")

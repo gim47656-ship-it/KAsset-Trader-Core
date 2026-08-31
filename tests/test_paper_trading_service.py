@@ -906,14 +906,14 @@ class TestPortfolioSummary:
             assert metrics["valuation_complete"] is True
 
     @pytest.mark.asyncio
-    async def test_summary_discloses_unreported_currency_instead_of_folding_it(
+    async def test_summary_buckets_usdt_crypto_with_krw_cash_ledger(
         self, service, monkeypatch
     ):
         account = PaperAccount(
             id=1,
             name="A",
             initial_capital=Decimal("1000000"),
-            cash_krw=Decimal("1000000"),
+            cash_krw=Decimal("995000"),
             cash_usd=Decimal("0"),
             is_active=True,
         )
@@ -926,7 +926,7 @@ class TestPortfolioSummary:
                     {
                         "symbol": "USDT-BTC",
                         "instrument_type": "crypto",
-                        "currency": "USDT",
+                        "currency": "KRW",
                         "total_invested": Decimal("5000"),
                         "evaluation_amount": Decimal("5500"),
                         "unrealized_pnl": Decimal("500"),
@@ -937,10 +937,11 @@ class TestPortfolioSummary:
 
         summary = await service.get_portfolio_summary(account_id=1)
 
-        # USDT is neither added to KRW nor silently dropped.
-        assert summary["currencies"]["KRW"]["positions_count"] == 0
-        assert summary["currencies"]["USD"]["positions_count"] == 0
-        assert summary["unsupported_currencies"] == {"USDT": {"positions": 1}}
+        krw = summary["currencies"]["KRW"]
+        assert krw["positions_count"] == 1
+        assert krw["total_evaluated"] == Decimal("5500")
+        assert krw["total_pnl"] == Decimal("500")
+        assert summary["unsupported_currencies"] == {}
 
 
 class TestDailySnapshots:
