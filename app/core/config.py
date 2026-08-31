@@ -717,6 +717,9 @@ class Settings(BaseSettings):
     AI_PAPER_AUTO_EXECUTION_ENABLED: bool = False
     # Event-driven market analysis is opt-in and remains fail-closed by default.
     KASSET_MARKET_EVENTS_ENABLED: bool = False
+    # Periodic Google News RSS fetch is separately opt-in to prevent unexpected
+    # outbound requests in tests and non-KAsset scheduler deployments.
+    KASSET_GOOGLE_NEWS_SCHEDULE_ENABLED: bool = False
     # Event analysis selects provider routes by feature. The compatibility
     # subscription CLI stays separate from the concrete HTTP MCP provider.
     KASSET_AI_PROVIDER_MODE: Literal["subscription", "api", "hybrid"] = "hybrid"

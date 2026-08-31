@@ -410,7 +410,6 @@ class AITradingPolicyService:
             row.value = payload
         state.trading_mode = "PAPER"
         state.kill_switch_enabled = limits.kill_switch
-        state.max_symbol_ratio = limits.max_symbol_allocation
         await db.commit()
         await db.refresh(row)
         return await self.get_snapshot(db, owner_user_id, now=current)

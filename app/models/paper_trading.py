@@ -39,6 +39,9 @@ class PaperAccount(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     initial_capital: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    initial_capital_usd: Mapped[Decimal] = mapped_column(
+        Numeric(20, 4), nullable=False, default=Decimal("0"), server_default="0"
+    )
     cash_krw: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     cash_usd: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), nullable=False, default=Decimal("0"), server_default="0"

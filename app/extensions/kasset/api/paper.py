@@ -66,8 +66,9 @@ class PaperAccountAdapter:
         account = PaperAccount(
             name=f"{_DEFAULT_ACCOUNT_NAME_PREFIX} {owner_user_id}",
             initial_capital=Decimal("10000000"),
+            initial_capital_usd=Decimal("10000"),
             cash_krw=Decimal("10000000"),
-            cash_usd=Decimal("0"),
+            cash_usd=Decimal("10000"),
             description="KAsset Android user PAPER account",
             strategy_name=None,
             is_active=True,
@@ -154,6 +155,7 @@ class PaperAccountAdapter:
         realized_result = await db.execute(
             select(PaperTrade.realized_pnl).where(
                 PaperTrade.account_id == account.id,
+                PaperTrade.instrument_type == InstrumentType.equity_kr,
                 PaperTrade.realized_pnl.is_not(None),
             )
         )

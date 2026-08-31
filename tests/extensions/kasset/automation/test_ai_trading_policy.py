@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
+from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
@@ -165,6 +166,11 @@ async def test_settings_round_trip_writes_only_canonical_fields(
 ) -> None:
     owner_id, username = await _owner(db_session)
     service = AITradingPolicyService()
+    await runtime_state.update_policy(
+        db_session,
+        owner_id,
+        max_symbol_ratio=Decimal("1"),
+    )
     limits = AITradingLimits(
         risk_level=4,
         operating_budget=Decimal("9000000"),
@@ -195,12 +201,14 @@ async def test_settings_round_trip_writes_only_canonical_fields(
                 UserSetting.key == "kasset.ai_trading",
             )
         )
+        state = await runtime_state.get(db_session, owner_id)
 
         assert saved.mode == loaded.mode == OperatingMode.AUTO_PAPER
         assert loaded.limits == limits
         assert loaded.limits.max_buys_per_day == 7
         assert loaded.limits.max_sells_per_day == 18
         assert loaded.limits.max_orders_per_day == 25
+        assert Decimal(state.max_symbol_ratio) == Decimal("1")
         assert loaded.executions == ()
         assert row is not None
         assert row.value["settings"] == {

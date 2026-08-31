@@ -85,6 +85,7 @@ class PaperTradingService:
         account = PaperAccount(
             name=name,
             initial_capital=initial_capital_krw,
+            initial_capital_usd=initial_capital_usd,
             cash_krw=initial_capital_krw,
             cash_usd=initial_capital_usd,
             description=description,
@@ -149,7 +150,7 @@ class PaperTradingService:
         )
         # Reset cash to initial.
         account.cash_krw = account.initial_capital
-        account.cash_usd = Decimal("0")
+        account.cash_usd = account.initial_capital_usd
         await self.db.commit()
         await self.db.refresh(account)
         return account

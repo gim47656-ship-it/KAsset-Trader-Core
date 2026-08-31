@@ -29,7 +29,8 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.models import AndroidPaperOrder
-from app.models.paper_trading import PaperTrade
+from app.models.paper_trading import PaperPosition, PaperTrade
+from app.models.trading import InstrumentType
 from app.services.paper_trading_service import PaperTradingService, calculate_fee
 
 
@@ -77,21 +78,67 @@ class PaperOrderFacade:
             if quote.currency == "USD"
             else Decimal(account.cash_krw)
         )
-        if request.side == "BUY" and estimated_amount + fee > available:
-            reasons.append(
-                RiskReason(
-                    code="INSUFFICIENT_CASH", message="주문 가능 금액이 부족합니다."
+        if request.side == "BUY":
+            if estimated_amount + fee > available:
+                reasons.append(
+                    RiskReason(
+                        code="INSUFFICIENT_CASH", message="주문 가능 금액이 부족합니다."
+                    )
                 )
-            )
-        if available > 0 and estimated_amount > available * Decimal(
-            state.max_order_ratio
-        ):
-            reasons.append(
-                RiskReason(
-                    code="MAX_ORDER_RATIO",
-                    message="한 주문의 최대 자산 비율을 초과했습니다.",
+            max_order_ratio = Decimal(state.max_order_ratio)
+            if (
+                max_order_ratio < 1
+                and available > 0
+                and estimated_amount > available * max_order_ratio
+            ):
+                reasons.append(
+                    RiskReason(
+                        code="MAX_ORDER_RATIO",
+                        message="한 주문 금액이 주문가능 현금 비율 한도를 초과했습니다.",
+                    )
                 )
-            )
+
+            max_symbol_ratio = Decimal(state.max_symbol_ratio)
+            if max_symbol_ratio < 1:
+                instrument_type = (
+                    InstrumentType.equity_us
+                    if quote.currency == "USD"
+                    else InstrumentType.equity_kr
+                )
+                position_result = await db.execute(
+                    select(
+                        PaperPosition.symbol,
+                        PaperPosition.quantity,
+                        PaperPosition.avg_price,
+                    ).where(
+                        PaperPosition.account_id == account.id,
+                        PaperPosition.instrument_type == instrument_type,
+                    )
+                )
+                position_cost_basis = Decimal("0")
+                symbol_cost_basis = Decimal("0")
+                for symbol, quantity, avg_price in position_result.all():
+                    cost_basis = Decimal(quantity) * Decimal(avg_price)
+                    position_cost_basis += cost_basis
+                    if symbol == request.symbol:
+                        symbol_cost_basis += cost_basis
+
+                projected_symbol_cost_basis = symbol_cost_basis + estimated_amount
+                projected_same_currency_assets = position_cost_basis + available - fee
+                if (
+                    projected_same_currency_assets > 0
+                    and projected_symbol_cost_basis
+                    > projected_same_currency_assets * max_symbol_ratio
+                ):
+                    reasons.append(
+                        RiskReason(
+                            code="MAX_SYMBOL_RATIO",
+                            message=(
+                                "주문 후 해당 종목 원가가 같은 통화 PAPER 자산의 "
+                                "비중 한도를 초과했습니다."
+                            ),
+                        )
+                    )
         return RiskAssessment(
             decision="REJECTED" if reasons else "APPROVED",
             reasons=reasons,

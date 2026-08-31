@@ -90,6 +90,376 @@ def _quote(*, price: str = "70000") -> Quote:
     )
 
 
+class PreviewRows:
+    def __init__(self, rows: list[tuple[str, Decimal, Decimal]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[tuple[str, Decimal, Decimal]]:
+        return self._rows
+
+
+class PreviewSession:
+    def __init__(self, positions: list[PaperPosition] | None = None) -> None:
+        self.positions = positions or []
+        self.last_statement: object | None = None
+
+    async def execute(self, statement: object) -> PreviewRows:
+        self.last_statement = statement
+        return PreviewRows(
+            [
+                (position.symbol, position.quantity, position.avg_price)
+                for position in self.positions
+            ]
+        )
+
+
+class ScalarRows:
+    def __init__(self, values: list[Decimal]) -> None:
+        self._values = values
+
+    def scalars(self) -> "ScalarRows":
+        return self
+
+    def all(self) -> list[Decimal]:
+        return self._values
+
+
+class BalanceSession:
+    def __init__(self, realized: list[Decimal]) -> None:
+        self.realized = realized
+        self.last_statement: object | None = None
+
+    async def execute(self, statement: object) -> ScalarRows:
+        self.last_statement = statement
+        return ScalarRows(self.realized)
+
+
+class EmptyAccountRows:
+    def scalar_one_or_none(self) -> None:
+        return None
+
+
+class NewAccountSession(FakeSession):
+    async def execute(self, _statement: object) -> EmptyAccountRows:
+        return EmptyAccountRows()
+
+    async def flush(self) -> None:
+        for value in self.added:
+            if isinstance(value, PaperAccount) and value.id is None:
+                value.id = 1
+
+
+def _risk_request(
+    *,
+    side: str = "BUY",
+    market: str = "KRX",
+    symbol: str = "005930",
+    quantity: str = "1",
+) -> OrderRequest:
+    return OrderRequest(
+        clientOrderId="risk-preview",
+        broker="PAPER",
+        accountId=None,
+        market=market,
+        symbol=symbol,
+        side=side,
+        orderType="MARKET",
+        quantity=quantity,
+        limitPrice=None,
+    )
+
+
+def _risk_quote(
+    *,
+    price: str = "100",
+    market: str = "KRX",
+    symbol: str = "005930",
+    currency: str = "KRW",
+) -> Quote:
+    return Quote(
+        broker="PAPER",
+        market=market,
+        symbol=symbol,
+        name=symbol,
+        currency=currency,
+        price=price,
+        as_of="2026-08-28T00:00:00Z",
+        source="TEST",
+    )
+
+
+def _position(
+    *,
+    symbol: str,
+    instrument_type: InstrumentType,
+    quantity: str,
+    avg_price: str,
+) -> PaperPosition:
+    cost_basis = Decimal(quantity) * Decimal(avg_price)
+    return PaperPosition(
+        account_id=1,
+        symbol=symbol,
+        instrument_type=instrument_type,
+        quantity=Decimal(quantity),
+        avg_price=Decimal(avg_price),
+        total_invested=cost_basis,
+    )
+
+
+def _configure_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: object,
+    quote: Quote,
+    max_order_ratio: str,
+    max_symbol_ratio: str,
+) -> None:
+    monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+    monkeypatch.setattr(
+        paper_account_adapter, "resolve_account", AsyncMock(return_value=account)
+    )
+    monkeypatch.setattr(
+        krx_quotes, "quote_for_market", AsyncMock(return_value=quote)
+    )
+    monkeypatch.setattr(
+        runtime_state,
+        "get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                kill_switch_enabled=False,
+                max_order_ratio=Decimal(max_order_ratio),
+                max_symbol_ratio=Decimal(max_symbol_ratio),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_state,
+        "get_global",
+        AsyncMock(return_value=SimpleNamespace(kill_switch_enabled=False)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_android_paper_account_starts_with_parallel_usd_cash() -> None:
+    db = NewAccountSession()
+    account = await paper_account_adapter.default_account(
+        db, owner_user_id=101  # type: ignore[arg-type]
+    )
+    assert account.initial_capital == Decimal("10000000")
+    assert account.initial_capital_usd == Decimal("10000")
+    assert account.cash_krw == Decimal("10000000")
+    assert account.cash_usd == Decimal("10000")
+    assert db.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_balance_keeps_usd_cash_separate_from_krw_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = BalanceSession([Decimal("1500")])
+    account = SimpleNamespace(
+        id=1, cash_krw=Decimal("10000000"), cash_usd=Decimal("10000")
+    )
+    monkeypatch.setattr(
+        paper_account_adapter, "default_account", AsyncMock(return_value=account)
+    )
+    monkeypatch.setattr(
+        PaperTradingService,
+        "get_positions",
+        AsyncMock(
+            return_value=[
+                {
+                    "instrument_type": "equity_kr",
+                    "evaluation_amount": Decimal("500000"),
+                    "unrealized_pnl": Decimal("25000"),
+                },
+                {
+                    "instrument_type": "equity_us",
+                    "evaluation_amount": Decimal("3000"),
+                    "unrealized_pnl": Decimal("200"),
+                },
+            ]
+        ),
+    )
+    balance = await paper_account_adapter.balance(
+        db, owner_user_id=101  # type: ignore[arg-type]
+    )
+    assert balance.base_currency == "KRW"
+    assert balance.evaluation_amount == "500000"
+    assert balance.total_assets == "10500000"
+    assert balance.unrealized_pnl == "25000"
+    assert balance.realized_pnl == "1500"
+    assert [(line.currency, line.cash) for line in balance.cash] == [
+        ("KRW", "10000000"),
+        ("USD", "10000"),
+    ]
+    assert db.last_statement is not None
+    assert InstrumentType.equity_kr in db.last_statement.compile().params.values()
+
+
+@pytest.mark.asyncio
+async def test_buy_rejects_order_ratio_against_orderable_cash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession()
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1, cash_krw=Decimal("1000"), cash_usd=Decimal("10000")
+        ),
+        quote=_risk_quote(),
+        max_order_ratio="0.5",
+        max_symbol_ratio="1",
+    )
+    risk = await PaperOrderFacade().preview(
+        db, 101, _risk_request(quantity="6")  # type: ignore[arg-type]
+    )
+    assert [(reason.code, reason.message) for reason in risk.reasons] == [
+        (
+            "MAX_ORDER_RATIO",
+            "한 주문 금액이 주문가능 현금 비율 한도를 초과했습니다.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_buy_rejects_projected_symbol_cost_basis_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession(
+        [
+            _position(
+                symbol="005930",
+                instrument_type=InstrumentType.equity_kr,
+                quantity="4",
+                avg_price="100",
+            )
+        ]
+    )
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1, cash_krw=Decimal("1000"), cash_usd=Decimal("10000")
+        ),
+        quote=_risk_quote(),
+        max_order_ratio="1",
+        max_symbol_ratio="0.25",
+    )
+    risk = await PaperOrderFacade().preview(
+        db, 101, _risk_request(quantity="2")  # type: ignore[arg-type]
+    )
+    assert [reason.code for reason in risk.reasons] == ["MAX_SYMBOL_RATIO"]
+
+
+@pytest.mark.asyncio
+async def test_buy_allows_both_concentration_ratios_at_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession(
+        [
+            _position(
+                symbol="005930",
+                instrument_type=InstrumentType.equity_kr,
+                quantity="4",
+                avg_price="100",
+            )
+        ]
+    )
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1, cash_krw=Decimal("1000"), cash_usd=Decimal("10000")
+        ),
+        quote=_risk_quote(),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+    risk = await PaperOrderFacade().preview(
+        db, 101, _risk_request(quantity="5")  # type: ignore[arg-type]
+    )
+    assert risk.decision == "APPROVED"
+    assert risk.reasons == []
+
+
+@pytest.mark.asyncio
+async def test_ratios_at_one_keep_insufficient_cash_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession()
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1, cash_krw=Decimal("100"), cash_usd=Decimal("10000")
+        ),
+        quote=_risk_quote(),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+    risk = await PaperOrderFacade().preview(
+        db, 101, _risk_request()  # type: ignore[arg-type]
+    )
+    assert [reason.code for reason in risk.reasons] == ["INSUFFICIENT_CASH"]
+
+
+@pytest.mark.asyncio
+async def test_sell_ignores_buy_concentration_ratios(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession()
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1, cash_krw=Decimal("1"), cash_usd=Decimal("1")
+        ),
+        quote=_risk_quote(),
+        max_order_ratio="0.01",
+        max_symbol_ratio="0.01",
+    )
+    risk = await PaperOrderFacade().preview(
+        db,
+        101,
+        _risk_request(side="SELL", quantity="100"),  # type: ignore[arg-type]
+    )
+    assert risk.decision == "APPROVED"
+    assert risk.reasons == []
+    assert db.last_statement is None
+
+
+@pytest.mark.asyncio
+async def test_usd_symbol_ratio_excludes_krw_cash_and_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession(
+        [
+            _position(
+                symbol="AAPL",
+                instrument_type=InstrumentType.equity_us,
+                quantity="20",
+                avg_price="100",
+            )
+        ]
+    )
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1,
+            cash_krw=Decimal("1000000000"),
+            cash_usd=Decimal("1000"),
+        ),
+        quote=_risk_quote(market="US", symbol="AAPL", currency="USD"),
+        max_order_ratio="0.5",
+        max_symbol_ratio="0.5",
+    )
+    risk = await PaperOrderFacade().preview(
+        db,
+        101,
+        _risk_request(market="US", symbol="AAPL"),  # type: ignore[arg-type]
+    )
+    assert [reason.code for reason in risk.reasons] == ["MAX_SYMBOL_RATIO"]
+    assert db.last_statement is not None
+    assert InstrumentType.equity_us in db.last_statement.compile().params.values()
+
+
 @pytest.mark.asyncio
 async def test_paper_market_order_reaches_fill_path(
     monkeypatch: pytest.MonkeyPatch,
@@ -636,6 +1006,7 @@ async def test_market_order_fills_at_submit_reference_price(
             return_value=SimpleNamespace(
                 kill_switch_enabled=False,
                 max_order_ratio=Decimal("0.1000"),
+                max_symbol_ratio=Decimal("0.2500"),
             )
         ),
     )

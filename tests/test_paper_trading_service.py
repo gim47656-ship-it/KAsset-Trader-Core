@@ -78,6 +78,7 @@ class TestAccountManagement:
         )
         assert account.name == "Test"
         assert account.initial_capital == pytest.approx(Decimal("10000000"))
+        assert account.initial_capital_usd == pytest.approx(Decimal("0"))
         assert account.cash_krw == pytest.approx(Decimal("10000000"))
         assert account.cash_usd == pytest.approx(Decimal("0"))
         assert account.is_active is True
@@ -94,6 +95,7 @@ class TestAccountManagement:
             description="dollar-cost averaging",
             strategy_name="dca-us",
         )
+        assert account.initial_capital_usd == pytest.approx(Decimal("5000"))
         assert account.cash_usd == pytest.approx(Decimal("5000"))
         assert account.description == "dollar-cost averaging"
         assert account.strategy_name == "dca-us"
@@ -106,6 +108,7 @@ class TestAccountManagement:
             id=1,
             name="Test",
             initial_capital=Decimal("10000000"),
+            initial_capital_usd=Decimal("10000"),
             cash_krw=Decimal("3000000"),
             cash_usd=Decimal("100"),
             is_active=True,
@@ -121,7 +124,7 @@ class TestAccountManagement:
         result = await service.reset_account(1)
 
         assert result.cash_krw == pytest.approx(Decimal("10000000"))
-        assert result.cash_usd == pytest.approx(Decimal("0"))
+        assert result.cash_usd == pytest.approx(Decimal("10000"))
         assert mock_db.execute.await_count == 3
         lock_statement, close_statement, delete_statement = (
             awaited.args[0] for awaited in mock_db.execute.await_args_list

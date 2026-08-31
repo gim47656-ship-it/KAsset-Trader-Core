@@ -393,6 +393,20 @@ def test_market_event_task_is_registered() -> None:
         kasset_market_events_tasks.kasset_market_events_run.task_name
         == "kasset_market_events.run"
     )
+    assert (
+        kasset_market_events_tasks.kasset_google_news_kr_sync.task_name
+        == "kasset.news.google.kr.sync"
+    )
+    assert kasset_market_events_tasks.kasset_google_news_kr_sync.labels["schedule"] == [
+        {"cron": "20 */3 * * *", "cron_offset": "Asia/Seoul"}
+    ]
+    assert (
+        kasset_market_events_tasks.kasset_google_news_us_sync.task_name
+        == "kasset.news.google.us.sync"
+    )
+    assert kasset_market_events_tasks.kasset_google_news_us_sync.labels["schedule"] == [
+        {"cron": "50 */3 * * *", "cron_offset": "Asia/Seoul"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -473,6 +487,95 @@ async def test_watchlist_candle_sync_isolates_per_symbol_failures(
             {"symbol": "000660", "error": "toss unavailable"},
             {"symbol": "005930", "rows": 60, "upserted": 60},
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_google_news_sync_delegates_bounded_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_GOOGLE_NEWS_SCHEDULE_ENABLED", True)
+
+    async def fake_targets(market: str) -> list[str]:
+        assert market == "us"
+        return ["AAPL", "MSFT"]
+
+    async def fake_ingest(
+        *,
+        market: str,
+        stock_symbols: list[str],
+    ) -> dict[str, object]:
+        assert market == "us"
+        assert stock_symbols == ["AAPL", "MSFT"]
+        return {"status": "success", "symbol_count": 2}
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_news_target_symbols",
+        fake_targets,
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "run_google_news_rss_ingestion",
+        fake_ingest,
+    )
+
+    assert await kasset_market_events_tasks._sync_google_news_market("us") == {
+        "status": "success",
+        "symbol_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_google_news_sync_skips_without_active_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_GOOGLE_NEWS_SCHEDULE_ENABLED", True)
+
+    async def no_targets(_market: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_news_target_symbols",
+        no_targets,
+    )
+
+    assert await kasset_market_events_tasks._sync_google_news_market("kr") == {
+        "status": "skipped",
+        "market": "kr",
+        "symbol_count": 0,
+        "reason": "no_active_targets",
+    }
+
+
+@pytest.mark.asyncio
+async def test_disabled_google_news_sync_is_database_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_GOOGLE_NEWS_SCHEDULE_ENABLED", False)
+
+    def forbidden_session() -> None:
+        raise AssertionError("disabled task must not open a database session")
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "AsyncSessionLocal",
+        forbidden_session,
+    )
+    assert await kasset_market_events_tasks._sync_google_news_market("kr") == {
+        "enabled": False,
+        "market": "kr",
+        "symbol_count": 0,
     }
 
 
