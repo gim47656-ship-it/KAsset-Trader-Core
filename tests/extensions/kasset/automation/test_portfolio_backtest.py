@@ -455,6 +455,42 @@ def test_backtest_ranking_uses_candidate_specific_kr_benchmarks() -> None:
     )
 
 
+def test_reporting_benchmark_does_not_fill_partial_candidate_ranking_input() -> None:
+    kospi = _candidate("005930", "KR")
+    kosdaq = _candidate("035900", "KR")
+    bars = _bars(count=280, scale=Decimal("100"))
+    flat = _trend_benchmark(bars, end_multiplier=Decimal("1"))
+    rising = _trend_benchmark(bars, end_multiplier=Decimal("2"))
+    config = PortfolioBacktestConfig(
+        initial_cash=Decimal("10000000"),
+        max_positions=1,
+        candidate_top_n=1,
+        risk_per_trade_rate=Decimal("0.02"),
+        max_symbol_allocation=Decimal("0.50"),
+    )
+    candidate_benchmarks = {
+        kospi.key: CandidateBenchmarkSeries("KOSPI", rising),
+    }
+
+    with_reporting = run_portfolio_backtest(
+        (kospi, kosdaq),
+        {kospi.key: bars, kosdaq.key: bars},
+        config=config,
+        benchmark_bars_by_market={"KR": flat},
+        benchmark_bars_by_candidate=candidate_benchmarks,
+    )
+    without_reporting = run_portfolio_backtest(
+        (kospi, kosdaq),
+        {kospi.key: bars, kosdaq.key: bars},
+        config=config,
+        benchmark_bars_by_candidate=candidate_benchmarks,
+    )
+
+    assert with_reporting.signals == without_reporting.signals
+    assert [item.market for item in with_reporting.benchmark_by_market] == ["KR"]
+    assert with_reporting.excess_return is not None
+
+
 def _ready_market(market: str) -> MarketReadiness:
     benchmark = BenchmarkCoverage(
         market=market,  # type: ignore[arg-type]

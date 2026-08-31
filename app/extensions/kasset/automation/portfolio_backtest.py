@@ -464,6 +464,12 @@ def run_portfolio_backtest(
         metadata,
         benchmark_bars_by_candidate or {},
     )
+    # Candidate-specific benchmark input mirrors runtime ranking. Market-level
+    # series remain available for portfolio excess-return reporting, but must not
+    # fill a missing candidate benchmark and create a mixed ranking scale.
+    ranking_benchmarks = (
+        {} if normalized_candidate_benchmarks else normalized_benchmarks
+    )
     strategy_tuple = tuple(strategies)
     if not strategy_tuple:
         raise ValueError("at least one deterministic strategy is required")
@@ -534,7 +540,7 @@ def run_portfolio_backtest(
             as_of=timestamp,
             allowed_markets=_SUPPORTED_MARKETS,
             benchmark_returns_60=_rolling_benchmark_returns(
-                normalized_benchmarks,
+                ranking_benchmarks,
                 as_of=timestamp,
                 maximum_age=active_ranker.config.maximum_bar_age,
             ),
