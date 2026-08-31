@@ -267,6 +267,49 @@ async def _load_live_kr_candidates(
     return tuple(candidates)
 
 
+async def _load_live_us_candidates(
+    db: AsyncSession,
+    *,
+    limit: int = DEFAULT_CANDIDATE_RANKER_CONFIG.candidate_limit,
+) -> tuple[TradingCandidate, ...]:
+    from app.services.market_valuation_snapshots.us_provider import (
+        TvScreenerUsValuationProvider,
+    )
+    from app.services.us_symbol_universe_service import get_us_common_stock_flags
+
+    fetch_limit = max(limit * 3, limit)
+    rows = await TvScreenerUsValuationProvider(timeout=30).fetch_rows(
+        limit=fetch_limit,
+        sort_by_market_cap=True,
+    )
+    normalized: list[tuple[str, dict[str, object]]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").rsplit(":", 1)[-1].strip().upper()
+        if symbol:
+            normalized.append((symbol, row))
+    flags = await get_us_common_stock_flags(
+        [symbol for symbol, _row in normalized],
+        db=db,
+    )
+    candidates: list[TradingCandidate] = []
+    seen: set[str] = set()
+    for symbol, _row in normalized:
+        if symbol in seen or flags.get(symbol) is not True:
+            continue
+        seen.add(symbol)
+        candidates.append(
+            TradingCandidate(
+                symbol=symbol,
+                market="US",
+                name=None,
+                source="tvscreener_us",
+            )
+        )
+        if len(candidates) >= limit:
+            break
+    return tuple(candidates)
+
+
 class AIRecommendationVerticalSlice:
     """Run one owner through existing candles, strategies, AI, and persistence."""
 
@@ -804,6 +847,27 @@ class AIRecommendationVerticalSlice:
                     limit=self._ranker_config.candidate_limit
                 )
                 self._live_candidates_cache["kr"] = live
+            for candidate in live:
+                ordered[candidate.ranker_key] = _merge_trading_candidate(
+                    ordered.get(candidate.ranker_key),
+                    candidate,
+                )
+
+        us_count = sum(
+            candidate.ranker_market == "US" and candidate.eligible_for_new_buy
+            for candidate in ordered.values()
+        )
+        if (
+            "US" in requested_markets
+            and us_count < self._ranker_config.minimum_candidate_target
+        ):
+            live = self._live_candidates_cache.get("us")
+            if live is None:
+                live = await _load_live_us_candidates(
+                    self._db,
+                    limit=self._ranker_config.candidate_limit,
+                )
+                self._live_candidates_cache["us"] = live
             for candidate in live:
                 ordered[candidate.ranker_key] = _merge_trading_candidate(
                     ordered.get(candidate.ranker_key),

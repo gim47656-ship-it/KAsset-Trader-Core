@@ -4,8 +4,8 @@ Guardrails owned by this module:
 
 * Stored data only. Nothing here generates a summary, calls an AI provider, or
   triggers an ingestion run (ROB-501: no in-process LLM provider).
-* News summaries come from the persisted ``NewsAnalysisResult.summary`` only;
-  ``prompt``, ``raw_response`` and ``article_content`` never leave the DB.
+* 일반 뉴스는 한국어 제목과 한국어 요약이 모두 완성된 영속 분석만 노출한다.
+  ``prompt``, ``raw_response``와 ``article_content``는 DB 밖으로 내보내지 않는다.
 * Research stays citation-shaped: title/publisher/link plus the same excerpt
   cap the ingestion contract already enforces (``DETAIL_EXCERPT_MAX``).
 * Daily routine alerts are owner-scoped read-only evidence and never enter an
@@ -47,6 +47,11 @@ from app.models.research_reports import ResearchReport
 from app.schemas.research_reports import (
     DETAIL_EXCERPT_MAX,
     ResearchReportSymbolCandidate,
+)
+from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
+from app.services.news_summary_service import (
+    complete_korean_analysis_conditions,
+    complete_korean_analysis_exists,
 )
 from app.services.research_reports.query_service import ResearchReportsQueryService
 
@@ -131,7 +136,14 @@ async def _load_news_rows(
 ) -> list[NewsArticle]:
     stmt = (
         select(NewsArticle)
-        .where(NewsArticle.market == market)
+        .where(
+            NewsArticle.market == market,
+            or_(
+                NewsArticle.feed_source.is_(None),
+                NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
+            ),
+            complete_korean_analysis_exists(),
+        )
         .order_by(
             NewsArticle.article_published_at.desc().nulls_last(),
             NewsArticle.id.desc(),
@@ -176,8 +188,8 @@ async def _load_related_symbols(
 
 async def _load_stored_summaries(
     db: AsyncSession, article_ids: list[int]
-) -> dict[int, str]:
-    """Bulk-load the newest stored analysis summary per article."""
+) -> dict[int, tuple[str, str]]:
+    """한국어가 완성된 최신 저장 분석의 ``(요약, 번역 제목)``을 읽는다."""
 
     if not article_ids:
         return {}
@@ -185,19 +197,33 @@ async def _load_stored_summaries(
         select(
             NewsAnalysisResult.article_id,
             NewsAnalysisResult.summary,
+            NewsAnalysisResult.translated_title,
+            NewsArticle.title,
         )
-        .where(NewsAnalysisResult.article_id.in_(article_ids))
+        .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
+        .where(
+            NewsAnalysisResult.article_id.in_(article_ids),
+            *complete_korean_analysis_conditions(),
+        )
         .order_by(
             NewsAnalysisResult.article_id,
             NewsAnalysisResult.created_at.desc(),
             NewsAnalysisResult.id.desc(),
         )
     )
-    summary_by_article: dict[int, str] = {}
-    for article_id, summary in (await db.execute(stmt)).all():
-        if summary and article_id not in summary_by_article:
-            summary_by_article[article_id] = summary
-    return summary_by_article
+    analysis_by_article: dict[int, tuple[str, str]] = {}
+    for article_id, summary, translated_title, article_title in (
+        await db.execute(stmt)
+    ).all():
+        if article_id not in analysis_by_article and summary is not None:
+            headline = (
+                translated_title
+                if translated_title is not None
+                and re.search(r"[가-힣]", translated_title)
+                else article_title
+            )
+            analysis_by_article[article_id] = (summary, headline)
+    return analysis_by_article
 
 
 def _news_symbol_refs(
@@ -221,17 +247,17 @@ def _news_symbol_refs(
 def _news_item(
     row: NewsArticle,
     relations: list[NewsArticleRelatedSymbol],
-    summary: str | None,
+    analysis: tuple[str, str],
 ) -> AiNewsItem:
     return AiNewsItem(
         id=f"news:{row.id}",
-        headline=row.title,
+        headline=analysis[1],
         source=row.source,
         published_at=_iso_or_none(row.article_published_at),
         market=(row.market or "").lower(),
         symbols=_news_symbol_refs(relations),
         canonical_url=row.url,
-        summary=summary,
+        summary=analysis[0],
         data_updated_at=_iso_or_none(row.updated_at or row.created_at),
     )
 
@@ -245,10 +271,9 @@ async def _build_news_section(
 
     article_ids = [row.id for row in rows]
     relations = await _load_related_symbols(db, article_ids)
-    summaries = await _load_stored_summaries(db, article_ids)
+    analyses = await _load_stored_summaries(db, article_ids)
     items = [
-        _news_item(row, relations.get(row.id, []), summaries.get(row.id))
-        for row in rows
+        _news_item(row, relations.get(row.id, []), analyses[row.id]) for row in rows
     ]
     refreshed_at = _newest([row.updated_at or row.created_at for row in rows])
     return AiNewsSection(

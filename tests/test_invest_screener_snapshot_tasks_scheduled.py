@@ -18,6 +18,7 @@ database or external screener data sources.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,6 +28,8 @@ from app.jobs.invest_screener_snapshots import (
     SnapshotBuildResult,
 )
 from app.tasks import invest_screener_snapshot_tasks as task_module
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _fake_build_result(market: str, *, committed: bool = False) -> SnapshotBuildResult:
@@ -81,6 +84,25 @@ def test_us_schedule_label_carries_et_offset_when_enabled() -> None:
         assert task_module._scheduled_us_post_close_labels() == [
             {"cron": "20 17 * * 1-5", "cron_offset": "America/New_York"}
         ]
+
+
+def test_kasset_compose_discovers_news_tasks_in_worker_and_scheduler() -> None:
+    compose = (ROOT / "docker-compose.kasset.yml").read_text(encoding="utf-8")
+    worker_command = (
+        'command: ["/app/.venv/bin/taskiq", "worker", '
+        '"app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", '
+        '"app.tasks.news_summary_tasks", '
+        '"app.tasks.truth_social_tasks", "--workers", "1"]'
+    )
+    scheduler_command = (
+        'command: ["/app/.venv/bin/taskiq", "scheduler", '
+        '"app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks", '
+        '"app.tasks.news_summary_tasks", '
+        '"app.tasks.truth_social_tasks"]'
+    )
+
+    assert worker_command in compose
+    assert scheduler_command in compose
 
 
 # --- is_market_session_today (XKRX / XNYS) ----------------------------------

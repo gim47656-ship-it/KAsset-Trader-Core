@@ -411,6 +411,18 @@ async def test_candidate_universe_order_and_owner_scoped_holdings(
         "_load_live_kr_candidates",
         live_loader,
     )
+    live_us_candidate = TradingCandidate(
+        symbol="TSLA",
+        market="US",
+        name="Tesla",
+        source="tvscreener_us",
+    )
+    live_us_loader = AsyncMock(return_value=(live_us_candidate,))
+    monkeypatch.setattr(
+        vertical_slice,
+        "_load_live_us_candidates",
+        live_us_loader,
+    )
 
     holdings_result = SimpleNamespace(
         all=lambda: [
@@ -466,18 +478,20 @@ async def test_candidate_universe_order_and_owner_scoped_holdings(
         allowed_markets=frozenset({"KR", "US"}),
     )
 
-    assert [candidate.symbol for candidate in candidates[:6]] == [
+    assert [candidate.symbol for candidate in candidates[:7]] == [
         "MSFT",
         "005930",
         "000660",
         "035420",
         "AAPL",
         "051910",
+        "TSLA",
     ]
     assert candidates[0].is_watchlisted is True
     assert candidates[2].is_held is True
     assert candidates[3].turnover == Decimal("800000000")
     assert candidates[4].turnover == Decimal("7000000")
     assert live_loader.await_count == 1
+    assert live_us_loader.await_count == 1
     holdings_statement = db.scalars.await_args_list[0].args[0]
     assert 41 in holdings_statement.compile().params.values()
