@@ -352,6 +352,15 @@ def test_normalize_accepts_the_default_payload() -> None:
     assert normalized == dict(DEFAULT_ROUTE_POLICY)
 
 
+def test_normalize_accepts_mcp_only_summary_policy() -> None:
+    payload = _valid_payload()
+    payload["summary_luna"] = ["mcp_tool"]
+
+    normalized = normalize_route_policy(payload)
+
+    assert normalized[AiLane.SUMMARY_LUNA] == (AiRouteId.MCP_TOOL,)
+
+
 def test_normalize_rejects_unknown_route() -> None:
     payload = _valid_payload()
     payload["review_terra"] = ["direct_terra", "gpt-4o-mini"]

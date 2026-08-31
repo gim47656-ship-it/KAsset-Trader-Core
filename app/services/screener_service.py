@@ -1,21 +1,96 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal
 from uuid import uuid4
 
 import redis.asyncio as redis
+from pydantic import BaseModel, ConfigDict, Field
 from redis.exceptions import WatchError
 
+from app.analysis.models import PriceAnalysis
 from app.core.config import settings
 
-if TYPE_CHECKING:
-    from app.services.agent_gateway import AgentGatewayClient
-
 ScreenMarket = Literal["kr", "us", "crypto"]
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_background(
+    coro: Coroutine[Any, Any, Any], *, name: str
+) -> asyncio.Task[Any]:
+    task = asyncio.create_task(coro, name=name)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+
+
+class _GeneratedScreenerReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["buy", "hold", "sell"]
+    confidence: int = Field(ge=0, le=100)
+    reasons: list[str] = Field(min_length=1, max_length=8)
+    price_analysis: PriceAnalysis
+    detailed_text: str = Field(min_length=1)
+
+
+async def generate_screener_report(
+    *, market: str, symbol: str, name: str
+) -> dict[str, Any]:
+    """Build an evidence-backed report through the configured MCP sidecar."""
+    from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
+    from app.mcp_server.tooling.analysis_tool_handlers import analyze_stock_impl
+
+    mcp_url = settings.KASSET_AI_MCP_URL.strip()
+    if not mcp_url:
+        raise RuntimeError("KASSET_AI_MCP_URL is not configured")
+    token = (
+        settings.KASSET_AI_MCP_TOKEN.get_secret_value()
+        if settings.KASSET_AI_MCP_TOKEN is not None
+        else None
+    )
+    evidence = await analyze_stock_impl(symbol=symbol, market=market)
+    client = McpStructuredJsonClient(
+        url=mcp_url,
+        token=token,
+        tool_name=settings.KASSET_AI_MCP_TOOL_NAME,
+        timeout_seconds=settings.KASSET_AI_MCP_TIMEOUT_SECONDS,
+    )
+    raw = await client.request_json(
+        model=settings.KASSET_AI_MODEL_TERRA,
+        input_payload={
+            "market": market,
+            "symbol": symbol,
+            "name": name,
+            "analysis": evidence,
+        },
+        reasoning_effort="high",
+        schema_name="screener_trading_report",
+        schema=_GeneratedScreenerReport.model_json_schema(),
+        additional_instructions=(
+            "분석 증거에 없는 수치나 사실을 만들지 마세요. 모든 설명은 한국어로 작성하고 "
+            "현재가와 기술적 근거에 맞춰 네 가격 범위를 제시하세요. 각 범위는 min이 max보다 "
+            "작거나 같아야 합니다. 투자 수익을 보장하거나 매매를 강요하지 마세요."
+        ),
+    )
+    report = _GeneratedScreenerReport.model_validate(raw)
+    price_analysis = report.price_analysis
+    for price_range in (
+        price_analysis.appropriate_buy_range,
+        price_analysis.appropriate_sell_range,
+        price_analysis.buy_hope_range,
+        price_analysis.sell_target_range,
+    ):
+        if price_range.min > price_range.max:
+            raise ValueError("MCP report price range min exceeds max")
+    return report.model_dump(mode="json")
 
 
 async def screen_stocks_impl(**kwargs: Any) -> dict[str, Any]:
@@ -60,17 +135,12 @@ class ScreenerService:
     def __init__(
         self,
         redis_client: redis.Redis | None = None,
-        agent_client: AgentGatewayClient | None = None,
+        report_generator: (
+            Callable[..., Awaitable[dict[str, Any]]] | None
+        ) = None,
     ) -> None:
         self._redis = redis_client
-        self._agent = agent_client
-
-    def _get_agent(self) -> AgentGatewayClient:
-        if self._agent is None:
-            from app.services.agent_gateway import AgentGatewayClient
-
-            self._agent = AgentGatewayClient()
-        return self._agent
+        self._report_generator = report_generator or generate_screener_report
 
     async def _get_redis(self) -> redis.Redis:
         if self._redis is None:
@@ -653,59 +723,12 @@ class ScreenerService:
             }
 
         display_name = (name or normalized_symbol).strip() or normalized_symbol
-        prompt = (
-            "Produce a trading report for the instrument below using MCP tools and return a JSON callback.\n"
-            f"market={normalized_market}\n"
-            f"symbol={normalized_symbol}\n"
-            f"name={display_name}\n"
-            "Include decision, confidence, reasons, and price_analysis ranges."
-        )
         instrument_type = self._instrument_type(normalized_market)
-        try:
-            job_id = await self._get_agent().request_analysis(
-                prompt=prompt,
-                symbol=normalized_symbol,
-                name=display_name,
-                instrument_type=instrument_type,
-                callback_url=settings.AGENT_GATEWAY_SCREENER_CALLBACK_URL,
-                include_model_name=False,
-                request_id=provisional_job_id,
-            )
-        except Exception as exc:
-            await redis_client.delete(inflight_key)
-            error_message = str(exc).strip() or exc.__class__.__name__
-            keys = self._report_keys(
-                normalized_market, normalized_symbol, provisional_job_id
-            )
-            await self._transition_report_status(
-                keys.status_key,
-                "failed",
-                redis_client=redis_client,
-            )
-            await self._store_json(
-                keys.job_key,
-                self.REPORT_CACHE_TTL_SECONDS,
-                {
-                    "job_id": provisional_job_id,
-                    "market": normalized_market,
-                    "symbol": normalized_symbol,
-                    "result_key": keys.result_key,
-                    "status_key": keys.status_key,
-                    "inflight_key": keys.inflight_key,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    "error": error_message,
-                },
-            )
-            return {
-                "job_id": provisional_job_id,
-                "status": "failed",
-                "error": error_message,
-                "is_reused": False,
-            }
-
-        keys = self._report_keys(normalized_market, normalized_symbol, job_id)
+        keys = self._report_keys(
+            normalized_market, normalized_symbol, provisional_job_id
+        )
         metadata = {
-            "job_id": job_id,
+            "job_id": provisional_job_id,
             "market": normalized_market,
             "symbol": normalized_symbol,
             "result_key": keys.result_key,
@@ -721,15 +744,80 @@ class ScreenerService:
         )
         await redis_client.set(
             keys.inflight_key,
-            job_id,
+            provisional_job_id,
             ex=self.REPORT_INFLIGHT_TTL_SECONDS,
         )
-
+        _spawn_background(
+            self._generate_and_store_report(
+                job_id=provisional_job_id,
+                market=normalized_market,
+                symbol=normalized_symbol,
+                name=display_name,
+                instrument_type=instrument_type,
+                keys=keys,
+                metadata=metadata,
+            ),
+            name=f"screener-report:{provisional_job_id}",
+        )
         return {
-            "job_id": job_id,
+            "job_id": provisional_job_id,
             "status": persisted_status,
             "is_reused": False,
         }
+
+    async def _generate_and_store_report(
+        self,
+        *,
+        job_id: str,
+        market: ScreenMarket,
+        symbol: str,
+        name: str,
+        instrument_type: str,
+        keys: _ReportKeys,
+        metadata: dict[str, Any],
+    ) -> None:
+        redis_client = await self._get_redis()
+        await self._transition_report_status(
+            keys.status_key,
+            "running",
+            redis_client=redis_client,
+        )
+        try:
+            generated = await self._report_generator(
+                market=market,
+                symbol=symbol,
+                name=name,
+            )
+            callback_result = await self.process_callback(
+                {
+                    "request_id": job_id,
+                    "symbol": symbol,
+                    "name": name,
+                    "instrument_type": instrument_type,
+                    **generated,
+                }
+            )
+            if callback_result.get("status") != "ok":
+                raise RuntimeError(
+                    str(callback_result.get("error") or "report_callback_failed")
+                )
+        except Exception as exc:
+            await redis_client.delete(keys.inflight_key)
+            error_message = str(exc).strip() or exc.__class__.__name__
+            await self._transition_report_status(
+                keys.status_key,
+                "failed",
+                redis_client=redis_client,
+            )
+            await self._store_json(
+                keys.job_key,
+                self.REPORT_CACHE_TTL_SECONDS,
+                {
+                    **metadata,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "error": error_message,
+                },
+            )
 
     async def get_report_status(self, job_id: str) -> dict[str, Any]:
         if not job_id:

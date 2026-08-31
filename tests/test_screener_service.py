@@ -39,6 +39,29 @@ class _AlwaysFailClaimRedis(_FakeRedis):
         return await super().set(key, value, ex=ex, nx=nx)
 
 
+def _generated_report() -> dict[str, Any]:
+    return {
+        "decision": "hold",
+        "confidence": 60,
+        "reasons": ["range"],
+        "price_analysis": {
+            "appropriate_buy_range": {"min": 100, "max": 110},
+            "appropriate_sell_range": {"min": 120, "max": 130},
+            "buy_hope_range": {"min": 95, "max": 98},
+            "sell_target_range": {"min": 150, "max": 160},
+        },
+        "detailed_text": "done",
+    }
+
+
+async def _await_background_reports() -> None:
+    from app.services import screener_service
+
+    tasks = tuple(screener_service._BACKGROUND_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
 @pytest.mark.asyncio
 async def test_list_screening_uses_5m_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.screener_service import ScreenerService
@@ -391,48 +414,89 @@ async def test_refresh_screening_invalidates_cache(
 
 
 @pytest.mark.asyncio
-async def test_request_report_reuses_inflight_job() -> None:
+async def test_generate_screener_report_uses_local_evidence_and_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.extensions.kasset.ai import mcp_provider
+    from app.mcp_server.tooling import analysis_tool_handlers
+    from app.services.screener_service import generate_screener_report
+
+    analyze = AsyncMock(return_value={"success": True, "current_price": 101})
+    request_json = AsyncMock(return_value=_generated_report())
+
+    class _FakeMcpClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def request_json(self, **kwargs: object) -> dict[str, Any]:
+            return await request_json(**kwargs)
+
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "http://mcp.test/mcp")
+    monkeypatch.setattr(analysis_tool_handlers, "analyze_stock_impl", analyze)
+    monkeypatch.setattr(mcp_provider, "McpStructuredJsonClient", _FakeMcpClient)
+
+    report = await generate_screener_report(
+        market="us",
+        symbol="KLAC",
+        name="KLA",
+    )
+
+    assert report["decision"] == "hold"
+    analyze.assert_awaited_once_with(symbol="KLAC", market="us")
+    assert request_json.await_args.kwargs["input_payload"]["analysis"] == {
+        "success": True,
+        "current_price": 101,
+    }
+
+
+@pytest.mark.asyncio
+async def test_request_report_reuses_completed_report() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-1")
+    generator = AsyncMock(return_value=_generated_report())
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
+    first = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await _await_background_reports()
+    second = await service.request_report(market="us", symbol="AAPL", name="Apple")
+
+    assert first["status"] == "queued"
+    assert second["job_id"] == first["job_id"]
+    assert second["status"] == "completed"
+    assert second["is_reused"] is True
+    generator.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_report_concurrent_same_symbol_single_generation() -> None:
+    from app.services.screener_service import ScreenerService
+
+    fake_redis = _FakeRedis()
+    release = asyncio.Event()
+
+    async def delayed_report(**_kwargs: object) -> dict[str, Any]:
+        await release.wait()
+        return _generated_report()
+
+    generator = AsyncMock(side_effect=delayed_report)
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
     first = await service.request_report(market="us", symbol="AAPL", name="Apple")
     second = await service.request_report(market="us", symbol="AAPL", name="Apple")
 
-    assert first["job_id"] == "job-1"
-    assert first["is_reused"] is False
-    assert second["job_id"] == "job-1"
-    assert second["is_reused"] is True
-    agent.request_analysis.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_request_report_concurrent_same_symbol_single_dispatch() -> None:
-    from app.services.screener_service import ScreenerService
-
-    fake_redis = _FakeRedis()
-
-    async def delayed_request_analysis(**kwargs: object) -> str:
-        await asyncio.sleep(0.01)
-        return str(kwargs["request_id"])
-
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(side_effect=delayed_request_analysis)
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
-    first, second = await asyncio.gather(
-        service.request_report(market="us", symbol="AAPL", name="Apple"),
-        service.request_report(market="us", symbol="AAPL", name="Apple"),
-    )
-
     assert first["job_id"] == second["job_id"]
     assert {first["is_reused"], second["is_reused"]} == {False, True}
-    agent.request_analysis.assert_awaited_once()
+    release.set()
+    await _await_background_reports()
+    generator.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -456,39 +520,28 @@ async def test_request_report_returns_failed_when_inflight_claim_is_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_request_report_does_not_downgrade_completed_status() -> None:
+async def test_get_report_status_marks_running_while_generation_is_inflight() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-race")
+    release = asyncio.Event()
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-    fake_redis.store["screener:report:status:job-race"] = "completed"
+    async def delayed_report(**_kwargs: object) -> dict[str, Any]:
+        await release.wait()
+        return _generated_report()
 
-    result = await service.request_report(market="us", symbol="AAPL", name="Apple")
-
-    assert result["job_id"] == "job-race"
-    assert result["status"] == "completed"
-    assert fake_redis.store["screener:report:status:job-race"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_get_report_status_marks_running_when_inflight_exists() -> None:
-    from app.services.screener_service import ScreenerService
-
-    fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-running")
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=delayed_report,
+    )
     queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await asyncio.sleep(0)
     status = await service.get_report_status(queued["job_id"])
 
     assert queued["status"] == "queued"
     assert status["status"] == "running"
-    assert fake_redis.store["screener:report:status:job-running"] == "running"
+    release.set()
+    await _await_background_reports()
 
 
 @pytest.mark.asyncio
@@ -508,65 +561,22 @@ async def test_get_report_status_unknown_job_returns_not_found_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_callback_completes_job_and_reuses_report() -> None:
+async def test_request_report_marks_failed_when_mcp_generation_fails() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-2")
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
+    generator = AsyncMock(side_effect=RuntimeError("mcp down"))
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
     queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
-    assert queued["status"] == "queued"
+    await _await_background_reports()
+    status = await service.get_report_status(queued["job_id"])
 
-    callback_payload = {
-        "request_id": "job-2",
-        "symbol": "AAPL",
-        "name": "Apple",
-        "instrument_type": "equity_us",
-        "decision": "hold",
-        "confidence": 60,
-        "reasons": ["range"],
-        "price_analysis": {
-            "appropriate_buy_range": {"min": 100, "max": 110},
-            "appropriate_sell_range": {"min": 120, "max": 130},
-            "buy_hope_range": {"min": 95, "max": 98},
-            "sell_target_range": {"min": 150, "max": 160},
-        },
-        "detailed_text": "done",
-    }
-    callback_result = await service.process_callback(callback_payload)
-    status = await service.get_report_status("job-2")
-    reused = await service.request_report(market="us", symbol="AAPL", name="Apple")
-
-    assert callback_result["status"] == "ok"
-    assert status["status"] == "completed"
-    assert status["report"]["decision"] == "hold"
-    assert reused["status"] == "completed"
-    assert reused["is_reused"] is True
-    agent.request_analysis.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_request_report_marks_failed_when_agent_request_fails() -> None:
-    from app.services.screener_service import ScreenerService
-
-    fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(side_effect=RuntimeError("agent down"))
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
-    result = await service.request_report(market="us", symbol="AAPL", name="Apple")
-
-    assert result["status"] == "failed"
-    assert result["is_reused"] is False
-    assert "agent down" in result["error"]
-
-    status = await service.get_report_status(result["job_id"])
     assert status["status"] == "failed"
-    assert "agent down" in status["error"]
+    assert "mcp down" in status["error"]
 
 
 @pytest.mark.asyncio
@@ -608,12 +618,22 @@ async def test_callback_payload_mismatch_marks_failed_and_clears_inflight() -> N
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-mismatch")
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
-    queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
-    assert queued["status"] == "queued"
+    service = ScreenerService(redis_client=cast(Any, fake_redis))
+    keys = service._report_keys("us", "AAPL", "job-mismatch")
+    await service._store_json(
+        keys.job_key,
+        service.REPORT_CACHE_TTL_SECONDS,
+        {
+            "job_id": "job-mismatch",
+            "market": "us",
+            "symbol": "AAPL",
+            "result_key": keys.result_key,
+            "status_key": keys.status_key,
+            "inflight_key": keys.inflight_key,
+        },
+    )
+    await fake_redis.set(keys.status_key, "running")
+    await fake_redis.set(keys.inflight_key, "job-mismatch")
 
     callback_result = await service.process_callback(
         {

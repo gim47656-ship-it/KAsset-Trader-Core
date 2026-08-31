@@ -78,6 +78,7 @@ _ROUTE_PROVIDERS: Final[Mapping[AiRouteId, AiProviderName]] = MappingProxyType(
 LANE_ROUTE_IDS: Final[AiRoutePolicy] = MappingProxyType(
     {
         AiLane.SUMMARY_LUNA: (
+            AiRouteId.MCP_TOOL,
             AiRouteId.DIRECT_LUNA,
             AiRouteId.OPENROUTER_FLASH,
         ),
