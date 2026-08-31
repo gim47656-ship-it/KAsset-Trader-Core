@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.jobs.google_news_rss_ingestion import load_google_news_symbols
 from app.models.news import NewsArticle, NewsIngestionRun
@@ -794,52 +794,59 @@ async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
         "summarize_ingested_news",
         fake_summary,
     )
-    first = await ingest_truth_social(
-        db_session,
-        http_client=FakeTruthSocialClient(_truth_account(), statuses),
-    )
-    second = await ingest_truth_social(
-        db_session,
-        http_client=FakeTruthSocialClient(_truth_account(), statuses),
-    )
-
     relevant_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{relevant_id}"
     card_only_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{card_only_id}"
-    article = (
-        await db_session.execute(
-            select(NewsArticle).where(NewsArticle.url == relevant_url)
+    inserted_urls = [relevant_url, card_only_url]
+    try:
+        first = await ingest_truth_social(
+            db_session,
+            http_client=FakeTruthSocialClient(_truth_account(), statuses),
         )
-    ).scalar_one()
-    link_count = await db_session.scalar(
-        select(func.count())
-        .select_from(SymbolNewsRelevance)
-        .where(SymbolNewsRelevance.article_id == article.id)
-    )
-    assert first.fetched == 6
-    assert first.relevant == 2
-    assert (first.inserted, first.updated, first.skipped) == (2, 0, 4)
-    assert (second.inserted, second.updated, second.skipped) == (0, 0, 6)
-    assert first.summary_status == "success"
-    assert summary_calls == [
-        [relevant_url, card_only_url],
-        [relevant_url, card_only_url],
-    ]
-    assert article.market == "us"
-    assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
-    assert article.source == "Donald J. Trump · Truth Social"
-    assert "tariff" in (article.article_content or "")
-    assert article.title == (
-        "I will impose a 25% tariff on imported semiconductor chips."
-    )
-    assert link_count == 0
-    assert (
-        await db_session.scalar(
+        second = await ingest_truth_social(
+            db_session,
+            http_client=FakeTruthSocialClient(_truth_account(), statuses),
+        )
+
+        article = (
+            await db_session.execute(
+                select(NewsArticle).where(NewsArticle.url == relevant_url)
+            )
+        ).scalar_one()
+        link_count = await db_session.scalar(
             select(func.count())
-            .select_from(NewsArticle)
-            .where(NewsArticle.feed_source == TRUTH_SOCIAL_FEED_SOURCE)
+            .select_from(SymbolNewsRelevance)
+            .where(SymbolNewsRelevance.article_id == article.id)
         )
-        == 2
-    )
+        assert first.fetched == 6
+        assert first.relevant == 2
+        assert (first.inserted, first.updated, first.skipped) == (2, 0, 4)
+        assert (second.inserted, second.updated, second.skipped) == (0, 0, 6)
+        assert first.summary_status == "success"
+        assert summary_calls == [
+            [relevant_url, card_only_url],
+            [relevant_url, card_only_url],
+        ]
+        assert article.market == "us"
+        assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
+        assert article.source == "Donald J. Trump · Truth Social"
+        assert "tariff" in (article.article_content or "")
+        assert article.title == (
+            "I will impose a 25% tariff on imported semiconductor chips."
+        )
+        assert link_count == 0
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(NewsArticle)
+                .where(NewsArticle.feed_source == TRUTH_SOCIAL_FEED_SOURCE)
+            )
+            == 2
+        )
+    finally:
+        await db_session.execute(
+            delete(NewsArticle).where(NewsArticle.url.in_(inserted_urls))
+        )
+        await db_session.commit()
 
 
 def test_truth_social_task_is_registered_with_ten_minute_schedule() -> None:
