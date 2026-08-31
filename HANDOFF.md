@@ -12,7 +12,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 5. Donald J. Trump 공식 Truth Social 원문 게시물 중 시장 관련 항목만 한국어 요약 완료 후 노출한다.
 
 ## 전체 진행 상태
-- `origin/main`은 PR #11 merge commit `3095a1a1ee68fd18786df689761c96e5e97d183c`이다.
+- 최신 실행 코드 commit은 PR #11 merge `3095a1a1ee68fd18786df689761c96e5e97d183c`이다. 이후 main 변경은 이 인수인계 문서 갱신뿐이다.
 - 운영 이미지는 `kasset-trader-core:3095a1a1`, image id `sha256:dd93ba4b15e9e6513b610c5b8673c6aabd6ddb094eda34ac6c2d828fa05aa0f7`이다.
 - API, worker, scheduler, 거래 MCP, AI MCP가 같은 이미지로 재기동됐다. 내부 `/healthz`는 `{"status":"ok"}`이다. DB/Redis/Caddy는 재기동하지 않았다.
 - 운영은 `TRADING_ENABLED=true`, `LIVE_TRADING_ENABLED=false`, `AI_PAPER_AUTO_EXECUTION_ENABLED=true`, owner 4 runtime은 `PAPER`다. Kill Switch, Hard Risk, promotion bypass는 바꾸지 않았다.
