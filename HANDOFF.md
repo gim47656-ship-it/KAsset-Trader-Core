@@ -48,7 +48,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 
 운영 배포·실측:
 - 배포 전 DB backup: `/root/backups/kasset-daily/kasset-20260831T050324Z.dump.gz`, 4,611,593 bytes, SHA-256 `578e1454e2fc269ae66141a318425e3453d7087ce059cf354d6657d77791fa19`; `gzip -t`와 `pg_restore --list` 통과.
-- KOSPI/KOSDAQ benchmark-only 백필: 각 400행, `2025-01-07`~`2026-08-28`, source `naver`. KIS OAuth가 403이라 공식 경로에서 Naver fallback으로 완료됐다.
+- KOSPI/KOSDAQ benchmark-only 백필: 각 400행, `2025-01-07`~`2026-08-28`, source `naver`. 현재 운영 범위는 Toss와 NH PLUG이며 KIS는 의도적으로 미사용이므로, KIS OAuth 403은 장애로 취급하지 않고 Naver fallback으로 완료했다.
 - Public `/health`: `{"status":"ok"}`. `/api/v1/system/status`: AI configured/available, DB head 정상, `PAPER`, LIVE false.
 - AI MCP: 내부 `/health` 200, 무인증 POST `/mcp` 401, 인증된 실제 `run_skill` 호출 `{"ok": true}`.
 - 05:10 UTC 실제 추천 cycle: owners=1, candidates=100(KR 94/US 6), ranked=99, actionable=1. MCP가 terra/sol review를 실행했지만 `action_mismatch=1`이라 reviewed=0, recommendations=0, `no_ai_confirmed_signal`로 종료했다.
@@ -61,7 +61,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 외부 코드·테스트·상수·문구·모듈 구조·fixture를 복사하지 않았다. GPL 코드도 포함하지 않았다.
 
 ## 다음 세션이 바로 할 일
-1. KIS live OAuth가 403이다. 현재 live app key/secret은 설정돼 있지만 account는 비어 있고 mock은 미설정이다. 새 자격/계좌 확인 전 임의 수정하지 말고, 정상 자격을 받은 뒤 token→KR/US candle sync를 실측한다.
+1. 현재 운영 브로커·시세 범위는 Toss와 NH PLUG다. KIS는 의도적으로 설정하지 않았으며, 사용자가 범위를 바꾸기 전에는 KIS OAuth/account 복구 작업을 하지 않는다.
 2. 다음 자연 발생 전략 신호에서 추천→AI 확인→PAPER order→fill→position→reconcile을 같은 trace로 확인한다. 강제 BUY, 임계값 완화, Kill Switch/Hard Risk/promotion 우회는 금지다.
 3. SHADOW 기능 활성화나 promotion은 이번 배포에 포함하지 않았다. 동일 데이터셋 backtest/walk-forward, 새 artifact fingerprint와 별도 PAPER promotion 승인을 거쳐야 한다.
 4. 백필 CLI는 이미지에서 `cd /app && /app/.venv/bin/python -m scripts.backfill_daily_candles ...`로 실행한다. 파일 경로 직접 실행은 `sys.path` 때문에 `ModuleNotFoundError: app`이 난다.
