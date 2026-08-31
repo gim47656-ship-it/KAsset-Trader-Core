@@ -81,6 +81,17 @@ def stub_status_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         "get_global",
         AsyncMock(return_value=SimpleNamespace(kill_switch_enabled=False)),
     )
+    monkeypatch.setattr(
+        mod,
+        "_ai_availability_status",
+        AsyncMock(
+            return_value=mod.AiAvailabilityStatus(
+                configured=True,
+                available=True,
+                message="AI 경로를 사용할 수 있습니다.",
+            )
+        ),
+    )
 
 
 @pytest.mark.asyncio
