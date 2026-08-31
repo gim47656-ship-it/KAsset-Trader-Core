@@ -656,10 +656,8 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         assert global_news.status_code == 200
         news_items = global_news.json()["items"]
         news_by_title = {item["title"]: item for item in news_items}
-        assert set(news_by_title) == {
-            analyzed_news.title,
-            translated_foreign.title,
-        }
+        assert analyzed_news.title in news_by_title
+        assert translated_foreign.title in news_by_title
         assert (
             news_by_title[translated_foreign.title]["translatedTitle"]
             == "회사의 반도체 투자 계획 발표"

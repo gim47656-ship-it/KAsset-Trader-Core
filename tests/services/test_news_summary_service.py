@@ -729,7 +729,10 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     article = _article(
         url=url,
         title=title,
-        summary="The company announced a new semiconductor investment plan.",
+        summary=(
+            "The company announced a new semiconductor investment plan. "
+            "The company did not disclose the investment amount."
+        ),
         published_at=datetime(2026, 8, 29, 12, 0),
     )
     db_session.add(article)
@@ -760,7 +763,7 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     await db_session.commit()
     generator = FakeSummaryGenerator(
         {
-            title: "회사가 신규 반도체 투자 계획을 발표했다.",
+            title: "회사가 신규 반도체 투자 계획을 발표했다. 투자 금액은 공개하지 않았다.",
         },
         translations={
             title: (
