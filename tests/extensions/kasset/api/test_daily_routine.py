@@ -503,10 +503,29 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
             source="Unknown Blog",
             published_at=wall_now - timedelta(minutes=5),
         ),
+        _news_article(
+            suffix=suffix,
+            ordinal=34,
+            title="Reuters item without Korean analysis",
+            source="Reuters",
+            published_at=wall_now - timedelta(seconds=30),
+        ),
     ]
     db_session.add_all(articles)
     await db_session.flush()
     article_ids.extend(article.id for article in articles)
+    generic_analysis_articles = [
+        article
+        for article in articles
+        if article.title
+        not in {
+            "CNBC market bulletin",
+            "Markets await a decision",
+            "Old Reuters item",
+            "Local sports result",
+            "Reuters item without Korean analysis",
+        }
+    ]
     db_session.add_all(
         [
             _analysis(
@@ -541,6 +560,16 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
                     "여건을 설명했다."
                 ),
             ),
+            *[
+                _analysis(
+                    article.id,
+                    summary=f"한국어 뉴스 요약 {article.id}입니다.",
+                    translated_title=f"한국어 번역 제목 {article.id}",
+                    translated_excerpt=None,
+                    created_at=wall_now,
+                )
+                for article in generic_analysis_articles
+            ],
         ]
     )
     await db_session.commit()
@@ -577,7 +606,7 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
     title_only = next(
         alert for alert in global_alerts if alert.headline == "CNBC market bulletin"
     )
-    assert title_only.summary is None
+    assert title_only.summary == "CNBC 제목에 적힌 시장 소식입니다."
     assert title_only.translated_title == "CNBC 시장 소식"
     assert title_only.translated_excerpt is None
     assert {alert.headline for alert in trump_alerts} == {
@@ -606,6 +635,9 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
     )
     assert "Old Reuters item" not in {alert.headline for alert in response.alerts}
     assert "Local sports result" not in {alert.headline for alert in response.alerts}
+    assert "Reuters item without Korean analysis" not in {
+        alert.headline for alert in response.alerts
+    }
     assert {alert.id for alert in context.routine_alerts} == {
         alert.id for alert in response.alerts
     }

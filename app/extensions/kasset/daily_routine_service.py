@@ -33,6 +33,10 @@ from app.services.daily_candles.repository import (
     DailyCandlesRepository,
     MarketKey,
 )
+from app.services.news_summary_service import (
+    complete_korean_analysis_conditions,
+    complete_korean_analysis_exists,
+)
 
 _RAPID_CHANGE_THRESHOLD = Decimal("5")
 _NEWS_WINDOW = timedelta(hours=24)
@@ -663,6 +667,7 @@ class DailyRoutineService:
                         NewsArticle.article_published_at.is_not(None),
                         NewsArticle.article_published_at >= cutoff,
                         or_(*relevance_conditions),
+                        complete_korean_analysis_exists(),
                     )
                     .order_by(
                         NewsArticle.article_published_at.desc(),
@@ -688,9 +693,9 @@ class DailyRoutineService:
             if published_at is None:
                 continue
             validated_analysis = analyses.get(row.id)
-            validated_summary = (
-                validated_analysis.summary if validated_analysis is not None else None
-            )
+            if validated_analysis is None:
+                continue
+            validated_summary = validated_analysis.summary
             evidence_text = " ".join(
                 value for value in (row.title, validated_summary) if value
             )
@@ -713,25 +718,14 @@ class DailyRoutineService:
             seen_titles.add(title_key)
             counts[kind] += 1
 
-            has_source_body = bool(
-                _normalized_text(row.article_content) or _normalized_text(row.summary)
-            )
             alerts.append(
                 DailyRoutineAlert(
                     id=f"news:{row.id}",
                     kind=kind,
                     headline=row.title,
-                    summary=validated_summary if has_source_body else None,
-                    translated_title=(
-                        validated_analysis.translated_title
-                        if validated_analysis is not None
-                        else None
-                    ),
-                    translated_excerpt=(
-                        validated_analysis.translated_excerpt
-                        if validated_analysis is not None
-                        else None
-                    ),
+                    summary=validated_summary,
+                    translated_title=validated_analysis.translated_title,
+                    translated_excerpt=validated_analysis.translated_excerpt,
                     symbol=(row.stock_symbol or None),
                     source=row.source,
                     url=row.url,
@@ -754,7 +748,11 @@ class DailyRoutineService:
                     NewsAnalysisResult.translated_title,
                     NewsAnalysisResult.translated_excerpt,
                 )
-                .where(NewsAnalysisResult.article_id.in_(article_ids))
+                .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
+                .where(
+                    NewsAnalysisResult.article_id.in_(article_ids),
+                    *complete_korean_analysis_conditions(),
+                )
                 .order_by(
                     NewsAnalysisResult.article_id,
                     NewsAnalysisResult.created_at.desc(),
