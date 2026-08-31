@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
+import logging
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -30,19 +32,35 @@ from app.models.trading import (
 
 NEWS_TARGET_LIMIT = 50
 NEWS_RECOMMENDATION_LOOKBACK = timedelta(days=7)
+_CYCLE_LOCK_NAMESPACE = 1_263_498_067
+_CYCLE_LOCK_KEY = 1
+
+logger = logging.getLogger(__name__)
 
 
 @broker.task(
     task_name="kasset_market_events.run",
-    # Hourly at :10 during KST sessions, right after the :05 candle sync.
-    # Features come from daily candles, so scanning faster than the data
-    # refreshes only burns model calls (and the old UTC */15 ran overnight).
-    schedule=[{"cron": "10 9-16 * * 1-5", "cron_offset": "Asia/Seoul"}],
+    # 현지 정규장 안에서 10분마다 후보를 점검한다. 09시대 장전 tick,
+    # 휴장·반일장·장전/시간외의 최종 차단은 exchange calendar runtime gate가 맡는다.
+    schedule=[
+        {"cron": "*/10 9-15 * * 1-5", "cron_offset": "Asia/Seoul"},
+        {"cron": "*/10 9-15 * * 1-5", "cron_offset": "America/New_York"},
+    ],
 )
 async def kasset_market_events_run() -> dict[str, object]:
     """Run the canonical screener→ensemble→AI recommendation producer once."""
 
-    return await run_ai_recommendation_cycle_once()
+    async with _cycle_single_flight() as acquired:
+        if not acquired:
+            logger.info("kasset AI recommendation cycle skipped: cycle_already_running")
+            return {
+                "enabled": True,
+                "owners": [],
+                "candidateCount": 0,
+                "recommendationCount": 0,
+                "skipped": "cycle_already_running",
+            }
+        return await run_ai_recommendation_cycle_once()
 
 
 @broker.task(
@@ -252,6 +270,32 @@ async def _sync_watchlist_symbol(symbol: str) -> dict[str, object]:
         upserted = await repository.upsert_rows(market=MarketKey.KR, rows=rows)
         await session.commit()
     return {"symbol": symbol, "rows": len(rows), "upserted": upserted}
+
+
+@asynccontextmanager
+async def _cycle_single_flight() -> AsyncIterator[bool]:
+    """Serialize scheduled cycles across every TaskIQ worker process."""
+
+    async with _session() as session:
+        acquired = bool(
+            await session.scalar(
+                text("SELECT pg_try_advisory_lock(:namespace, :key)"),
+                {"namespace": _CYCLE_LOCK_NAMESPACE, "key": _CYCLE_LOCK_KEY},
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    await session.scalar(
+                        text("SELECT pg_advisory_unlock(:namespace, :key)"),
+                        {"namespace": _CYCLE_LOCK_NAMESPACE, "key": _CYCLE_LOCK_KEY},
+                    )
+                except Exception:
+                    # Connection close also releases session advisory locks. Log the
+                    # failed explicit cleanup without masking the completed cycle.
+                    logger.exception("kasset AI cycle advisory unlock failed")
 
 
 def _session() -> AbstractAsyncContextManager[AsyncSession]:

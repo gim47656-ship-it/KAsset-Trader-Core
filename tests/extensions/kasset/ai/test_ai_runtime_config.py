@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, ModuleType
 
@@ -851,6 +852,11 @@ async def test_automation_cycle_reads_one_snapshot_and_passes_it_to_the_router(
     from app.services import ai_runtime_config as runtime_config_service
 
     monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    monkeypatch.setattr(
+        vertical_slice,
+        "is_market_open",
+        lambda market, *, now=None: market == "kr",
+    )
 
     session = AsyncMock()
     owner_result = MagicMock()
@@ -910,7 +916,162 @@ def _cycle_session(monkeypatch: pytest.MonkeyPatch, owner_ids: list[int]):  # ty
     audit = AsyncMock()
     monkeypatch.setattr(vertical_slice, "_session", fake_session)
     monkeypatch.setattr(vertical_slice, "record_automation_cycle_event", audit)
+    monkeypatch.setattr(
+        vertical_slice,
+        "is_market_open",
+        lambda market, *, now=None: market == "kr",
+    )
     return audit
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_closed_markets_skip_every_owner_before_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.automation import vertical_slice
+    from app.services import ai_runtime_config as runtime_config_service
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    audit = _cycle_session(monkeypatch, [4, 8])
+    now = datetime(2026, 12, 25, 15, 0, tzinfo=UTC)
+    market_calls: list[tuple[str, datetime | None]] = []
+
+    def closed_market(market: str, *, now: datetime | None = None) -> bool:
+        market_calls.append((market, now))
+        return False
+
+    def never_build_router(**kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("must not build router")
+
+    class NeverConstructSlice:
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError("must not construct candidate slice")
+
+    monkeypatch.setattr(vertical_slice, "is_market_open", closed_market)
+    monkeypatch.setattr(
+        runtime_config_service,
+        "get_ai_runtime_snapshot",
+        AsyncMock(side_effect=AssertionError("must not read AI policy")),
+    )
+    monkeypatch.setattr(ai_factory, "build_model_router", never_build_router)
+    monkeypatch.setattr(
+        vertical_slice,
+        "AIRecommendationVerticalSlice",
+        NeverConstructSlice,
+    )
+
+    result = await vertical_slice.run_ai_recommendation_cycle_once(now=now)
+
+    assert market_calls == [("kr", now), ("us", now)]
+    assert result["openMarkets"] == []
+    assert result["candidateCount"] == 0
+    assert result["recommendationCount"] == 0
+    owners = result["owners"]
+    assert isinstance(owners, list)
+    assert [owner["ownerUserId"] for owner in owners] == [4, 8]
+    assert {owner["skipped"] for owner in owners} == {"no_regular_market_open"}
+    assert all(owner["candidateCount"] == 0 for owner in owners)
+    assert all(owner["aiReviewedCount"] == 0 for owner in owners)
+    traces = [owner["cycleTraceId"] for owner in owners]
+    assert len(set(traces)) == 2
+    assert audit.await_count == 2
+    assert [
+        call.kwargs["result"]["cycleTraceId"] for call in audit.await_args_list
+    ] == traces
+
+
+@pytest.mark.asyncio
+async def test_automation_cycle_passes_only_the_open_us_market_to_each_owner(
+    configured_ai,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.automation import vertical_slice
+    from app.services import ai_runtime_config as runtime_config_service
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    _cycle_session(monkeypatch, [4])
+    monkeypatch.setattr(
+        vertical_slice,
+        "is_market_open",
+        lambda market, *, now=None: market == "us",
+    )
+
+    async def snapshot(db):  # type: ignore[no-untyped-def]
+        return default_snapshot()
+
+    monkeypatch.setattr(runtime_config_service, "get_ai_runtime_snapshot", snapshot)
+    monkeypatch.setattr(
+        ai_factory,
+        "build_model_router",
+        lambda *, snapshot=None: object(),
+    )
+    captured_markets: list[frozenset[str]] = []
+
+    class CapturingSlice:
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            captured_markets.append(kwargs["allowed_markets"])
+
+        async def run_owner(self, owner_user_id: int) -> dict[str, object]:
+            return {
+                "ownerUserId": owner_user_id,
+                "candidateCount": 0,
+                "recommendationIds": [],
+                "skipped": "screener_candidates_unavailable",
+            }
+
+    monkeypatch.setattr(
+        vertical_slice,
+        "AIRecommendationVerticalSlice",
+        CapturingSlice,
+    )
+
+    result = await vertical_slice.run_ai_recommendation_cycle_once(
+        now=datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
+    )
+
+    assert result["openMarkets"] == ["US"]
+    assert captured_markets == [frozenset({"US"})]
+
+
+def test_regular_market_gate_uses_exchange_holidays_and_dst() -> None:
+    from app.extensions.kasset.automation import vertical_slice
+
+    christmas = datetime(2026, 12, 25, 15, 0, tzinfo=UTC)
+    winter_us_session = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    summer_us_session = datetime(2026, 7, 6, 14, 0, tzinfo=UTC)
+
+    assert vertical_slice._open_regular_markets(now=christmas) == frozenset()
+    assert vertical_slice._open_regular_markets(now=winter_us_session) == frozenset(
+        {"US"}
+    )
+    assert vertical_slice._open_regular_markets(now=summer_us_session) == frozenset(
+        {"US"}
+    )
+
+
+def test_regular_market_gate_fails_closed_per_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.extensions.kasset.automation import vertical_slice
+
+    calls: list[str] = []
+
+    def unstable_market(market: str, *, now: datetime | None = None) -> bool:
+        calls.append(market)
+        if market == "kr":
+            raise LookupError("XKRX unavailable")
+        return True
+
+    monkeypatch.setattr(vertical_slice, "is_market_open", unstable_market)
+
+    assert vertical_slice._open_regular_markets(
+        now=datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
+    ) == frozenset({"US"})
+    assert calls == ["kr", "us"]
 
 
 @pytest.mark.asyncio

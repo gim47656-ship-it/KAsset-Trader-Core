@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,9 +23,20 @@ from app.extensions.kasset.api.paper_schemas import (
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.paper_trading import PaperAccount, PaperTrade
 from app.models.trading import Instrument, InstrumentType
+from app.services.exchange_rate_service import (
+    UsdKrwExchangeRateQuote,
+    get_usd_krw_rate_details,
+)
 from app.services.paper_trading_service import PaperTradingService
 
 _DEFAULT_ACCOUNT_NAME_PREFIX = "KAsset Android PAPER"
+_FX_QUOTE_UNAVAILABLE = "FX_QUOTE_UNAVAILABLE"
+_FX_QUOTE_PAIR_MISMATCH = "FX_QUOTE_PAIR_MISMATCH"
+_FX_QUOTE_INVALID = "FX_QUOTE_INVALID"
+_FX_QUOTE_INCOMPLETE = "FX_QUOTE_INCOMPLETE"
+_FX_QUOTE_STALE = "FX_QUOTE_STALE"
+
+logger = logging.getLogger(__name__)
 
 
 def decimal_text(value: Decimal | int | str) -> str:
@@ -216,6 +228,119 @@ class PaperAccountAdapter:
             "valuation_error": item.get("valuation_error"),
         }
 
+    @staticmethod
+    def _empty_krw_reference(
+        error: str | None = None,
+    ) -> dict[str, object | None]:
+        return {
+            "market_value_krw_reference": None,
+            "market_value_krw_fx_rate": None,
+            "market_value_krw_fx_source": None,
+            "market_value_krw_fx_as_of": None,
+            "market_value_krw_fx_valid_until": None,
+            "market_value_krw_fx_is_stale": None,
+            "market_value_krw_reference_error": error,
+        }
+
+    @classmethod
+    def _krw_reference_snapshot(
+        cls,
+        quote: UsdKrwExchangeRateQuote,
+        *,
+        now: datetime,
+    ) -> dict[str, object | None]:
+        if not isinstance(quote, UsdKrwExchangeRateQuote):
+            return cls._empty_krw_reference(_FX_QUOTE_INVALID)
+        if quote.base_currency != "USD" or quote.quote_currency != "KRW":
+            return cls._empty_krw_reference(_FX_QUOTE_PAIR_MISMATCH)
+
+        try:
+            rate = quote.default_rate_decimal
+        except (InvalidOperation, TypeError, ValueError):
+            return cls._empty_krw_reference(_FX_QUOTE_INVALID)
+        if quote.mid_rate_decimal is None:
+            return cls._empty_krw_reference(_FX_QUOTE_INCOMPLETE)
+        if quote.source not in {"toss", "open_er_api"}:
+            return cls._empty_krw_reference(_FX_QUOTE_INVALID)
+
+        as_of = quote.valid_from
+        valid_until = quote.valid_until
+        snapshot = cls._empty_krw_reference()
+        snapshot.update(
+            {
+                "market_value_krw_fx_rate": decimal_text(rate),
+                "market_value_krw_fx_source": quote.source,
+                "market_value_krw_fx_as_of": (
+                    iso_z(as_of) if isinstance(as_of, datetime) else None
+                ),
+                "market_value_krw_fx_valid_until": (
+                    iso_z(valid_until) if isinstance(valid_until, datetime) else None
+                ),
+            }
+        )
+        if not isinstance(as_of, datetime) or not isinstance(valid_until, datetime):
+            snapshot["market_value_krw_reference_error"] = _FX_QUOTE_INCOMPLETE
+            return snapshot
+        if (
+            as_of.tzinfo is None
+            or as_of.utcoffset() is None
+            or valid_until.tzinfo is None
+            or valid_until.utcoffset() is None
+            or valid_until <= as_of
+            or as_of > now
+        ):
+            snapshot["market_value_krw_reference_error"] = _FX_QUOTE_INVALID
+            return snapshot
+        if (
+            snapshot["market_value_krw_fx_as_of"]
+            == snapshot["market_value_krw_fx_valid_until"]
+        ):
+            snapshot["market_value_krw_reference_error"] = _FX_QUOTE_INCOMPLETE
+            return snapshot
+        if valid_until <= now:
+            snapshot["market_value_krw_fx_is_stale"] = True
+            snapshot["market_value_krw_reference_error"] = _FX_QUOTE_STALE
+            return snapshot
+
+        snapshot["market_value_krw_fx_is_stale"] = False
+        snapshot["_rate_decimal"] = rate
+        return snapshot
+
+    @classmethod
+    def _position_krw_reference(
+        cls,
+        item: dict[str, object],
+        snapshot: dict[str, object | None],
+    ) -> dict[str, object | None]:
+        if str(item.get("currency", "")).upper() != "USD":
+            return cls._empty_krw_reference()
+        raw_market_value = item.get("evaluation_amount")
+        if raw_market_value is None:
+            return cls._empty_krw_reference()
+
+        reference = {
+            key: value for key, value in snapshot.items() if key != "_rate_decimal"
+        }
+        raw_market_value = item["evaluation_amount"]
+        rate = snapshot.get("_rate_decimal")
+        if not isinstance(rate, Decimal):
+            return reference
+        try:
+            market_value = Decimal(str(raw_market_value))
+            converted = market_value * rate
+        except (DecimalException, InvalidOperation, TypeError, ValueError):
+            reference["market_value_krw_reference_error"] = _FX_QUOTE_INVALID
+            return reference
+        if (
+            not market_value.is_finite()
+            or market_value < 0
+            or not converted.is_finite()
+        ):
+            reference["market_value_krw_reference_error"] = _FX_QUOTE_INVALID
+            return reference
+        reference["market_value_krw_reference"] = decimal_text(converted)
+        return reference
+
     async def positions(
         self, db: AsyncSession, owner_user_id: int
     ) -> PositionsResponse:
@@ -225,7 +350,28 @@ class PaperAccountAdapter:
         names = await self._instrument_names(
             db, [item["symbol"] for item in raw_positions]
         )
-        now = iso_z()
+        observed_at = datetime.now(UTC)
+        fx_snapshot = self._empty_krw_reference()
+        if any(
+            str(item.get("currency", "")).upper() == "USD"
+            and item.get("evaluation_amount") is not None
+            for item in raw_positions
+        ):
+            try:
+                quote = await get_usd_krw_rate_details()
+            except Exception as exc:
+                logger.warning(
+                    "PAPER 원화 참고용 USD/KRW 환율을 가져오지 못했습니다: %s",
+                    exc,
+                )
+                fx_snapshot = self._empty_krw_reference(_FX_QUOTE_UNAVAILABLE)
+            else:
+                fx_snapshot = self._krw_reference_snapshot(
+                    quote,
+                    now=observed_at,
+                )
+
+        now = iso_z(observed_at)
         return PositionsResponse(
             positions=[
                 Position(
@@ -249,6 +395,7 @@ class PaperAccountAdapter:
                         if item["evaluation_amount"] is not None
                         else None
                     ),
+                    **self._position_krw_reference(item, fx_snapshot),  # type: ignore[arg-type]
                     unrealized_pnl=(
                         decimal_text(item["unrealized_pnl"])
                         if item["unrealized_pnl"] is not None

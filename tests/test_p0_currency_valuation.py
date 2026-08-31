@@ -339,6 +339,75 @@ class TestPositionWireProvenance:
         ):
             assert wire[key] is None
 
+    def test_krw_reference_fields_are_additive_camel_case_evidence(self):
+        wire = self._position(
+            currency="USD",
+            market_value="12.34",
+            market_value_krw_reference="18510.00",
+            market_value_krw_fx_rate="1500.00",
+            market_value_krw_fx_source="toss",
+            market_value_krw_fx_as_of="2026-08-31T05:59:00Z",
+            market_value_krw_fx_valid_until="2026-08-31T06:01:00Z",
+            market_value_krw_fx_is_stale=False,
+        ).model_dump(by_alias=True)
+
+        assert wire["marketValue"] == "12.34"
+        assert wire["marketValueKrwReference"] == "18510.00"
+        assert wire["marketValueKrwFxRate"] == "1500.00"
+        assert wire["marketValueKrwFxSource"] == "toss"
+        assert wire["marketValueKrwFxAsOf"] == "2026-08-31T05:59:00Z"
+        assert wire["marketValueKrwFxValidUntil"] == "2026-08-31T06:01:00Z"
+        assert wire["marketValueKrwFxIsStale"] is False
+        assert wire["marketValueKrwReferenceError"] is None
+
+    def test_krw_reference_fields_default_to_null(self):
+        wire = self._position().model_dump(by_alias=True)
+
+        for key in (
+            "marketValueKrwReference",
+            "marketValueKrwFxRate",
+            "marketValueKrwFxSource",
+            "marketValueKrwFxAsOf",
+            "marketValueKrwFxValidUntil",
+            "marketValueKrwFxIsStale",
+            "marketValueKrwReferenceError",
+        ):
+            assert wire[key] is None
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"market_value_krw_fx_rate": None},
+            {"market_value_krw_fx_rate": "0"},
+            {"market_value_krw_fx_rate": "NaN"},
+            {"market_value_krw_fx_source": None},
+            {"market_value_krw_fx_as_of": None},
+            {"market_value_krw_fx_valid_until": None},
+            {"market_value_krw_fx_is_stale": True},
+            {"market_value_krw_reference_error": "FX_QUOTE_STALE"},
+            {"currency": "KRW"},
+            {"market_value": None},
+        ],
+    )
+    def test_krw_reference_rejects_incomplete_or_stale_evidence(
+        self,
+        overrides: dict[str, object],
+    ) -> None:
+        fields = {
+            "currency": "USD",
+            "market_value": "12.34",
+            "market_value_krw_reference": "18510.00",
+            "market_value_krw_fx_rate": "1500.00",
+            "market_value_krw_fx_source": "toss",
+            "market_value_krw_fx_as_of": "2026-08-31T05:59:00Z",
+            "market_value_krw_fx_valid_until": "2026-08-31T06:01:00Z",
+            "market_value_krw_fx_is_stale": False,
+        }
+        fields.update(overrides)
+
+        with pytest.raises(ValueError, match="marketValueKrwReference requires"):
+            self._position(**fields)
+
     def test_unavailable_valuation_carries_a_code_and_no_numbers(self):
         wire = self._position(valuation_error="QUOTE_UNAVAILABLE").model_dump(
             by_alias=True

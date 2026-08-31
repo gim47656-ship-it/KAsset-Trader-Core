@@ -107,6 +107,35 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
     assert "rawResponse" not in row.ai_review_outcomes[0]
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["no_regular_market_open", "no_configured_regular_market_open"],
+)
+def test_no_regular_market_open_is_recorded_as_skipped(reason: str) -> None:
+    row = build_automation_cycle_event(
+        owner_user_id=4,
+        observed_at=_NOW,
+        finished_at=_NOW,
+        result={
+            "cycleTraceId": "cyc-market-closed",
+            "candidateCount": 0,
+            "rankedCount": 0,
+            "strategyEvaluatedCount": 0,
+            "strategyActionableCount": 0,
+            "aiReviewedCount": 0,
+            "aiFailureCount": 0,
+            "recommendationIds": [],
+            "skipped": reason,
+        },
+    )
+
+    assert row.status == "skipped"
+    assert row.skipped_reason == reason
+    assert row.cycle_trace_id == "cyc-market-closed"
+    assert row.candidate_count == 0
+    assert row.ai_reviewed_count == 0
+
+
 def test_owner_failure_is_recorded_without_negative_counts() -> None:
     row = build_automation_cycle_event(
         owner_user_id=4,
