@@ -598,3 +598,110 @@ class KAssetStrategyPromotion(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class KAssetShadowDailyHighWatermark(Base):
+    """소유자·계좌·시장·거래일별 SHADOW 계좌 자산 고점 상태."""
+
+    __tablename__ = "kasset_shadow_daily_high_watermarks"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(account_key) <> ''",
+            name="ck_kasset_shadow_hwm_account_key_nonempty",
+        ),
+        CheckConstraint(
+            "market IN ('KRX', 'US')",
+            name="ck_kasset_shadow_hwm_market_valid",
+        ),
+        CheckConstraint(
+            "mode = 'SHADOW'",
+            name="ck_kasset_shadow_hwm_mode_shadow",
+        ),
+        CheckConstraint(
+            "session_opening_equity > 0 AND reference_equity > 0 "
+            "AND peak_equity > 0 AND current_equity > 0",
+            name="ck_kasset_shadow_hwm_equities_positive",
+        ),
+        CheckConstraint(
+            "peak_equity >= session_opening_equity "
+            "AND peak_equity >= current_equity",
+            name="ck_kasset_shadow_hwm_peak_monotonic",
+        ),
+        CheckConstraint(
+            "state_version > 0",
+            name="ck_kasset_shadow_hwm_state_version_positive",
+        ),
+        CheckConstraint(
+            "btrim(valuation_source) <> ''",
+            name="ck_kasset_shadow_hwm_valuation_source_nonempty",
+        ),
+        CheckConstraint(
+            "btrim(evidence_schema_version) <> ''",
+            name="ck_kasset_shadow_hwm_evidence_schema_nonempty",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'",
+            name="ck_kasset_shadow_hwm_evidence_object",
+        ),
+        Index(
+            "ix_kasset_shadow_hwm_owner_valuation",
+            "owner_user_id",
+            "valuation_at",
+        ),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    market: Mapped[str] = mapped_column(Text, primary_key=True)
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    session_opening_equity: Mapped[Decimal] = mapped_column(
+        Numeric(24, 8),
+        nullable=False,
+    )
+    reference_equity: Mapped[Decimal] = mapped_column(
+        Numeric(24, 8),
+        nullable=False,
+    )
+    peak_equity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    current_equity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    valuation_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    valuation_source: Mapped[str] = mapped_column(Text, nullable=False)
+    state_version: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    evidence_schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="SHADOW",
+        server_default="SHADOW",
+    )
+    evidence: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
