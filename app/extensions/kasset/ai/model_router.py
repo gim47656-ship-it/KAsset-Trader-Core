@@ -44,7 +44,13 @@ class _TierAnalysis(BaseModel):
     bullish_score: int = Field(ge=0, le=100)
     bearish_score: int = Field(ge=0, le=100)
     escalate: bool
-    rationale_tags: list[str] = Field(max_length=12)
+    rationale_tags: list[str] = Field(
+        max_length=12,
+        description=(
+            "Short noun-like rationale tags only; each tag must be at most 64 "
+            "characters and contain no sentence punctuation or user names."
+        ),
+    )
 
     @field_validator("rationale_tags")
     @classmethod

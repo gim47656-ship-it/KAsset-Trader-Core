@@ -183,6 +183,8 @@ async def test_high_confidence_luna_hold_stops_after_one_call(
         "escalate",
         "rationale_tags",
     }
+    rationale_schema = response_format["schema"]["properties"]["rationale_tags"]
+    assert "Short noun-like rationale tags only" in rationale_schema["description"]
 
 
 @pytest.mark.asyncio

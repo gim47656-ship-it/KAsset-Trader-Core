@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -841,16 +842,25 @@ class AIRecommendationVerticalSlice:
             "target": _level_text(item.ensemble.agreeing, "target"),
             "events": [dict(event) for event in events],
         }
-        verdict = await self._ai_router.analyze_for_owner(
-            self._db,
-            owner_user_id,
-            AnalysisKind.CANDIDATE_REVIEW,
-            payload,
-            correlation_id=(
-                f"ai-vertical:{owner_user_id}:{item.candidate.market}:"
-                f"{item.candidate.symbol}:{int(self._now.timestamp())}"
-            ),
-        )
+        try:
+            verdict = await self._ai_router.analyze_for_owner(
+                self._db,
+                owner_user_id,
+                AnalysisKind.CANDIDATE_REVIEW,
+                payload,
+                correlation_id=(
+                    f"ai-vertical:{owner_user_id}:{item.candidate.market}:"
+                    f"{item.candidate.symbol}:{int(self._now.timestamp())}"
+                ),
+            )
+        except ValidationError:
+            reason = "invalid_ai_response"
+            logger.warning(
+                "KAsset AI candidate response rejected: market=%s symbol=%s",
+                item.candidate.market,
+                item.candidate.symbol,
+            )
+            return None, reason, self._review_outcome(item, reason=reason)
         shadow_observation = build_ai_shadow_observation(
             verdict,
             observed_at=self._now,

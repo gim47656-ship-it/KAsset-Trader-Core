@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.extensions.kasset.ai.model_router import _TierAnalysis
 from app.extensions.kasset.automation import vertical_slice
 from app.extensions.kasset.automation.ai_shadow import build_ai_shadow_observation
 from app.extensions.kasset.automation.candidate_ranker import CandidateRankResult
@@ -198,7 +199,7 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
 
 
 @pytest.mark.asyncio
-async def test_ai_action_mismatch_keeps_secret_free_review_outcome() -> None:
+async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
     strategy = StrategyResult(
         action=Action.BUY,
         confidence=Decimal("0.80"),
@@ -250,6 +251,49 @@ async def test_ai_action_mismatch_keeps_secret_free_review_outcome() -> None:
             ranked_total=100,
         ),
     )
+    with pytest.raises(ValueError) as invalid_response:
+        _TierAnalysis.model_validate(
+            {
+                "action": "BUY",
+                "confidence": 0.8,
+                "risk": "LOW",
+                "bullish_score": 80,
+                "bearish_score": 20,
+                "escalate": False,
+                "rationale_tags": ["이 문장은 태그가 아닙니다."],
+            }
+        )
+    invalid_router = SimpleNamespace(
+        analyze_for_owner=AsyncMock(side_effect=invalid_response.value)
+    )
+    invalid_instance = AIRecommendationVerticalSlice(
+        MagicMock(), invalid_router, now=_NOW
+    )
+    invalid_instance._event_evidence = AsyncMock(  # type: ignore[method-assign]
+        return_value=()
+    )
+
+    (
+        invalid_reviewed,
+        invalid_rejection,
+        invalid_outcome,
+    ) = await invalid_instance._review_candidate(  # noqa: SLF001
+        4,
+        evaluated,
+        RegimeAssessment(
+            regime=MarketRegime.BULL,
+            detail="trend",
+            breadth_above_sma20=Decimal("0.7"),
+            median_return20=Decimal("0.1"),
+            median_atr_ratio=Decimal("0.02"),
+            weights=weights_for_regime(MarketRegime.BULL),
+        ),
+    )
+
+    assert invalid_reviewed is None
+    assert invalid_rejection == "invalid_ai_response"
+    assert invalid_outcome.as_dict()["reason"] == "invalid_ai_response"
+
     verdict = SimpleNamespace(
         input_hash="b" * 64,
         provider="mcp",
