@@ -199,6 +199,23 @@ class PaperAccountAdapter:
             updated_at=iso_z(),
         )
 
+    @staticmethod
+    def _quote_provenance(item: dict[str, object]) -> dict[str, object | None]:
+        """Wire-side quote provenance for one position row.
+
+        Passed through from the service verbatim. ``quoteAsOf`` stays absent
+        when the provider gave no timestamp — filling in the server clock would
+        make an undated quote look freshly observed.
+        """
+        as_of = item.get("quote_as_of")
+        return {
+            "quote_source": item.get("quote_source"),
+            "quote_as_of": iso_z(as_of) if isinstance(as_of, datetime) else None,
+            "quote_session": item.get("quote_session"),
+            "quote_is_stale": item.get("quote_is_stale"),
+            "valuation_error": item.get("valuation_error"),
+        }
+
     async def positions(
         self, db: AsyncSession, owner_user_id: int
     ) -> PositionsResponse:
@@ -217,7 +234,9 @@ class PaperAccountAdapter:
                     market=self.market_name(item["instrument_type"]),
                     symbol=item["symbol"],
                     name=names.get(item["symbol"]),
-                    currency=self.currency(item["instrument_type"]),
+                    # Settlement currency as resolved by the service, the same
+                    # value its trades and per-currency metrics are keyed by.
+                    currency=str(item["currency"]),
                     quantity=decimal_text(item["quantity"]),
                     average_price=decimal_text(item["avg_price"]),
                     current_price=(
@@ -240,6 +259,7 @@ class PaperAccountAdapter:
                         if item["pnl_pct"] is not None
                         else None
                     ),
+                    **self._quote_provenance(item),  # type: ignore[arg-type]
                     updated_at=now,
                 )
                 for item in raw_positions
@@ -375,10 +395,6 @@ class PaperAccountAdapter:
             "equity_us": "US",
             "crypto": "CRYPTO",
         }.get(instrument_type, instrument_type.upper())
-
-    @staticmethod
-    def currency(instrument_type: str) -> str:
-        return "USD" if instrument_type == "equity_us" else "KRW"
 
     @staticmethod
     async def _instrument_names(db: AsyncSession, symbols: list[str]) -> dict[str, str]:

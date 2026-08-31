@@ -49,11 +49,22 @@ def register_paper_analytics_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_paper_performance",
         description=(
-            "Return paper trading account performance: total_return_pct, realized/unrealized PnL, "
-            "total_trades (closed round trips), win_rate, avg_holding_days, max_drawdown_pct, "
-            "sharpe_ratio (annualised, 252 trading days), best_trade, worst_trade. "
-            "period ∈ {1d, 1w, 1m, 3m, all}. "
-            "Drawdown/Sharpe require PaperDailySnapshot rows in the period; otherwise null."
+            "Return paper trading account performance partitioned by settlement currency. "
+            "`performance.currencies` holds one metrics block per reported currency "
+            "(KRW, USD): initial_capital, cash, positions_value, total_equity, "
+            "total_return_pct, realized/unrealized PnL, total_trades (closed round trips), "
+            "win_rate, avg_holding_days, max_drawdown_pct, "
+            "sharpe_ratio (annualised, 252 trading days), best_trade, worst_trade, plus "
+            "valuation_complete / positions_valued / snapshots_used evidence. "
+            "There is NO combined total: the paper ledger holds no FX rate, so KRW and USD "
+            "values are never added. A currency whose live positions could not all be valued "
+            "reports valuation_complete=false with null equity, return, and unrealized PnL. "
+            "A currency the account never funded and never used reports total_return_pct 0. "
+            "Drawdown/Sharpe use only currency-safe PaperDailySnapshot rows in the period "
+            "(pre-P0 mixed-currency snapshots are excluded); otherwise null. "
+            "`performance.unsupported_currencies` counts rows held in any other currency — "
+            "they are disclosed, never folded into KRW or USD. "
+            "period ∈ {1d, 1w, 1m, 3m, all}."
         ),
     )
     async def get_paper_performance(
@@ -143,6 +154,9 @@ def register_paper_analytics_tools(mcp: FastMCP) -> None:
         description=(
             "Side-by-side performance comparison for multiple paper accounts. "
             "Runs calculate_performance against each name and returns a list. "
+            "Each performance payload is partitioned by settlement currency under "
+            "`currencies` (KRW, USD) with no combined total — compare accounts within "
+            "one currency, never across currencies. "
             "Missing accounts appear with performance=null and an error message. "
             "period ∈ {1d, 1w, 1m, 3m, all}, defaults to 'all'."
         ),

@@ -28,6 +28,7 @@ PARENT_REVISION = "20260824_s257_rung_reason"
 PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
 
 _BOUNDARY_TABLES = (
+    "review.kasset_paper_execution_events",
     "review.kasset_automation_cycle_events",
     "review.ai_call_events",
     "review.ai_recommendations",
@@ -139,6 +140,22 @@ async def test_upgrade_and_downgrade_ownership_guards_fail_closed() -> None:
                 )
             await connection.execute(
                 text("ALTER TABLE paper.paper_accounts DROP COLUMN initial_capital_usd")
+            )
+            # The P0 currency migration is also later than this boundary, so
+            # current metadata already carries its per-currency snapshot columns
+            # and the relaxed nullability of the legacy mixed-currency columns.
+            await connection.execute(
+                text(
+                    "ALTER TABLE paper.paper_daily_snapshots "
+                    "DROP COLUMN equity_krw, "
+                    "DROP COLUMN equity_usd, "
+                    "DROP COLUMN daily_return_krw_pct, "
+                    "DROP COLUMN daily_return_usd_pct, "
+                    "DROP COLUMN valuation_complete_krw, "
+                    "DROP COLUMN valuation_complete_usd, "
+                    "ALTER COLUMN positions_value SET NOT NULL, "
+                    "ALTER COLUMN total_equity SET NOT NULL"
+                )
             )
             await connection.execute(
                 text(

@@ -27,6 +27,15 @@ class Balance(AndroidWireModel):
 
 
 class Position(AndroidWireModel):
+    """PAPER 보유 종목. 평가 필드는 시세 출처와 함께만 의미가 있다.
+
+    평가값(`currentPrice`/`marketValue`/`unrealizedPnl`/`unrealizedPnlRate`)이
+    채워지면 `quoteSource`가 그 값을 만든 채널을 증명한다. 채워지지 않으면
+    `valuationError`에 안정된 코드가 담긴다 — 원본 예외 문구는 절대 내려가지
+    않는다. `quoteAsOf`가 없으면 `quoteIsStale`도 없다(모른다는 뜻이며 최신을
+    뜻하지 않는다).
+    """
+
     broker: str
     account_id: str
     market: str
@@ -40,6 +49,11 @@ class Position(AndroidWireModel):
     unrealized_pnl: str | None = None
     unrealized_pnl_rate: str | None = None
     realized_pnl: str | None = None
+    quote_source: str | None = None
+    quote_as_of: str | None = None
+    quote_session: MarketSessionState | None = None
+    quote_is_stale: bool | None = None
+    valuation_error: str | None = None
     updated_at: str
 
 

@@ -88,7 +88,10 @@ from app.models.trading import InstrumentType, User, UserRole
 from app.services.ai_recommendations.service import AIRecommendationService
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
-from app.services.kasset_automation_audit import record_automation_cycle_event
+from app.services.kasset_automation_audit import (
+    new_cycle_trace_id,
+    record_automation_cycle_event,
+)
 from app.services.symbol_news_store import load_symbol_news
 
 _RECOMMENDATION_LIMIT = 5
@@ -167,6 +170,9 @@ class AIReviewOutcome:
     tier: str | None = None
     model_id: str | None = None
     rationale_tags: tuple[str, ...] = ()
+    #: 이 후보가 실제로 추천 행으로 저장된 경우의 추천 id. 채택되지 않았거나
+    #: 상위 N개에 들지 못해 저장되지 않았으면 None으로 남는다.
+    recommendation_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -181,6 +187,7 @@ class AIReviewOutcome:
             "tier": self.tier,
             "modelId": self.model_id,
             "rationaleTags": list(self.rationale_tags),
+            "recommendationId": self.recommendation_id,
         }
 
 
@@ -234,10 +241,15 @@ class AIRecommendationVerticalSlice:
         allowed_markets: frozenset[str] | None = None,
         ranker_config: CandidateRankerConfig = DEFAULT_CANDIDATE_RANKER_CONFIG,
         shadow_setup_config: ShadowSetupConfig = DEFAULT_SHADOW_SETUP_CONFIG,
+        cycle_trace_id: str | None = None,
     ) -> None:
         self._db = db
         self._ai_router = ai_router
         self._now = _aware_utc(now)
+        # 후보를 한 건도 만지기 전에 이 cycle의 추적 id를 확정한다. 호출자가
+        # 넘겨주면 그 값을 쓰고, 그래야 owner cycle이 예외로 끝나도 원장과
+        # 추천이 같은 추적 id를 공유한다.
+        self._cycle_trace_id = cycle_trace_id or new_cycle_trace_id()
         self._policy = AITradingPolicyService()
         self._live_candidates_cache = (
             live_candidates_cache if live_candidates_cache is not None else {}
@@ -259,11 +271,14 @@ class AIRecommendationVerticalSlice:
         )
 
     async def run_owner(self, owner_user_id: int) -> dict[str, object]:
+        """Produce one owner's recommendations under this cycle's trace id."""
+
         cooldown_active = await self._cooldown_active(owner_user_id)
         position_exit_ids = await self._position_manager.run_owner(owner_user_id)
         if cooldown_active or position_exit_ids:
             return {
                 "ownerUserId": owner_user_id,
+                "cycleTraceId": self._cycle_trace_id,
                 "skipped": (
                     "position_exit_recommendation_created"
                     if position_exit_ids
@@ -276,6 +291,7 @@ class AIRecommendationVerticalSlice:
         if self._ai_router is None:
             return {
                 "ownerUserId": owner_user_id,
+                "cycleTraceId": self._cycle_trace_id,
                 "skipped": "ai_unavailable",
                 "candidateCount": 0,
                 "positionExitRecommendationIds": [],
@@ -312,6 +328,7 @@ class AIRecommendationVerticalSlice:
         if not recommendation_candidates:
             return {
                 "ownerUserId": owner_user_id,
+                "cycleTraceId": self._cycle_trace_id,
                 "skipped": "screener_candidates_unavailable",
                 "candidateCount": 0,
                 "heldManagementOnly": [
@@ -426,6 +443,9 @@ class AIRecommendationVerticalSlice:
             )
         )
         recommendation_ids: list[str] = []
+        # 저장된 추천을 그 추천을 만든 AI 검토 결과로 되돌려 잇는다. 후보는
+        # (symbol, market)로 이미 중복 제거돼 있으므로 이 키는 유일하다.
+        recommendation_id_by_candidate: dict[tuple[str, str], str] = {}
         total = len(ranking.ranked)
         for position, item in enumerate(reviewed[:_RECOMMENDATION_LIMIT], start=1):
             candidate_regime = item.evaluated.regime
@@ -439,8 +459,22 @@ class AIRecommendationVerticalSlice:
                 total=total,
                 snapshot=snapshot,
             )
+            persisted_candidate = item.evaluated.candidate
+            recommendation_id_by_candidate[
+                (persisted_candidate.symbol, persisted_candidate.ranker_market)
+            ] = row.id
             if row.action in {"BUY", "SELL"}:
                 recommendation_ids.append(row.id)
+
+        review_outcomes = [
+            replace(
+                outcome,
+                recommendation_id=recommendation_id_by_candidate.get(
+                    (outcome.symbol, outcome.market)
+                ),
+            )
+            for outcome in review_outcomes
+        ]
 
         ranked_evidence = [
             result.as_evidence()
@@ -448,6 +482,7 @@ class AIRecommendationVerticalSlice:
         ]
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
+            "cycleTraceId": self._cycle_trace_id,
             "candidateCount": len(recommendation_candidates),
             "rankedCount": len(ranking.ranked),
             "strategyActionableCount": len(actionable),
@@ -1057,7 +1092,11 @@ class AIRecommendationVerticalSlice:
             ai_confidence=item.external.confidence,
             now=self._now,
         )
-        persistence = AIRecommendationService(self._db, clock=lambda: self._now)
+        persistence = AIRecommendationService(
+            self._db,
+            clock=lambda: self._now,
+            cycle_trace_id=self._cycle_trace_id,
+        )
         row = await RecommendationProducer(
             owner_user_id=str(owner_user_id),
             persistence=persistence,
@@ -1228,6 +1267,9 @@ async def run_ai_recommendation_cycle_once(
     total_recommendations = 0
     for raw_owner_id in owner_ids:
         owner_id = int(raw_owner_id)
+        # 후보를 한 건도 읽기 전에 이 owner cycle의 추적 id를 확정한다. owner
+        # cycle이 예외로 끝나도 원장 행이 같은 값을 갖는다.
+        cycle_trace_id = new_cycle_trace_id()
         try:
             async with _session() as db:
                 result = await AIRecommendationVerticalSlice(
@@ -1235,6 +1277,7 @@ async def run_ai_recommendation_cycle_once(
                     ai_router,
                     now=current,
                     live_candidates_cache=live_candidates_cache,
+                    cycle_trace_id=cycle_trace_id,
                 ).run_owner(owner_id)
         except Exception as exc:
             # 스택 없이 errorClass만 담아 돌려주면 TaskIQ가 그 dict를 버리는
@@ -1245,6 +1288,7 @@ async def run_ai_recommendation_cycle_once(
             )
             result = {
                 "ownerUserId": owner_id,
+                "cycleTraceId": cycle_trace_id,
                 "candidateCount": 0,
                 "recommendationIds": [],
                 "skipped": "owner_cycle_failed",
@@ -1254,6 +1298,7 @@ async def run_ai_recommendation_cycle_once(
             "collectionPolicy",
             _collection_policy_payload(DEFAULT_CANDIDATE_RANKER_CONFIG),
         )
+        result.setdefault("cycleTraceId", cycle_trace_id)
         try:
             await record_automation_cycle_event(
                 owner_user_id=owner_id,
@@ -1273,10 +1318,12 @@ async def run_ai_recommendation_cycle_once(
         total_candidates += int(result.get("candidateCount", 0))
         total_recommendations += produced
         logger.info(
-            "kasset AI recommendation cycle owner=%s skipped=%s candidates=%s "
+            "kasset AI recommendation cycle owner=%s trace=%s skipped=%s "
+            "candidates=%s "
             "markets=%s sources=%s ranked=%s actionable=%s reviewed=%s "
             "review_rejections=%s recommendations=%d",
             owner_id,
+            cycle_trace_id,
             result.get("skipped"),
             result.get("candidateCount", 0),
             result.get("candidateMarkets"),

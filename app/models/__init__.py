@@ -63,6 +63,7 @@ from .investment_snapshots import (
 )
 from .investor_flow_snapshot import InvestorFlowSnapshot
 from .kasset_automation_cycle_events import KAssetAutomationCycleEvent
+from .kasset_paper_execution_events import KAssetPaperExecutionEvent
 from .kasset_research_cohorts import (
     KAssetResearchCohort,
     KAssetResearchCohortMember,
@@ -271,6 +272,7 @@ __all__ = [
     "InvestScreenerSnapshot",
     "InvestMomentumEventSnapshot",
     "KAssetAutomationCycleEvent",
+    "KAssetPaperExecutionEvent",
     "KAssetCorporateActionFetchCoverage",
     "KAssetResearchCohort",
     "KAssetResearchCohortMember",

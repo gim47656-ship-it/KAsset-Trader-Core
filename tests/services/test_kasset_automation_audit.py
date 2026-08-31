@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from app.services.kasset_automation_audit import build_automation_cycle_event
+import pytest
+
+from app.services.kasset_automation_audit import (
+    build_automation_cycle_event,
+    build_paper_execution_event,
+    new_cycle_trace_id,
+)
 
 _NOW = datetime(2026, 8, 31, 5, 50, tzinfo=UTC)
 
@@ -95,6 +101,7 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
             "tier": "terra",
             "modelId": "gpt-5.6-terra",
             "rationaleTags": ["breakout_not_confirmed"],
+            "recommendationId": None,
         }
     ]
     assert "rawResponse" not in row.ai_review_outcomes[0]
@@ -116,3 +123,134 @@ def test_owner_failure_is_recorded_without_negative_counts() -> None:
     assert row.status == "failed"
     assert row.candidate_count == 0
     assert row.finished_at == row.observed_at
+
+
+def test_cycle_event_joins_its_trace_to_the_accepted_recommendation() -> None:
+    trace = new_cycle_trace_id()
+    row = build_automation_cycle_event(
+        owner_user_id=4,
+        observed_at=_NOW,
+        finished_at=_NOW + timedelta(seconds=3),
+        result={
+            "cycleTraceId": trace,
+            "recommendationIds": ["rec-1", "rec-2"],
+            "aiReviewOutcomes": [
+                {
+                    "symbol": "003230",
+                    "market": "KR",
+                    "strategyAction": "BUY",
+                    "reason": "accepted",
+                    "observedAt": "2026-08-31T05:50:00Z",
+                    "recommendationId": "rec-1",
+                },
+                {
+                    "symbol": "005930",
+                    "market": "KR",
+                    "strategyAction": "BUY",
+                    "reason": "action_mismatch",
+                    "observedAt": "2026-08-31T05:50:00Z",
+                },
+            ],
+        },
+    )
+
+    assert row.cycle_trace_id == trace
+    assert row.recommendation_ids == ["rec-1", "rec-2"]
+    assert row.recommendation_count == 2
+    accepted = [
+        outcome for outcome in row.ai_review_outcomes if outcome["reason"] == "accepted"
+    ]
+    assert [outcome["recommendationId"] for outcome in accepted] == ["rec-1"]
+    # 채택되지 않은 후보는 추천 id를 갖지 않는다.
+    assert row.ai_review_outcomes[1]["recommendationId"] is None
+
+
+def test_cycle_event_bounds_the_recommendation_id_list_but_not_the_count() -> None:
+    produced = [f"rec-{index}" for index in range(120)]
+    row = build_automation_cycle_event(
+        owner_user_id=4,
+        observed_at=_NOW,
+        finished_at=_NOW,
+        result={"cycleTraceId": " ", "recommendationIds": produced},
+    )
+
+    assert len(row.recommendation_ids) == 50
+    assert row.recommendation_ids == produced[:50]
+    assert row.recommendation_count == 120
+    # 공백만 있는 추적 id는 저장하지 않는다. DB CHECK가 거부하는 값이다.
+    assert row.cycle_trace_id is None
+
+
+def test_execution_event_keeps_the_recommendation_order_and_attempt() -> None:
+    row = build_paper_execution_event(
+        owner_user_id=7,
+        origin="AUTO_PAPER",
+        status="SUBMITTED",
+        reason="idempotent_replay",
+        recommendation_id="  rec-9  ",
+        observed_at=_NOW,
+        attempt_count=2,
+        replayed=True,
+        cycle_trace_id="cyc-abc",
+        paper_order_id="ord-1",
+        promotion_bypass_reason="모의투자 계좌 완전 자동매매 게이트 개방",
+    )
+
+    assert row.owner_user_id == 7
+    assert row.recommendation_id == "rec-9"
+    assert row.origin == "AUTO_PAPER"
+    assert row.status == "SUBMITTED"
+    assert row.reason == "idempotent_replay"
+    assert row.attempt_count == 2
+    assert row.replayed is True
+    assert row.cycle_trace_id == "cyc-abc"
+    assert row.paper_order_id == "ord-1"
+    assert row.observed_at == _NOW
+    assert row.started_at == _NOW
+    assert row.finished_at == _NOW
+
+
+@pytest.mark.parametrize(
+    ("origin", "status"),
+    [("LIVE", "SUBMITTED"), ("auto_paper", "SUBMITTED"), ("AUTO_PAPER", "DONE")],
+)
+def test_execution_event_rejects_an_unknown_origin_or_status(
+    origin: str,
+    status: str,
+) -> None:
+    with pytest.raises(ValueError):
+        build_paper_execution_event(
+            owner_user_id=7,
+            origin=origin,
+            status=status,
+            reason="submitted",
+            recommendation_id="rec-9",
+            observed_at=_NOW,
+        )
+
+
+def test_execution_event_bounds_its_reason_and_requires_a_recommendation() -> None:
+    row = build_paper_execution_event(
+        owner_user_id=7,
+        origin="APPROVAL",
+        status="FAILED",
+        reason="submit_ambiguous:" + "X" * 500,
+        recommendation_id="rec-9",
+        observed_at=_NOW,
+        attempt_count=-4,
+    )
+
+    assert len(row.reason) == 256
+    assert row.reason.startswith("submit_ambiguous:")
+    assert row.attempt_count == 0
+    assert row.paper_order_id is None
+
+    with pytest.raises(ValueError):
+        build_paper_execution_event(
+            owner_user_id=7,
+            origin="APPROVAL",
+            status="FAILED",
+            reason="submit_rejected",
+            recommendation_id="   ",
+            observed_at=_NOW,
+        )

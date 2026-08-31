@@ -153,6 +153,11 @@ class PaperTrade(Base):
 
 # ---------------------------------------------------------------------------
 # paper.paper_daily_snapshots — daily portfolio equity snapshots
+#
+# Equity is recorded per settlement currency. The pre-P0 columns
+# (``positions_value``, ``total_equity``, ``daily_return_pct``) added KRW and
+# USD as raw numbers; they keep their historical rows for audit but are no
+# longer written or read by the reporting code.
 # ---------------------------------------------------------------------------
 class PaperDailySnapshot(Base):
     __tablename__ = "paper_daily_snapshots"
@@ -175,9 +180,23 @@ class PaperDailySnapshot(Base):
     snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
     cash_krw: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     cash_usd: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    positions_value: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    total_equity: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    # Legacy mixed-currency columns — preserved data, unused by new code.
+    # Nullable since ``20260831_p0_currency``; a downgrade rebuilds them from
+    # the per-currency columns below.
+    positions_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    total_equity: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     daily_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    # Currency-safe equity: ``equity_<cur>`` = ``cash_<cur>`` plus the value of
+    # the positions settling in that currency. The positions-only value stays
+    # derivable as ``equity_<cur> - cash_<cur>``.
+    equity_krw: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    equity_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    daily_return_krw_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    daily_return_usd_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    # True only when every live position in that currency was valued, so a
+    # partially-valued day can never enter a drawdown or Sharpe series.
+    valuation_complete_krw: Mapped[bool | None] = mapped_column(Boolean)
+    valuation_complete_usd: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

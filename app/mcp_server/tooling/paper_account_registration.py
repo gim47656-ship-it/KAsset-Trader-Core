@@ -30,16 +30,21 @@ def _session_factory() -> async_sessionmaker[AsyncSession]:
     return cast(async_sessionmaker[AsyncSession], cast(object, AsyncSessionLocal))
 
 
-def _to_float(value: Decimal | None) -> float | None:
-    return float(value) if value is not None else None
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {str(key): _json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_json_value(child) for child in value]
+    return value
 
 
 def _serialize_account(
     account: PaperAccount,
     *,
-    positions_count: int | None = None,
-    total_evaluated: Decimal | None = None,
-    total_pnl_pct: Decimal | None = None,
+    summary: dict[str, Any] | None = None,
+    summary_error: str | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "id": account.id,
@@ -53,10 +58,12 @@ def _serialize_account(
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
     }
-    if positions_count is not None:
-        data["positions_count"] = positions_count
-        data["total_evaluated_krw"] = _to_float(total_evaluated)
-        data["total_pnl_pct"] = _to_float(total_pnl_pct)
+    if summary is not None:
+        data["positions_count"] = summary["positions_count"]
+        data["currencies"] = _json_value(summary["currencies"])
+        data["unsupported_currencies"] = _json_value(summary["unsupported_currencies"])
+    if summary_error is not None:
+        data["summary_error"] = summary_error
     return data
 
 
@@ -100,12 +107,11 @@ def register_paper_account_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="list_paper_accounts",
         description=(
-            "List paper trading accounts with per-account summary "
-            "(positions_count, total_evaluated_krw, total_pnl_pct). "
-            "Note: total_evaluated_krw sums KRW and USD position values verbatim "
-            "— it does not convert USD to KRW. "
-            "is_active=True (default) filters to active accounts only. "
-            "strategy_name (optional) filters to accounts with a matching strategy slug."
+            "List paper trading accounts with position counts and independent "
+            "KRW/USD valuation and PnL summaries. Monetary values from different "
+            "currencies are never added. is_active=True (default) filters to active "
+            "accounts only. strategy_name (optional) filters to accounts with a "
+            "matching strategy slug."
         ),
     )
     async def list_paper_accounts(
@@ -123,21 +129,19 @@ def register_paper_account_tools(mcp: FastMCP) -> None:
             for account in accounts:
                 try:
                     summary = await service.get_portfolio_summary(account.id)
-                    out.append(
-                        _serialize_account(
-                            account,
-                            positions_count=summary["positions_count"],
-                            total_evaluated=summary.get("total_evaluated"),
-                            total_pnl_pct=summary.get("total_pnl_pct"),
-                        )
-                    )
+                    out.append(_serialize_account(account, summary=summary))
                 except Exception as exc:  # summary is best-effort
                     logger.warning(
                         "get_portfolio_summary failed for account %s: %s",
                         account.id,
-                        exc,
+                        type(exc).__name__,
                     )
-                    out.append(_serialize_account(account, positions_count=0))
+                    out.append(
+                        _serialize_account(
+                            account,
+                            summary_error="SUMMARY_UNAVAILABLE",
+                        )
+                    )
             return {"success": True, "accounts": out}
 
     @mcp.tool(

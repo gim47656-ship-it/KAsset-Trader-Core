@@ -120,7 +120,7 @@ class TestPaperTradeModel:
         )
 
 
-def test_paper_daily_snapshot_constructor() -> None:
+def test_paper_daily_snapshot_records_equity_per_currency() -> None:
     from datetime import date
     from decimal import Decimal
 
@@ -130,11 +130,42 @@ def test_paper_daily_snapshot_constructor() -> None:
         account_id=1,
         snapshot_date=date(2026, 4, 13),
         cash_krw=Decimal("1000000"),
-        cash_usd=Decimal("0"),
-        positions_value=Decimal("500000"),
-        total_equity=Decimal("1500000"),
-        daily_return_pct=Decimal("0.25"),
+        cash_usd=Decimal("500"),
+        equity_krw=Decimal("1500000"),
+        equity_usd=Decimal("900"),
+        daily_return_krw_pct=Decimal("0.25"),
+        daily_return_usd_pct=Decimal("-0.50"),
+        valuation_complete_krw=True,
+        valuation_complete_usd=False,
     )
     assert snap.account_id == 1
-    assert snap.total_equity == pytest.approx(Decimal("1500000"))
-    assert snap.daily_return_pct == pytest.approx(Decimal("0.25"))
+    assert snap.equity_krw == pytest.approx(Decimal("1500000"))
+    assert snap.equity_usd == pytest.approx(Decimal("900"))
+    assert snap.daily_return_krw_pct == pytest.approx(Decimal("0.25"))
+    assert snap.daily_return_usd_pct == pytest.approx(Decimal("-0.50"))
+    assert snap.valuation_complete_krw is True
+    assert snap.valuation_complete_usd is False
+    # The mixed-currency columns are optional now, so a new row simply omits
+    # them instead of storing another KRW+USD sum.
+    assert snap.positions_value is None
+    assert snap.total_equity is None
+    assert snap.daily_return_pct is None
+
+
+def test_paper_daily_snapshot_keeps_legacy_mixed_columns_nullable() -> None:
+    """Historical rows must still load; the legacy columns are only nullable."""
+    from app.models.paper_trading import PaperDailySnapshot
+
+    table = PaperDailySnapshot.__table__
+    for column_name in ("positions_value", "total_equity", "daily_return_pct"):
+        assert column_name in table.c
+        assert table.c[column_name].nullable is True
+    for column_name in (
+        "equity_krw",
+        "equity_usd",
+        "daily_return_krw_pct",
+        "daily_return_usd_pct",
+        "valuation_complete_krw",
+        "valuation_complete_usd",
+    ):
+        assert table.c[column_name].nullable is True

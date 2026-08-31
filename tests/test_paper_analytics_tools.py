@@ -62,36 +62,69 @@ def _patch_session(monkeypatch, db) -> None:
     )
 
 
+def _currency_metrics(currency: str, **overrides) -> dict:
+    """One `currencies` block in the shape `calculate_performance` returns."""
+    metrics = {
+        "currency": currency,
+        "initial_capital": 0.0,
+        "cash": 0.0,
+        "positions_count": 0,
+        "positions_valued": 0,
+        "valuation_complete": True,
+        "positions_value": 0.0,
+        "total_equity": 0.0,
+        "total_return_pct": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "total_trades": 0,
+        "win_rate": 0.0,
+        "avg_holding_days": 0.0,
+        "max_drawdown_pct": None,
+        "sharpe_ratio": None,
+        "best_trade": None,
+        "worst_trade": None,
+        "snapshots_used": 0,
+    }
+    metrics.update(overrides)
+    return metrics
+
+
 def _perf_payload() -> dict:
+    trip = {
+        "symbol": "005930",
+        "entry_date": "2026-04-01T00:00:00+00:00",
+        "exit_date": "2026-04-06T00:00:00+00:00",
+        "holding_days": 5,
+        "pnl": 98635.0,
+        "return_pct": 16.44,
+        "entry_reason": "",
+        "exit_reason": "",
+    }
     return {
-        "total_return_pct": 10.0,
-        "realized_pnl": 98635.0,
-        "unrealized_pnl": 400000.0,
-        "total_trades": 1,
-        "win_rate": 100.0,
-        "avg_holding_days": 5.0,
-        "max_drawdown_pct": 1.49,
-        "sharpe_ratio": 0.5,
-        "best_trade": {
-            "symbol": "005930",
-            "entry_date": "2026-04-01T00:00:00+00:00",
-            "exit_date": "2026-04-06T00:00:00+00:00",
-            "holding_days": 5,
-            "pnl": 98635.0,
-            "return_pct": 16.44,
-            "entry_reason": "",
-            "exit_reason": "",
+        "currencies": {
+            "KRW": _currency_metrics(
+                "KRW",
+                initial_capital=10000000.0,
+                cash=5000000.0,
+                positions_count=1,
+                positions_valued=1,
+                positions_value=6000000.0,
+                total_equity=11000000.0,
+                total_return_pct=10.0,
+                realized_pnl=98635.0,
+                unrealized_pnl=400000.0,
+                total_trades=1,
+                win_rate=100.0,
+                avg_holding_days=5.0,
+                max_drawdown_pct=1.49,
+                sharpe_ratio=0.5,
+                best_trade=trip,
+                worst_trade=trip,
+                snapshots_used=3,
+            ),
+            "USD": _currency_metrics("USD"),
         },
-        "worst_trade": {
-            "symbol": "005930",
-            "entry_date": "2026-04-01T00:00:00+00:00",
-            "exit_date": "2026-04-06T00:00:00+00:00",
-            "holding_days": 5,
-            "pnl": 98635.0,
-            "return_pct": 16.44,
-            "entry_reason": "",
-            "exit_reason": "",
-        },
+        "unsupported_currencies": {},
     }
 
 
@@ -127,8 +160,14 @@ async def test_get_paper_performance_all_period(monkeypatch):
     assert result["success"] is True
     assert result["account_name"] == "bot"
     assert result["period"] == "all"
-    assert result["performance"]["total_return_pct"] == pytest.approx(10.0)
-    assert result["performance"]["best_trade"]["symbol"] == "005930"
+    # Metrics are read per currency; no combined total exists to read.
+    assert "total_return_pct" not in result["performance"]
+    krw = result["performance"]["currencies"]["KRW"]
+    assert krw["total_return_pct"] == pytest.approx(10.0)
+    assert krw["best_trade"]["symbol"] == "005930"
+    assert result["performance"]["currencies"]["USD"]["total_return_pct"] == (
+        pytest.approx(0.0)
+    )
 
 
 @pytest.mark.asyncio
@@ -314,28 +353,36 @@ async def test_compare_paper_accounts_all_found(monkeypatch):
     name_to_account = {"bot-a": acc1, "bot-b": acc2}
     perf_by_id = {
         1: {
-            "total_return_pct": 5.0,
-            "realized_pnl": 100.0,
-            "unrealized_pnl": 50.0,
-            "total_trades": 3,
-            "win_rate": 66.67,
-            "avg_holding_days": 4.0,
-            "max_drawdown_pct": 2.0,
-            "sharpe_ratio": 1.0,
-            "best_trade": None,
-            "worst_trade": None,
+            "currencies": {
+                "KRW": _currency_metrics(
+                    "KRW",
+                    total_return_pct=5.0,
+                    realized_pnl=100.0,
+                    unrealized_pnl=50.0,
+                    total_trades=3,
+                    win_rate=66.67,
+                    avg_holding_days=4.0,
+                    max_drawdown_pct=2.0,
+                    sharpe_ratio=1.0,
+                ),
+                "USD": _currency_metrics("USD"),
+            },
+            "unsupported_currencies": {},
         },
         2: {
-            "total_return_pct": -2.0,
-            "realized_pnl": -200.0,
-            "unrealized_pnl": 0.0,
-            "total_trades": 1,
-            "win_rate": 0.0,
-            "avg_holding_days": 2.0,
-            "max_drawdown_pct": 5.0,
-            "sharpe_ratio": -0.5,
-            "best_trade": None,
-            "worst_trade": None,
+            "currencies": {
+                "KRW": _currency_metrics(
+                    "KRW",
+                    total_return_pct=-2.0,
+                    realized_pnl=-200.0,
+                    total_trades=1,
+                    avg_holding_days=2.0,
+                    max_drawdown_pct=5.0,
+                    sharpe_ratio=-0.5,
+                ),
+                "USD": _currency_metrics("USD"),
+            },
+            "unsupported_currencies": {},
         },
     }
 
@@ -358,8 +405,13 @@ async def test_compare_paper_accounts_all_found(monkeypatch):
     assert result["success"] is True
     rows = result["comparison"]
     assert [r["account_name"] for r in rows] == ["bot-a", "bot-b"]
-    assert rows[0]["performance"]["total_return_pct"] == pytest.approx(5.0)
-    assert rows[1]["performance"]["total_return_pct"] == pytest.approx(-2.0)
+    # Accounts are compared inside one currency, never across currencies.
+    assert rows[0]["performance"]["currencies"]["KRW"]["total_return_pct"] == (
+        pytest.approx(5.0)
+    )
+    assert rows[1]["performance"]["currencies"]["KRW"]["total_return_pct"] == (
+        pytest.approx(-2.0)
+    )
 
 
 @pytest.mark.asyncio
@@ -388,16 +440,11 @@ async def test_compare_paper_accounts_skips_missing(monkeypatch):
         svc.get_account_by_name = AsyncMock(side_effect=_lookup)
         svc.calculate_performance = AsyncMock(
             return_value={
-                "total_return_pct": 0.0,
-                "realized_pnl": 0.0,
-                "unrealized_pnl": 0.0,
-                "total_trades": 0,
-                "win_rate": 0.0,
-                "avg_holding_days": 0.0,
-                "max_drawdown_pct": None,
-                "sharpe_ratio": None,
-                "best_trade": None,
-                "worst_trade": None,
+                "currencies": {
+                    "KRW": _currency_metrics("KRW"),
+                    "USD": _currency_metrics("USD"),
+                },
+                "unsupported_currencies": {},
             }
         )
 
@@ -408,7 +455,9 @@ async def test_compare_paper_accounts_skips_missing(monkeypatch):
     assert len(result["comparison"]) == 2
     first, second = result["comparison"]
     assert first["account_name"] == "bot-a"
-    assert first["performance"]["total_return_pct"] == pytest.approx(0.0)
+    assert first["performance"]["currencies"]["KRW"]["total_return_pct"] == (
+        pytest.approx(0.0)
+    )
     assert first.get("error") is None
     assert second == {
         "account_name": "ghost",
