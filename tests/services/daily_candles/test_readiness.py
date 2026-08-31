@@ -178,7 +178,7 @@ def _delisted_member(
 def _benchmark(
     symbol: str,
     *,
-    count: int = 60,
+    count: int = 61,
     source: str = "kis",
 ) -> dict[str, object]:
     return {
@@ -771,7 +771,7 @@ async def test_fallback_only_history_never_becomes_promotion_ready(
 
 
 @pytest.mark.asyncio
-async def test_benchmark_still_requires_60_durable_bars(
+async def test_benchmark_requires_61_bars_for_a_60_session_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -779,7 +779,7 @@ async def test_benchmark_still_requires_60_durable_bars(
         monkeypatch,
         market="us",
         members=[_member("AAPL", sessions=sessions)],
-        benchmark=[_benchmark("SPY", count=59)],
+        benchmark=[_benchmark("SPY", count=60)],
         sessions=sessions,
     )
 

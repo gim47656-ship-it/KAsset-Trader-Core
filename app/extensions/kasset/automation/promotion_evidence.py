@@ -431,7 +431,6 @@ async def build_and_store_portfolio_evidence(
             source.candidates,
             source.bars_by_candidate,
             config=config,
-            benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
             benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
         )
@@ -440,7 +439,6 @@ async def build_and_store_portfolio_evidence(
             source.bars_by_candidate,
             config=config,
             walk_forward=walk_config,
-            benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
             benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
         )

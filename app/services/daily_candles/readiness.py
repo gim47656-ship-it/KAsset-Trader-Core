@@ -25,7 +25,7 @@ CorporateActionStatus = Literal["suspected", "clear", "unknown"]
 BenchmarkStatus = Literal["available", "insufficient", "unavailable"]
 
 REQUIRED_HISTORY_BARS = 252
-REQUIRED_BENCHMARK_BARS = 60
+REQUIRED_BENCHMARK_BARS = 61  # 60-session return requires both endpoints
 _CALENDAR_LOOKBACK_DAYS = 550
 _FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
 _DELISTED_STATUSES = frozenset({"delisted", "상장폐지"})

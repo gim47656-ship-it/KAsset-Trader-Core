@@ -456,3 +456,48 @@ async def test_include_benchmark_is_an_explicit_target_outside_all_limit(
             "symbol": "KOSDAQ",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_only_syncs_kr_benchmarks_without_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.backfill_daily_candles as cli
+
+    success = SimpleNamespace(
+        rows_upserted=61,
+        fallback_used=False,
+        skipped_reason=None,
+    )
+    service = SimpleNamespace(
+        sync_one=AsyncMock(),
+        sync_benchmark=AsyncMock(side_effect=(success, success)),
+        rollback=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(cli, "_build_default_service", AsyncMock(return_value=service))
+    args = cli._build_parser().parse_args(
+        [
+            "--market",
+            "kr",
+            "--benchmark-only",
+            "--horizon-bars",
+            "400",
+        ]
+    )
+
+    assert await cli._amain(args) == 0
+    service.sync_one.assert_not_awaited()
+    assert [call.kwargs for call in service.sync_benchmark.await_args_list] == [
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSPI",
+        },
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSDAQ",
+        },
+    ]
+    service.close.assert_awaited_once()

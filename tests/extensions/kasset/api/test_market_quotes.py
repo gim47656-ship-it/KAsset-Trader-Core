@@ -598,6 +598,27 @@ def test_extended_session_change_tracks_price_from_latest_regular_close(
     assert quote.change_rate == "2.00"
 
 
+def test_extended_session_omits_change_when_regular_close_is_unavailable() -> None:
+    quote = krx_quotes._toss_quote(
+        TossQuotePoint(
+            symbol="TQQQ",
+            price=Decimal("73.45"),
+            currency="USD",
+            as_of=datetime.fromisoformat("2026-08-28T09:30:00+09:00"),
+        ),
+        market="US",
+        name=None,
+        rows=(),
+        previous_close_fallback=Decimal("72.00"),
+        session="AFTER_MARKET",
+        regular_close=None,
+    )
+
+    assert quote.previous_close is None
+    assert quote.change_amount is None
+    assert quote.change_rate is None
+
+
 def test_us_after_market_quote_tracks_current_price_from_regular_close(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:

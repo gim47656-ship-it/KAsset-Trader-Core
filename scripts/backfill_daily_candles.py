@@ -12,6 +12,9 @@ Examples:
         --include-benchmark --horizon-bars 400
 
     uv run python scripts/backfill_daily_candles.py \
+        --market kr --benchmark-only --horizon-bars 400
+
+    uv run python scripts/backfill_daily_candles.py \
         --market us --top-market-cap 100 --horizon-bars 500
 """
 
@@ -72,6 +75,11 @@ def _build_parser() -> argparse.ArgumentParser:
     targets.add_argument(
         "--cohort-id",
         help="연구 코호트의 active+forced 멤버를 rank/symbol 순서로 조회",
+    )
+    targets.add_argument(
+        "--benchmark-only",
+        action="store_true",
+        help="종목 백필 없이 시장 benchmark만 동기화",
     )
     parser.add_argument("--horizon-bars", type=_positive_int, default=None)
     parser.add_argument(
@@ -176,10 +184,23 @@ async def _amain(args: argparse.Namespace) -> int:
     market_key, default_bars, default_partition = _MARKET_DEFAULTS[args.market]
     horizon = args.horizon_bars if args.horizon_bars is not None else default_bars
 
+    benchmark_only = bool(args.benchmark_only)
     bulk_mode = (
         args.all or args.top_market_cap is not None or args.cohort_id is not None
     )
-    if bulk_mode:
+    if benchmark_only:
+        if args.market == "crypto":
+            raise ValueError("--benchmark-only는 kr과 us에서만 지원합니다")
+        if (
+            args.partition is not None
+            or args.resume_after is not None
+            or args.limit is not None
+        ):
+            raise ValueError(
+                "--benchmark-only에는 --partition/--resume-after/--limit을 사용할 수 없습니다"
+            )
+        explicit_targets: list[SyncTarget] = []
+    elif bulk_mode:
         target_mode = (
             "--all"
             if args.all
@@ -195,7 +216,7 @@ async def _amain(args: argparse.Namespace) -> int:
             raise ValueError(
                 f"--resume-after/--limit은 {target_mode}과 함께 사용할 수 없습니다"
             )
-        explicit_targets: list[SyncTarget] = []
+        explicit_targets = []
     else:
         if args.resume_after is not None or args.limit is not None:
             raise ValueError("--resume-after/--limit에는 --all이 필요합니다")
@@ -206,7 +227,11 @@ async def _amain(args: argparse.Namespace) -> int:
             requested_partition=requested_partition,
         )
 
-    benchmarks = _benchmark_targets(market_key) if args.include_benchmark else ()
+    benchmarks = (
+        _benchmark_targets(market_key)
+        if args.include_benchmark or benchmark_only
+        else ()
+    )
     svc = await _build_default_service()
     try:
         if args.all:

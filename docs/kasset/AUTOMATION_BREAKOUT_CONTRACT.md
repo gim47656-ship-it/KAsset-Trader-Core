@@ -65,7 +65,7 @@ owner/account/market/symbol별 활성 상태는 실제 `PaperPosition.id`와 imm
 
 백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
 
-승격 evidence는 새 백테스트 체계를 만들지 않고 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry를 사용한다. DB 일봉에서 종목 수, 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate-action 상태, point-in-time·상장폐지 포함 가능 여부, KOSPI/SPY benchmark 범위를 계산한다. evidence가 부족하거나 fallback benchmark뿐이면 승격을 fail-closed한다.
+승격 evidence는 새 백테스트 체계를 만들지 않고 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry를 사용한다. DB 일봉에서 종목 수, 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate-action 상태, point-in-time·상장폐지 포함 가능 여부, KOSPI/KOSDAQ/SPY benchmark 범위를 계산한다. evidence가 부족하거나 fallback benchmark뿐이면 승격을 fail-closed한다.
 
 전략 상태는 `DRAFT`, `BACKTESTED`, `PAPER_APPROVED`, `PAPER_SUSPENDED`, `RETIRED`다. 운영자는 persisted candidate ID와 사유만 넘길 수 있고 raw metrics를 CLI로 주입할 수 없다. 승인·추천 생성·AUTO_PAPER submit 직전의 strategy artifact fingerprint가 모두 같아야 하며, Ranker/Regime/Ensemble/Sizer/Manager/Backtest/비용 설정과 schema evidence version 변경은 새 backtest/promotion을 요구한다. Git SHA는 source lineage로 별도 저장하고 문서·UI·테스트 변경은 artifact fingerprint에서 제외한다.
 
@@ -121,10 +121,13 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 
 1. 신규 migration `20260831_kasset_shadow_hwm`,
    `20260831_kasset_shadow_loss_lock`을 별도 비운영 DB에서 먼저 검증한다.
-2. `ShadowAutomationManifest`와 활성 설정 fingerprint를 증거에 고정한다.
-3. 비용 포함 portfolio backtest, walk-forward, 기존 주문결과 동일성 회귀를 실행한다.
-4. owner scope, Kill Switch, Hard Risk, Position Manager SELL 우선 계약을 재검증한다.
-5. SHADOW 관찰 기간을 거친 뒤에도 실제 주문 연결은 별도 변경과 승인을 거친다.
+2. KRX 활성화·승격 전에
+   `python scripts/backfill_daily_candles.py --market kr --benchmark-only --horizon-bars 400`
+   으로 KOSPI와 KOSDAQ을 모두 적재하고 각각 최소 61봉인지 확인한다.
+3. `ShadowAutomationManifest`와 활성 설정 fingerprint를 증거에 고정한다.
+4. 비용 포함 portfolio backtest, walk-forward, 기존 주문결과 동일성 회귀를 실행한다.
+5. owner scope, Kill Switch, Hard Risk, Position Manager SELL 우선 계약을 재검증한다.
+6. SHADOW 관찰 기간을 거친 뒤에도 실제 주문 연결은 별도 변경과 승인을 거친다.
 
 ### 롤백
 

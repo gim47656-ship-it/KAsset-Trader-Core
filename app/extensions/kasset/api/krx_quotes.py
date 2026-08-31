@@ -475,10 +475,10 @@ def build_quote(
     if session == "REGULAR":
         regular_close = None
     elif session in {"DAY_MARKET", "PRE_MARKET", "AFTER_MARKET"}:
-        # 장외 세션은 calendar가 증명한 최신 완료 정규장 종가를 기준으로
-        # 움직이는 현재가의 등락을 계산한다. REST와 stream 모두 이 경계를 쓴다.
-        if regular_close is not None:
-            previous_close = regular_close
+        # 장외 세션은 calendar가 증명한 최신 완료 정규장 종가만 기준으로
+        # 사용한다. 기준 종가를 확보하지 못하면 다른 날짜의 종가로 조용히
+        # 대체하지 않고 등락값을 비워 잘못된 퍼센트를 차단한다.
+        previous_close = regular_close
     change_amount = price - previous_close if previous_close is not None else None
     rate = change_rate(change_amount, previous_close)
     session_change_amount = price - regular_close if regular_close is not None else None
