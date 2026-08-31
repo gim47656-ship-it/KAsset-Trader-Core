@@ -61,6 +61,13 @@ from app.extensions.kasset.automation.regime import (
     RegimeAssessment,
     assess_market_regime,
 )
+from app.extensions.kasset.automation.shadow_setups import (
+    DEFAULT_SHADOW_SETUP_CONFIG,
+    SHADOW_SETUPS_SCHEMA_VERSION,
+    ShadowSetupConfig,
+    evaluate_ranked_shadow_setups,
+    shadow_setups_evidence,
+)
 from app.extensions.kasset.automation.strategies import STRATEGIES
 from app.extensions.kasset.automation.strategy_artifact import (
     current_strategy_artifact,
@@ -181,6 +188,7 @@ class AIRecommendationVerticalSlice:
         live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] | None = None,
         allowed_markets: frozenset[str] | None = None,
         ranker_config: CandidateRankerConfig = DEFAULT_CANDIDATE_RANKER_CONFIG,
+        shadow_setup_config: ShadowSetupConfig = DEFAULT_SHADOW_SETUP_CONFIG,
     ) -> None:
         self._db = db
         self._ai_router = ai_router
@@ -196,6 +204,7 @@ class AIRecommendationVerticalSlice:
         )
         self._ranker_config = ranker_config
         self._ranker = CandidateRanker(ranker_config)
+        self._shadow_setup_config = shadow_setup_config
         self._strategy_artifact_fingerprint = current_strategy_artifact().fingerprint
         self._position_manager = PaperPositionManagerService(
             db,
@@ -293,6 +302,13 @@ class AIRecommendationVerticalSlice:
             as_of=self._now,
             allowed_markets=allowed_markets,
             benchmark_returns_60_by_candidate=benchmark_returns,
+        )
+        shadow_setups = evaluate_ranked_shadow_setups(
+            tuple(result.key for result in ranking.ranked),
+            bars_by_candidate,
+            as_of=self._now,
+            limit=_RECOMMENDATION_LIMIT,
+            config=self._shadow_setup_config,
         )
         ranks_for_review = ranking.for_strategy_review(
             self._ranker_config.strategy_review_limit
@@ -396,6 +412,15 @@ class AIRecommendationVerticalSlice:
                 for market, assessment in regimes.items()
             },
             "rankedCandidates": ranked_evidence,
+            "shadowSetups": {
+                "schemaVersion": SHADOW_SETUPS_SCHEMA_VERSION,
+                "mode": "SHADOW",
+                "active": self._shadow_setup_config.feature_enabled,
+                "configFingerprint": self._shadow_setup_config.fingerprint,
+                "candidates": [
+                    shadow_setups_evidence(item) for item in shadow_setups
+                ],
+            },
             "candidateExclusions": [
                 result.as_evidence() for result in ranking.excluded
             ],
