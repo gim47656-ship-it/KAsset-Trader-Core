@@ -134,23 +134,28 @@ class PaperAccountAdapter:
         account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
         positions = await service.get_positions(account.id)
-        evaluation = sum(
-            (
-                Decimal(str(item["evaluation_amount"]))
-                for item in positions
-                if item["instrument_type"] == "equity_kr"
-                and item["evaluation_amount"] is not None
-            ),
-            Decimal("0"),
+        kr_positions = [
+            item for item in positions if item["instrument_type"] == "equity_kr"
+        ]
+        valuation_complete = all(
+            item["evaluation_amount"] is not None and item["unrealized_pnl"] is not None
+            for item in kr_positions
         )
-        unrealized = sum(
-            (
-                Decimal(str(item["unrealized_pnl"]))
-                for item in positions
-                if item["instrument_type"] == "equity_kr"
-                and item["unrealized_pnl"] is not None
-            ),
-            Decimal("0"),
+        evaluation = (
+            sum(
+                (Decimal(str(item["evaluation_amount"])) for item in kr_positions),
+                Decimal("0"),
+            )
+            if valuation_complete
+            else None
+        )
+        unrealized = (
+            sum(
+                (Decimal(str(item["unrealized_pnl"])) for item in kr_positions),
+                Decimal("0"),
+            )
+            if valuation_complete
+            else None
         )
         realized_result = await db.execute(
             select(PaperTrade.realized_pnl).where(
@@ -179,9 +184,17 @@ class PaperAccountAdapter:
                     available=decimal_text(account.cash_usd),
                 ),
             ],
-            evaluation_amount=decimal_text(evaluation),
-            total_assets=decimal_text(Decimal(account.cash_krw) + evaluation),
-            unrealized_pnl=decimal_text(unrealized),
+            evaluation_amount=(
+                decimal_text(evaluation) if evaluation is not None else None
+            ),
+            total_assets=(
+                decimal_text(Decimal(account.cash_krw) + evaluation)
+                if evaluation is not None
+                else None
+            ),
+            unrealized_pnl=(
+                decimal_text(unrealized) if unrealized is not None else None
+            ),
             realized_pnl=decimal_text(realized),
             updated_at=iso_z(),
         )

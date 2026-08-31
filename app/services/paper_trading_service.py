@@ -167,20 +167,12 @@ class PaperTradingService:
     # Price fetch
     # ------------------------------------------------------------------ #
     async def _fetch_current_price(self, symbol: str, instrument_type: str) -> Decimal:
-        if instrument_type == "equity_kr":
-            from app.mcp_server.tooling.market_data_quotes import (
-                _fetch_quote_equity_kr,
-            )
+        if instrument_type in {"equity_kr", "equity_us"}:
+            from app.extensions.kasset.api.krx_quotes import quote_for_market
 
-            quote = await _fetch_quote_equity_kr(symbol)
-            price = quote.get("price")
-        elif instrument_type == "equity_us":
-            from app.mcp_server.tooling.market_data_quotes import (
-                _fetch_quote_equity_us,
-            )
-
-            quote = await _fetch_quote_equity_us(symbol)
-            price = quote.get("price")
+            market = "KRX" if instrument_type == "equity_kr" else "US"
+            quote = await quote_for_market(self.db, market=market, symbol=symbol)
+            price = quote.price
         elif instrument_type == "crypto":
             prices = await fetch_multiple_current_prices([symbol])
             price = prices.get(symbol)

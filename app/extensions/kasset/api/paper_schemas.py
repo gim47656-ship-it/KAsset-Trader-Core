@@ -18,9 +18,9 @@ class Balance(AndroidWireModel):
     account_id: str
     base_currency: str
     cash: list[CashBalance]
-    evaluation_amount: str
-    total_assets: str
-    unrealized_pnl: str
+    evaluation_amount: str | None
+    total_assets: str | None
+    unrealized_pnl: str | None
     realized_pnl: str | None = None
     fx_rate: str | None = None
     updated_at: str

@@ -175,24 +175,6 @@ class TestFetchCurrentPrice:
         return PaperTradingService(mock_db)
 
     @pytest.mark.asyncio
-    async def test_fetch_equity_kr_uses_kis_quote(self, service, monkeypatch):
-        monkeypatch.setattr(
-            "app.mcp_server.tooling.market_data_quotes._fetch_quote_equity_kr",
-            AsyncMock(return_value={"price": 70000.0}),
-        )
-        price = await service._fetch_current_price("005930", "equity_kr")
-        assert price == pytest.approx(Decimal("70000.0"))
-
-    @pytest.mark.asyncio
-    async def test_fetch_equity_us_uses_yahoo_quote(self, service, monkeypatch):
-        monkeypatch.setattr(
-            "app.mcp_server.tooling.market_data_quotes._fetch_quote_equity_us",
-            AsyncMock(return_value={"price": 190.5}),
-        )
-        price = await service._fetch_current_price("AAPL", "equity_us")
-        assert price == pytest.approx(Decimal("190.5"))
-
-    @pytest.mark.asyncio
     async def test_fetch_crypto_uses_upbit_batch(self, service, monkeypatch):
         monkeypatch.setattr(
             "app.services.paper_trading_service.fetch_multiple_current_prices",
@@ -606,6 +588,31 @@ class TestQueries:
         result = MagicMock()
         result.scalars.return_value = scalars
         return AsyncMock(return_value=result)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("instrument_type", "market"),
+        [("equity_kr", "KRX"), ("equity_us", "US")],
+    )
+    async def test_fetch_current_price_uses_unified_market_quote(
+        self, service, mock_db, monkeypatch, instrument_type, market
+    ):
+        quote_for_market = AsyncMock(
+            return_value=SimpleNamespace(price=Decimal("70123.45"))
+        )
+        monkeypatch.setattr(
+            "app.extensions.kasset.api.krx_quotes.quote_for_market",
+            quote_for_market,
+        )
+
+        price = await service._fetch_current_price("005930", instrument_type)
+
+        assert price == Decimal("70123.45")
+        quote_for_market.assert_awaited_once_with(
+            mock_db,
+            market=market,
+            symbol="005930",
+        )
 
     @pytest.mark.asyncio
     async def test_get_positions_enriches_with_current_price(

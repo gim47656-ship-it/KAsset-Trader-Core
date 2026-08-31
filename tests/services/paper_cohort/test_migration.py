@@ -327,6 +327,11 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 "kasset_broker_credentials",
             ):
                 await connection.execute(text(f"DROP TABLE {table}"))
+            # PAPER USD initial capital is a post-boundary additive column.
+            # Remove the current-head shape so its migration owns each round trip.
+            await connection.execute(
+                text("ALTER TABLE paper.paper_accounts DROP COLUMN initial_capital_usd")
+            )
             # The KAsset multi-user migration adds these case-insensitive
             # unique indexes; current metadata already materializes them, so
             # drop both and let the migration add them back.

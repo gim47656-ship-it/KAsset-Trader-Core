@@ -218,9 +218,7 @@ def _configure_preview(
     monkeypatch.setattr(
         paper_account_adapter, "resolve_account", AsyncMock(return_value=account)
     )
-    monkeypatch.setattr(
-        krx_quotes, "quote_for_market", AsyncMock(return_value=quote)
-    )
+    monkeypatch.setattr(krx_quotes, "quote_for_market", AsyncMock(return_value=quote))
     monkeypatch.setattr(
         runtime_state,
         "get",
@@ -243,7 +241,8 @@ def _configure_preview(
 async def test_new_android_paper_account_starts_with_parallel_usd_cash() -> None:
     db = NewAccountSession()
     account = await paper_account_adapter.default_account(
-        db, owner_user_id=101  # type: ignore[arg-type]
+        db,
+        owner_user_id=101,  # type: ignore[arg-type]
     )
     assert account.initial_capital == Decimal("10000000")
     assert account.initial_capital_usd == Decimal("10000")
@@ -282,7 +281,8 @@ async def test_balance_keeps_usd_cash_separate_from_krw_totals(
         ),
     )
     balance = await paper_account_adapter.balance(
-        db, owner_user_id=101  # type: ignore[arg-type]
+        db,
+        owner_user_id=101,  # type: ignore[arg-type]
     )
     assert balance.base_currency == "KRW"
     assert balance.evaluation_amount == "500000"
@@ -295,6 +295,41 @@ async def test_balance_keeps_usd_cash_separate_from_krw_totals(
     ]
     assert db.last_statement is not None
     assert InstrumentType.equity_kr in db.last_statement.compile().params.values()
+
+
+@pytest.mark.asyncio
+async def test_balance_does_not_report_false_zero_when_krw_quote_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = BalanceSession([])
+    account = SimpleNamespace(
+        id=1, cash_krw=Decimal("10000000"), cash_usd=Decimal("10000")
+    )
+    monkeypatch.setattr(
+        paper_account_adapter, "default_account", AsyncMock(return_value=account)
+    )
+    monkeypatch.setattr(
+        PaperTradingService,
+        "get_positions",
+        AsyncMock(
+            return_value=[
+                {
+                    "instrument_type": "equity_kr",
+                    "evaluation_amount": None,
+                    "unrealized_pnl": None,
+                }
+            ]
+        ),
+    )
+
+    balance = await paper_account_adapter.balance(
+        db,
+        owner_user_id=101,  # type: ignore[arg-type]
+    )
+
+    assert balance.evaluation_amount is None
+    assert balance.total_assets is None
+    assert balance.unrealized_pnl is None
 
 
 @pytest.mark.asyncio
@@ -312,7 +347,9 @@ async def test_buy_rejects_order_ratio_against_orderable_cash(
         max_symbol_ratio="1",
     )
     risk = await PaperOrderFacade().preview(
-        db, 101, _risk_request(quantity="6")  # type: ignore[arg-type]
+        db,
+        101,
+        _risk_request(quantity="6"),  # type: ignore[arg-type]
     )
     assert [(reason.code, reason.message) for reason in risk.reasons] == [
         (
@@ -346,7 +383,9 @@ async def test_buy_rejects_projected_symbol_cost_basis_ratio(
         max_symbol_ratio="0.25",
     )
     risk = await PaperOrderFacade().preview(
-        db, 101, _risk_request(quantity="2")  # type: ignore[arg-type]
+        db,
+        101,
+        _risk_request(quantity="2"),  # type: ignore[arg-type]
     )
     assert [reason.code for reason in risk.reasons] == ["MAX_SYMBOL_RATIO"]
 
@@ -375,7 +414,9 @@ async def test_buy_allows_both_concentration_ratios_at_one(
         max_symbol_ratio="1",
     )
     risk = await PaperOrderFacade().preview(
-        db, 101, _risk_request(quantity="5")  # type: ignore[arg-type]
+        db,
+        101,
+        _risk_request(quantity="5"),  # type: ignore[arg-type]
     )
     assert risk.decision == "APPROVED"
     assert risk.reasons == []
@@ -396,7 +437,9 @@ async def test_ratios_at_one_keep_insufficient_cash_guard(
         max_symbol_ratio="1",
     )
     risk = await PaperOrderFacade().preview(
-        db, 101, _risk_request()  # type: ignore[arg-type]
+        db,
+        101,
+        _risk_request(),  # type: ignore[arg-type]
     )
     assert [reason.code for reason in risk.reasons] == ["INSUFFICIENT_CASH"]
 
@@ -408,9 +451,7 @@ async def test_sell_ignores_buy_concentration_ratios(
     db = PreviewSession()
     _configure_preview(
         monkeypatch,
-        account=SimpleNamespace(
-            id=1, cash_krw=Decimal("1"), cash_usd=Decimal("1")
-        ),
+        account=SimpleNamespace(id=1, cash_krw=Decimal("1"), cash_usd=Decimal("1")),
         quote=_risk_quote(),
         max_order_ratio="0.01",
         max_symbol_ratio="0.01",
