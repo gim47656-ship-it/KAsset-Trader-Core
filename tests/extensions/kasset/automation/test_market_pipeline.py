@@ -463,7 +463,9 @@ async def test_market_event_task_skips_when_previous_cycle_holds_lease(
         yield False
 
     async def forbidden_run() -> dict[str, object]:
-        raise AssertionError("contended cycle must not enter the recommendation pipeline")
+        raise AssertionError(
+            "contended cycle must not enter the recommendation pipeline"
+        )
 
     monkeypatch.setattr(
         kasset_market_events_tasks,

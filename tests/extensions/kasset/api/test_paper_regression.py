@@ -479,7 +479,6 @@ async def test_positions_share_one_fresh_fx_snapshot_without_changing_native_val
     assert krw.market_value_krw_reference_error is None
 
 
-
 @pytest.mark.asyncio
 async def test_usd_position_without_market_value_has_no_borrowed_fx_provenance(
     monkeypatch: pytest.MonkeyPatch,
@@ -530,6 +529,7 @@ async def test_usd_position_without_market_value_has_no_borrowed_fx_provenance(
     assert missing.market_value_krw_fx_valid_until is None
     assert missing.market_value_krw_fx_is_stale is None
     assert missing.market_value_krw_reference_error is None
+
 
 @pytest.mark.asyncio
 async def test_positions_keep_native_usd_when_fx_fetch_fails(
@@ -642,12 +642,8 @@ async def test_positions_do_not_fetch_fx_without_a_usd_market_value(
                 source="toss",
                 rate_decimal=Decimal("1500"),
                 mid_rate_decimal=Decimal("1500"),
-                valid_from=datetime(
-                    2026, 8, 31, 0, 59, 59, 100_000, tzinfo=UTC
-                ),
-                valid_until=datetime(
-                    2026, 8, 31, 0, 59, 59, 900_000, tzinfo=UTC
-                ),
+                valid_from=datetime(2026, 8, 31, 0, 59, 59, 100_000, tzinfo=UTC),
+                valid_until=datetime(2026, 8, 31, 0, 59, 59, 900_000, tzinfo=UTC),
             ),
             "FX_QUOTE_INCOMPLETE",
             None,
