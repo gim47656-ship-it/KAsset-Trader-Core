@@ -29,8 +29,6 @@ def _spawn_background(
     return task
 
 
-
-
 class _GeneratedScreenerReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,9 +133,7 @@ class ScreenerService:
     def __init__(
         self,
         redis_client: redis.Redis | None = None,
-        report_generator: (
-            Callable[..., Awaitable[dict[str, Any]]] | None
-        ) = None,
+        report_generator: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._redis = redis_client
         self._report_generator = report_generator or generate_screener_report
