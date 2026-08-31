@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from app.core.database import AsyncSessionLocal
+from app.core.db import AsyncSessionLocal
 from app.core.taskiq_broker import broker
 from app.services.truth_social_ingestion import ingest_truth_social
 

@@ -718,7 +718,6 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     assert len(analysis_ids) == 2
 
 
-
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exists(

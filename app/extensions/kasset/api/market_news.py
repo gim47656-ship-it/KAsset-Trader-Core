@@ -195,6 +195,7 @@ def _complete_korean_news_analysis():
         ),
     )
 
+
 async def _latest_news_analyses(
     db: AsyncSession,
     article_ids: list[int],

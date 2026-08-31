@@ -98,7 +98,9 @@ def _json_array(response: httpx.Response, *, label: str) -> list[dict[str, Any]]
     if len(response.content) > _MAX_RESPONSE_BYTES:
         raise TruthSocialError(f"{label} response exceeds size limit")
     payload = response.json()
-    if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+    if not isinstance(payload, list) or any(
+        not isinstance(item, dict) for item in payload
+    ):
         raise TruthSocialError(f"{label} response must be an object array")
     return payload
 

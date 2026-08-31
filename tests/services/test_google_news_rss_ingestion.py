@@ -150,6 +150,7 @@ def _truth_status(
         "card": None,
     }
 
+
 def test_market_locale_and_market_specific_query_are_pure() -> None:
     kr = market_config("KR")
     us = market_config("us")

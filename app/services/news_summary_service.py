@@ -703,6 +703,7 @@ def _has_complete_korean_analysis():
         ),
     )
 
+
 async def _candidate_ids(
     db: AsyncSession,
     *,
@@ -811,9 +812,7 @@ async def _run_batch(
                     NewsAnalysisResult.translated_title.op("~")(_HANGUL_RE.pattern)
                 )
             complete_analysis_id = await db.scalar(
-                select(NewsAnalysisResult.id)
-                .where(*complete_conditions)
-                .limit(1)
+                select(NewsAnalysisResult.id).where(*complete_conditions).limit(1)
             )
             if complete_analysis_id is not None:
                 processed += 1
