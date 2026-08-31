@@ -444,7 +444,15 @@ async def test_include_benchmark_is_an_explicit_target_outside_all_limit(
         target=candidate,
         horizon_bars=400,
     )
-    service.sync_benchmark.assert_awaited_once_with(
-        market=MarketKey.KR,
-        horizon_bars=400,
-    )
+    assert [call.kwargs for call in service.sync_benchmark.await_args_list] == [
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSPI",
+        },
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSDAQ",
+        },
+    ]

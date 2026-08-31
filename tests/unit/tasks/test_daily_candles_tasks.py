@@ -6,6 +6,13 @@ TaskIQ version (AsyncTaskiqDecoratedTask). Verified via:
   => {'schedule': [{'cron': '*/10 * * * *', 'cron_offset': 'Asia/Seoul'}]}
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.services.daily_candles.repository import MarketKey
+
 
 def test_cron_schedules_are_registered():
     from app.tasks import daily_candles_tasks
@@ -53,3 +60,53 @@ def test_cron_expressions_match_spec():
         assert schedule[0]["cron"] == expected_cron, (
             f"{attr_name} cron mismatch: {schedule[0]['cron']!r} != {expected_cron!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_kr_daily_sync_persists_both_broad_market_benchmarks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.jobs import daily_candles
+
+    benchmark_result = SimpleNamespace(
+        rows_upserted=61,
+        fallback_used=False,
+        skipped_reason=None,
+    )
+    service = SimpleNamespace(
+        sync_market_universe=AsyncMock(
+            return_value={
+                "market": "kr",
+                "targets_total": 1,
+                "rows_upserted": 252,
+                "fallback_count": 0,
+                "skipped": 0,
+            }
+        ),
+        sync_benchmark=AsyncMock(side_effect=(benchmark_result, benchmark_result)),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        daily_candles,
+        "_build_default_service",
+        AsyncMock(return_value=service),
+    )
+
+    result = await daily_candles.run_daily_candles_sync("kr")
+
+    assert result["status"] == "ok"
+    assert result["benchmark_targets_total"] == 2
+    assert result["benchmark_rows_upserted"] == 122
+    assert [call.kwargs for call in service.sync_benchmark.await_args_list] == [
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSPI",
+        },
+        {
+            "market": MarketKey.KR,
+            "horizon_bars": 400,
+            "symbol": "KOSDAQ",
+        },
+    ]
+    service.close.assert_awaited_once()

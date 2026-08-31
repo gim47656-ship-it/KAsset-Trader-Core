@@ -375,6 +375,11 @@ class CandidateRanker:
                 )
                 continue
             prepared.append(candidate)
+        candidate_benchmark = _homogeneous_candidate_benchmarks(
+            candidate_benchmark,
+            prepared,
+            market_benchmarks=benchmark,
+        )
 
         cross_sectional = _cross_sectional_strength(prepared)
         ranked = [
@@ -857,6 +862,29 @@ def _normalized_candidate_benchmarks(
         ):
             continue
         normalized[key] = value
+    return normalized
+
+
+def _homogeneous_candidate_benchmarks(
+    values: Mapping[CandidateKey, BenchmarkReturn],
+    candidates: Sequence[_PreparedCandidate],
+    *,
+    market_benchmarks: Mapping[str, BenchmarkReturn],
+) -> dict[CandidateKey, BenchmarkReturn]:
+    """Never mix benchmark-scaled and percentile RS within one market batch."""
+
+    normalized = dict(values)
+    for market in _SUPPORTED_MARKETS:
+        if market in market_benchmarks:
+            continue
+        candidate_keys = {
+            item.metadata.key for item in candidates if item.metadata.market == market
+        }
+        covered_keys = candidate_keys.intersection(normalized)
+        if covered_keys and covered_keys != candidate_keys:
+            normalized = {
+                key: value for key, value in normalized.items() if key[0] != market
+            }
     return normalized
 
 

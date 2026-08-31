@@ -394,6 +394,26 @@ class AIRecommendationVerticalSlice:
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
             "candidateCount": len(recommendation_candidates),
+            "rankedCount": len(ranking.ranked),
+            "strategyActionableCount": len(actionable),
+            "candidateMarkets": dict(
+                sorted(
+                    Counter(
+                        candidate.ranker_market
+                        for candidate in recommendation_candidates
+                    ).items()
+                )
+            ),
+            "candidateSources": dict(
+                sorted(
+                    Counter(
+                        source
+                        for candidate in recommendation_candidates
+                        for source in candidate.source.split("|")
+                        if source
+                    ).items()
+                )
+            ),
             "candidateTargetMet": (
                 len(ranking.ranked) >= self._ranker_config.minimum_candidate_target
             ),
@@ -1108,10 +1128,15 @@ async def run_ai_recommendation_cycle_once(
         total_recommendations += produced
         logger.info(
             "kasset AI recommendation cycle owner=%s skipped=%s candidates=%s "
-            "reviewed=%s review_rejections=%s recommendations=%d",
+            "markets=%s sources=%s ranked=%s actionable=%s reviewed=%s "
+            "review_rejections=%s recommendations=%d",
             owner_id,
             result.get("skipped"),
             result.get("candidateCount", 0),
+            result.get("candidateMarkets"),
+            result.get("candidateSources"),
+            result.get("rankedCount"),
+            result.get("strategyActionableCount"),
             result.get("aiReviewedCount"),
             result.get("aiReviewRejections"),
             produced,

@@ -10,6 +10,7 @@ import pytest
 from app.extensions.kasset.automation.candidate_ranker import CandidateMetadata
 from app.extensions.kasset.automation.contracts import Action, PriceBar
 from app.extensions.kasset.automation.portfolio_backtest import (
+    CandidateBenchmarkSeries,
     MarketExecutionCost,
     PortfolioBacktestConfig,
     SignalStatus,
@@ -112,6 +113,31 @@ def _benchmark(bars: tuple[PriceBar, ...]) -> tuple[PriceBar, ...]:
             volume=bar.volume,
         )
         for bar in bars
+    )
+
+
+def _trend_benchmark(
+    bars: tuple[PriceBar, ...],
+    *,
+    end_multiplier: Decimal,
+) -> tuple[PriceBar, ...]:
+    denominator = Decimal(max(len(bars) - 1, 1))
+    return tuple(
+        PriceBar(
+            timestamp=bar.timestamp,
+            open=(price := Decimal("100"))
+            * (Decimal("1") + (end_multiplier - Decimal("1")) * index / denominator),
+            high=price
+            * (Decimal("1") + (end_multiplier - Decimal("1")) * index / denominator)
+            + Decimal("1"),
+            low=price
+            * (Decimal("1") + (end_multiplier - Decimal("1")) * index / denominator)
+            - Decimal("1"),
+            close=price
+            * (Decimal("1") + (end_multiplier - Decimal("1")) * index / denominator),
+            volume=bar.volume,
+        )
+        for index, bar in enumerate(bars)
     )
 
 
@@ -376,6 +402,59 @@ def test_kr_and_us_mapping_never_exceeds_the_position_cap() -> None:
     assert any(signal.reason == "max_positions_reached" for signal in result.signals)
 
 
+def test_backtest_ranking_uses_candidate_specific_kr_benchmarks() -> None:
+    kospi = _candidate("005930", "KR")
+    kosdaq = _candidate("035900", "KR")
+    bars = _bars(count=280, scale=Decimal("100"))
+    flat = _trend_benchmark(bars, end_multiplier=Decimal("1"))
+    rising = _trend_benchmark(bars, end_multiplier=Decimal("2"))
+    config = PortfolioBacktestConfig(
+        initial_cash=Decimal("10000000"),
+        max_positions=1,
+        candidate_top_n=1,
+        risk_per_trade_rate=Decimal("0.02"),
+        max_symbol_allocation=Decimal("0.50"),
+    )
+
+    kospi_first = run_portfolio_backtest(
+        (kospi, kosdaq),
+        {kospi.key: bars, kosdaq.key: bars},
+        config=config,
+        benchmark_bars_by_market={"KR": flat},
+        benchmark_bars_by_candidate={
+            kospi.key: CandidateBenchmarkSeries("KOSPI", flat),
+            kosdaq.key: CandidateBenchmarkSeries("KOSDAQ", rising),
+        },
+    )
+    kosdaq_first = run_portfolio_backtest(
+        (kospi, kosdaq),
+        {kospi.key: bars, kosdaq.key: bars},
+        config=config,
+        benchmark_bars_by_market={"KR": flat},
+        benchmark_bars_by_candidate={
+            kospi.key: CandidateBenchmarkSeries("KOSPI", rising),
+            kosdaq.key: CandidateBenchmarkSeries("KOSDAQ", flat),
+        },
+    )
+
+    assert (
+        next(
+            signal.symbol
+            for signal in kospi_first.signals
+            if signal.action == Action.BUY
+        )
+        == "005930"
+    )
+    assert (
+        next(
+            signal.symbol
+            for signal in kosdaq_first.signals
+            if signal.action == Action.BUY
+        )
+        == "035900"
+    )
+
+
 def _ready_market(market: str) -> MarketReadiness:
     benchmark = BenchmarkCoverage(
         market=market,  # type: ignore[arg-type]
@@ -514,6 +593,10 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
         "US": _benchmark(bars),
         "KR": _benchmark(kr_bars),
     }
+    candidate_benchmarks = {
+        candidate.key: CandidateBenchmarkSeries("SPY", benchmarks["US"]),
+        kr_candidate.key: CandidateBenchmarkSeries("KOSPI", benchmarks["KR"]),
+    }
     config = _config()
     universe = UniverseEvidence(
         source="daily_candles_readiness",
@@ -526,6 +609,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
         bars_by_candidate,
         config=config,
         benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
         universe_evidence=universe,
     )
     walk_config = WalkForwardConfig(train_bars=260, test_bars=20, step_bars=20)
@@ -535,6 +619,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
         config=config,
         walk_forward=walk_config,
         benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
         universe_evidence=universe,
     )
     readiness = _readiness()
@@ -545,6 +630,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
         candidates=candidates,
         bars_by_candidate=bars_by_candidate,
         benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
         selected_universe=(
             {
                 "market": "KR",
@@ -559,6 +645,8 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
                 "marketCap": "1000000",
                 "isActive": True,
                 "listingStatus": "listed",
+                "exchange": "KOSPI",
+                "benchmarkSymbol": "KOSPI",
                 "loadedBarCount": 330,
                 "sources": ["kis"],
             },
@@ -576,6 +664,8 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
                 "isActive": True,
                 "listingStatus": "listed",
                 "loadedBarCount": 330,
+                "exchange": "NASDAQ",
+                "benchmarkSymbol": "SPY",
                 "sources": ["kis"],
             },
         ),

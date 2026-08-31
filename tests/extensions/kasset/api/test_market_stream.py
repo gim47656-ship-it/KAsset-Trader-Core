@@ -1204,8 +1204,8 @@ async def test_stream_refreshes_quote_baseline_when_calendar_session_changes() -
     assert calls == 2
     assert quote["session"] == "AFTER_MARKET"
     assert quote["regularClose"] == "71.89"
-    assert quote["changeAmount"] == "-1.41"
-    assert quote["changeRate"] == "-1.92"
+    assert quote["changeAmount"] == "-0.1905"
+    assert quote["changeRate"] == "-0.26"
     assert quote["sessionChangeAmount"] == "-0.1905"
     assert quote["sessionChangeRate"] == "-0.26"
 

@@ -42,6 +42,7 @@ BACKTEST_HISTORY_BARS = 400
 # Only strategy-impacting runtime code belongs here. Operational surfaces and
 # mutable evidence plumbing (docs, tests, UI, migrations, CLI) are excluded.
 STRATEGY_CODE_PATHS: tuple[str, ...] = (
+    "app/extensions/kasset/automation/benchmark_relative_strength.py",
     "app/extensions/kasset/automation/candidate_ranker.py",
     "app/extensions/kasset/automation/contracts.py",
     "app/extensions/kasset/automation/portfolio_backtest.py",

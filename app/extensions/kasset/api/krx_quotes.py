@@ -411,11 +411,6 @@ def _toss_quote(
     previous_close = _previous_close(rows, market=market, before=point.as_of)
     if previous_close is None:
         previous_close = previous_close_fallback
-    # US 데이마켓은 ET 전날 저녁에 열리지만 다음 거래일 구간이다. 시세
-    # timestamp의 ET 날짜로 일봉 경계를 잡으면 하루 전 종가를 하나 더
-    # 건너뛰므로, calendar가 증명한 직전 정규장 종가를 previousClose로 쓴다.
-    if session == "DAY_MARKET":
-        previous_close = regular_close
     return build_quote(
         market=market,
         symbol=point.symbol,
@@ -475,14 +470,16 @@ def build_quote(
     session: MarketSessionState | None = None,
     regular_close: Decimal | None = None,
 ) -> Quote:
-    """REST와 스트림이 공유하는 정규장/현재 세션 등락 생성점."""
+    """REST와 스트림이 공유하는 현재가의 직전 정규장 대비 등락 생성점."""
 
     if session == "REGULAR":
         regular_close = None
-    regular_basis = regular_close if regular_close is not None else price
-    change_amount = (
-        regular_basis - previous_close if previous_close is not None else None
-    )
+    elif session in {"DAY_MARKET", "PRE_MARKET", "AFTER_MARKET"}:
+        # 장외 세션은 calendar가 증명한 최신 완료 정규장 종가를 기준으로
+        # 움직이는 현재가의 등락을 계산한다. REST와 stream 모두 이 경계를 쓴다.
+        if regular_close is not None:
+            previous_close = regular_close
+    change_amount = price - previous_close if previous_close is not None else None
     rate = change_rate(change_amount, previous_close)
     session_change_amount = price - regular_close if regular_close is not None else None
     session_rate = change_rate(session_change_amount, regular_close)

@@ -215,6 +215,41 @@ def test_kospi_and_kosdaq_candidates_keep_distinct_benchmarks() -> None:
     assert kospi_rs.raw_value - kosdaq_rs.raw_value == Decimal("0.020000")
 
 
+def test_partial_market_benchmark_batch_uses_one_cross_sectional_scale() -> None:
+    kospi = _metadata("005930", "KR")
+    kosdaq = _metadata("035900", "KR")
+
+    ranked = CandidateRanker().rank(
+        (kospi, kosdaq),
+        {kospi.key: _candidate_bars(), kosdaq.key: _candidate_bars()},
+        as_of=_NOW,
+        allowed_markets=frozenset({"KR"}),
+        benchmark_returns_60_by_candidate={
+            kospi.key: BenchmarkReturn(
+                market="KR",
+                return_60=Decimal("0.01"),
+                data_as_of=_NOW - timedelta(hours=1),
+                benchmark_symbol="KOSPI",
+            )
+        },
+    )
+
+    assert {
+        next(
+            evidence.value
+            for evidence in item.evidence
+            if evidence.code == "relative_strength_source"
+        )
+        for item in ranked.ranked
+    } == {"cross_sectional_60_session_percentile"}
+    assert all(
+        not any(
+            evidence.code == "relative_strength_benchmark" for evidence in item.evidence
+        )
+        for item in ranked.ranked
+    )
+
+
 def test_stale_benchmark_fails_closed() -> None:
     result = compute_benchmark_return_60(
         _benchmark_rows("KOSPI", latest=_NOW - timedelta(days=7)),

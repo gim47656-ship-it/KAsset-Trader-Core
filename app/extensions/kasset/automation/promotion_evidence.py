@@ -11,12 +11,16 @@ from typing import Any, cast
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extensions.kasset.automation.benchmark_relative_strength import (
+    benchmark_symbol_for_exchange,
+)
 from app.extensions.kasset.automation.candidate_ranker import (
     CandidateKey,
     CandidateMetadata,
 )
 from app.extensions.kasset.automation.contracts import PriceBar
 from app.extensions.kasset.automation.portfolio_backtest import (
+    CandidateBenchmarkSeries,
     PortfolioBacktestConfig,
     PortfolioBacktestDiagnostics,
     PortfolioBacktestResult,
@@ -77,6 +81,7 @@ class PortfolioEvidenceSource:
     candidates: tuple[CandidateMetadata, ...]
     bars_by_candidate: Mapping[CandidateKey, tuple[PriceBar, ...]]
     benchmark_bars_by_market: Mapping[str, tuple[PriceBar, ...]]
+    benchmark_bars_by_candidate: Mapping[CandidateKey, CandidateBenchmarkSeries]
     selected_universe: tuple[Mapping[str, object], ...]
     dataset_content_hash: str
     period_start: datetime
@@ -134,6 +139,7 @@ def _universe_query(storage: _Storage):
             u.listing_status,
             u.list_date,
             u.delist_date,
+            u.exchange,
             COUNT(DISTINCT candles.time) FILTER (
                 WHERE candles.time <= :as_of
             ) AS bar_count,
@@ -162,7 +168,8 @@ def _universe_query(storage: _Storage):
             u.is_active,
             u.listing_status,
             u.list_date,
-            u.delist_date
+            u.delist_date,
+            u.exchange
         ORDER BY
             m.rank,
             CASE m.member_kind WHEN 'active' THEN 0 ELSE 1 END,
@@ -226,6 +233,7 @@ async def load_portfolio_evidence_source(
     selected_evidence: list[Mapping[str, object]] = []
     bars_by_candidate: dict[CandidateKey, tuple[PriceBar, ...]] = {}
     benchmarks: dict[str, tuple[PriceBar, ...]] = {}
+    candidate_benchmarks: dict[CandidateKey, CandidateBenchmarkSeries] = {}
 
     for market_name in ("kr", "us"):
         storage = _STORAGE[market_name]
@@ -273,6 +281,7 @@ async def load_portfolio_evidence_source(
             if source:
                 source_by_symbol[symbol].add(source)
 
+        benchmark_symbol_by_candidate: dict[CandidateKey, str] = {}
         for row in selected:
             symbol = str(row["symbol"]).strip().upper()
             bars = tuple(grouped[symbol])
@@ -285,6 +294,16 @@ async def load_portfolio_evidence_source(
                 raise PromotionEvidenceBuildError(
                     f"{market_name}:{symbol}:candle_source_missing"
                 )
+            exchange = str(row.get("exchange") or "").strip().upper()
+            benchmark_symbol = (
+                benchmark_symbol_for_exchange(exchange)
+                if market_name == "kr"
+                else "SPY"
+            )
+            if benchmark_symbol is None:
+                raise PromotionEvidenceBuildError(
+                    f"{market_name}:{symbol}:benchmark_mapping_missing"
+                )
             metadata = CandidateMetadata(
                 symbol=symbol,
                 market=cast(Any, storage.candidate_market),
@@ -293,6 +312,7 @@ async def load_portfolio_evidence_source(
             )
             candidates.append(metadata)
             bars_by_candidate[metadata.key] = bars
+            benchmark_symbol_by_candidate[metadata.key] = benchmark_symbol
             selected_evidence.append(
                 {
                     "market": storage.candidate_market,
@@ -313,30 +333,49 @@ async def load_portfolio_evidence_source(
                     "listingStatus": str(row.get("listing_status") or "") or None,
                     "listDate": _date_text(cast(date | None, row.get("list_date"))),
                     "delistDate": _date_text(cast(date | None, row.get("delist_date"))),
+                    "exchange": exchange or None,
+                    "benchmarkSymbol": benchmark_symbol,
                     "storedBarCount": int(row.get("bar_count") or 0),
                     "loadedBarCount": len(bars),
                     "sources": list(sources),
                 }
             )
 
-        benchmark_result = await db.execute(
-            _benchmark_query(storage),
-            {
-                "symbol": market_readiness.benchmark.symbol,
-                "as_of": measured_at,
-                "history_bars": BACKTEST_HISTORY_BARS,
-            },
-        )
-        benchmark_rows = list(
-            cast(Sequence[Mapping[str, object]], benchmark_result.mappings().all())
-        )
-        benchmark_rows.reverse()
-        benchmark_bars = tuple(_price_bar(row) for row in benchmark_rows)
-        if len(benchmark_bars) < REQUIRED_BENCHMARK_BARS:
-            raise PromotionEvidenceBuildError(
-                f"{market_name}:benchmark_window_insufficient"
+        benchmark_bars_by_symbol: dict[str, tuple[PriceBar, ...]] = {}
+        required_benchmark_symbols = {
+            market_readiness.benchmark.symbol,
+            *benchmark_symbol_by_candidate.values(),
+        }
+        for benchmark_symbol in sorted(required_benchmark_symbols):
+            benchmark_result = await db.execute(
+                _benchmark_query(storage),
+                {
+                    "symbol": benchmark_symbol,
+                    "as_of": measured_at,
+                    "history_bars": BACKTEST_HISTORY_BARS,
+                },
             )
-        benchmarks[storage.candidate_market] = benchmark_bars
+            benchmark_rows = list(
+                cast(
+                    Sequence[Mapping[str, object]],
+                    benchmark_result.mappings().all(),
+                )
+            )
+            benchmark_rows.reverse()
+            benchmark_bars = tuple(_price_bar(row) for row in benchmark_rows)
+            if len(benchmark_bars) < REQUIRED_BENCHMARK_BARS:
+                raise PromotionEvidenceBuildError(
+                    f"{market_name}:{benchmark_symbol}:benchmark_window_insufficient"
+                )
+            benchmark_bars_by_symbol[benchmark_symbol] = benchmark_bars
+        benchmarks[storage.candidate_market] = benchmark_bars_by_symbol[
+            market_readiness.benchmark.symbol
+        ]
+        for candidate_key, benchmark_symbol in benchmark_symbol_by_candidate.items():
+            candidate_benchmarks[candidate_key] = CandidateBenchmarkSeries(
+                benchmark_symbol=benchmark_symbol,
+                bars=benchmark_bars_by_symbol[benchmark_symbol],
+            )
 
     all_timestamps = tuple(
         bar.timestamp for bars in bars_by_candidate.values() for bar in bars
@@ -350,6 +389,7 @@ async def load_portfolio_evidence_source(
         candidates=tuple(candidates),
         bars_by_candidate=bars_by_candidate,
         benchmarks=benchmarks,
+        candidate_benchmarks=candidate_benchmarks,
         selected_universe=tuple(selected_evidence),
     )
     return PortfolioEvidenceSource(
@@ -358,6 +398,7 @@ async def load_portfolio_evidence_source(
         candidates=tuple(candidates),
         bars_by_candidate=bars_by_candidate,
         benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
         selected_universe=tuple(selected_evidence),
         dataset_content_hash=content_hash,
         period_start=period_start,
@@ -391,6 +432,7 @@ async def build_and_store_portfolio_evidence(
             source.bars_by_candidate,
             config=config,
             benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
+            benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
         )
         walk_forward = run_walk_forward(
@@ -399,6 +441,7 @@ async def build_and_store_portfolio_evidence(
             config=config,
             walk_forward=walk_config,
             benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
+            benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
         )
     except (ArithmeticError, ValueError) as exc:
@@ -946,6 +989,9 @@ def _dataset_content_hash(
     candidates: Sequence[CandidateMetadata],
     bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
     benchmarks: Mapping[str, Sequence[PriceBar]],
+    candidate_benchmarks: (
+        Mapping[CandidateKey, CandidateBenchmarkSeries] | None
+    ) = None,
     selected_universe: Sequence[Mapping[str, object]],
 ) -> str:
     # The enclosing cohort ID also covers forced readiness-only members. Keep it
@@ -972,6 +1018,15 @@ def _dataset_content_hash(
             "benchmarks": {
                 market: tuple(_bar_hash_input(bar) for bar in bars)
                 for market, bars in sorted(benchmarks.items())
+            },
+            "candidateBenchmarks": {
+                f"{market}:{symbol}": {
+                    "benchmarkSymbol": series.benchmark_symbol,
+                    "bars": tuple(_bar_hash_input(bar) for bar in series.bars),
+                }
+                for (market, symbol), series in sorted(
+                    (candidate_benchmarks or {}).items()
+                )
             },
         }
     )

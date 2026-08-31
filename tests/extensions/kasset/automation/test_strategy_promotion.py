@@ -535,6 +535,10 @@ def test_artifact_fingerprint_tracks_strategy_code_and_config_not_commit_or_ops(
         not path.startswith(("docs/", "tests/", "frontend/", "alembic/", "scripts/"))
         for path in STRATEGY_CODE_PATHS
     )
+    assert (
+        "app/extensions/kasset/automation/benchmark_relative_strength.py"
+        in STRATEGY_CODE_PATHS
+    )
 
 
 def test_artifact_loads_deployment_lineage_without_git_or_git_metadata(

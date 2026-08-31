@@ -559,13 +559,46 @@ def test_us_day_market_uses_latest_regular_close_as_previous_close() -> None:
     )
 
     assert quote.previous_close == "73.30"
-    assert quote.change_amount == "0.00"
-    assert quote.change_rate == "0.00"
+    assert quote.change_amount == "0.15"
+    assert quote.change_rate == "0.20"
     assert quote.session_change_amount == "0.15"
     assert quote.session_change_rate == "0.20"
 
 
-def test_us_after_market_quote_separates_regular_and_session_changes(
+@pytest.mark.parametrize(
+    ("market", "session"),
+    [
+        ("US", "PRE_MARKET"),
+        ("US", "AFTER_MARKET"),
+        ("KRX", "PRE_MARKET"),
+        ("KRX", "AFTER_MARKET"),
+    ],
+)
+def test_extended_session_change_tracks_price_from_latest_regular_close(
+    market: str,
+    session: str,
+) -> None:
+    quote = krx_quotes._toss_quote(
+        TossQuotePoint(
+            symbol="TEST",
+            price=Decimal("102"),
+            currency="USD" if market == "US" else "KRW",
+            as_of=datetime.fromisoformat("2026-08-28T09:30:00+09:00"),
+        ),
+        market=market,
+        name=None,
+        rows=(),
+        previous_close_fallback=Decimal("90"),
+        session=session,  # type: ignore[arg-type]
+        regular_close=Decimal("100"),
+    )
+
+    assert quote.previous_close == "100"
+    assert quote.change_amount == "2"
+    assert quote.change_rate == "2.00"
+
+
+def test_us_after_market_quote_tracks_current_price_from_regular_close(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     toss = _StubTossClient(
@@ -616,9 +649,9 @@ def test_us_after_market_quote_separates_regular_and_session_changes(
         "name": None,
         "currency": "USD",
         "price": "71.6995",
-        "previousClose": "73.3",
-        "changeAmount": "-1.41",
-        "changeRate": "-1.92",
+        "previousClose": "71.89",
+        "changeAmount": "-0.1905",
+        "changeRate": "-0.26",
         "session": "AFTER_MARKET",
         "regularClose": "71.89",
         "sessionChangeAmount": "-0.1905",

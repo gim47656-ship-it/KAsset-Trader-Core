@@ -147,11 +147,14 @@ def _explicit_targets(
     ]
 
 
-def _benchmark_target(market: MarketKey) -> SyncTarget:
+def _benchmark_targets(market: MarketKey) -> tuple[SyncTarget, ...]:
     if market == MarketKey.KR:
-        return SyncTarget(market=market, symbol="KOSPI", partition="KRX")
+        return (
+            SyncTarget(market=market, symbol="KOSPI", partition="KRX"),
+            SyncTarget(market=market, symbol="KOSDAQ", partition="KRX"),
+        )
     if market == MarketKey.US:
-        return SyncTarget(market=market, symbol="SPY", partition="NASD")
+        return (SyncTarget(market=market, symbol="SPY", partition="NASD"),)
     raise ValueError("--include-benchmark는 kr과 us에서만 지원합니다")
 
 
@@ -203,7 +206,7 @@ async def _amain(args: argparse.Namespace) -> int:
             requested_partition=requested_partition,
         )
 
-    benchmark = _benchmark_target(market_key) if args.include_benchmark else None
+    benchmarks = _benchmark_targets(market_key) if args.include_benchmark else ()
     svc = await _build_default_service()
     try:
         if args.all:
@@ -224,8 +227,9 @@ async def _amain(args: argparse.Namespace) -> int:
             )
         else:
             targets = explicit_targets
-        if benchmark is not None and benchmark not in targets:
-            targets.append(benchmark)
+        for benchmark in benchmarks:
+            if benchmark not in targets:
+                targets.append(benchmark)
 
         if args.dry_run:
             for target in targets:
@@ -243,10 +247,11 @@ async def _amain(args: argparse.Namespace) -> int:
         failed_symbols: list[str] = []
         for target in targets:
             try:
-                if benchmark is not None and target == benchmark:
+                if target in benchmarks:
                     result = await svc.sync_benchmark(
                         market=market_key,
                         horizon_bars=horizon,
+                        symbol=target.symbol,
                     )
                 else:
                     result = await svc.sync_one(

@@ -14,6 +14,7 @@ from app.services.daily_candles.constants import (
     DAILY_CANDLE_SYNC_BARS_KR,
     DAILY_CANDLE_SYNC_BARS_US,
 )
+from app.services.daily_candles.repository import MarketKey
 from app.services.daily_candles.sync_service import _build_default_service
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,12 @@ _HORIZON_BY_MARKET = {
     "kr": DAILY_CANDLE_SYNC_BARS_KR,
     "us": DAILY_CANDLE_SYNC_BARS_US,
     "crypto": DAILY_CANDLE_SYNC_BARS_CRYPTO,
+}
+
+_BENCHMARK_SYMBOLS_BY_MARKET: dict[str, tuple[str, ...]] = {
+    "kr": ("KOSPI", "KOSDAQ"),
+    "us": ("SPY",),
+    "crypto": (),
 }
 
 
@@ -43,7 +50,27 @@ async def run_daily_candles_sync(market: str) -> dict[str, Any]:
     try:
         svc = await _build_default_service()
         result = await svc.sync_market_universe(market=market, horizon_bars=horizon)
-        result["status"] = "ok"
+        benchmark_rows = 0
+        benchmark_fallbacks = 0
+        benchmark_skipped = 0
+        for symbol in _BENCHMARK_SYMBOLS_BY_MARKET[market]:
+            benchmark = await svc.sync_benchmark(
+                market=MarketKey(market),
+                horizon_bars=horizon,
+                symbol=symbol,
+            )
+            benchmark_rows += benchmark.rows_upserted
+            benchmark_fallbacks += int(benchmark.fallback_used)
+            benchmark_skipped += int(benchmark.skipped_reason is not None)
+        result.update(
+            {
+                "benchmark_targets_total": len(_BENCHMARK_SYMBOLS_BY_MARKET[market]),
+                "benchmark_rows_upserted": benchmark_rows,
+                "benchmark_fallback_count": benchmark_fallbacks,
+                "benchmark_skipped": benchmark_skipped,
+                "status": "ok",
+            }
+        )
         return result
     except Exception as exc:
         logger.error(

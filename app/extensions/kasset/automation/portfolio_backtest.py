@@ -80,6 +80,14 @@ class MarketExecutionCost:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateBenchmarkSeries:
+    """Completed benchmark bars assigned to one candidate."""
+
+    benchmark_symbol: str
+    bars: tuple[PriceBar, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class UniverseEvidence:
     """Caller-supplied evidence about the historical universe construction."""
 
@@ -434,6 +442,9 @@ def run_portfolio_backtest(
     *,
     config: PortfolioBacktestConfig = PortfolioBacktestConfig(),
     benchmark_bars_by_market: Mapping[MarketKey, Sequence[PriceBar]] | None = None,
+    benchmark_bars_by_candidate: (
+        Mapping[CandidateKey, CandidateBenchmarkSeries] | None
+    ) = None,
     universe_evidence: UniverseEvidence = UniverseEvidence(),
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
@@ -449,6 +460,10 @@ def run_portfolio_backtest(
     metadata = _validate_candidates(candidates)
     normalized_bars = _normalize_candidate_bars(metadata, bars_by_candidate)
     normalized_benchmarks = _normalize_benchmarks(benchmark_bars_by_market or {})
+    normalized_candidate_benchmarks = _normalize_candidate_benchmarks(
+        metadata,
+        benchmark_bars_by_candidate or {},
+    )
     strategy_tuple = tuple(strategies)
     if not strategy_tuple:
         raise ValueError("at least one deterministic strategy is required")
@@ -522,6 +537,13 @@ def run_portfolio_backtest(
                 normalized_benchmarks,
                 as_of=timestamp,
                 maximum_age=active_ranker.config.maximum_bar_age,
+            ),
+            benchmark_returns_60_by_candidate=(
+                _rolling_candidate_benchmark_returns(
+                    normalized_candidate_benchmarks,
+                    as_of=timestamp,
+                    maximum_age=active_ranker.config.maximum_bar_age,
+                )
             ),
         )
         ranking_decisions += 1
@@ -633,6 +655,9 @@ def run_walk_forward(
     config: PortfolioBacktestConfig = PortfolioBacktestConfig(),
     walk_forward: WalkForwardConfig = WalkForwardConfig(),
     benchmark_bars_by_market: Mapping[MarketKey, Sequence[PriceBar]] | None = None,
+    benchmark_bars_by_candidate: (
+        Mapping[CandidateKey, CandidateBenchmarkSeries] | None
+    ) = None,
     universe_evidence: UniverseEvidence = UniverseEvidence(),
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
@@ -667,11 +692,22 @@ def run_walk_forward(
         test_benchmarks = _slice_benchmarks(
             benchmark_bars_by_market or {}, start_at=train_start, end_at=test_end
         )
+        train_candidate_benchmarks = _slice_candidate_benchmarks(
+            benchmark_bars_by_candidate or {},
+            start_at=train_start,
+            end_at=train_end,
+        )
+        test_candidate_benchmarks = _slice_candidate_benchmarks(
+            benchmark_bars_by_candidate or {},
+            start_at=train_start,
+            end_at=test_end,
+        )
         train_result = run_portfolio_backtest(
             metadata,
             train_bars,
             config=config,
             benchmark_bars_by_market=train_benchmarks,
+            benchmark_bars_by_candidate=train_candidate_benchmarks,
             universe_evidence=universe_evidence,
             strategies=strategies,
             ranker=ranker,
@@ -681,6 +717,7 @@ def run_walk_forward(
             test_bars,
             config=config,
             benchmark_bars_by_market=test_benchmarks,
+            benchmark_bars_by_candidate=test_candidate_benchmarks,
             universe_evidence=universe_evidence,
             strategies=strategies,
             ranker=ranker,
@@ -747,6 +784,9 @@ def run_portfolio_diagnostics(
     *,
     config: PortfolioBacktestConfig = PortfolioBacktestConfig(),
     benchmark_bars_by_market: Mapping[MarketKey, Sequence[PriceBar]] | None = None,
+    benchmark_bars_by_candidate: (
+        Mapping[CandidateKey, CandidateBenchmarkSeries] | None
+    ) = None,
     universe_evidence: UniverseEvidence = UniverseEvidence(),
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
@@ -766,6 +806,12 @@ def run_portfolio_diagnostics(
             scenario_bars,
             config=scenario_config,
             benchmark_bars_by_market=benchmark_bars_by_market,
+            benchmark_bars_by_candidate={
+                candidate.key: benchmark_bars_by_candidate[candidate.key]
+                for candidate in scenario_candidates
+                if benchmark_bars_by_candidate
+                and candidate.key in benchmark_bars_by_candidate
+            },
             universe_evidence=universe_evidence,
             strategies=strategies,
             ranker=ranker,
@@ -985,6 +1031,32 @@ def _normalize_candidate_bars(
     }
 
 
+def _normalize_candidate_benchmarks(
+    candidates: Sequence[CandidateMetadata],
+    benchmarks: Mapping[CandidateKey, CandidateBenchmarkSeries],
+) -> dict[CandidateKey, CandidateBenchmarkSeries]:
+    known_keys = {candidate.key for candidate in candidates}
+    unknown = set(benchmarks) - known_keys
+    if unknown:
+        raise ValueError(
+            f"candidate benchmarks contain unknown keys: {sorted(unknown)!r}"
+        )
+    normalized: dict[CandidateKey, CandidateBenchmarkSeries] = {}
+    for key, series in benchmarks.items():
+        symbol = str(series.benchmark_symbol).strip().upper()
+        if not symbol:
+            raise ValueError(f"candidate benchmark symbol is required: {key!r}")
+        normalized[key] = CandidateBenchmarkSeries(
+            benchmark_symbol=symbol,
+            bars=_normalize_bars(
+                series.bars,
+                field_name=f"candidate_benchmark[{key[0]},{key[1]}:{symbol}]",
+                allow_empty=True,
+            ),
+        )
+    return normalized
+
+
 def _normalize_benchmarks(
     benchmarks: Mapping[MarketKey, Sequence[PriceBar]],
 ) -> dict[MarketKey, tuple[PriceBar, ...]]:
@@ -1017,6 +1089,26 @@ def _rolling_benchmark_returns(
         )
         if result is not None:
             output[market] = result
+    return output
+
+
+def _rolling_candidate_benchmark_returns(
+    benchmarks: Mapping[CandidateKey, CandidateBenchmarkSeries],
+    *,
+    as_of: datetime,
+    maximum_age: timedelta,
+) -> dict[CandidateKey, BenchmarkReturn]:
+    output: dict[CandidateKey, BenchmarkReturn] = {}
+    for key, series in benchmarks.items():
+        result = compute_benchmark_return_60_from_bars(
+            tuple(bar for bar in series.bars if bar.timestamp <= as_of),
+            market=key[0],
+            benchmark_symbol=series.benchmark_symbol,
+            as_of=as_of,
+            maximum_age=maximum_age,
+        )
+        if result is not None:
+            output[key] = result
     return output
 
 
@@ -1631,6 +1723,23 @@ def _slice_candidate_bars(
     }
 
 
+def _slice_candidate_benchmarks(
+    benchmarks: Mapping[CandidateKey, CandidateBenchmarkSeries],
+    *,
+    start_at: datetime,
+    end_at: datetime,
+) -> dict[CandidateKey, CandidateBenchmarkSeries]:
+    return {
+        key: CandidateBenchmarkSeries(
+            benchmark_symbol=series.benchmark_symbol,
+            bars=tuple(
+                bar for bar in series.bars if start_at <= bar.timestamp <= end_at
+            ),
+        )
+        for key, series in benchmarks.items()
+    }
+
+
 def _slice_benchmarks(
     benchmarks: Mapping[MarketKey, Sequence[PriceBar]],
     *,
@@ -1665,6 +1774,7 @@ def _stable_hash(value: object) -> str:
 
 
 __all__ = [
+    "CandidateBenchmarkSeries",
     "BacktestPerformanceSlice",
     "BacktestEvidence",
     "BacktestWindow",
