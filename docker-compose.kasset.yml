@@ -101,6 +101,56 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # AI provider 전용 MCP sidecar. 위 `mcp`(analysis_readonly 거래 도구 서버)와
+  # 다른 프로세스이며 `run_skill` 도구 하나만 노출한다. broker/account/order
+  # 도구가 없고 DB/Redis에도 붙지 않으므로 depends_on이 없다.
+  #
+  # ports를 두지 않는다. compose 기본 backend 네트워크에서만 닿고, Caddy는 host
+  # 네트워크로 돌며 이 서비스의 site block도 없으므로 공개 경로가 존재하지 않는다.
+  #
+  # env_file을 붙이지 않는다. DB·JWT·broker 자격을 sidecar에 주입하지 않는 최소
+  # 권한 경계다. sidecar는 app.core.config 전체 Settings를 읽지 않고 아래 환경변수만
+  # 본다. 값은 `--env-file .env.kasset` 보간으로 들어온다.
+  #
+  # profiles 옵트인이므로 기본 `up -d`로는 뜨지 않는다. 활성화 절차:
+  #   1) .env.kasset에 KASSET_AI_SIDECAR_TOKEN / KASSET_AI_SIDECAR_CMD 설정
+  #   2) docker compose --env-file .env.kasset -f docker-compose.kasset.yml \
+  #        --profile ai-mcp up -d ai-mcp
+  #   3) api/worker 쪽 KASSET_AI_MCP_URL=http://ai-mcp:8770/mcp 와
+  #      KASSET_AI_MCP_TOKEN=<KASSET_AI_SIDECAR_TOKEN 과 동일> 설정 후 재기동
+  ai-mcp:
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
+    profiles: ["ai-mcp"]
+    command: ["python", "-m", "app.extensions.kasset.ai_mcp_sidecar.server"]
+    environment:
+      # 비어 있으면 기동을 실패시킨다. 잘못된 설정으로 서비스하지 않는다.
+      KASSET_AI_SIDECAR_CMD: "${KASSET_AI_SIDECAR_CMD:-}"
+      KASSET_AI_SIDECAR_TOKEN: "${KASSET_AI_SIDECAR_TOKEN:-}"
+      KASSET_AI_SIDECAR_HOST: "0.0.0.0"
+      KASSET_AI_SIDECAR_PORT: "8770"
+      KASSET_AI_SIDECAR_PATH: "/mcp"
+      # 호출자 KASSET_AI_MCP_TIMEOUT_SECONDS(기본 30초)보다 넉넉히 크게 둔다.
+      # 느린 CLI는 호출자 timeout(=가용성 실패)으로 먼저 드러나야 기존
+      # direct/OpenRouter fallback이 돌고, sidecar가 계약 오류로 lane을 닫지 않는다.
+      KASSET_AI_SIDECAR_TIMEOUT_SECONDS: "${KASSET_AI_SIDECAR_TIMEOUT_SECONDS:-90}"
+      # 동시 처리 상한. 포화 시 HTTP 429로 즉시 거절해 호출자가 fallback한다.
+      KASSET_AI_SIDECAR_MAX_CONCURRENCY: "${KASSET_AI_SIDECAR_MAX_CONCURRENCY:-2}"
+      CODEX_HOME: /var/lib/kasset-codex
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    # 구독 CLI 바이너리와 운영자 인증 디렉터리만 마운트한다(api 서비스와 동일 자산).
+    volumes:
+      - /usr/local/bin/codex:/usr/local/bin/codex:ro
+      - /usr/local/bin/codex-code-mode-host:/usr/local/bin/codex-code-mode-host:ro
+      - /opt/kasset-codex:/var/lib/kasset-codex
+    # 이미지 HEALTHCHECK(api :8000)를 sidecar 포트로 교정
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8770/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
   migration:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
