@@ -100,3 +100,52 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 ## 참고 출처와 라이선스
 
 알고리즘 아이디어는 MIT License의 [VladPetrariu/Qullamaggie-breakout-scanner](https://github.com/VladPetrariu/Qullamaggie-breakout-scanner)를 참고했다. 재사용 아이디어는 multi-factor breakout ranking, relative strength, HH/HL, ATR compression, volume contraction/expansion, weekly confluence, ATR risk sizing, partial profit/trailing/time stop, walk-forward·stress·counterfactual 검증이다. 소스 파일을 복사하지 않고 KAsset의 Decimal·timezone·owner scope·PAPER safety 계약에 맞게 독립 구현한다.
+
+## 2026-08-31 SHADOW 확장 상태
+
+| 기능 | 구현 | 기본 활성 | 실제 주문 영향 |
+|---|---|---:|---|
+| 후보별 Benchmark RS | KRX는 KOSPI/KOSDAQ, 미국은 SPY 60-session 수익률 | 사용 중 | 기존 Ranker evidence 확장 |
+| First Pullback / NR7 / Inside Day | 완결봉 공통 detector와 상위후보 evidence | `false` | 없음 |
+| Account High-Watermark | owner/account/market/date별 영속 SHADOW 상태 | `false` | 없음 |
+| Loss-Streak | 종료 PAPER 손실 거래의 scope·expiry·dedupe 관찰 | `false` | 없음 |
+| Soft Top-K / Sector Cap | 순수 목표비중 비교 계산 | `false` | 없음 |
+
+`ShadowActivation`의 모든 필드는 기본값이 `false`다. 활성 설정 fingerprint는
+기존 strategy artifact fingerprint와 분리돼 있고 `promotionEligible=false`다.
+현재 런타임에는 이 값을 켜는 환경변수나 관리자 API가 없다. 따라서 SHADOW 기능을
+주문 입력으로 승격하려면 별도 코드 변경, 동일 데이터셋 backtest/walk-forward,
+새 artifact fingerprint와 PAPER 승격 승인이 모두 필요하다.
+
+### 활성화 전 절차
+
+1. 신규 migration `20260831_kasset_shadow_hwm`,
+   `20260831_kasset_shadow_loss_lock`을 별도 비운영 DB에서 먼저 검증한다.
+2. `ShadowAutomationManifest`와 활성 설정 fingerprint를 증거에 고정한다.
+3. 비용 포함 portfolio backtest, walk-forward, 기존 주문결과 동일성 회귀를 실행한다.
+4. owner scope, Kill Switch, Hard Risk, Position Manager SELL 우선 계약을 재검증한다.
+5. SHADOW 관찰 기간을 거친 뒤에도 실제 주문 연결은 별도 변경과 승인을 거친다.
+
+### 롤백
+
+- 주문 연결 전: activation을 모두 `false`로 되돌린다. 기존 APPROVAL/AUTO_PAPER
+  경로와 주문 결과는 바뀌지 않는다.
+- 주문 연결 후: 새 연결 코드를 되돌리고 새 promotion을 `PAPER_SUSPENDED`로 닫는다.
+  Kill Switch나 기존 Hard Risk를 우회해 복구하지 않는다.
+- HWM/Loss-Streak 이력은 감사용으로 보존한다. 스키마 downgrade나 운영 데이터 삭제는
+  별도 파괴적 변경 승인 없이는 실행하지 않는다.
+
+### Clean-room 참고
+
+- `xang1234/stock-screener@22f96f6f11b03e54037e2937a58bdb6530e67bbe`
+  (Apache-2.0): First Pullback, NR7/Inside Day의 추상 판정 개념.
+- `QuantConnect/Lean@b692bf4788e8b54fc23bdcb5659666bf055ce89f`
+  (Apache-2.0): portfolio high-watermark와 drawdown predicate 개념.
+- `freqtrade/freqtrade@5fc5faeae7033ed5a83c1eecc8160828f5ee0d2e`
+  (GPL-3.0): 최근 stop-loss 군집의 lookback/scope/expiry 개념만 조사.
+- `microsoft/qlib@79633dd9506ea689e5400dea0197717b5b3d74b7`
+  (MIT): top-k 목표비중과 step별 변화 상한 개념.
+
+어느 저장소에서도 코드, 테스트, 상수, reason 문자열, fixture, 모듈 구조를 복사하지
+않았다. 특히 GPL-3.0 Freqtrade는 조사 보고서의 추상 behavior spec만 사용해
+프로젝트 고유 `Decimal`·timezone·owner scope 계약으로 독립 구현했다.
