@@ -266,6 +266,7 @@ async def _load_live_kr_candidates(
         )
     return tuple(candidates)
 
+
 async def _load_live_us_candidates(
     db: AsyncSession,
     *,

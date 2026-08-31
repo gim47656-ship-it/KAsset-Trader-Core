@@ -802,6 +802,7 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     assert analyses[0].translated_title == "회사의 반도체 투자 계획 발표"
     assert analyses[0].updated_at is not None
 
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_recent_incomplete_analysis_observes_retry_backoff(
@@ -857,7 +858,6 @@ async def test_recent_incomplete_analysis_observes_retry_backoff(
 
     assert result.selected == 0
     assert generator.calls == []
-
 
 
 @pytest.mark.unit

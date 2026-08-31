@@ -129,6 +129,7 @@ async def test_fetch_rows_diagnostic_limit(monkeypatch, _patch_tvscreener):
     assert _CapturingService.last_limit == 10
     assert len(rows) == 10
 
+
 @pytest.mark.asyncio
 async def test_fetch_rows_can_prioritize_market_cap(monkeypatch, _patch_tvscreener):
     service = _CapturingService(full_rows=5000)

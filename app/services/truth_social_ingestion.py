@@ -40,6 +40,7 @@ _KST = timezone(timedelta(hours=9))
 class TruthSocialError(RuntimeError):
     """공식 계정 또는 게시물 응답을 신뢰할 수 없음을 나타낸다."""
 
+
 class TruthSocialIdentityError(TruthSocialError):
     """공식 계정 또는 게시물 URL의 identity mismatch를 나타낸다."""
 
@@ -115,7 +116,9 @@ def _validate_account(account: dict[str, Any]) -> None:
         or str(account.get("url") or "") != TRUTH_SOCIAL_PROFILE_URL
         or account.get("verified") is not True
     ):
-        raise TruthSocialIdentityError("Truth Social official account identity mismatch")
+        raise TruthSocialIdentityError(
+            "Truth Social official account identity mismatch"
+        )
 
 
 def _status_url(status_id: str, value: object) -> str:

@@ -417,9 +417,7 @@ def test_news_query_is_newest_first_limit_bounded_and_symbol_scoped() -> None:
     assert "005930" in params.values()
     assert "news_article_related_symbols" in sql
     assert "news_analysis_results" in sql
-    assert any(
-        isinstance(value, tuple) and "sec" in value for value in params.values()
-    )
+    assert "news_articles.feed_source NOT IN" in sql
 
 
 def test_research_items_are_citation_only_and_limit_bounded() -> None:

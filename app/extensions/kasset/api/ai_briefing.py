@@ -273,8 +273,7 @@ async def _build_news_section(
     relations = await _load_related_symbols(db, article_ids)
     analyses = await _load_stored_summaries(db, article_ids)
     items = [
-        _news_item(row, relations.get(row.id, []), analyses[row.id])
-        for row in rows
+        _news_item(row, relations.get(row.id, []), analyses[row.id]) for row in rows
     ]
     refreshed_at = _newest([row.updated_at or row.created_at for row in rows])
     return AiNewsSection(
