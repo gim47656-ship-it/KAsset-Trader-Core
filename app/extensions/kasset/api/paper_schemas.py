@@ -1,6 +1,7 @@
 """Android wire contracts for PAPER account, market, and orders."""
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -30,10 +31,11 @@ class Position(AndroidWireModel):
     """PAPER 보유 종목. 평가 필드는 시세 출처와 함께만 의미가 있다.
 
     평가값(`currentPrice`/`marketValue`/`unrealizedPnl`/`unrealizedPnlRate`)이
-    채워지면 `quoteSource`가 그 값을 만든 채널을 증명한다. 채워지지 않으면
-    `valuationError`에 안정된 코드가 담긴다 — 원본 예외 문구는 절대 내려가지
-    않는다. `quoteAsOf`가 없으면 `quoteIsStale`도 없다(모른다는 뜻이며 최신을
-    뜻하지 않는다).
+    채워지면 `quoteSource`가 그 값을 만든 채널을 증명한다. USD의 native
+    `marketValue`는 덮어쓰지 않으며 `marketValueKrwReference`는 USD/KRW 방향,
+    Decimal 환율, provider 유효 구간이 모두 입증되고 fresh일 때만 채우는 표시
+    전용 값이다. 증거가 불완전하면 참고값은 `null`이고 안정된 오류 코드만 담는다.
+    `quoteAsOf`가 없으면 `quoteIsStale`도 없다.
     """
 
     broker: str
@@ -46,6 +48,13 @@ class Position(AndroidWireModel):
     average_price: str
     current_price: str | None = None
     market_value: str | None = None
+    market_value_krw_reference: str | None = None
+    market_value_krw_fx_rate: str | None = None
+    market_value_krw_fx_source: Literal["toss", "open_er_api"] | None = None
+    market_value_krw_fx_as_of: str | None = None
+    market_value_krw_fx_valid_until: str | None = None
+    market_value_krw_fx_is_stale: bool | None = None
+    market_value_krw_reference_error: str | None = None
     unrealized_pnl: str | None = None
     unrealized_pnl_rate: str | None = None
     realized_pnl: str | None = None
@@ -55,6 +64,32 @@ class Position(AndroidWireModel):
     quote_is_stale: bool | None = None
     valuation_error: str | None = None
     updated_at: str
+
+    @model_validator(mode="after")
+    def validate_krw_reference_provenance(self) -> "Position":
+        if self.market_value_krw_reference is None:
+            return self
+        try:
+            rate = Decimal(self.market_value_krw_fx_rate or "")
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(
+                "marketValueKrwReference requires a valid USD/KRW rate"
+            ) from exc
+        if (
+            self.currency != "USD"
+            or self.market_value is None
+            or not rate.is_finite()
+            or rate <= 0
+            or not self.market_value_krw_fx_source
+            or not self.market_value_krw_fx_as_of
+            or not self.market_value_krw_fx_valid_until
+            or self.market_value_krw_fx_is_stale is not False
+            or self.market_value_krw_reference_error is not None
+        ):
+            raise ValueError(
+                "marketValueKrwReference requires complete fresh USD/KRW provenance"
+            )
+        return self
 
 
 class PositionsResponse(AndroidWireModel):

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal
 
 import httpx
 
@@ -35,10 +35,26 @@ class UsdKrwExchangeRateQuote:
     valid_until: datetime | None = None
     basis_point: float | None = None
     rate_change_type: str | None = None
+    base_currency: str = "USD"
+    quote_currency: str = "KRW"
+    rate_decimal: Decimal | None = None
+    mid_rate_decimal: Decimal | None = None
 
     @property
     def default_rate(self) -> float:
         return self.mid_rate
+
+    @property
+    def default_rate_decimal(self) -> Decimal:
+        """공급자 Decimal 값을 float 왕복 없이 반환한다."""
+
+        _strict_positive_decimal(self.mid_rate, field="mid_rate")
+        if self.mid_rate_decimal is not None:
+            return _strict_positive_decimal(
+                self.mid_rate_decimal,
+                field="mid_rate_decimal",
+            )
+        return _strict_positive_decimal(self.mid_rate, field="mid_rate")
 
 
 @dataclass(frozen=True)
@@ -52,6 +68,7 @@ class OpenErApiUsdSnapshot:
     # CNY는 응답에서 빠질 수 있다. 없으면 CNY 교차환율만 비우고 USD/JPY/EUR
     # 경로는 그대로 살린다(전체를 실패로 만들지 않는다).
     cny_per_usd: Decimal | None = None
+    valid_until: datetime | None = None
 
     @property
     def jpy_krw(self) -> Decimal:
@@ -78,13 +95,6 @@ class OpenErApiUsdSnapshot:
         return rate if rate.is_finite() and rate > 0 else None
 
 
-class _ExchangeRatePayload(TypedDict, total=False):
-    result: str
-    base_code: str
-    rates: dict[str, float]
-    time_last_update_unix: int
-
-
 def _parse_decimal_float(value: object) -> float:
     if isinstance(value, float):
         raise TypeError("Toss decimal values must be strings, not float")
@@ -103,24 +113,37 @@ def _parse_datetime(value: object) -> datetime | None:
     if value is None:
         return None
     parsed = datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Exchange-rate timestamp must include a timezone")
     return parsed.astimezone(UTC)
 
 
 def _parse_toss_usd_krw_quote(raw: dict[str, Any]) -> UsdKrwExchangeRateQuote:
     if raw.get("baseCurrency") != "USD" or raw.get("quoteCurrency") != "KRW":
         raise ValueError("Toss exchange-rate response is not USD/KRW")
+    rate_decimal = _strict_toss_positive_decimal(raw.get("rate"), field="rate")
+    mid_rate_decimal = _strict_toss_positive_decimal(
+        raw.get("midRate"),
+        field="midRate",
+    )
+    valid_from = _parse_datetime(raw.get("validFrom"))
+    valid_until = _parse_datetime(raw.get("validUntil"))
+    if valid_from is None or valid_until is None:
+        raise ValueError("Toss exchange-rate response has no complete valid window")
+    if valid_until <= valid_from:
+        raise ValueError("Toss exchange-rate response has an invalid valid window")
     return UsdKrwExchangeRateQuote(
-        rate=_parse_decimal_float(raw["rate"]),
-        mid_rate=_parse_decimal_float(raw["midRate"]),
+        rate=float(rate_decimal),
+        mid_rate=float(mid_rate_decimal),
         source="toss",
-        valid_from=_parse_datetime(raw.get("validFrom")),
-        valid_until=_parse_datetime(raw.get("validUntil")),
+        valid_from=valid_from,
+        valid_until=valid_until,
         basis_point=_parse_optional_decimal_float(raw.get("basisPoint")),
         rate_change_type=str(raw["rateChangeType"])
         if raw.get("rateChangeType") is not None
         else None,
+        rate_decimal=rate_decimal,
+        mid_rate_decimal=mid_rate_decimal,
     )
 
 
@@ -134,6 +157,23 @@ def _strict_positive_decimal(value: object, *, field: str) -> Decimal:
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"{field} must be a positive decimal")
     return parsed
+
+
+def _strict_toss_positive_decimal(value: object, *, field: str) -> Decimal:
+    if isinstance(value, float):
+        raise ValueError(f"Toss {field} must be a decimal string, not float")
+    return _strict_positive_decimal(value, field=field)
+
+
+def _parse_unix_datetime(value: object, *, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise ValueError(f"{field} is outside the supported range") from exc
 
 
 def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
@@ -167,17 +207,18 @@ def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
         except ValueError:
             cny_per_usd = None
 
-    raw_as_of = data.get("time_last_update_unix")
-    as_of: datetime | None = None
-    if raw_as_of is not None:
-        if type(raw_as_of) is not int or raw_as_of < 0:
-            raise ValueError("time_last_update_unix must be a non-negative integer")
-        try:
-            as_of = datetime.fromtimestamp(raw_as_of, tz=UTC)
-        except (OSError, OverflowError, ValueError) as exc:
-            raise ValueError(
-                "time_last_update_unix is outside the supported range"
-            ) from exc
+    as_of = _parse_unix_datetime(
+        data.get("time_last_update_unix"),
+        field="time_last_update_unix",
+    )
+    valid_until = _parse_unix_datetime(
+        data.get("time_next_update_unix"),
+        field="time_next_update_unix",
+    )
+    if as_of is not None and valid_until is not None and valid_until <= as_of:
+        raise ValueError(
+            "time_next_update_unix must be later than time_last_update_unix"
+        )
 
     return OpenErApiUsdSnapshot(
         usd_krw=usd_krw,
@@ -185,17 +226,26 @@ def _parse_open_er_api_usd_snapshot(data: object) -> OpenErApiUsdSnapshot:
         eur_per_usd=eur_per_usd,
         as_of=as_of,
         cny_per_usd=cny_per_usd,
+        valid_until=valid_until,
     )
 
 
 def _parse_open_er_api_usd_krw_quote(
-    data: _ExchangeRatePayload,
+    data: object,
 ) -> UsdKrwExchangeRateQuote:
-    rate = float(data["rates"]["KRW"])
+    snapshot = _parse_open_er_api_usd_snapshot(data)
+    if snapshot.as_of is None or snapshot.valid_until is None:
+        raise ValueError("open.er-api response has no complete valid window")
+    rate_decimal = snapshot.usd_krw
+    rate = float(rate_decimal)
     return UsdKrwExchangeRateQuote(
         rate=rate,
         mid_rate=rate,
         source="open_er_api",
+        valid_from=snapshot.as_of,
+        valid_until=snapshot.valid_until,
+        rate_decimal=rate_decimal,
+        mid_rate_decimal=rate_decimal,
     )
 
 
@@ -298,7 +348,7 @@ async def _fetch_open_er_api_usd_snapshot() -> OpenErApiUsdSnapshot:
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.get(_EXCHANGE_RATE_URL)
         _ = response.raise_for_status()
-        data = response.json()
+        data = response.json(parse_float=Decimal)
 
     return _parse_open_er_api_usd_snapshot(data)
 
@@ -326,7 +376,7 @@ async def _fetch_open_er_api_usd_krw_quote() -> UsdKrwExchangeRateQuote:
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.get(_EXCHANGE_RATE_URL)
         _ = response.raise_for_status()
-        data = cast(_ExchangeRatePayload, response.json())
+        data = response.json(parse_float=Decimal)
 
     quote = _parse_open_er_api_usd_krw_quote(data)
     logger.debug("Fetched USD/KRW exchange rate from open.er-api.com: %s", quote.rate)

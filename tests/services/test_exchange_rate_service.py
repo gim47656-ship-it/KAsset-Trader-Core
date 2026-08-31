@@ -32,31 +32,48 @@ def test_parse_toss_usd_krw_quote_uses_mid_rate_as_default() -> None:
     assert quote.rate == pytest.approx(1522.2)
     assert quote.mid_rate == pytest.approx(1522.05)
     assert quote.default_rate == pytest.approx(1522.05)
+    assert quote.default_rate_decimal == Decimal("1522.05")
     assert quote.basis_point == pytest.approx(15.2)
     assert quote.rate_change_type == "UP"
     assert quote.valid_from == datetime(2026, 6, 12, 0, 30, tzinfo=UTC)
     assert quote.valid_until == datetime(2026, 6, 12, 0, 31, tzinfo=UTC)
 
 
-def test_parse_open_er_api_quote_exposes_same_rate_and_mid_rate() -> None:
-    quote = mod._parse_open_er_api_usd_krw_quote({"rates": {"KRW": 1498.7}})
+def test_parse_open_er_api_quote_validates_snapshot_and_preserves_decimal() -> None:
+    as_of = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+    valid_until = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+    quote = mod._parse_open_er_api_usd_krw_quote(
+        {
+            "result": "success",
+            "base_code": "USD",
+            "rates": {
+                "KRW": "1498.7000000000000001",
+                "JPY": "150",
+                "EUR": "0.85",
+            },
+            "time_last_update_unix": int(as_of.timestamp()),
+            "time_next_update_unix": int(valid_until.timestamp()),
+        }
+    )
 
     assert quote.source == "open_er_api"
     assert quote.rate == pytest.approx(1498.7)
     assert quote.mid_rate == pytest.approx(1498.7)
-    assert quote.default_rate == pytest.approx(1498.7)
-    assert quote.valid_from is None
-    assert quote.valid_until is None
+    assert quote.default_rate_decimal == Decimal("1498.7000000000000001")
+    assert quote.valid_from == as_of
+    assert quote.valid_until == valid_until
 
 
 def test_open_er_api_snapshot_validates_cross_rates_and_source_time() -> None:
     as_of = datetime(2026, 8, 28, 6, 0, tzinfo=UTC)
 
+    valid_until = datetime(2026, 8, 29, 6, 0, tzinfo=UTC)
     snapshot = mod._parse_open_er_api_usd_snapshot(
         {
             "result": "success",
             "base_code": "USD",
             "time_last_update_unix": int(as_of.timestamp()),
+            "time_next_update_unix": int(valid_until.timestamp()),
             "rates": {
                 "KRW": "1500.00",
                 "JPY": "150",
@@ -69,6 +86,7 @@ def test_open_er_api_snapshot_validates_cross_rates_and_source_time() -> None:
     assert snapshot.jpy_krw == Decimal("10.00")
     assert snapshot.eur_krw == Decimal("2000")
     assert snapshot.as_of == as_of
+    assert snapshot.valid_until == valid_until
     # CNY가 빠진 응답은 기존 통화 경로를 그대로 유지하고 CNY만 비운다.
     assert snapshot.cny_per_usd is None
     assert snapshot.cny_krw is None
@@ -171,6 +189,114 @@ def test_parse_open_er_api_usd_snapshot_rejects_invalid_base_or_cross_rates(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         mod._parse_open_er_api_usd_snapshot(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": 1,
+            },
+            "complete valid window",
+        ),
+        (
+            {
+                "result": "error",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": 1,
+                "time_next_update_unix": 2,
+            },
+            "result is not success",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "EUR",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": 1,
+                "time_next_update_unix": 2,
+            },
+            "base_code is not USD",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "0", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": 1,
+                "time_next_update_unix": 2,
+            },
+            "rates.KRW must be a positive decimal",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": 2,
+                "time_next_update_unix": 1,
+            },
+            "must be later",
+        ),
+        (
+            {
+                "result": "success",
+                "base_code": "USD",
+                "rates": {"KRW": "1500", "JPY": "150", "EUR": "0.85"},
+                "time_last_update_unix": True,
+                "time_next_update_unix": 2,
+            },
+            "time_last_update_unix must be a non-negative integer",
+        ),
+    ],
+)
+def test_open_er_api_quote_rejects_unproved_usd_krw_snapshot(
+    payload: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        mod._parse_open_er_api_usd_krw_quote(payload)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"baseCurrency": "KRW", "quoteCurrency": "USD"}, "not USD/KRW"),
+        ({"midRate": "0"}, "midRate must be a positive decimal"),
+        ({"rate": "NaN"}, "rate must be a positive decimal"),
+        ({"midRate": 1522.05}, "must be a decimal string"),
+        ({"validUntil": None}, "no complete valid window"),
+        ({"validFrom": "2026-06-12T09:30:00"}, "must include a timezone"),
+        (
+            {
+                "validFrom": "2026-06-12T09:31:00+09:00",
+                "validUntil": "2026-06-12T09:30:00+09:00",
+            },
+            "invalid valid window",
+        ),
+    ],
+)
+def test_toss_quote_rejects_invalid_pair_rate_or_window(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    payload: dict[str, object] = {
+        "baseCurrency": "USD",
+        "quoteCurrency": "KRW",
+        "rate": "1522.2",
+        "midRate": "1522.05",
+        "validFrom": "2026-06-12T09:30:00+09:00",
+        "validUntil": "2026-06-12T09:31:00+09:00",
+    }
+    payload.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        mod._parse_toss_usd_krw_quote(payload)
 
 
 @pytest.mark.asyncio

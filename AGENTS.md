@@ -66,6 +66,10 @@
     token/revoke 2 path 예외뿐이다. `NHPLUG_MOCK_ENABLED` default false 유지,
     vendor SDK·`NHPLUG_BASE_URL`/`NHPLUG_AUTH_URL`·주문 endpoint/TR 추가 금지.
     주문 메서드/MCP/레저/reconcile/스케줄러는 Stage 1 범위 밖이다.
+15. **검증 실행 위치**: 이 저장소의 Python test·lint·type check·build는 로컬
+    워크스테이션에서 실행하지 않는다. 기본 검증 경로는 GitHub Actions다. 서버에서
+    실행할 때는 운영 DB·운영 프로세스와 분리된 test checkout·test DB·container를
+    사용하고, 이 격리를 마련하지 못하면 서버 대신 GitHub Actions에서 실행한다.
 
 ## 최소 명령어
 

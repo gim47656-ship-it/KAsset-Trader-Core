@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -393,6 +394,10 @@ def test_market_event_task_is_registered() -> None:
         kasset_market_events_tasks.kasset_market_events_run.task_name
         == "kasset_market_events.run"
     )
+    assert kasset_market_events_tasks.kasset_market_events_run.labels["schedule"] == [
+        {"cron": "*/10 9-15 * * 1-5", "cron_offset": "Asia/Seoul"},
+        {"cron": "*/10 9-15 * * 1-5", "cron_offset": "America/New_York"},
+    ]
     assert (
         kasset_market_events_tasks.kasset_google_news_kr_sync.task_name
         == "kasset.news.google.kr.sync"
@@ -433,8 +438,53 @@ async def test_market_event_task_delegates_to_canonical_vertical_slice(
         fake_run,
     )
 
+    @asynccontextmanager
+    async def acquired_lease():
+        yield True
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_cycle_single_flight",
+        acquired_lease,
+    )
+
     assert await kasset_market_events_tasks.kasset_market_events_run() is expected
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_market_event_task_skips_when_previous_cycle_holds_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import kasset_market_events_tasks
+
+    @asynccontextmanager
+    async def contended_lease():
+        yield False
+
+    async def forbidden_run() -> dict[str, object]:
+        raise AssertionError("contended cycle must not enter the recommendation pipeline")
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_cycle_single_flight",
+        contended_lease,
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "run_ai_recommendation_cycle_once",
+        forbidden_run,
+    )
+
+    result = await kasset_market_events_tasks.kasset_market_events_run()
+
+    assert result == {
+        "enabled": True,
+        "owners": [],
+        "candidateCount": 0,
+        "recommendationCount": 0,
+        "skipped": "cycle_already_running",
+    }
 
 
 @pytest.mark.asyncio

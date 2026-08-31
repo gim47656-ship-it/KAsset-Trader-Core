@@ -27,6 +27,8 @@ from app.models.kasset_paper_execution_events import (
 _EARLY_SKIP_REASONS = frozenset(
     {
         "ai_unavailable",
+        "no_regular_market_open",
+        "no_configured_regular_market_open",
         "position_exit_recommendation_created",
         "recommendation_cooldown_active",
         "screener_candidates_unavailable",

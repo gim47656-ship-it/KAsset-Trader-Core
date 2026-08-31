@@ -388,6 +388,81 @@ async def test_ai_unavailable_still_runs_held_position_manager() -> None:
     assert result["recommendationIds"] == []
 
 
+@pytest.mark.asyncio
+async def test_owner_market_scope_is_intersected_before_candidate_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = MagicMock()
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(),
+        router,
+        now=_NOW,
+        allowed_markets=frozenset({"KR"}),
+    )
+    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
+        run_owner=AsyncMock(return_value=())
+    )
+    instance._policy = SimpleNamespace(  # type: ignore[assignment]
+        get_snapshot=AsyncMock(
+            return_value=SimpleNamespace(limits=SimpleNamespace(currency="KRW"))
+        )
+    )
+    load_candidates = AsyncMock(return_value=[])
+    instance._load_candidates = load_candidates  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        vertical_slice.daily_routine_service,
+        "recommendation_markets",
+        AsyncMock(return_value=frozenset({"KR", "US"})),
+    )
+
+    result = await instance.run_owner(11)
+
+    assert result["skipped"] == "screener_candidates_unavailable"
+    load_candidates.assert_awaited_once_with(
+        11,
+        currency="KRW",
+        allowed_markets=frozenset({"KR"}),
+    )
+    assert router.mock_calls == []
+
+
+@pytest.mark.asyncio
+async def test_owner_market_scope_mismatch_skips_before_candidates_or_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = MagicMock()
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(),
+        router,
+        now=_NOW,
+        allowed_markets=frozenset({"KR"}),
+        cycle_trace_id="cyc-owner-mismatch",
+    )
+    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
+        run_owner=AsyncMock(return_value=())
+    )
+    load_candidates = AsyncMock(side_effect=AssertionError("must not load candidates"))
+    instance._load_candidates = load_candidates  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        vertical_slice.daily_routine_service,
+        "recommendation_markets",
+        AsyncMock(return_value=frozenset({"US"})),
+    )
+
+    result = await instance.run_owner(12)
+
+    assert result["ownerUserId"] == 12
+    assert result["cycleTraceId"] == "cyc-owner-mismatch"
+    assert result["skipped"] == "no_configured_regular_market_open"
+    assert result["candidateCount"] == 0
+    assert result["aiReviewedCount"] == 0
+    assert result["recommendationIds"] == []
+    load_candidates.assert_not_awaited()
+    assert router.mock_calls == []
+
+
 def test_price_bars_restore_database_timezone_boundary() -> None:
     naive = datetime(2026, 8, 29, 1, 0)
     aware = datetime(2026, 8, 29, 10, 0, tzinfo=timezone(timedelta(hours=9)))

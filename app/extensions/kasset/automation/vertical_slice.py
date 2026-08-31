@@ -79,6 +79,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
 )
 from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.extensions.kasset.models import AndroidPaperAccount
+from app.jobs.watch_market_data import is_market_open
 from app.models.ai_recommendations import AIRecommendation
 from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.news import NewsArticle
@@ -94,12 +95,53 @@ from app.services.kasset_automation_audit import (
 )
 from app.services.symbol_news_store import load_symbol_news
 
+logger = logging.getLogger(__name__)
 _RECOMMENDATION_LIMIT = 5
 _OWNER_COOLDOWN = timedelta(hours=1)
 
 #: 검토 lane에 쓸 수 있는 route가 없어 cycle이 AI 없이 도는 상태의 사유.
 #: 정책 자체는 정상이므로 ``AiAvailability``의 사유 코드와 층을 구분한다.
 _AI_REVIEW_UNAVAILABLE = "review_routes_unavailable"
+_NO_REGULAR_MARKET_OPEN = "no_regular_market_open"
+_NO_CONFIGURED_REGULAR_MARKET_OPEN = "no_configured_regular_market_open"
+
+
+def _open_regular_markets(*, now: datetime) -> frozenset[str]:
+    """정규장 calendar가 현재 열려 있다고 입증한 시장만 반환한다."""
+
+    open_markets: set[str] = set()
+    for market, market_key in (("kr", "KR"), ("us", "US")):
+        try:
+            if is_market_open(market, now=now):
+                open_markets.add(market_key)
+        except Exception:
+            # calendar 조회가 깨진 시장은 후보/AI 호출로 넘어가지 않는다.
+            logger.exception(
+                "kasset regular market gate failed closed: market=%s",
+                market,
+            )
+    return frozenset(open_markets)
+
+
+def _regular_market_skip_result(
+    *,
+    owner_user_id: int,
+    cycle_trace_id: str,
+    reason: str = _NO_REGULAR_MARKET_OPEN,
+) -> dict[str, object]:
+    return {
+        "ownerUserId": owner_user_id,
+        "cycleTraceId": cycle_trace_id,
+        "skipped": reason,
+        "candidateCount": 0,
+        "rankedCount": 0,
+        "strategyEvaluatedCount": 0,
+        "strategyActionableCount": 0,
+        "aiReviewedCount": 0,
+        "aiFailureCount": 0,
+        "recommendationIds": [],
+        "positionExitRecommendationIds": [],
+    }
 
 
 def _collection_policy_payload(
@@ -112,9 +154,6 @@ def _collection_policy_payload(
         "recommendationLimit": _RECOMMENDATION_LIMIT,
         "aiReviewActions": [Action.BUY.value, Action.SELL.value],
     }
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +327,28 @@ class AIRecommendationVerticalSlice:
                 "positionExitRecommendationIds": list(position_exit_ids),
                 "recommendationIds": list(position_exit_ids),
             }
+        allowed_markets = self._allowed_markets
+        if allowed_markets is not None:
+            configured_markets = await daily_routine_service.recommendation_markets(
+                self._db,
+                owner_user_id,
+                now=self._now,
+            )
+            configured_market_keys = frozenset(
+                market.upper() for market in configured_markets
+            )
+            configured_allowed_markets = (
+                normalize_allowed_markets(configured_market_keys)
+                if configured_market_keys
+                else frozenset()
+            )
+            allowed_markets = allowed_markets & configured_allowed_markets
+            if not allowed_markets:
+                return _regular_market_skip_result(
+                    owner_user_id=owner_user_id,
+                    cycle_trace_id=self._cycle_trace_id,
+                    reason=_NO_CONFIGURED_REGULAR_MARKET_OPEN,
+                )
         if self._ai_router is None:
             return {
                 "ownerUserId": owner_user_id,
@@ -304,14 +365,15 @@ class AIRecommendationVerticalSlice:
             now=self._now,
             execution_limit=0,
         )
-        configured_markets = await daily_routine_service.recommendation_markets(
-            self._db,
-            owner_user_id,
-            now=self._now,
-        )
-        allowed_markets = self._allowed_markets or normalize_allowed_markets(
-            frozenset(market.upper() for market in configured_markets)
-        )
+        if allowed_markets is None:
+            configured_markets = await daily_routine_service.recommendation_markets(
+                self._db,
+                owner_user_id,
+                now=self._now,
+            )
+            allowed_markets = normalize_allowed_markets(
+                frozenset(market.upper() for market in configured_markets)
+            )
         candidates = await self._load_candidates(
             owner_user_id,
             currency=snapshot.limits.currency,
@@ -1214,14 +1276,10 @@ async def run_ai_recommendation_cycle_once(
             "KASSET_MARKET_EVENTS_ENABLED=false"
         )
         return {"enabled": False, "owners": [], "candidateCount": 0}
-    from app.extensions.kasset.ai.factory import build_model_router
-    from app.services.ai_runtime_config import get_ai_runtime_snapshot
-
+    open_markets = _open_regular_markets(now=current)
     live_candidates_cache: dict[str, tuple[TradingCandidate, ...]] = {}
+    snapshot = None
     async with _session() as db:
-        # cycle 시작 시 정책을 한 번만 읽는다. 이 cycle 안에서는 route가 섞이지
-        # 않고, 다음 cycle부터 새 정책이 재시작 없이 적용된다.
-        snapshot = await get_ai_runtime_snapshot(db)
         owner_ids = list(
             (
                 await db.scalars(
@@ -1231,34 +1289,50 @@ async def run_ai_recommendation_cycle_once(
                 )
             ).all()
         )
+        if open_markets:
+            # cycle 시작 시 정책을 한 번만 읽는다. 이 cycle 안에서는 route가
+            # 섞이지 않고, 다음 cycle부터 새 정책이 재시작 없이 적용된다.
+            from app.services.ai_runtime_config import get_ai_runtime_snapshot
 
-    # 같은 snapshot에서 유효 가용성을 계산한다. catalog는 설정만 읽는 순수
-    # 함수이므로 DB를 다시 건드리지 않는다(cycle당 정책 조회는 여전히 1회).
-    availability = build_ai_availability(snapshot, build_ai_route_catalog())
+            snapshot = await get_ai_runtime_snapshot(db)
 
-    # 이 cycle의 첫 분석은 candidate_review -> terra다. 다른 review lane만
-    # 살아 있으면 router 객체는 만들 수 있어도 실제 후보를 한 건도 처리하지 못한다.
-    # 따라서 cycle 가용성은 시작 lane을 기준으로 보고한다.
-    if availability.lane_usable(AiLane.REVIEW_TERRA):
-        try:
-            ai_router: OpenAiModelRouter | None = build_model_router(snapshot=snapshot)
-        except AiProviderUnavailable:
-            ai_router = None
+    ai_router: OpenAiModelRouter | None = None
+    if snapshot is not None:
+        from app.extensions.kasset.ai.factory import build_model_router
+
+        # 같은 snapshot에서 유효 가용성을 계산한다. catalog는 설정만 읽는 순수
+        # 함수이므로 DB를 다시 건드리지 않는다(cycle당 정책 조회는 여전히 1회).
+        availability = build_ai_availability(snapshot, build_ai_route_catalog())
+
+        # 이 cycle의 첫 분석은 candidate_review -> terra다. 다른 review lane만
+        # 살아 있으면 router 객체는 만들 수 있어도 실제 후보를 처리하지 못한다.
+        if availability.lane_usable(AiLane.REVIEW_TERRA):
+            try:
+                ai_router = build_model_router(snapshot=snapshot)
+            except AiProviderUnavailable:
+                ai_router = None
+        ai_unavailable_reason = (
+            None
+            if ai_router is not None
+            else availability.unavailable_reason or _AI_REVIEW_UNAVAILABLE
+        )
+        ai_policy_source: str | None = availability.source
+        ai_usable_lanes = sorted(lane.value for lane in availability.usable_lanes)
     else:
-        ai_router = None
-    ai_unavailable_reason = (
-        None
-        if ai_router is not None
-        else availability.unavailable_reason or _AI_REVIEW_UNAVAILABLE
-    )
+        # 장이 닫힌 cycle은 정책/provider/router를 건드리지 않는다.
+        ai_unavailable_reason = _NO_REGULAR_MARKET_OPEN
+        ai_policy_source = None
+        ai_usable_lanes = []
 
     logger.info(
-        "kasset AI recommendation cycle start: owners=%d ai_available=%s "
-        "ai_policy_source=%s ai_usable_lanes=%s ai_unavailable_reason=%s",
+        "kasset AI recommendation cycle start: owners=%d open_markets=%s "
+        "ai_available=%s ai_policy_source=%s ai_usable_lanes=%s "
+        "ai_unavailable_reason=%s",
         len(owner_ids),
+        sorted(open_markets),
         ai_router is not None,
-        availability.source,
-        sorted(lane.value for lane in availability.usable_lanes),
+        ai_policy_source,
+        ai_usable_lanes,
         ai_unavailable_reason,
     )
 
@@ -1270,30 +1344,37 @@ async def run_ai_recommendation_cycle_once(
         # 후보를 한 건도 읽기 전에 이 owner cycle의 추적 id를 확정한다. owner
         # cycle이 예외로 끝나도 원장 행이 같은 값을 갖는다.
         cycle_trace_id = new_cycle_trace_id()
-        try:
-            async with _session() as db:
-                result = await AIRecommendationVerticalSlice(
-                    db,
-                    ai_router,
-                    now=current,
-                    live_candidates_cache=live_candidates_cache,
-                    cycle_trace_id=cycle_trace_id,
-                ).run_owner(owner_id)
-        except Exception as exc:
-            # 스택 없이 errorClass만 담아 돌려주면 TaskIQ가 그 dict를 버리는
-            # 순간 원인이 사라진다. 원장에는 요약을, 로그에는 스택을 남긴다.
-            logger.exception(
-                "kasset AI recommendation cycle owner failed: owner_user_id=%s",
-                owner_id,
+        if not open_markets:
+            result = _regular_market_skip_result(
+                owner_user_id=owner_id,
+                cycle_trace_id=cycle_trace_id,
             )
-            result = {
-                "ownerUserId": owner_id,
-                "cycleTraceId": cycle_trace_id,
-                "candidateCount": 0,
-                "recommendationIds": [],
-                "skipped": "owner_cycle_failed",
-                "errorClass": type(exc).__name__,
-            }
+        else:
+            try:
+                async with _session() as db:
+                    result = await AIRecommendationVerticalSlice(
+                        db,
+                        ai_router,
+                        now=current,
+                        live_candidates_cache=live_candidates_cache,
+                        allowed_markets=open_markets,
+                        cycle_trace_id=cycle_trace_id,
+                    ).run_owner(owner_id)
+            except Exception as exc:
+                # 스택 없이 errorClass만 담아 돌려주면 TaskIQ가 그 dict를 버리는
+                # 순간 원인이 사라진다. 원장에는 요약을, 로그에는 스택을 남긴다.
+                logger.exception(
+                    "kasset AI recommendation cycle owner failed: owner_user_id=%s",
+                    owner_id,
+                )
+                result = {
+                    "ownerUserId": owner_id,
+                    "cycleTraceId": cycle_trace_id,
+                    "candidateCount": 0,
+                    "recommendationIds": [],
+                    "skipped": "owner_cycle_failed",
+                    "errorClass": type(exc).__name__,
+                }
         result.setdefault(
             "collectionPolicy",
             _collection_policy_payload(DEFAULT_CANDIDATE_RANKER_CONFIG),
@@ -1349,8 +1430,9 @@ async def run_ai_recommendation_cycle_once(
         "candidateCount": total_candidates,
         "recommendationCount": total_recommendations,
         "aiAvailable": ai_router is not None,
-        "aiPolicySource": availability.source,
+        "aiPolicySource": ai_policy_source,
         "aiUnavailableReason": ai_unavailable_reason,
+        "openMarkets": sorted(open_markets),
     }
 
 

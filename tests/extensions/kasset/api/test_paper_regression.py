@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.api import krx_quotes
+from app.extensions.kasset.api import paper as paper_api
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import PaperOrderFacade, paper_orders
@@ -24,6 +26,7 @@ from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
 from app.models.paper_trading import PaperAccount, PaperPosition, PaperTrade
 from app.models.trading import InstrumentType, User
+from app.services.exchange_rate_service import UsdKrwExchangeRateQuote
 from app.services.paper_trading_service import PaperTradingService
 
 
@@ -363,6 +366,320 @@ async def test_balance_does_not_report_false_zero_when_krw_quote_fails(
     assert balance.evaluation_amount is None
     assert balance.total_assets is None
     assert balance.unrealized_pnl is None
+
+
+def _position_row(
+    *,
+    symbol: str,
+    instrument_type: str,
+    currency: str,
+    market_value: str | None,
+) -> dict[str, object]:
+    value = Decimal(market_value) if market_value is not None else None
+    return {
+        "instrument_type": instrument_type,
+        "symbol": symbol,
+        "currency": currency,
+        "quantity": Decimal("1"),
+        "avg_price": Decimal("1"),
+        "current_price": Decimal("1") if value is not None else None,
+        "evaluation_amount": value,
+        "unrealized_pnl": Decimal("0") if value is not None else None,
+        "pnl_pct": Decimal("0") if value is not None else None,
+    }
+
+
+def _prepare_positions(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[dict[str, object]],
+) -> None:
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "default_account",
+        AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+    monkeypatch.setattr(
+        PaperTradingService,
+        "get_positions",
+        AsyncMock(return_value=rows),
+    )
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "_instrument_names",
+        AsyncMock(return_value={row["symbol"]: str(row["symbol"]) for row in rows}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_positions_share_one_fresh_fx_snapshot_without_changing_native_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="AAPL",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value="1.2345",
+        ),
+        _position_row(
+            symbol="MSFT",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value="2",
+        ),
+        _position_row(
+            symbol="005930",
+            instrument_type="equity_kr",
+            currency="KRW",
+            market_value="70000",
+        ),
+    ]
+    _prepare_positions(monkeypatch, rows)
+    now = datetime.now(UTC)
+    quote_fetch = AsyncMock(
+        return_value=UsdKrwExchangeRateQuote(
+            rate=1500.0,
+            mid_rate=1500.0,
+            source="toss",
+            valid_from=now - timedelta(minutes=1),
+            valid_until=now + timedelta(minutes=1),
+            rate_decimal=Decimal("1500.00"),
+            mid_rate_decimal=Decimal("1500.00"),
+        )
+    )
+    monkeypatch.setattr(paper_api, "get_usd_krw_rate_details", quote_fetch)
+
+    response = await paper_account_adapter.positions(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        owner_user_id=101,
+    )
+
+    quote_fetch.assert_awaited_once_with()
+    first, second, krw = response.positions
+    assert (first.currency, first.market_value) == ("USD", "1.2345")
+    assert (second.currency, second.market_value) == ("USD", "2")
+    assert first.market_value_krw_reference == "1851.750000"
+    assert second.market_value_krw_reference == "3000.00"
+    for position in (first, second):
+        assert position.market_value_krw_fx_rate == "1500.00"
+        assert position.market_value_krw_fx_source == "toss"
+        assert position.market_value_krw_fx_is_stale is False
+        assert position.market_value_krw_reference_error is None
+        assert position.market_value_krw_fx_as_of is not None
+        assert position.market_value_krw_fx_valid_until is not None
+    assert first.market_value_krw_fx_as_of == second.market_value_krw_fx_as_of
+    assert (
+        first.market_value_krw_fx_valid_until == second.market_value_krw_fx_valid_until
+    )
+    assert first.unrealized_pnl == "0"
+    assert second.unrealized_pnl == "0"
+    assert krw.market_value == "70000"
+    assert krw.market_value_krw_reference is None
+    assert krw.market_value_krw_fx_rate is None
+    assert krw.market_value_krw_reference_error is None
+
+
+
+@pytest.mark.asyncio
+async def test_usd_position_without_market_value_has_no_borrowed_fx_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="AAPL",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value="1",
+        ),
+        _position_row(
+            symbol="MSFT",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value=None,
+        ),
+    ]
+    _prepare_positions(monkeypatch, rows)
+    now = datetime.now(UTC)
+    monkeypatch.setattr(
+        paper_api,
+        "get_usd_krw_rate_details",
+        AsyncMock(
+            return_value=UsdKrwExchangeRateQuote(
+                rate=1500,
+                mid_rate=1500,
+                source="toss",
+                valid_from=now - timedelta(minutes=1),
+                valid_until=now + timedelta(minutes=1),
+                rate_decimal=Decimal("1500"),
+                mid_rate_decimal=Decimal("1500"),
+            )
+        ),
+    )
+
+    response = await paper_account_adapter.positions(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        owner_user_id=101,
+    )
+
+    missing = response.positions[1]
+    assert missing.market_value is None
+    assert missing.market_value_krw_reference is None
+    assert missing.market_value_krw_fx_rate is None
+    assert missing.market_value_krw_fx_source is None
+    assert missing.market_value_krw_fx_as_of is None
+    assert missing.market_value_krw_fx_valid_until is None
+    assert missing.market_value_krw_fx_is_stale is None
+    assert missing.market_value_krw_reference_error is None
+
+@pytest.mark.asyncio
+async def test_positions_keep_native_usd_when_fx_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="AAPL",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value="123.45",
+        )
+    ]
+    _prepare_positions(monkeypatch, rows)
+    quote_fetch = AsyncMock(side_effect=RuntimeError("provider detail must not leak"))
+    monkeypatch.setattr(paper_api, "get_usd_krw_rate_details", quote_fetch)
+
+    response = await paper_account_adapter.positions(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        owner_user_id=101,
+    )
+
+    position = response.positions[0]
+    assert position.currency == "USD"
+    assert position.market_value == "123.45"
+    assert position.market_value_krw_reference is None
+    assert position.market_value_krw_fx_rate is None
+    assert position.market_value_krw_reference_error == "FX_QUOTE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_positions_do_not_fetch_fx_without_a_usd_market_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="AAPL",
+            instrument_type="equity_us",
+            currency="USD",
+            market_value=None,
+        ),
+        _position_row(
+            symbol="005930",
+            instrument_type="equity_kr",
+            currency="KRW",
+            market_value="70000",
+        ),
+    ]
+    _prepare_positions(monkeypatch, rows)
+    quote_fetch = AsyncMock(side_effect=AssertionError("FX must not be fetched"))
+    monkeypatch.setattr(paper_api, "get_usd_krw_rate_details", quote_fetch)
+
+    response = await paper_account_adapter.positions(  # type: ignore[arg-type]
+        SimpleNamespace(),
+        owner_user_id=101,
+    )
+
+    quote_fetch.assert_not_awaited()
+    assert all(
+        position.market_value_krw_reference is None for position in response.positions
+    )
+
+
+@pytest.mark.parametrize(
+    ("quote", "error", "is_stale"),
+    [
+        (
+            UsdKrwExchangeRateQuote(
+                rate=1500,
+                mid_rate=1500,
+                source="toss",
+                base_currency="KRW",
+                quote_currency="USD",
+            ),
+            "FX_QUOTE_PAIR_MISMATCH",
+            None,
+        ),
+        (
+            UsdKrwExchangeRateQuote(
+                rate=0,
+                mid_rate=0,
+                source="toss",
+            ),
+            "FX_QUOTE_INVALID",
+            None,
+        ),
+        (
+            UsdKrwExchangeRateQuote(
+                rate=float("inf"),
+                mid_rate=float("inf"),
+                source="toss",
+            ),
+            "FX_QUOTE_INVALID",
+            None,
+        ),
+        (
+            UsdKrwExchangeRateQuote(
+                rate=1500,
+                mid_rate=1500,
+                source="toss",
+                mid_rate_decimal=Decimal("1500"),
+            ),
+            "FX_QUOTE_INCOMPLETE",
+            None,
+        ),
+        (
+            UsdKrwExchangeRateQuote(
+                rate=1500,
+                mid_rate=1500,
+                source="toss",
+                rate_decimal=Decimal("1500"),
+                mid_rate_decimal=Decimal("1500"),
+                valid_from=datetime(
+                    2026, 8, 31, 0, 59, 59, 100_000, tzinfo=UTC
+                ),
+                valid_until=datetime(
+                    2026, 8, 31, 0, 59, 59, 900_000, tzinfo=UTC
+                ),
+            ),
+            "FX_QUOTE_INCOMPLETE",
+            None,
+        ),
+        (
+            UsdKrwExchangeRateQuote(
+                rate=1500,
+                mid_rate=1500,
+                source="toss",
+                mid_rate_decimal=Decimal("1500"),
+                valid_from=datetime(2026, 8, 30, tzinfo=UTC),
+                valid_until=datetime(2026, 8, 31, tzinfo=UTC),
+            ),
+            "FX_QUOTE_STALE",
+            True,
+        ),
+    ],
+)
+def test_reference_snapshot_fails_closed_for_unproved_fx(
+    quote: UsdKrwExchangeRateQuote,
+    error: str,
+    is_stale: bool | None,
+) -> None:
+    snapshot = paper_account_adapter._krw_reference_snapshot(
+        quote,
+        now=datetime(2026, 8, 31, 1, tzinfo=UTC),
+    )
+
+    assert snapshot["market_value_krw_reference"] is None
+    assert snapshot["market_value_krw_reference_error"] == error
+    assert snapshot["market_value_krw_fx_is_stale"] is is_stale
+    assert "_rate_decimal" not in snapshot
 
 
 @pytest.mark.asyncio
