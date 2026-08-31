@@ -94,6 +94,17 @@ def _admin_kwargs(url, *, database: str) -> dict[str, object]:
 #: schema -- otherwise the migration collides with what create_all already
 #: made. Same maintenance point the sibling roundtrip tests carry.
 _POST_PARENT_TABLES: tuple[str, ...] = (
+    "kasset_research_cohort_members",
+    "kasset_research_cohorts",
+    "kasset_corporate_action_fetch_coverage",
+    "kr_corporate_action_evidence",
+    "kr_stock_lifecycle_observations",
+    "review.ai_call_events",
+    "password_reset_tokens",
+    "kasset_ai_runtime_config",
+    "kasset_shadow_daily_high_watermarks",
+    "kasset_shadow_loss_locks",
+    "review.kasset_automation_cycle_events",
     "review.telegram_callback_recovery_cursor",
     "review.telegram_callback_inbox",
     "review.screener_pick_log",
@@ -143,6 +154,28 @@ async def scratch_database() -> AsyncIterator[str]:
                 await connection.execute(
                     text(
                         "DROP INDEX IF EXISTS paper.uq_paper_trades_account_correlation"
+                    )
+                )
+                for column in ("translated_title", "translated_excerpt"):
+                    await connection.execute(
+                        text(f"ALTER TABLE news_analysis_results DROP COLUMN {column}")
+                    )
+                for column in (
+                    "failed_login_attempts",
+                    "login_cooldown_level",
+                    "login_cooldown_until",
+                    "web_session_version",
+                ):
+                    await connection.execute(
+                        text(f"ALTER TABLE users DROP COLUMN {column}")
+                    )
+                await connection.execute(
+                    text("ALTER TABLE kr_symbol_universe DROP COLUMN std_pdno")
+                )
+                await connection.execute(
+                    text(
+                        "ALTER TABLE paper.paper_accounts "
+                        "DROP COLUMN initial_capital_usd"
                     )
                 )
                 # The KAsset multi-user migration adds these case-insensitive

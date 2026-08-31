@@ -264,6 +264,45 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 "external_cash_declarations",
             ):
                 await connection.execute(text(f"DROP TABLE review.{table}"))
+            # Current metadata also includes the post-claim-lease KAsset
+            # observability, lifecycle, AI, and shadow-risk tables. Remove
+            # dependents first so the later migration chain creates them.
+            for table in (
+                "kasset_research_cohort_members",
+                "kasset_research_cohorts",
+                "kasset_corporate_action_fetch_coverage",
+                "kr_corporate_action_evidence",
+                "kr_stock_lifecycle_observations",
+                "review.ai_call_events",
+                "password_reset_tokens",
+                "kasset_ai_runtime_config",
+                "kasset_shadow_daily_high_watermarks",
+                "kasset_shadow_loss_locks",
+                "review.kasset_automation_cycle_events",
+            ):
+                await connection.execute(text(f"DROP TABLE {table}"))
+            for column in (
+                "translated_title",
+                "translated_excerpt",
+            ):
+                await connection.execute(
+                    text(f"ALTER TABLE news_analysis_results DROP COLUMN {column}")
+                )
+            for column in (
+                "failed_login_attempts",
+                "login_cooldown_level",
+                "login_cooldown_until",
+                "web_session_version",
+            ):
+                await connection.execute(
+                    text(f"ALTER TABLE users DROP COLUMN {column}")
+                )
+            await connection.execute(
+                text("ALTER TABLE kr_symbol_universe DROP COLUMN std_pdno")
+            )
+            await connection.execute(
+                text("ALTER TABLE paper.paper_accounts DROP COLUMN initial_capital_usd")
+            )
             # KAsset Android and AI review tables are later than this
             # reconstructed boundary and already present in current metadata.
             await connection.execute(text("DROP TABLE review.ai_recommendations"))
