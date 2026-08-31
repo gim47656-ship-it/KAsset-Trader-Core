@@ -724,18 +724,20 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     db_session,
 ) -> None:
     suffix = uuid.uuid4().hex
+    title = "Company announces semiconductor investment"
     url = f"https://news.test.invalid/{suffix}/repair-translation"
     article = _article(
         url=url,
-        title="Company announces semiconductor investment",
+        title=title,
         summary="The company announced a new semiconductor investment plan.",
         published_at=datetime(2026, 8, 29, 12, 0),
     )
     db_session.add(article)
     await db_session.flush()
+    article_id = article.id
     db_session.add(
         NewsAnalysisResult(
-            article_id=article.id,
+            article_id=article_id,
             model_name="old-incomplete-analysis",
             sentiment=Sentiment.NEUTRAL,
             sentiment_score=None,
@@ -758,10 +760,10 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     await db_session.commit()
     generator = FakeSummaryGenerator(
         {
-            article.title: "회사가 신규 반도체 투자 계획을 발표했다.",
+            title: "회사가 신규 반도체 투자 계획을 발표했다.",
         },
         translations={
-            article.title: (
+            title: (
                 "회사의 반도체 투자 계획 발표",
                 "회사는 신규 반도체 투자 계획을 발표했다.",
             )
@@ -785,7 +787,7 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
         (
             await db_session.scalars(
                 select(NewsAnalysisResult)
-                .where(NewsAnalysisResult.article_id == article.id)
+                .where(NewsAnalysisResult.article_id == article_id)
                 .order_by(NewsAnalysisResult.created_at.asc())
             )
         ).all()

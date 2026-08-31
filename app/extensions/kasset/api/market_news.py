@@ -307,10 +307,7 @@ async def list_market_news(
                 and_(
                     is_dart,
                     NewsArticle.stock_symbol.is_not(None),
-                    or_(
-                        ~low_information_dart,
-                        NewsArticle.summary.is_not(None),
-                    ),
+                    ~low_information_dart,
                 ),
             )
         )
@@ -322,7 +319,14 @@ async def list_market_news(
         has_analysis = exists().where(NewsAnalysisResult.article_id == NewsArticle.id)
         curation_rank = case(
             (and_(is_dart, important_dart), 0),
-            (and_(is_disclosure, NewsArticle.summary.is_not(None)), 0),
+            (
+                and_(
+                    is_disclosure,
+                    not_dart,
+                    NewsArticle.summary.is_not(None),
+                ),
+                0,
+            ),
             (and_(is_ordinary_news, has_analysis), 0),
             (is_disclosure, 1),
             (
