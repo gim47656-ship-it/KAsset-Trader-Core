@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta, timezone
@@ -35,6 +36,7 @@ _HTTP_TIMEOUT_SECONDS = 15.0
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_POSTS = 40
 _KST = timezone(timedelta(hours=9))
+_TRAILING_URL_RE = re.compile(r"(?:^|\s+)https?://.*$", re.IGNORECASE)
 
 
 class TruthSocialError(RuntimeError):
@@ -205,11 +207,12 @@ def _article_input(status: dict[str, Any]) -> FeedArticleInput | None:
     article_content = "\n".join(
         part for part in (post_text, card_title, card_description) if part
     )[:4_000]
+    title = _TRAILING_URL_RE.sub("", post_text).strip() or card_title or post_text
     if not _market_relevant(post_text, article_content):
         return None
     return FeedArticleInput(
         url=url,
-        title=post_text[:500],
+        title=title[:500],
         source=TRUTH_SOCIAL_SOURCE,
         published_at=_published_at(status.get("created_at")),
         article_content=article_content,

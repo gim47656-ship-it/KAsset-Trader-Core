@@ -755,7 +755,10 @@ async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
     statuses = [
         _truth_status(
             relevant_id,
-            "I will impose a 25% tariff on imported semiconductor chips.",
+            (
+                "I will impose a 25% tariff on imported semiconductor chips. "
+                "https://example.com/2026/08/31/policy"
+            ),
         ),
         _truth_status(irrelevant_id, "Happy birthday to a great friend."),
         _truth_status(
@@ -825,6 +828,9 @@ async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
     assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
     assert article.source == "Donald J. Trump · Truth Social"
     assert "tariff" in (article.article_content or "")
+    assert article.title == (
+        "I will impose a 25% tariff on imported semiconductor chips."
+    )
     assert link_count == 0
     assert (
         await db_session.scalar(
