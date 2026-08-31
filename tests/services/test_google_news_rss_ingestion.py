@@ -691,6 +691,42 @@ def test_google_news_task_is_registered_without_recurring_schedule() -> None:
     assert "schedule" not in task.labels
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_truth_social_default_transport_uses_browser_tls_impersonation(
+    db_session,
+    monkeypatch,
+) -> None:
+    observed: dict[str, object] = {}
+    client = FakeTruthSocialClient(_truth_account(), [])
+
+    class FakeCurlSession:
+        def __init__(self, **kwargs) -> None:
+            observed.update(kwargs)
+
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    async def fake_summary(_db, urls):
+        assert list(urls) == []
+        return SimpleNamespace(status="success", summarized=0, failed=0)
+
+    monkeypatch.setattr(truth_social_ingestion, "CurlAsyncSession", FakeCurlSession)
+    monkeypatch.setattr(
+        truth_social_ingestion,
+        "summarize_ingested_news",
+        fake_summary,
+    )
+
+    result = await ingest_truth_social(db_session)
+
+    assert result.fetched == 0
+    assert observed == {"impersonate": "chrome146", "timeout": 15.0}
+
+
 @pytest.mark.asyncio
 async def test_truth_social_rejects_official_account_identity_mismatch(
     db_session,

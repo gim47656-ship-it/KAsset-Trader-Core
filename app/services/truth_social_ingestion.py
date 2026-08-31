@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-import httpx
+from curl_cffi.requests import AsyncSession as CurlAsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import symbol_news_store
@@ -45,13 +45,21 @@ class TruthSocialIdentityError(TruthSocialError):
     """공식 계정 또는 게시물 URL의 identity mismatch를 나타낸다."""
 
 
+class TruthSocialHttpResponse(Protocol):
+    content: bytes
+
+    def raise_for_status(self) -> None: ...
+
+    def json(self) -> object: ...
+
+
 class TruthSocialHttpClient(Protocol):
     async def get(
         self,
         url: str,
         *,
         params: dict[str, str],
-    ) -> httpx.Response: ...
+    ) -> TruthSocialHttpResponse: ...
 
 
 class _PlainTextParser(HTMLParser):
@@ -87,7 +95,7 @@ def _plain_text(value: object) -> str:
     return " ".join(html.unescape(" ".join(parser.parts)).split())
 
 
-def _json_object(response: httpx.Response, *, label: str) -> dict[str, Any]:
+def _json_object(response: TruthSocialHttpResponse, *, label: str) -> dict[str, Any]:
     response.raise_for_status()
     if len(response.content) > _MAX_RESPONSE_BYTES:
         raise TruthSocialError(f"{label} response exceeds size limit")
@@ -97,7 +105,9 @@ def _json_object(response: httpx.Response, *, label: str) -> dict[str, Any]:
     return payload
 
 
-def _json_array(response: httpx.Response, *, label: str) -> list[dict[str, Any]]:
+def _json_array(
+    response: TruthSocialHttpResponse, *, label: str
+) -> list[dict[str, Any]]:
     response.raise_for_status()
     if len(response.content) > _MAX_RESPONSE_BYTES:
         raise TruthSocialError(f"{label} response exceeds size limit")
@@ -248,9 +258,11 @@ async def ingest_truth_social(
 
     run_uuid = f"truth-social-{uuid.uuid4().hex}"
     if http_client is None:
-        async with httpx.AsyncClient(
+        # Truth Social's Cloudflare edge rejects ordinary HTTP/TLS clients with
+        # 403. curl_cffi sends the same TLS fingerprint as the public web app.
+        async with CurlAsyncSession(
+            impersonate="chrome146",
             timeout=_HTTP_TIMEOUT_SECONDS,
-            follow_redirects=False,
         ) as owned_client:
             fetched, items = await _collect(owned_client)
     else:
