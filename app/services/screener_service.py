@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import redis.asyncio as redis
