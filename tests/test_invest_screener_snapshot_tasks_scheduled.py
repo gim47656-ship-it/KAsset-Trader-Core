@@ -86,18 +86,18 @@ def test_us_schedule_label_carries_et_offset_when_enabled() -> None:
         ]
 
 
-def test_kasset_compose_discovers_scheduled_tasks_in_worker_and_scheduler() -> None:
+def test_kasset_compose_discovers_news_tasks_in_worker_and_scheduler() -> None:
     compose = (ROOT / "docker-compose.kasset.yml").read_text(encoding="utf-8")
     worker_command = (
         'command: ["/app/.venv/bin/taskiq", "worker", '
         '"app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", '
-        '"app.tasks.invest_screener_snapshot_tasks", "app.tasks.news_summary_tasks", '
+        '"app.tasks.news_summary_tasks", '
         '"app.tasks.truth_social_tasks", "--workers", "1"]'
     )
     scheduler_command = (
         'command: ["/app/.venv/bin/taskiq", "scheduler", '
         '"app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks", '
-        '"app.tasks.invest_screener_snapshot_tasks", "app.tasks.news_summary_tasks", '
+        '"app.tasks.news_summary_tasks", '
         '"app.tasks.truth_social_tasks"]'
     )
 

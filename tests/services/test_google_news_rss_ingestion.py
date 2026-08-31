@@ -138,6 +138,8 @@ def _truth_status(
     content: str,
     *,
     reblog: object | None = None,
+    in_reply_to_id: object | None = None,
+    card: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "id": status_id,
@@ -145,9 +147,10 @@ def _truth_status(
         "created_at": "2026-08-31T10:00:00.000Z",
         "visibility": "public",
         "reblog": reblog,
+        "in_reply_to_id": in_reply_to_id,
         "content": f"<p>{escape(content)}</p>",
         "account": _truth_account(),
-        "card": None,
+        "card": card,
     }
 
 
@@ -704,13 +707,15 @@ async def test_truth_social_rejects_official_account_identity_mismatch(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_truth_social_persists_only_market_posts_and_hands_off_summary(
+async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
     db_session,
     monkeypatch,
 ) -> None:
     relevant_id = str(uuid.uuid4().int)
     irrelevant_id = str(uuid.uuid4().int)
     boosted_id = str(uuid.uuid4().int)
+    card_only_id = str(uuid.uuid4().int)
+    reply_id = str(uuid.uuid4().int)
     statuses = [
         _truth_status(
             relevant_id,
@@ -722,6 +727,17 @@ async def test_truth_social_persists_only_market_posts_and_hands_off_summary(
             "Federal Reserve rate decision.",
             reblog={"id": "someone-else"},
         ),
+        _truth_status(
+            card_only_id,
+            "Read this report.",
+            card={"title": "New semiconductor tariff policy", "description": ""},
+        ),
+        _truth_status(
+            reply_id,
+            "The stock market will rise.",
+            in_reply_to_id="parent-status",
+        ),
+        _truth_status("not-a-decimal-id", "Federal Reserve rate decision."),
     ]
     summary_calls: list[list[str]] = []
 
@@ -748,21 +764,27 @@ async def test_truth_social_persists_only_market_posts_and_hands_off_summary(
         http_client=FakeTruthSocialClient(_truth_account(), statuses),
     )
 
-    url = f"{TRUTH_SOCIAL_PROFILE_URL}/{relevant_id}"
+    relevant_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{relevant_id}"
+    card_only_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{card_only_id}"
     article = (
-        await db_session.execute(select(NewsArticle).where(NewsArticle.url == url))
+        await db_session.execute(
+            select(NewsArticle).where(NewsArticle.url == relevant_url)
+        )
     ).scalar_one()
     link_count = await db_session.scalar(
         select(func.count())
         .select_from(SymbolNewsRelevance)
         .where(SymbolNewsRelevance.article_id == article.id)
     )
-    assert first.fetched == 3
-    assert first.relevant == 1
-    assert (first.inserted, first.updated, first.skipped) == (1, 0, 2)
-    assert (second.inserted, second.updated, second.skipped) == (0, 0, 3)
+    assert first.fetched == 6
+    assert first.relevant == 2
+    assert (first.inserted, first.updated, first.skipped) == (2, 0, 4)
+    assert (second.inserted, second.updated, second.skipped) == (0, 0, 6)
     assert first.summary_status == "success"
-    assert summary_calls == [[url], [url]]
+    assert summary_calls == [
+        [relevant_url, card_only_url],
+        [relevant_url, card_only_url],
+    ]
     assert article.market == "us"
     assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
     assert article.source == "Donald J. Trump · Truth Social"
@@ -774,7 +796,7 @@ async def test_truth_social_persists_only_market_posts_and_hands_off_summary(
             .select_from(NewsArticle)
             .where(NewsArticle.feed_source == TRUTH_SOCIAL_FEED_SOURCE)
         )
-        == 1
+        == 2
     )
 
 

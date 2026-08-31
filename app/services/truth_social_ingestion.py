@@ -40,6 +40,9 @@ _KST = timezone(timedelta(hours=9))
 class TruthSocialError(RuntimeError):
     """공식 계정 또는 게시물 응답을 신뢰할 수 없음을 나타낸다."""
 
+class TruthSocialIdentityError(TruthSocialError):
+    """공식 계정 또는 게시물 URL의 identity mismatch를 나타낸다."""
+
 
 class TruthSocialHttpClient(Protocol):
     async def get(
@@ -112,7 +115,7 @@ def _validate_account(account: dict[str, Any]) -> None:
         or str(account.get("url") or "") != TRUTH_SOCIAL_PROFILE_URL
         or account.get("verified") is not True
     ):
-        raise TruthSocialError("Truth Social official account identity mismatch")
+        raise TruthSocialIdentityError("Truth Social official account identity mismatch")
 
 
 def _status_url(status_id: str, value: object) -> str:
@@ -131,7 +134,7 @@ def _status_url(status_id: str, value: object) -> str:
         or parsed.username is not None
         or parsed.password is not None
     ):
-        raise TruthSocialError("Truth Social status URL identity mismatch")
+        raise TruthSocialIdentityError("Truth Social status URL identity mismatch")
     return candidate
 
 
@@ -149,7 +152,7 @@ def _market_relevant(title: str, article_content: str) -> bool:
     briefing = format_market_news_briefing(
         [
             {
-                "title": title,
+                "title": f"{title}\n{article_content}",
                 "summary": article_content,
                 "keywords": ["Donald Trump", "Truth Social"],
                 "stock_symbol": None,
@@ -167,7 +170,11 @@ def _article_input(status: dict[str, Any]) -> FeedArticleInput | None:
     if not isinstance(account, dict):
         raise TruthSocialError("Truth Social status account is missing")
     _validate_account(account)
-    if status.get("reblog") is not None or status.get("visibility") != "public":
+    if (
+        status.get("reblog") is not None
+        or status.get("in_reply_to_id") is not None
+        or status.get("visibility") != "public"
+    ):
         return None
     status_id = str(status.get("id") or "")
     if not status_id.isdecimal():
@@ -213,7 +220,17 @@ async def _collect(client: TruthSocialHttpClient) -> tuple[int, list[FeedArticle
     statuses = _json_array(statuses_response, label="account statuses")
     items: list[FeedArticleInput] = []
     for status in statuses:
-        item = _article_input(status)
+        try:
+            item = _article_input(status)
+        except TruthSocialIdentityError:
+            raise
+        except TruthSocialError as exc:
+            logger.warning(
+                "Truth Social malformed status skipped: id=%s error=%s",
+                status.get("id"),
+                exc,
+            )
+            continue
         if item is not None:
             items.append(item)
     return len(statuses), items
@@ -293,6 +310,7 @@ __all__ = [
     "TRUTH_SOCIAL_FEED_SOURCE",
     "TRUTH_SOCIAL_PROFILE_URL",
     "TruthSocialError",
+    "TruthSocialIdentityError",
     "TruthSocialIngestionResult",
     "ingest_truth_social",
 ]

@@ -34,6 +34,10 @@ from app.services.disclosures.quality import (
     DART_LOW_INFORMATION_TITLE_TERMS,
     title_matches_any,
 )
+from app.services.news_summary_service import (
+    complete_korean_analysis_conditions,
+    complete_korean_analysis_exists,
+)
 
 DEFAULT_LIMIT = 20
 MIN_LIMIT = 1
@@ -185,17 +189,6 @@ def _localized_disclosure_title(article: NewsArticle) -> str | None:
     return f"{subject} {form} 공시"
 
 
-def _complete_korean_news_analysis():
-    return exists().where(
-        NewsAnalysisResult.article_id == NewsArticle.id,
-        NewsAnalysisResult.summary.op("~")("[가-힣]"),
-        or_(
-            NewsArticle.title.op("~")("[가-힣]"),
-            NewsAnalysisResult.translated_title.op("~")("[가-힣]"),
-        ),
-    )
-
-
 async def _latest_news_analyses(
     db: AsyncSession,
     article_ids: list[int],
@@ -223,11 +216,7 @@ async def _latest_news_analyses(
         .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
         .where(
             NewsAnalysisResult.article_id.in_(article_ids),
-            NewsAnalysisResult.summary.op("~")("[가-힣]"),
-            or_(
-                NewsArticle.title.op("~")("[가-힣]"),
-                NewsAnalysisResult.translated_title.op("~")("[가-힣]"),
-            ),
+            *complete_korean_analysis_conditions(),
         )
         .subquery()
     )
@@ -307,12 +296,15 @@ async def list_market_news(
                 and_(
                     is_dart,
                     NewsArticle.stock_symbol.is_not(None),
-                    ~low_information_dart,
+                    or_(
+                        ~low_information_dart,
+                        NewsArticle.summary.is_not(None),
+                    ),
                 ),
             )
         )
-        is_disclosure = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
-        is_ordinary_news = or_(
+        is_disclosure_expr = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
+        is_ordinary_news_expr = or_(
             NewsArticle.feed_source.is_(None),
             NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
         )
@@ -321,17 +313,19 @@ async def list_market_news(
             (and_(is_dart, important_dart), 0),
             (
                 and_(
-                    is_disclosure,
+                    is_disclosure_expr,
                     not_dart,
                     NewsArticle.summary.is_not(None),
                 ),
                 0,
             ),
-            (and_(is_ordinary_news, has_analysis), 0),
-            (is_disclosure, 1),
+            (and_(is_ordinary_news_expr, has_analysis), 0),
+            (and_(is_dart, ~low_information_dart), 1),
+            (and_(is_dart, low_information_dart), 2),
+            (is_disclosure_expr, 1),
             (
                 and_(
-                    is_ordinary_news,
+                    is_ordinary_news_expr,
                     NewsArticle.article_content.is_not(None),
                 ),
                 1,
@@ -350,20 +344,20 @@ async def list_market_news(
                 NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
             )
         )
-    is_disclosure = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
-    is_ordinary_news = or_(
+    is_disclosure_expr = NewsArticle.feed_source.in_(DISCLOSURE_FEED_SOURCES)
+    is_ordinary_news_expr = or_(
         NewsArticle.feed_source.is_(None),
         NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
     )
     statement = statement.where(
         or_(
             and_(
-                is_disclosure,
+                is_disclosure_expr,
                 NewsArticle.summary.op("~")("[가-힣]"),
             ),
             and_(
-                is_ordinary_news,
-                _complete_korean_news_analysis(),
+                is_ordinary_news_expr,
+                complete_korean_analysis_exists(),
             ),
         )
     )
@@ -443,22 +437,22 @@ async def list_market_news(
     )
     items: list[MarketNewsItem] = []
     for article, _rank in page:
-        is_disclosure = article.feed_source in DISCLOSURE_FEED_SOURCES
-        analysis = None if is_disclosure else news_analyses.get(article.id)
+        article_is_disclosure = article.feed_source in DISCLOSURE_FEED_SOURCES
+        analysis = None if article_is_disclosure else news_analyses.get(article.id)
         items.append(
             MarketNewsItem(
-                kind="disclosure" if is_disclosure else "news",
+                kind="disclosure" if article_is_disclosure else "news",
                 title=article.title,
                 summary=(
                     article.summary
-                    if is_disclosure
+                    if article_is_disclosure
                     else analysis.summary
                     if analysis is not None
                     else None
                 ),
                 translated_title=(
                     _localized_disclosure_title(article)
-                    if is_disclosure
+                    if article_is_disclosure
                     else analysis.translated_title
                     if analysis is not None
                     else None

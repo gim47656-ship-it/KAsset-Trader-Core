@@ -65,14 +65,24 @@ def _fake_df(n: int) -> pd.DataFrame:
 
 class _CapturingService:
     last_limit: int | None = None
+    last_sort_by: Any = None
+    last_ascending: bool | None = None
 
     def __init__(self, *, full_rows: int) -> None:
         self._full_rows = full_rows
 
     async def query_stock_screener(
-        self, *, columns: Any, markets: Any, limit: int | None = None
+        self,
+        *,
+        columns: Any,
+        markets: Any,
+        limit: int | None = None,
+        sort_by: Any = None,
+        ascending: bool = True,
     ) -> pd.DataFrame:
         type(self).last_limit = limit
+        type(self).last_sort_by = sort_by
+        type(self).last_ascending = ascending
         n = min(limit, self._full_rows) if limit else 150
         return _fake_df(n)
 
@@ -118,6 +128,20 @@ async def test_fetch_rows_diagnostic_limit(monkeypatch, _patch_tvscreener):
 
     assert _CapturingService.last_limit == 10
     assert len(rows) == 10
+
+@pytest.mark.asyncio
+async def test_fetch_rows_can_prioritize_market_cap(monkeypatch, _patch_tvscreener):
+    service = _CapturingService(full_rows=5000)
+    monkeypatch.setattr(provider_mod, "TvScreenerService", lambda **kw: service)
+
+    await TvScreenerUsValuationProvider().fetch_rows(
+        limit=300,
+        sort_by_market_cap=True,
+    )
+
+    assert _CapturingService.last_limit == 300
+    assert _CapturingService.last_sort_by == _FakeStockField.MARKET_CAPITALIZATION
+    assert _CapturingService.last_ascending is False
 
 
 @pytest.mark.asyncio

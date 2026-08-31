@@ -359,8 +359,8 @@ def test_news_items_expose_stored_rows_persisted_symbols_and_stored_summary() ->
                 _related(11, symbol="000660", rank=3),
             ],
             "NewsAnalysisResult": [
-                (11, "저장된 분석 요약", None, None),
-                (11, "오래된 분석 요약", None, None),
+                (11, "저장된 분석 요약", "번역된 헤드라인 11", "헤드라인 11"),
+                (11, "오래된 분석 요약", "이전 헤드라인 11", "헤드라인 11"),
             ],
         }
     )
@@ -374,7 +374,7 @@ def test_news_items_expose_stored_rows_persisted_symbols_and_stored_summary() ->
     assert set(item) == NEWS_ITEM_KEYS
     assert item == {
         "id": "news:11",
-        "headline": "헤드라인 11",
+        "headline": "번역된 헤드라인 11",
         "source": "매일경제",
         "publishedAt": "2026-08-26T02:00:00Z",
         "market": "kr",
@@ -388,20 +388,23 @@ def test_news_items_expose_stored_rows_persisted_symbols_and_stored_summary() ->
     }
 
 
-def test_news_summary_is_null_without_a_stored_analysis_summary() -> None:
-    session = _FakeSession(
-        {"NewsArticle": [_article(12, summary="기사 테이블에 남아 있는 요약")]}
-    )
+def test_news_without_complete_korean_analysis_is_not_exposed() -> None:
+    session = _FakeSession()
     with _client(session) as client:
         body = client.get("/api/v1/ai/briefing?market=kr").json()
 
-    item = body["news"]["items"][0]
-    assert item["summary"] is None
-    assert item["symbols"] == []
+    assert body["news"] == {"status": "empty", "refreshedAt": None, "items": []}
 
 
 def test_news_query_is_newest_first_limit_bounded_and_symbol_scoped() -> None:
-    session = _FakeSession({"NewsArticle": [_article(13)]})
+    session = _FakeSession(
+        {
+            "NewsArticle": [_article(13)],
+            "NewsAnalysisResult": [
+                (13, "저장된 요약", "번역된 헤드라인 13", "헤드라인 13")
+            ],
+        }
+    )
     with _client(session) as client:
         client.get("/api/v1/ai/briefing?market=kr&symbol=005930&limit=3")
 
@@ -413,6 +416,10 @@ def test_news_query_is_newest_first_limit_bounded_and_symbol_scoped() -> None:
     assert "kr" in params.values()
     assert "005930" in params.values()
     assert "news_article_related_symbols" in sql
+    assert "news_analysis_results" in sql
+    assert any(
+        isinstance(value, tuple) and "sec" in value for value in params.values()
+    )
 
 
 def test_research_items_are_citation_only_and_limit_bounded() -> None:

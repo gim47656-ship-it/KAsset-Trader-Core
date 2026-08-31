@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -798,13 +798,71 @@ async def test_incomplete_foreign_analysis_is_reprocessed_until_translation_exis
     assert first.summarized == 1
     assert second.selected == 0
     assert len(generator.calls) == 1
-    assert len(analyses) == 2
-    assert analyses[-1].translated_title == "회사의 반도체 투자 계획 발표"
+    assert len(analyses) == 1
+    assert analyses[0].translated_title == "회사의 반도체 투자 계획 발표"
+    assert analyses[0].updated_at is not None
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recent_incomplete_analysis_observes_retry_backoff(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 31, 12, 0)
+    monkeypatch.setattr(news_summary_service, "_utcnow", lambda: now)
+    title = "Company announces a market update"
+    url = f"https://news.test.invalid/{uuid.uuid4().hex}/recent-incomplete"
+    article = _article(
+        url=url,
+        title=title,
+        summary="The company announced a market update.",
+        published_at=now,
+    )
+    db_session.add(article)
+    await db_session.flush()
+    db_session.add(
+        NewsAnalysisResult(
+            article_id=article.id,
+            model_name="recent-incomplete",
+            sentiment=Sentiment.NEUTRAL,
+            sentiment_score=None,
+            summary="회사가 시장 관련 소식을 발표했다.",
+            translated_title=None,
+            translated_excerpt=None,
+            key_points=[],
+            topics=None,
+            price_impact=None,
+            price_impact_score=None,
+            confidence=70,
+            analysis_quality="high",
+            prompt="recent prompt",
+            raw_response="{}",
+            processing_time_ms=1,
+            created_at=now - timedelta(hours=1),
+            updated_at=None,
+        )
+    )
+    await db_session.commit()
+    generator = FakeSummaryGenerator(
+        {title: "회사가 시장 관련 소식을 발표했다."},
+        translations={title: ("회사의 시장 관련 발표", None)},
+    )
+
+    result = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[url],
+        generator=generator,
+    )
+
+    assert result.selected == 0
+    assert generator.calls == []
+
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ingested_news_summary_chunks_every_persisted_url(
+async def test_ingested_news_summary_caps_and_chunks_persisted_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
@@ -828,13 +886,13 @@ async def test_ingested_news_summary_chunks_every_persisted_url(
         "summarize_pending_news",
         fake_pending,
     )
-    urls = [f"https://news.test.invalid/chunk/{index}" for index in range(45)]
+    urls = [f"https://news.test.invalid/chunk/{index}" for index in range(205)]
 
     result = await summarize_ingested_news(object(), urls)
 
-    assert [len(chunk) for chunk in calls] == [20, 20, 5]
-    assert result.selected == 45
-    assert result.summarized == 45
+    assert [len(chunk) for chunk in calls] == [20] * 10
+    assert result.selected == 200
+    assert result.summarized == 200
     assert result.status == "success"
 
 

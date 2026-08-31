@@ -45,7 +45,12 @@ class TvScreenerUsValuationProvider:
     def __init__(self, *, timeout: float | None = None) -> None:
         self._timeout = timeout
 
-    async def fetch_rows(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+    async def fetch_rows(
+        self,
+        *,
+        limit: int | None = None,
+        sort_by_market_cap: bool = False,
+    ) -> list[dict[str, Any]]:
         is_full = limit is None or limit <= 0
         query_limit = _FULL_UNIVERSE_FETCH_CAP if is_full else limit
         tvs = _import_tvscreener()
@@ -53,10 +58,13 @@ class TvScreenerUsValuationProvider:
         sf = tvs.StockField
 
         cols = []
+        market_cap_field = None
         for key, candidates in _US_STOCK_FIELD_SPECS:
             field = _get_tvscreener_attr(sf, *candidates)
             if field:
                 cols.append(field)
+                if key == "market_cap":
+                    market_cap_field = field
             else:
                 logger.warning(
                     "[US-Valuation] StockField for %s unresolved (tried %s)",
@@ -75,11 +83,14 @@ class TvScreenerUsValuationProvider:
             if self._timeout is not None
             else TvScreenerService()
         )
-        df = await service.query_stock_screener(
-            columns=cols,
-            markets=[market.AMERICA],
-            limit=query_limit,
-        )
+        query_options: dict[str, Any] = {
+            "columns": cols,
+            "markets": [market.AMERICA],
+            "limit": query_limit,
+        }
+        if sort_by_market_cap and market_cap_field is not None:
+            query_options.update(sort_by=market_cap_field, ascending=False)
+        df = await service.query_stock_screener(**query_options)
         if df is None or df.empty:
             return []
 

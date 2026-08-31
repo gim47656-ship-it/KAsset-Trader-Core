@@ -9,12 +9,12 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
-from sqlalchemy import case, exists, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 AUTO_SUMMARY_BATCH_SIZE = 20
+AUTO_SUMMARY_CANDIDATE_LIMIT = 200
+NEWS_SUMMARY_RETRY_BACKOFF = timedelta(hours=6)
 MAX_TRANSLATION_SOURCE_CHARS = 4_000
 MAX_TRANSLATED_TITLE_CHARS = 500
 MAX_TRANSLATED_EXCERPT_CHARS = 6_000
@@ -693,8 +695,8 @@ def _validate_scope(
             raise ValueError("feed_source must select ordinary news, not disclosures")
 
 
-def _has_complete_korean_analysis():
-    return exists().where(
+def complete_korean_analysis_conditions():
+    return (
         NewsAnalysisResult.article_id == NewsArticle.id,
         NewsAnalysisResult.summary.op("~")(_HANGUL_RE.pattern),
         or_(
@@ -702,6 +704,10 @@ def _has_complete_korean_analysis():
             NewsAnalysisResult.translated_title.op("~")(_HANGUL_RE.pattern),
         ),
     )
+
+
+def complete_korean_analysis_exists():
+    return exists().where(*complete_korean_analysis_conditions())
 
 
 async def _candidate_ids(
@@ -714,6 +720,15 @@ async def _candidate_ids(
 ) -> list[int]:
     if article_urls is not None and not article_urls:
         return []
+    retry_cutoff = _utcnow() - NEWS_SUMMARY_RETRY_BACKOFF
+    recent_incomplete_attempt = exists().where(
+        NewsAnalysisResult.article_id == NewsArticle.id,
+        func.coalesce(
+            NewsAnalysisResult.updated_at,
+            NewsAnalysisResult.created_at,
+        )
+        >= retry_cutoff,
+    )
     statement = (
         select(NewsArticle.id)
         .where(
@@ -721,7 +736,8 @@ async def _candidate_ids(
                 NewsArticle.feed_source.is_(None),
                 NewsArticle.feed_source.not_in(DISCLOSURE_FEED_SOURCES),
             ),
-            ~_has_complete_korean_analysis(),
+            ~complete_korean_analysis_exists(),
+            ~recent_incomplete_attempt,
         )
         .order_by(
             case(
@@ -803,22 +819,32 @@ async def _run_batch(
                 skipped_existing += 1
                 await db.rollback()
                 continue
-            complete_conditions = [
-                NewsAnalysisResult.article_id == article_id,
-                NewsAnalysisResult.summary.op("~")(_HANGUL_RE.pattern),
-            ]
-            if not _HANGUL_RE.search(article.title):
-                complete_conditions.append(
-                    NewsAnalysisResult.translated_title.op("~")(_HANGUL_RE.pattern)
-                )
             complete_analysis_id = await db.scalar(
-                select(NewsAnalysisResult.id).where(*complete_conditions).limit(1)
+                select(NewsAnalysisResult.id)
+                .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
+                .where(
+                    NewsArticle.id == article_id,
+                    *complete_korean_analysis_conditions(),
+                )
+                .limit(1)
             )
             if complete_analysis_id is not None:
                 processed += 1
                 skipped_existing += 1
                 await db.rollback()
                 continue
+            repair_target = await db.scalar(
+                select(NewsAnalysisResult)
+                .where(NewsAnalysisResult.article_id == article_id)
+                .order_by(
+                    func.coalesce(
+                        NewsAnalysisResult.updated_at,
+                        NewsAnalysisResult.created_at,
+                    ).desc(),
+                    NewsAnalysisResult.id.desc(),
+                )
+                .limit(1)
+            )
             news_input = _summary_input_for(article)
             if news_input is None:
                 skipped_ids.append(article_id)
@@ -846,32 +872,32 @@ async def _run_batch(
             confidence = _validated_confidence(generated.confidence)
             elapsed_ms = int((time.monotonic() - started) * 1_000)
             now = _utcnow()
-            db.add(
-                NewsAnalysisResult(
-                    article_id=article.id,
-                    model_name=generated.model_name,
-                    sentiment=sentiment,
-                    sentiment_score=None,
-                    summary=summary,
-                    translated_title=translated_title,
-                    translated_excerpt=translated_excerpt,
-                    key_points=[
-                        sentence.strip()
-                        for sentence in _SENTENCE_SPLIT_RE.split(summary)
-                        if sentence.strip()
-                    ],
-                    topics=None,
-                    price_impact=None,
-                    price_impact_score=None,
-                    confidence=confidence,
-                    analysis_quality=_analysis_quality(confidence),
-                    prompt=generated.prompt,
-                    raw_response=generated.raw_response,
-                    processing_time_ms=elapsed_ms,
-                    created_at=now,
-                    updated_at=None,
-                )
+            analysis = repair_target or NewsAnalysisResult(
+                article_id=article.id,
+                created_at=now,
             )
+            analysis.model_name = generated.model_name
+            analysis.sentiment = sentiment
+            analysis.sentiment_score = None
+            analysis.summary = summary
+            analysis.translated_title = translated_title
+            analysis.translated_excerpt = translated_excerpt
+            analysis.key_points = [
+                sentence.strip()
+                for sentence in _SENTENCE_SPLIT_RE.split(summary)
+                if sentence.strip()
+            ]
+            analysis.topics = None
+            analysis.price_impact = None
+            analysis.price_impact_score = None
+            analysis.confidence = confidence
+            analysis.analysis_quality = _analysis_quality(confidence)
+            analysis.prompt = generated.prompt
+            analysis.raw_response = generated.raw_response
+            analysis.processing_time_ms = elapsed_ms
+            analysis.updated_at = now if repair_target is not None else None
+            if repair_target is None:
+                db.add(analysis)
             article.is_analyzed = True
             article.updated_at = now
             await db.commit()
@@ -949,9 +975,9 @@ async def summarize_ingested_news(
     db: AsyncSession,
     article_urls: Sequence[str],
 ) -> NewsSummaryBatchResult:
-    """한 수집 회차의 모든 고유 일반 뉴스를 제한된 chunk로 빠짐없이 처리한다."""
+    """한 수집 회차에서 최대 200개 고유 일반 뉴스를 제한 chunk로 처리한다."""
 
-    unique_urls = tuple(dict.fromkeys(article_urls))
+    unique_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_CANDIDATE_LIMIT]
     results: list[NewsSummaryBatchResult] = []
     for offset in range(0, len(unique_urls), AUTO_SUMMARY_BATCH_SIZE):
         result = await summarize_pending_news(
@@ -1007,17 +1033,21 @@ async def summarize_ingested_news(
 
 __all__ = [
     "AUTO_SUMMARY_BATCH_SIZE",
+    "AUTO_SUMMARY_CANDIDATE_LIMIT",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",
     "MAX_TRANSLATED_EXCERPT_CHARS",
     "MAX_TRANSLATED_TITLE_CHARS",
     "MAX_TRANSLATION_SOURCE_CHARS",
+    "NEWS_SUMMARY_RETRY_BACKOFF",
     "GeneratedNewsSummary",
     "NewsSummaryBatchResult",
     "NewsSummaryGenerator",
     "NewsSummaryInput",
     "OpenAiNewsSummaryGenerator",
     "build_news_summary_generator",
+    "complete_korean_analysis_conditions",
+    "complete_korean_analysis_exists",
     "summarize_ingested_news",
     "summarize_pending_news",
 ]

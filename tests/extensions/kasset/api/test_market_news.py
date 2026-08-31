@@ -646,7 +646,7 @@ async def test_global_feed_curates_dart_but_symbol_feed_keeps_symbol_rows(
         global_titles = {item["title"] for item in global_response.json()["items"]}
         assert important.title in global_titles
         assert routine.title in global_titles
-        assert low_information.title not in global_titles
+        assert low_information.title in global_titles
         assert unlisted.title not in global_titles
 
         global_news = await client.get(
