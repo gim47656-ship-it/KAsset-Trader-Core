@@ -100,12 +100,12 @@ async def test_kr_daily_sync_persists_both_broad_market_benchmarks(
     assert [call.kwargs for call in service.sync_benchmark.await_args_list] == [
         {
             "market": MarketKey.KR,
-            "horizon_bars": 400,
+            "horizon_bars": daily_candles.DAILY_CANDLE_SYNC_BARS_KR,
             "symbol": "KOSPI",
         },
         {
             "market": MarketKey.KR,
-            "horizon_bars": 400,
+            "horizon_bars": daily_candles.DAILY_CANDLE_SYNC_BARS_KR,
             "symbol": "KOSDAQ",
         },
     ]
