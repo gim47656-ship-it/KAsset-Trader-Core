@@ -213,6 +213,36 @@ async def test_disabled_flag_is_a_database_free_no_op(
 
 
 @pytest.mark.asyncio
+async def test_enabled_empty_sweep_reports_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """장중 후보가 0건이어도 sweep 실행 자체는 관측 가능해야 한다."""
+
+    class _Session:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    async def _no_claimable_owners(_db: object, _now: datetime) -> list[int]:
+        return []
+
+    monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(job, "_session", _Session)
+    monkeypatch.setattr(job, "_claimable_owner_ids", _no_claimable_owners)
+    caplog.set_level("INFO", logger=job.__name__)
+
+    assert await run_paper_automation_once(now=_NOW_IN_SESSION) == {
+        "enabled": True,
+        "owners": 0,
+        "outcomes": [],
+    }
+    assert "paper automation sweep done: owners=0 outcomes=[]" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_enabled_sweep_is_blocked_by_the_owner_kill_switch(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

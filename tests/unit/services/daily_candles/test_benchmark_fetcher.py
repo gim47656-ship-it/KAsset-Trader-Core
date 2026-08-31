@@ -138,6 +138,45 @@ async def test_kis_index_history_uses_header_continuation_and_deduplicates() -> 
 
 
 @pytest.mark.asyncio
+async def test_kosdaq_uses_its_kis_index_code() -> None:
+    kis = _KISClient(
+        [
+            (
+                {
+                    "rt_cd": "0",
+                    "output2": [_kis_row("20240503", 870.0)],
+                },
+                {"tr_cont": "D"},
+            )
+        ]
+    )
+
+    frame = await fetch_kr_benchmark_daily_kis(
+        kis=kis,
+        symbol="kosdaq",
+        n=1,
+        input_date=date(2024, 5, 4),
+    )
+
+    assert frame["close"].tolist() == [870.0]
+    assert kis.calls[0]["params"]["FID_INPUT_ISCD"] == "1001"
+
+
+@pytest.mark.asyncio
+async def test_kosdaq_uses_its_naver_index_endpoint() -> None:
+    client = _Client([[_row(date(2024, 5, 3), 870.0)]])
+
+    frame = await fetch_kr_benchmark_daily(
+        symbol="kosdaq",
+        n=1,
+        client=client,
+    )
+
+    assert frame["close"].tolist() == [870.0]
+    assert client.calls[0]["url"].endswith("/KOSDAQ/price")
+
+
+@pytest.mark.asyncio
 async def test_kis_index_history_rejects_repeated_page_state() -> None:
     page = {
         "rt_cd": "0",

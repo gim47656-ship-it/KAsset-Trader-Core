@@ -824,6 +824,54 @@ async def test_kr_benchmark_prefers_kis_index_and_preserves_provenance() -> None
 
 
 @pytest.mark.asyncio
+async def test_kr_benchmark_can_sync_kosdaq_independently() -> None:
+    repo = MagicMock()
+    repo.upsert_rows = AsyncMock(return_value=2)
+    repo.session = MagicMock()
+    repo.session.commit = AsyncMock()
+    repo.session.rollback = AsyncMock()
+    kis_index_fetcher = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "date": ["2024-05-01", "2024-05-02"],
+                "open": [850.0, 860.0],
+                "high": [860.0, 870.0],
+                "low": [840.0, 850.0],
+                "close": [855.0, 865.0],
+                "volume": [1.0, 2.0],
+                "value": [855.0, 1730.0],
+            }
+        )
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+        kis_kr_benchmark_fetcher=kis_index_fetcher,
+        naver_kr_benchmark_fetcher=AsyncMock(),
+    )
+
+    result = await svc.sync_benchmark(
+        market=MarketKey.KR,
+        horizon_bars=2,
+        symbol="kosdaq",
+    )
+
+    kis_index_fetcher.assert_awaited_once_with(symbol="KOSDAQ", n=2)
+    assert [row.symbol for row in repo.upsert_rows.await_args.kwargs["rows"]] == [
+        "KOSDAQ",
+        "KOSDAQ",
+    ]
+    assert result.target == SyncTarget(
+        market=MarketKey.KR,
+        symbol="KOSDAQ",
+        partition="KRX",
+    )
+
+
+@pytest.mark.asyncio
 async def test_kr_benchmark_persists_naver_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

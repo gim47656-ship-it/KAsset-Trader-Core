@@ -707,7 +707,13 @@ async def run_paper_automation_once(
                 "promotion_bypass_reason": outcome.promotion_bypass_reason,
             }
         )
-    return {"enabled": True, "owners": len(owner_ids), "outcomes": outcomes}
+    result = {"enabled": True, "owners": len(owner_ids), "outcomes": outcomes}
+    logger.info(
+        "kasset paper automation sweep done: owners=%d outcomes=%s",
+        len(owner_ids),
+        outcomes,
+    )
+    return result
 
 
 async def run_approved_recommendation_once(
