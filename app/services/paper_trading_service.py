@@ -899,7 +899,7 @@ class PaperTradingService:
         prior_equity = snapshot_equity(prior, currency)
         if prior_equity is None or prior_equity <= 0:
             return None
-        return _q_money((equity / prior_equity - Decimal("1")) * Decimal("100"))
+        return _q_pct((equity / prior_equity - Decimal("1")) * Decimal("100"))
 
     async def record_daily_snapshot(self, account_id: int) -> PaperDailySnapshot:
         """Record today's equity per currency.
