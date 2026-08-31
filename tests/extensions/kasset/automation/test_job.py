@@ -1206,6 +1206,10 @@ async def test_the_ledger_never_reads_another_owners_execution_state(
     recommendation = _approved_recommendation(owner_a_id)
     recommendation.cycle_trace_id = "cyc-owner-a"
     recommendation.paper_execution_attempt_count = 2
+    recommendation.paper_execution_status = "FAILED"
+    recommendation.paper_execution_claimed_at = _NOW - timedelta(seconds=1)
+    recommendation.paper_execution_completed_at = _NOW
+    recommendation.paper_execution_error = "source_owner_failure"
     recommendation_id = recommendation.id
     try:
         db_session.add(recommendation)

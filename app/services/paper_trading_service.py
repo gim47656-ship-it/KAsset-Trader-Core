@@ -1264,7 +1264,7 @@ class PaperTradingService:
 
         initial = {
             "KRW": Decimal(account.initial_capital),
-            "USD": Decimal(account.initial_capital_usd),
+            "USD": Decimal(account.initial_capital_usd or 0),
         }
         cash = {"KRW": account.cash_krw, "USD": account.cash_usd}
 
