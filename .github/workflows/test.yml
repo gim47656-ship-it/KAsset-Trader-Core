@@ -2,10 +2,6 @@ name: Test
 
 on: [push, pull_request, workflow_dispatch]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   # Branch protection snapshot (verified 2026-07-28): only lint,
   # taskiq-smoke, and test (3.13, 1..4) are required checks. The
