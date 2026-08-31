@@ -4,7 +4,7 @@
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 안전 계약은 owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인·promotion, 주문 idempotency를 보존하는 것이다. LIVE 주문 경로와 안전장치 우회는 추가하지 않는다.
 
-이번 변경은 Benchmark RS, First Pullback/NR7/Inside Day, High-Watermark, Loss-Streak, Soft Top-K/Sector Cap을 관찰용 SHADOW evidence로 계산한다. 모든 신규 활성값은 기본 `false`, `promotionEligible=false`이며 주문 입력으로 사용하지 않는다. MCP sidecar도 내부 구독형 AI 실행만 제공하고 주문·DB·Redis·broker 도구를 노출하지 않는다.
+후보별 Benchmark RS는 기존 Candidate Ranker의 활성 입력으로 연결돼 순위·추천에 영향을 줄 수 있지만, PAPER 주문 안전장치는 우회하지 않는다. First Pullback/NR7/Inside Day, High-Watermark, Loss-Streak, Soft Top-K/Sector Cap은 관찰용 SHADOW evidence만 계산한다. 이 SHADOW 기능의 활성값은 모두 기본 `false`, `promotionEligible=false`이며 주문 입력으로 사용하지 않는다. MCP sidecar도 내부 구독형 AI 실행만 제공하고 주문·DB·Redis·broker 도구를 노출하지 않는다.
 
 ## 전체 진행 상태
 - 로컬 `main` 구현 기준 SHA: `1238f69c5899b8e40297e188e86c4cf194ad48fb`(HANDOFF 커밋 전).
@@ -62,4 +62,4 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 5. 운영 PAPER의 기존 KIS token Redis lock 실패와 장중 추천→주문→fill→position→reconcile을 별도 추적한다. 신호가 없으면 무주문이 정상이다.
 
 ## 세션 이력
-- 2026-08-31: Benchmark/Setup/Risk/Portfolio SHADOW, 내부 MCP sidecar, 검증·문서 완료. 운영 미배포.
+- 2026-08-31: Benchmark RS Ranker 연결, Setup/Risk/Portfolio SHADOW, 내부 MCP sidecar, 검증·문서 완료. 운영 미배포.
