@@ -623,8 +623,7 @@ class KAssetShadowDailyHighWatermark(Base):
             name="ck_kasset_shadow_hwm_equities_positive",
         ),
         CheckConstraint(
-            "peak_equity >= session_opening_equity "
-            "AND peak_equity >= current_equity",
+            "peak_equity >= session_opening_equity AND peak_equity >= current_equity",
             name="ck_kasset_shadow_hwm_peak_monotonic",
         ),
         CheckConstraint(
@@ -805,12 +804,8 @@ class KAssetShadowLossLock(Base):
     newest_loss_id: Mapped[int | None] = mapped_column(BigInteger)
     newest_loss_transaction_id: Mapped[str | None] = mapped_column(Text)
     newest_loss_trade_id: Mapped[str | None] = mapped_column(Text)
-    newest_loss_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True)
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True)
-    )
+    newest_loss_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     buy_locked: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

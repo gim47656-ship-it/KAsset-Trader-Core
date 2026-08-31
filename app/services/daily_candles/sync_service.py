@@ -283,8 +283,7 @@ class DailyCandleSyncService:
                     fallback_used = True
                     frame = None
                     logger.warning(
-                        "KIS %s 완료 일봉 수 부족, Naver 대체 경로 사용 "
-                        "requested=%d",
+                        "KIS %s 완료 일봉 수 부족, Naver 대체 경로 사용 requested=%d",
                         target.symbol,
                         horizon_bars,
                     )

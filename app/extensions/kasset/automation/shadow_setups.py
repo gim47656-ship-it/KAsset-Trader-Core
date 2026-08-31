@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
-import json
 from typing import Literal
 
 from app.extensions.kasset.automation.contracts import PriceBar
@@ -89,9 +89,7 @@ class ShadowSetupConfig:
             "pullbackReferenceBars": self.pullback_reference_bars,
             "maximumPullbackDepth": _text(self.maximum_pullback_depth),
             "minimumOrderliness": _text(self.minimum_orderliness),
-            "minimumSupportiveVolumeRatio": _text(
-                self.minimum_supportive_volume_ratio
-            ),
+            "minimumSupportiveVolumeRatio": _text(self.minimum_supportive_volume_ratio),
             "nrWindow": self.nr_window,
             "validitySeconds": int(self.validity.total_seconds()),
         }
@@ -223,7 +221,11 @@ def evaluate_shadow_setups(
     """
 
     evaluated_at = _utc(as_of, "as_of")
-    cutoff = _utc(completed_through, "completed_through") if completed_through else evaluated_at
+    cutoff = (
+        _utc(completed_through, "completed_through")
+        if completed_through
+        else evaluated_at
+    )
     normalized_symbol = symbol.strip().upper()
     if not normalized_symbol:
         return _failed_batch(
@@ -398,7 +400,10 @@ def _prepare_bars(
         if timestamp > as_of or timestamp > cutoff:
             continue
         try:
-            values = tuple(_decimal(getattr(bar, name)) for name in ("open", "high", "low", "close", "volume"))
+            values = tuple(
+                _decimal(getattr(bar, name))
+                for name in ("open", "high", "low", "close", "volume")
+            )
         except (AttributeError, InvalidOperation, ValueError):
             return None, ("invalid_ohlcv", tuple(item.timestamp for item in retained))
         open_, high, low, close, volume = values
@@ -481,9 +486,13 @@ def _evaluate_first_pullback(
         label = "second"
     else:
         label = "later"
-    pullback_index = min(cluster.indices, key=lambda index: (bars[index].low, bars[index].timestamp))
+    pullback_index = min(
+        cluster.indices, key=lambda index: (bars[index].low, bars[index].timestamp)
+    )
     pullback_pivot = bars[pullback_index].low
-    reference_start = max(lookback_start, cluster.indices[0] - config.pullback_reference_bars)
+    reference_start = max(
+        lookback_start, cluster.indices[0] - config.pullback_reference_bars
+    )
     reference_indices = tuple(range(reference_start, cluster.indices[0]))
     if not reference_indices:
         reference_indices = (cluster.indices[0],)
@@ -503,7 +512,9 @@ def _evaluate_first_pullback(
     latest = bars[-1]
     ema_recovered = latest.close > emas[-1]
     trigger_cleared = latest.close > trigger_price
-    prior_volumes = tuple(bar.volume for bar in bars[-(config.volume_lookback + 1) : -1])
+    prior_volumes = tuple(
+        bar.volume for bar in bars[-(config.volume_lookback + 1) : -1]
+    )
     average_volume = _mean(prior_volumes)
     volume_ratio = latest.volume / average_volume if average_volume > _ZERO else _ZERO
     supportive_volume = (
@@ -660,14 +671,18 @@ def _evaluate_nr7_inside_day(
     nr7 = current_range <= min(ranges)
     inside_day = current.high < previous.high and current.low > previous.low
     if nr7 and inside_day:
-        subtype: Literal["none", "nr7", "inside_day", "nr7_inside_day"] = "nr7_inside_day"
+        subtype: Literal["none", "nr7", "inside_day", "nr7_inside_day"] = (
+            "nr7_inside_day"
+        )
     elif nr7:
         subtype = "nr7"
     elif inside_day:
         subtype = "inside_day"
     else:
         subtype = "none"
-    prior_volumes = tuple(bar.volume for bar in bars[-(config.volume_lookback + 1) : -1])
+    prior_volumes = tuple(
+        bar.volume for bar in bars[-(config.volume_lookback + 1) : -1]
+    )
     average_volume = _mean(prior_volumes)
     volume_ratio = current.volume / average_volume if average_volume > _ZERO else _ZERO
     volume_contracted = average_volume > _ZERO and volume_ratio < _ONE
@@ -748,7 +763,9 @@ def _evaluate_nr7_inside_day(
     )
 
 
-def _cluster_contacts(indices: tuple[int, ...], gap_bars: int) -> tuple[_ContactCluster, ...]:
+def _cluster_contacts(
+    indices: tuple[int, ...], gap_bars: int
+) -> tuple[_ContactCluster, ...]:
     if not indices:
         return ()
     clusters: list[list[int]] = [[indices[0]]]
@@ -777,7 +794,7 @@ def _orderliness(bars: tuple[PriceBar, ...], indices: tuple[int, ...]) -> Decima
         return _ONE
     comparisons = 0
     orderly = 0
-    for previous_index, current_index in zip(indices, indices[1:]):
+    for previous_index, current_index in zip(indices, indices[1:], strict=False):
         comparisons += 2
         if bars[current_index].high <= bars[previous_index].high:
             orderly += 1
@@ -947,8 +964,6 @@ def _utc(value: datetime, field: str) -> datetime:
     return value.astimezone(UTC)
 
 
-
-
 def _mean(values: tuple[Decimal, ...]) -> Decimal:
     return sum(values, start=_ZERO) / Decimal(len(values))
 
@@ -959,6 +974,8 @@ def _quantize(value: Decimal) -> Decimal:
 
 def _text(value: Decimal) -> str:
     return format(_quantize(value), "f")
+
+
 def evaluate_ranked_shadow_setups(
     candidate_keys: Sequence[tuple[str, str]],
     histories: Mapping[tuple[str, str], Sequence[PriceBar]],
@@ -1022,12 +1039,8 @@ def shadow_setups_evidence(result: ShadowSetupsResult) -> dict[str, object]:
             "contactLabel": result.first_pullback.contact_label,
             "distinctContactCount": result.first_pullback.distinct_contact_count,
             "confirmed": result.first_pullback.confirmed,
-            "triggerPrice": _optional_decimal_text(
-                result.first_pullback.trigger_price
-            ),
-            "validUntil": _optional_timestamp_text(
-                result.first_pullback.valid_until
-            ),
+            "triggerPrice": _optional_decimal_text(result.first_pullback.trigger_price),
+            "validUntil": _optional_timestamp_text(result.first_pullback.valid_until),
         },
         "nr7InsideDay": {
             "status": result.nr7_inside_day.status.value,
@@ -1035,12 +1048,8 @@ def shadow_setups_evidence(result: ShadowSetupsResult) -> dict[str, object]:
             "nr7": result.nr7_inside_day.nr7,
             "insideDay": result.nr7_inside_day.inside_day,
             "volumeContracted": result.nr7_inside_day.volume_contracted,
-            "triggerPrice": _optional_decimal_text(
-                result.nr7_inside_day.trigger_price
-            ),
-            "validUntil": _optional_timestamp_text(
-                result.nr7_inside_day.valid_until
-            ),
+            "triggerPrice": _optional_decimal_text(result.nr7_inside_day.trigger_price),
+            "validUntil": _optional_timestamp_text(result.nr7_inside_day.valid_until),
         },
         "observations": [
             {
@@ -1065,8 +1074,6 @@ def _optional_timestamp_text(value: datetime | None) -> str | None:
 
 def _optional_decimal_text(value: Decimal | None) -> str | None:
     return _text(value) if value is not None else None
-
-
 
 
 __all__ = [

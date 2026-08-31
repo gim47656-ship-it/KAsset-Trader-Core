@@ -18,9 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.extensions.kasset.models import KAssetShadowDailyHighWatermark
 
 SHADOW_HIGH_WATERMARK_SCHEMA_VERSION = "kasset.shadow-high-watermark.v1"
-SHADOW_HIGH_WATERMARK_CONFIG_SCHEMA_VERSION = (
-    "kasset.shadow-high-watermark-config.v1"
-)
+SHADOW_HIGH_WATERMARK_CONFIG_SCHEMA_VERSION = "kasset.shadow-high-watermark-config.v1"
 SHADOW_MODE = "SHADOW"
 
 _ZERO = Decimal("0")
@@ -121,10 +119,7 @@ class ShadowHighWatermarkThresholds:
             ],
             "maximumLossRatio": str(self.maximum_loss_ratio),
             "maxValuationAgeMicroseconds": (
-                (
-                    self.max_valuation_age.days * 86_400
-                    + self.max_valuation_age.seconds
-                )
+                (self.max_valuation_age.days * 86_400 + self.max_valuation_age.seconds)
                 * 1_000_000
                 + self.max_valuation_age.microseconds
             ),
@@ -299,9 +294,7 @@ class ShadowHighWatermarkEvaluation:
                 "sessionLossRatio": _decimal_text(self.session_loss_ratio),
                 "referenceLossRatio": _decimal_text(self.reference_loss_ratio),
             },
-            "triggeredStages": [
-                stage.as_evidence() for stage in self.triggered_stages
-            ],
+            "triggeredStages": [stage.as_evidence() for stage in self.triggered_stages],
             "reasons": [reason.as_evidence() for reason in self.reasons],
             "state": self.state.as_evidence() if self.state is not None else None,
         }
@@ -736,8 +729,7 @@ def _valid_evaluation(
             )
 
     maximum_loss_reached = (
-        max(session_loss_ratio, reference_loss_ratio)
-        >= thresholds.maximum_loss_ratio
+        max(session_loss_ratio, reference_loss_ratio) >= thresholds.maximum_loss_ratio
     )
     reasons = (reason,)
     if maximum_loss_reached:

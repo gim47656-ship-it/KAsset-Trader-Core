@@ -126,6 +126,7 @@ class BenchmarkReturn:
         object.__setattr__(self, "return_60", _decimal(self.return_60))
         object.__setattr__(self, "benchmark_symbol", symbol)
 
+
 @dataclass(frozen=True, slots=True)
 class CandidateMetadata:
     symbol: str

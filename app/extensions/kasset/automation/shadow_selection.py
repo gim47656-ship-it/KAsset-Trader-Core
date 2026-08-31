@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
-import json
 from typing import Literal
 
 from app.extensions.kasset.automation.candidate_ranker import (
@@ -548,9 +548,7 @@ def allocate_shadow_targets(
             ceiling = atr_by_key.get(key)
             atr_room = unconstrained_delta
             if ceiling is not None and ceiling.maximum_allocation_weight is not None:
-                atr_room = max(
-                    _ZERO, ceiling.maximum_allocation_weight - targets[key]
-                )
+                atr_room = max(_ZERO, ceiling.maximum_allocation_weight - targets[key])
             atr_delta = min(unconstrained_delta, atr_room)
             atr_deltas[key] = atr_delta
             sector = sectors[key]
@@ -560,9 +558,7 @@ def allocate_shadow_targets(
 
         sector_scales: dict[str, Decimal] = {}
         for sector, proposed_delta in sector_delta_totals.items():
-            sector_room = max(
-                _ZERO, config.sector_weight_cap - exposures[sector]
-            )
+            sector_room = max(_ZERO, config.sector_weight_cap - exposures[sector])
             sector_scales[sector] = (
                 min(_ONE, sector_room / proposed_delta)
                 if proposed_delta > _ZERO
@@ -577,9 +573,7 @@ def allocate_shadow_targets(
             sector = sectors[key]
             unconstrained_delta = unconstrained_deltas[key]
             atr_delta = atr_deltas[key]
-            sector_room = max(
-                _ZERO, config.sector_weight_cap - exposures[sector]
-            )
+            sector_room = max(_ZERO, config.sector_weight_cap - exposures[sector])
             applied_delta = _q(
                 min(
                     atr_delta * sector_scales[sector],
@@ -721,9 +715,7 @@ def _prepare_inputs(
             raise _CalculationFailure("duplicate ATR ceiling key")
         _source_time(item.source_timestamp, evaluated_at, "ATR source_timestamp")
         if item.maximum_allocation_weight is not None:
-            _finite_ratio(
-                item.maximum_allocation_weight, "maximum_allocation_weight"
-            )
+            _finite_ratio(item.maximum_allocation_weight, "maximum_allocation_weight")
         if item.maximum_quantity is not None:
             _finite_nonnegative(item.maximum_quantity, "maximum_quantity")
         if (

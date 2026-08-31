@@ -77,10 +77,9 @@ class ShadowLossStreakConfig:
             raise ValueError("loss_limit must be a positive integer")
         if not isinstance(self.lookback, timedelta) or self.lookback <= timedelta(0):
             raise ValueError("lookback must be positive")
-        if (
-            not isinstance(self.lock_duration, timedelta)
-            or self.lock_duration <= timedelta(0)
-        ):
+        if not isinstance(
+            self.lock_duration, timedelta
+        ) or self.lock_duration <= timedelta(0):
             raise ValueError("lock_duration must be positive")
         if not isinstance(self.emit_global_evidence, bool) or not isinstance(
             self.emit_symbol_evidence, bool
@@ -94,9 +93,7 @@ class ShadowLossStreakConfig:
             "stopLossReasons": list(self.stop_loss_reasons),
             "lossLimit": self.loss_limit,
             "lookbackMicroseconds": _timedelta_microseconds(self.lookback),
-            "lockDurationMicroseconds": _timedelta_microseconds(
-                self.lock_duration
-            ),
+            "lockDurationMicroseconds": _timedelta_microseconds(self.lock_duration),
             "emission": {
                 "globalEvidenceEnabled": self.emit_global_evidence,
                 "symbolEvidenceEnabled": self.emit_symbol_evidence,
@@ -236,9 +233,7 @@ class ShadowLossLockState:
             streak_count=observation.streak_count,
             loss_limit=observation.loss_limit,
             newest_loss_id=observation.newest_loss_id,
-            newest_loss_transaction_id=(
-                observation.newest_loss_transaction_id
-            ),
+            newest_loss_transaction_id=(observation.newest_loss_transaction_id),
             newest_loss_trade_id=observation.newest_loss_trade_id,
             newest_loss_at=observation.newest_loss_at,
             expires_at=observation.expires_at,
@@ -368,12 +363,8 @@ def evaluate_shadow_loss_streak(
     """실제 정책을 호출하지 않고 전역·종목별 가상 BUY 잠금을 계산한다."""
     config_fingerprint = config.fingerprint
 
-    normalized_market = (
-        market.strip().upper() if isinstance(market, str) else ""
-    )
-    normalized_symbol = (
-        symbol.strip().upper() if isinstance(symbol, str) else ""
-    )
+    normalized_market = market.strip().upper() if isinstance(market, str) else ""
+    normalized_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
     normalized_evaluated_at = _utc_or_none(evaluated_at)
     scope_valid = (
         not isinstance(owner_user_id, bool)
@@ -431,11 +422,7 @@ def evaluate_shadow_loss_streak(
 
     global_facts, global_failure = _deduplicate_facts(prepared)
     symbol_facts, symbol_failure = _deduplicate_facts(
-        tuple(
-            fact
-            for fact in prepared
-            if fact.symbol == normalized_symbol
-        )
+        tuple(fact for fact in prepared if fact.symbol == normalized_symbol)
     )
     deduplication_failure = global_failure or symbol_failure
     if deduplication_failure is not None:
@@ -481,9 +468,7 @@ def evaluate_shadow_loss_streak(
         market=normalized_market,
         symbol=normalized_symbol,
         evaluated_at=normalized_evaluated_at,
-        source_timestamps=tuple(
-            fact.executed_at for fact in global_facts
-        ),
+        source_timestamps=tuple(fact.executed_at for fact in global_facts),
         config=config,
         config_fingerprint=config_fingerprint,
         global_lock=global_lock,
@@ -548,23 +533,17 @@ async def persist_shadow_loss_locks(
             }
         }
         mutable_values["updated_at"] = func.now()
-        statement = (
-            base.on_conflict_do_update(
-                index_elements=[
-                    "owner_user_id",
-                    "account_key",
-                    "market",
-                    "lock_scope",
-                    "symbol",
-                ],
-                set_=mutable_values,
-                where=(
-                    KAssetShadowLossLock.evaluated_at
-                    < base.excluded.evaluated_at
-                ),
-            )
-            .returning(KAssetShadowLossLock)
-        )
+        statement = base.on_conflict_do_update(
+            index_elements=[
+                "owner_user_id",
+                "account_key",
+                "market",
+                "lock_scope",
+                "symbol",
+            ],
+            set_=mutable_values,
+            where=(KAssetShadowLossLock.evaluated_at < base.excluded.evaluated_at),
+        ).returning(KAssetShadowLossLock)
         row = await db.scalar(statement)
         if row is not None:
             persisted.append(_row_to_state(row))
@@ -612,10 +591,7 @@ def _prepare_facts(
             not isinstance(fact.symbol, str)
             or not isinstance(fact.transaction_id, str)
             or not isinstance(fact.trade_id, str)
-            or (
-                fact.exit_reason is not None
-                and not isinstance(fact.exit_reason, str)
-            )
+            or (fact.exit_reason is not None and not isinstance(fact.exit_reason, str))
             or (
                 fact.realized_pnl is not None
                 and not isinstance(fact.realized_pnl, Decimal)
@@ -922,10 +898,7 @@ def _timestamp_text(value: object) -> str | None:
 
 
 def _timedelta_microseconds(value: timedelta) -> int:
-    return (
-        (value.days * 86_400 + value.seconds) * 1_000_000
-        + value.microseconds
-    )
+    return (value.days * 86_400 + value.seconds) * 1_000_000 + value.microseconds
 
 
 __all__ = [

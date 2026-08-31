@@ -417,9 +417,7 @@ class AIRecommendationVerticalSlice:
                 "mode": "SHADOW",
                 "active": self._shadow_setup_config.feature_enabled,
                 "configFingerprint": self._shadow_setup_config.fingerprint,
-                "candidates": [
-                    shadow_setups_evidence(item) for item in shadow_setups
-                ],
+                "candidates": [shadow_setups_evidence(item) for item in shadow_setups],
             },
             "candidateExclusions": [
                 result.as_evidence() for result in ranking.excluded
