@@ -748,11 +748,14 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     assert isinstance(baseline, dict)
     assert isinstance(cost_stress, list)
 
-    assert stored["grossProfit"] == baseline["grossProfit"]
-    assert stored["grossLoss"] == baseline["grossLoss"]
+    assert Decimal(str(stored["grossProfit"])) == Decimal(str(baseline["grossProfit"]))
+    assert Decimal(str(stored["grossLoss"])) == Decimal(str(baseline["grossLoss"]))
     expected_profit_factor = expected.profit_factor
-    assert stored["profitFactor"] == (
-        str(expected_profit_factor) if expected_profit_factor is not None else None
+    stored_profit_factor = stored["profitFactor"]
+    assert (
+        Decimal(str(stored_profit_factor)) == expected_profit_factor
+        if expected_profit_factor is not None
+        else stored_profit_factor is None
     )
     expected_total_costs = Decimal(str(baseline["feesPaid"])) + Decimal(
         str(baseline["slippageCost"])
@@ -762,7 +765,7 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     for item in cost_stress:
         assert isinstance(item, dict)
         cost_stressed_returns.append(Decimal(str(item["totalReturn"])))
-    assert stored["costStressedTotalReturn"] == str(min(cost_stressed_returns))
+    assert Decimal(str(stored["costStressedTotalReturn"])) == min(cost_stressed_returns)
     assert thresholds["minProfitFactor"] == str(
         DEFAULT_PROMOTION_THRESHOLDS.min_profit_factor
     )
