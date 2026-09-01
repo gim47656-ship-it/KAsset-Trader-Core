@@ -49,15 +49,10 @@ INTRADAY_BAR_INTERVAL: Final = timedelta(minutes=5)
 #: 기준이므로 bucket 하나가 막 닫힌 직후에도 통과할 수 있어야 한다.
 INTRADAY_MAX_BAR_AGE: Final = timedelta(minutes=12)
 
-#: 5분 bucket을 몇 개까지 읽을지. 5분 창 1개 + 20분 창 4개 + 기준선 12개와
-#: 개장 구간을 모두 덮고도 남는 폭이다.
-INTRADAY_BAR_COUNT: Final = 60
-
-#: KR 지수 상대강도에 쓰는 벤치마크 심볼.
-KR_INDEX_SYMBOL_BY_EXCHANGE: Final[dict[str, str]] = {
-    "KOSPI": "KOSPI",
-    "KOSDAQ": "KOSDAQ",
-}
+#: KRX/XNYS 정규장 390분 전체(78 bucket)와 공급자 경계 여유를 함께 읽는다.
+#: 최근 bar만 반환하는 공급자에서도 개장 bucket을 잃지 않아 ORB와 세션-reset
+#: VWAP이 장 마감까지 같은 세션 기준을 유지해야 한다.
+INTRADAY_BAR_COUNT: Final = 84
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +346,6 @@ __all__ = [
     "INTRADAY_BAR_INTERVAL",
     "INTRADAY_BAR_PERIOD",
     "INTRADAY_MAX_BAR_AGE",
-    "KR_INDEX_SYMBOL_BY_EXCHANGE",
     "CompletedIntradayBars",
     "IntradayBarsResult",
     "IntradayBarsUnavailable",

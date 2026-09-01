@@ -394,11 +394,9 @@ class RecommendationProducer:
         # 않으므로, AI 실패나 불일치가 여기서 action을 바꾸지 못한다.
         confidence = Decimal("0")
         if candidate != Action.HOLD and decision.action == candidate:
+            # Daily Setup과 intraday trigger를 통과한 기술 판정이 action의 관문이다.
+            # confidence는 근거 강도이지 별도의 숨은 허용/차단 기준이 아니다.
             confidence = min(ensemble.confidence, decision.confidence)
-            if confidence < Decimal("0.50"):
-                rejected_reasons.append("combined confidence is below the action floor")
-                candidate = Action.HOLD
-                confidence = Decimal("0")
         else:
             if candidate != Action.HOLD and decision.action != candidate:
                 rejected_reasons.append(

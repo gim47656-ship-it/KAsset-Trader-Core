@@ -1797,10 +1797,11 @@ def _admitted_candidate(
     ranking = item.factor_ranking
     setup = item.setup
     active = tuple(trigger for trigger in trigger_decision.triggers if trigger.active)
+    available = tuple(
+        trigger for trigger in trigger_decision.triggers if trigger.available
+    )
     trigger_strength = (
-        Decimal(len(active)) / Decimal(len(trigger_decision.triggers))
-        if trigger_decision.triggers
-        else Decimal("0")
+        Decimal(len(active)) / Decimal(len(available)) if available else Decimal("0")
     )
     valid_until = min(
         (

@@ -18,6 +18,16 @@ from typing import Any
 from app.extensions.kasset.automation.candidate_ranker import (
     DEFAULT_CANDIDATE_RANKER_CONFIG,
 )
+from app.extensions.kasset.automation.daily_setup import DEFAULT_DAILY_SETUP_CONFIG
+from app.extensions.kasset.automation.intraday_data import (
+    INTRADAY_BAR_COUNT,
+    INTRADAY_BAR_INTERVAL,
+    INTRADAY_BAR_PERIOD,
+    INTRADAY_MAX_BAR_AGE,
+)
+from app.extensions.kasset.automation.intraday_triggers import (
+    DEFAULT_INTRADAY_TRIGGER_POLICY,
+)
 from app.extensions.kasset.automation.portfolio_backtest import (
     PortfolioBacktestConfig,
     WalkForwardConfig,
@@ -45,6 +55,10 @@ STRATEGY_CODE_PATHS: tuple[str, ...] = (
     "app/extensions/kasset/automation/benchmark_relative_strength.py",
     "app/extensions/kasset/automation/candidate_ranker.py",
     "app/extensions/kasset/automation/contracts.py",
+    "app/extensions/kasset/automation/daily_setup.py",
+    "app/extensions/kasset/automation/intraday_data.py",
+    "app/extensions/kasset/automation/intraday_triggers.py",
+    "app/extensions/kasset/automation/market_session.py",
     "app/extensions/kasset/automation/portfolio_backtest.py",
     "app/extensions/kasset/automation/position_manager.py",
     "app/extensions/kasset/automation/position_sizing.py",
@@ -52,6 +66,7 @@ STRATEGY_CODE_PATHS: tuple[str, ...] = (
     "app/extensions/kasset/automation/regime.py",
     "app/extensions/kasset/automation/strategies.py",
     "app/extensions/kasset/automation/strategy_promotion.py",
+    "app/extensions/kasset/automation/vertical_slice.py",
 )
 
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -136,6 +151,14 @@ def effective_strategy_config() -> dict[str, object]:
     return _canonical_config_value(
         {
             "candidateRanker": DEFAULT_CANDIDATE_RANKER_CONFIG,
+            "dailySetup": DEFAULT_DAILY_SETUP_CONFIG,
+            "intradayData": {
+                "period": INTRADAY_BAR_PERIOD,
+                "barInterval": INTRADAY_BAR_INTERVAL,
+                "maximumBarAge": INTRADAY_MAX_BAR_AGE,
+                "barCount": INTRADAY_BAR_COUNT,
+            },
+            "intradayTriggerPolicy": DEFAULT_INTRADAY_TRIGGER_POLICY,
             "portfolioBacktest": portfolio,
             "evidenceUniverseSelection": {
                 "candidatesPerMarket": BACKTEST_CANDIDATES_PER_MARKET,
