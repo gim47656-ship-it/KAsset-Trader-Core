@@ -95,6 +95,14 @@ class BenchmarkCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class SymbolReadinessExclusion:
+    """One active cohort member excluded from the forward evaluation sample."""
+
+    symbol: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MarketReadiness:
     """Immutable readiness evidence for one market cohort."""
 
@@ -115,6 +123,8 @@ class MarketReadiness:
     symbols_with_exactly_251_bars: int
     symbols_with_at_least_252_bars: int
     eligible_symbol_count: int
+    eligible_symbols: tuple[str, ...]
+    excluded_symbols: tuple[SymbolReadinessExclusion, ...]
     stale_bar_count: int
     future_bar_count: int
     duplicate_timestamp_count: int
@@ -709,7 +719,8 @@ def _evaluate_market(
     )
     stale = 0
     missing: int | None = 0 if expected_sessions else None
-    eligible = 0
+    eligible_symbols: list[str] = []
+    excluded_symbols: list[SymbolReadinessExclusion] = []
     adjustment_covered = 0
     for row in core_rows:
         latest = cast(datetime | None, row.get("latest_bar_at"))
@@ -746,15 +757,31 @@ def _evaluate_market(
             if row_missing == 0 and _int(row, "invalid_adjustment_count") == 0:
                 adjustment_covered += 1
 
-        if (
-            _int(row, "bar_count") >= REQUIRED_HISTORY_BARS
-            and not row_stale
-            and row_missing == 0
-            and _int(row, "future_bar_count") == 0
-            and _int(row, "duplicate_timestamp_count") == 0
-            and _int(row, "ohlc_anomaly_count") == 0
-        ):
-            eligible += 1
+        symbol = str(row.get("symbol") or "").strip().upper()
+        exclusion_reasons: list[str] = []
+        if _int(row, "bar_count") < REQUIRED_HISTORY_BARS:
+            exclusion_reasons.append("insufficient_history")
+        if row_stale:
+            exclusion_reasons.append("stale_bar")
+        if row_missing:
+            exclusion_reasons.append("missing_expected_trading_days")
+        if _int(row, "future_bar_count"):
+            exclusion_reasons.append("future_bar")
+        if _int(row, "duplicate_timestamp_count"):
+            exclusion_reasons.append("duplicate_bar_timestamp")
+        if _int(row, "ohlc_anomaly_count"):
+            exclusion_reasons.append("invalid_ohlcv")
+        if _int(row, "invalid_adjustment_count"):
+            exclusion_reasons.append("adjustment_coverage_incomplete")
+        if exclusion_reasons:
+            excluded_symbols.append(
+                SymbolReadinessExclusion(
+                    symbol=symbol,
+                    reasons=tuple(exclusion_reasons),
+                )
+            )
+        else:
+            eligible_symbols.append(symbol)
 
     list_date_covered = sum(1 for row in core_rows if row.get("list_date") is not None)
     delist_date_covered_inactive = sum(
@@ -865,20 +892,24 @@ def _evaluate_market(
             or cohort_active != cohort.requested_size
         ):
             daily_block("cohort_member_count_mismatch")
-        if eligible == 0:
+        if not eligible_symbols:
             daily_block("eligible_symbols_zero")
-        if total > 0 and at_least_252 < total:
-            daily_block("insufficient_history")
-        if total > 0 and eligible < total and at_least_252 == total:
-            daily_block("member_not_eligible")
-        if stale:
-            daily_block("stale_bar")
-        if future:
-            daily_block("future_bar")
-        if duplicates:
-            daily_block("duplicate_bar_timestamp")
-        if ohlc:
-            daily_block("invalid_ohlcv")
+            if total > 0 and at_least_252 < total:
+                daily_block("insufficient_history")
+            if total > 0 and at_least_252 == total:
+                daily_block("member_not_eligible")
+            if stale:
+                daily_block("stale_bar")
+            if future:
+                daily_block("future_bar")
+            if duplicates:
+                daily_block("duplicate_bar_timestamp")
+            if ohlc:
+                daily_block("invalid_ohlcv")
+            if missing:
+                daily_block("missing_expected_trading_days")
+            if price_adjustment_status != "covered":
+                daily_block("adjustment_coverage_incomplete")
         if calendar_status == "unavailable":
             daily_block("calendar_unavailable")
         else:
@@ -886,14 +917,10 @@ def _evaluate_market(
                 daily_block("expected_session_window_incomplete")
             if window.ingest_lag_sessions > MAX_INGEST_LAG_SESSIONS:
                 daily_block("ingest_lag_exceeded")
-            if missing:
-                daily_block("missing_expected_trading_days")
         if benchmark_member_count != 1:
             daily_block("benchmark_member_count_invalid")
         if benchmark.status != "available":
             daily_block("benchmark_unavailable")
-        if price_adjustment_status != "covered":
-            daily_block("adjustment_coverage_incomplete")
 
     # Forward PAPER promotion is gated on evidence the configured sources can
     # actually produce. Historical-fidelity claims (point-in-time membership,
@@ -955,7 +982,9 @@ def _evaluate_market(
         inactive_symbol_count=inactive,
         symbols_with_exactly_251_bars=exactly_251,
         symbols_with_at_least_252_bars=at_least_252,
-        eligible_symbol_count=eligible,
+        eligible_symbol_count=len(eligible_symbols),
+        eligible_symbols=tuple(eligible_symbols),
+        excluded_symbols=tuple(excluded_symbols),
         stale_bar_count=stale,
         future_bar_count=future,
         duplicate_timestamp_count=duplicates,
@@ -1152,6 +1181,7 @@ __all__ = [
     "DailyCandlesReadinessService",
     "MAX_INGEST_LAG_SESSIONS",
     "MarketReadiness",
+    "SymbolReadinessExclusion",
     "REQUIRED_BENCHMARK_BARS",
     "REQUIRED_HISTORY_BARS",
 ]

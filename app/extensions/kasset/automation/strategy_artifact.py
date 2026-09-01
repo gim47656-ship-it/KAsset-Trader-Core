@@ -45,7 +45,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
 from app.services.research_canonical_hash import canonical_sha256
 
 STRATEGY_ARTIFACT_SCHEMA_VERSION = "kasset.strategy-artifact.v1"
-PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v4"
+PROMOTION_EVIDENCE_SCHEMA_VERSION = "kasset.paper-promotion-evidence.v5"
 BACKTEST_CANDIDATES_PER_MARKET = 6
 BACKTEST_HISTORY_BARS = 400
 

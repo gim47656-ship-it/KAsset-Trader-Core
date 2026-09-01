@@ -481,6 +481,46 @@ async def test_252_bar_threshold_and_quality_checks_are_not_weakened(
 
 
 @pytest.mark.asyncio
+async def test_ineligible_member_is_excluded_without_blocking_ready_peers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member("READY", sessions=sessions),
+            _member(
+                "SHORT",
+                sessions=sessions,
+                bar_count=251,
+                observed_expected=251,
+                latest_day=sessions[-2],
+                invalid_adjustment=1,
+            ),
+        ],
+        sessions=sessions,
+    )
+
+    market = result.for_market("us")
+    assert market.total_symbol_count == 2
+    assert len(market.excluded_symbols) == 1
+    assert market.excluded_symbols[0].symbol == "SHORT"
+    assert market.excluded_symbols[0].reasons == (
+        "insufficient_history",
+        "stale_bar",
+        "missing_expected_trading_days",
+        "adjustment_coverage_incomplete",
+    )
+    assert market.eligible_symbol_count == 1
+    assert market.eligible_symbols == ("READY",)
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is True
+    assert "us:insufficient_history" not in market.daily_history_blockers
+    assert "us:adjustment_coverage_incomplete" not in market.daily_history_blockers
+
+
+@pytest.mark.asyncio
 async def test_forward_cohort_reaches_promotion_ready_with_unresolved_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

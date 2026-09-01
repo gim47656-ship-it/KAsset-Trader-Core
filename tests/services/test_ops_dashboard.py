@@ -672,6 +672,8 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         symbols_with_exactly_251_bars=0,
         symbols_with_at_least_252_bars=0,
         eligible_symbol_count=0,
+        eligible_symbols=(),
+        excluded_symbols=(),
         stale_bar_count=0,
         future_bar_count=0,
         duplicate_timestamp_count=0,
