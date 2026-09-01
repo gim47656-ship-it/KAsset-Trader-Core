@@ -10,7 +10,11 @@ import pytest
 from app.extensions.kasset.ai.model_router import _TierAnalysis
 from app.extensions.kasset.automation import vertical_slice
 from app.extensions.kasset.automation.ai_shadow import build_ai_shadow_observation
-from app.extensions.kasset.automation.candidate_ranker import CandidateRankResult
+from app.extensions.kasset.automation.candidate_ranker import (
+    CandidateRankerConfig,
+    CandidateRankingBatch,
+    CandidateRankResult,
+)
 from app.extensions.kasset.automation.contracts import (
     Action,
     ExternalEvidence,
@@ -18,6 +22,11 @@ from app.extensions.kasset.automation.contracts import (
     StrategyResult,
 )
 from app.extensions.kasset.automation.policy import HardRiskResult, PortfolioPlan
+from app.extensions.kasset.automation.position_sizing import (
+    PositionSizingReason,
+    PositionSizingResult,
+    PositionSizingZeroCode,
+)
 from app.extensions.kasset.automation.producer import WeightedEnsembleDecision
 from app.extensions.kasset.automation.regime import (
     MarketRegime,
@@ -33,6 +42,214 @@ from app.extensions.kasset.automation.vertical_slice import (
 from app.schemas.ai_recommendations import RecommendationRanking
 
 _NOW = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
+_BULL = RegimeAssessment(
+    regime=MarketRegime.BULL,
+    detail="trend",
+    breadth_above_sma20=Decimal("0.7"),
+    median_return20=Decimal("0.1"),
+    median_atr_ratio=Decimal("0.02"),
+    weights=weights_for_regime(MarketRegime.BULL),
+)
+
+
+def _rank_result(
+    symbol: str,
+    *,
+    position: int,
+    market: str = "KR",
+) -> CandidateRankResult:
+    return CandidateRankResult(
+        symbol=symbol,
+        market=market,  # type: ignore[arg-type]
+        total_score=Decimal("0.9") - Decimal(position) / Decimal("100"),
+        factor_scores=(),
+        penalties=(),
+        data_as_of=_NOW - timedelta(hours=1),
+        valid_until=_NOW + timedelta(hours=1),
+        exclusion_reason=None,
+        atr_14=Decimal("2"),
+        average_volume_20=Decimal("1000000"),
+        average_turnover_20=Decimal("100000000"),
+        evidence=(),
+        sources=("tvscreener_kr",),
+        is_held=False,
+        is_watchlisted=False,
+        eligible_for_new_buy=True,
+        rank_position=position,
+        ranked_total=position,
+    )
+
+
+def _strategy_result(symbol: str) -> StrategyResult:
+    return StrategyResult(
+        action=Action.BUY,
+        confidence=Decimal("0.80"),
+        entry=Decimal("100"),
+        stop=Decimal("98"),
+        target=Decimal("104"),
+        rationale=("breakout",),
+        evidence=(),
+        strategy=StrategyName.BREAKOUT,
+        version="1.0.0",
+        symbol=symbol,
+        market="KRX",
+        as_of=_NOW,
+        valid_until=_NOW + timedelta(hours=1),
+    )
+
+
+def _sizing_result(
+    quantity: Decimal,
+    *,
+    zero_reasons: tuple[PositionSizingReason, ...] = (),
+) -> PositionSizingResult:
+    return PositionSizingResult(
+        action="BUY",
+        market="KRX",
+        quantity=quantity,
+        unrounded_quantity=quantity,
+        lot_size=Decimal("1"),
+        risk_budget=Decimal("1000"),
+        risk_per_unit=Decimal("2"),
+        risk_per_trade_rate=Decimal("0.01"),
+        regime="TRENDING_UP",
+        regime_multiplier=Decimal("1"),
+        caps=(),
+        limiting_caps=(),
+        zero_reasons=zero_reasons,
+    )
+
+
+def _below_lot_plan() -> PortfolioPlan:
+    return PortfolioPlan(
+        target_weight=Decimal("0.1"),
+        target_quantity=Decimal("0"),
+        cash_after=Decimal("1000"),
+        note="Deterministic position sizing returned zero; reasons=BELOW_MARKET_LOT.",
+        position_sizing=_sizing_result(
+            Decimal("0"),
+            zero_reasons=(
+                PositionSizingReason(
+                    code=PositionSizingZeroCode.BELOW_MARKET_LOT,
+                    field="quantity",
+                    detail="capped quantity is below the market lot size",
+                ),
+            ),
+        ),
+    )
+
+
+def _affordable_plan() -> PortfolioPlan:
+    return PortfolioPlan(
+        target_weight=Decimal("0.1"),
+        target_quantity=Decimal("3"),
+        cash_after=Decimal("700"),
+        note="Deterministic ATR risk sizing; limitingCaps=RISK_BUDGET.",
+        position_sizing=_sizing_result(Decimal("3")),
+    )
+
+
+def _stub_review_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ranked_symbols: tuple[str, ...],
+    unaffordable: frozenset[str],
+    ranker_config: CandidateRankerConfig,
+) -> tuple[AIRecommendationVerticalSlice, AsyncMock, AsyncMock]:
+    """Wire one owner cycle down to the ranked-row review loop, without a DB."""
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    instance = AIRecommendationVerticalSlice(
+        db,
+        MagicMock(),
+        now=_NOW,
+        allowed_markets=frozenset({"KR"}),
+        ranker_config=ranker_config,
+    )
+    portfolio_plan = AsyncMock(
+        side_effect=lambda *_args, **kwargs: (
+            _below_lot_plan()
+            if kwargs["symbol"] in unaffordable
+            else _affordable_plan()
+        )
+    )
+    instance._policy = SimpleNamespace(  # type: ignore[assignment]
+        get_snapshot=AsyncMock(
+            return_value=SimpleNamespace(
+                limits=SimpleNamespace(currency="KRW"),
+                usage=object(),
+            )
+        ),
+        portfolio_plan=portfolio_plan,
+    )
+    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
+        run_owner=AsyncMock(return_value=())
+    )
+    monkeypatch.setattr(
+        vertical_slice.daily_routine_service,
+        "recommendation_markets",
+        AsyncMock(return_value=frozenset({"KR"})),
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "load_candidate_benchmark_returns",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "evaluate_ranked_shadow_setups",
+        MagicMock(return_value=()),
+    )
+    instance._load_candidates = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            TradingCandidate(symbol, "KRX", None, "tvscreener_kr")
+            for symbol in ranked_symbols
+        ]
+    )
+    instance._sync_missing_kr_candles = AsyncMock(  # type: ignore[method-assign]
+        return_value={"requested": 0, "synced": 0, "failed": 0}
+    )
+    instance._load_candidate_bars = AsyncMock(return_value={})  # type: ignore[method-assign]
+    instance._ranker = SimpleNamespace(  # type: ignore[assignment]
+        rank=MagicMock(
+            return_value=CandidateRankingBatch(
+                ranked=tuple(
+                    _rank_result(symbol, position=index)
+                    for index, symbol in enumerate(ranked_symbols, start=1)
+                ),
+                excluded=(),
+            )
+        )
+    )
+
+    def _evaluate(candidate, bars, regime, *, factor_ranking):
+        strategy = _strategy_result(candidate.symbol)
+        return EvaluatedCandidate(
+            candidate=candidate,
+            strategy_results=(strategy,),
+            ensemble=WeightedEnsembleDecision(
+                action=Action.BUY,
+                score=Decimal("0.5"),
+                confidence=Decimal("0.8"),
+                agreeing=(strategy,),
+                votes=(),
+            ),
+            factor_ranking=factor_ranking,
+            regime=regime,
+        )
+
+    instance._evaluate_candidate = MagicMock(side_effect=_evaluate)  # type: ignore[method-assign]
+    review_candidate = AsyncMock(
+        side_effect=lambda _owner, item, _regime: (
+            None,
+            "low_confidence",
+            instance._review_outcome(item, reason="low_confidence"),
+        )
+    )
+    instance._review_candidate = review_candidate  # type: ignore[method-assign]
+    return instance, review_candidate, portfolio_plan
 
 
 @pytest.mark.asyncio
@@ -157,22 +374,27 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         ),
     )
 
+    sizing = await instance._pre_ai_sizing(  # noqa: SLF001 - pre-AI sizing seam
+        4,
+        evaluated,
+        _BULL,
+        snapshot=SimpleNamespace(limits=object(), usage=object()),
+    )
+    assert isinstance(sizing, vertical_slice._PreAiSizing)  # noqa: SLF001
+
     await instance._persist_recommendation(  # noqa: SLF001 - production seam regression
         4,
         reviewed,
-        RegimeAssessment(
-            regime=MarketRegime.BULL,
-            detail="trend",
-            breadth_above_sma20=Decimal("0.7"),
-            median_return20=Decimal("0.1"),
-            median_atr_ratio=Decimal("0.02"),
-            weights=weights_for_regime(MarketRegime.BULL),
-        ),
+        _BULL,
         position=1,
         total=100,
-        snapshot=SimpleNamespace(limits=object(), usage=object()),
+        sizing=sizing,
     )
 
+    # AI 앞단에서 한 번 계산한 plan을 저장 단계가 그대로 재사용한다.
+    assert portfolio_plan.await_count == 1
+    assert captured["suggested_quantity"] == Decimal("1")
+    assert captured["portfolio"]["targetQuantity"] == "1"
     assert captured["name"] == "삼성전자"
     ranking = captured["ranking"]
     assert isinstance(ranking, dict)
@@ -482,3 +704,81 @@ def test_price_bars_restore_database_timezone_boundary() -> None:
 
     assert bars[0].timestamp == naive.replace(tzinfo=UTC)
     assert bars[1].timestamp == aware.astimezone(UTC)
+
+
+@pytest.mark.asyncio
+async def test_unaffordable_candidate_is_replaced_before_ai_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, review_candidate, portfolio_plan = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("000111", "000222"),
+        unaffordable=frozenset({"000111"}),
+        ranker_config=CandidateRankerConfig(),
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["strategyEvaluatedCount"] == 2
+    assert result["strategyActionableCount"] == 2
+    assert result["preAiExclusions"] == {"presizing_zero_quantity:BELOW_MARKET_LOT": 1}
+    exclusion = result["candidateExclusions"][0]
+    assert exclusion["symbol"] == "000111"
+    assert exclusion["market"] == "KR"
+    assert exclusion["exclusionReason"] == "presizing_zero_quantity:BELOW_MARKET_LOT"
+    assert exclusion["targetQuantity"] == "0"
+    assert exclusion["rankPosition"] == 1
+    zero_reasons = exclusion["portfolio"]["positionSizing"]["zeroReasons"]
+    assert [reason["code"] for reason in zero_reasons] == ["BELOW_MARKET_LOT"]
+    # 사이징이 0인 행은 AI를 거치지 않고, 다음 순위 후보가 그 슬롯을 쓴다.
+    assert portfolio_plan.await_count == 2
+    assert review_candidate.await_count == 1
+    assert [
+        call.args[1].candidate.symbol for call in review_candidate.await_args_list
+    ] == ["000222"]
+    assert result["aiReviewedCount"] == 1
+    assert result["skipped"] == "no_ai_confirmed_signal"
+
+
+@pytest.mark.asyncio
+async def test_all_unaffordable_actionable_rows_never_reach_ai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, review_candidate, _plan = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("000111", "000222"),
+        unaffordable=frozenset({"000111", "000222"}),
+        ranker_config=CandidateRankerConfig(),
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["strategyActionableCount"] == 2
+    assert result["aiReviewedCount"] == 0
+    assert result["preAiExclusions"] == {"presizing_zero_quantity:BELOW_MARKET_LOT": 2}
+    assert result["skipped"] == "no_affordable_actionable_candidate"
+    review_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ai_review_cap_survives_pre_ai_exclusions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, review_candidate, _plan = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("000111", "000222", "000333", "000444"),
+        unaffordable=frozenset({"000111"}),
+        ranker_config=CandidateRankerConfig(strategy_review_limit=2),
+    )
+
+    result = await instance.run_owner(9)
+
+    # 창은 4까지 열리지만 AI로 보내는 최대 건수는 strategy_review_limit(2)다.
+    assert result["strategyEvaluationWindow"] == 4
+    assert result["strategyEvaluatedCount"] == 3
+    assert review_candidate.await_count == 2
+    assert result["aiReviewedCount"] == 2
+    assert result["strategyReviewCapReached"] is True
+    assert [
+        call.args[1].candidate.symbol for call in review_candidate.await_args_list
+    ] == ["000222", "000333"]

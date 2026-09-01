@@ -214,16 +214,15 @@ async def test_run_kr_candles_sync_failure_payload(
 async def test_task_payload_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tasks import kr_candles_tasks
 
-    monkeypatch.setattr(
-        kr_candles_tasks,
-        "run_kr_candles_sync",
-        AsyncMock(return_value={"status": "completed", "rows_upserted": 3}),
-    )
+    sync = AsyncMock(return_value={"status": "completed", "rows_upserted": 3})
+    monkeypatch.setattr(kr_candles_tasks, "run_kr_candles_sync", sync)
 
     result = await kr_candles_tasks.sync_kr_candles_incremental_task()
 
     assert result["status"] == "completed"
     assert result["rows_upserted"] == 3
+    # 이 배포의 운영 범위는 Toss 시세다. 스케줄 job은 기본값 KIS로 돌지 않는다.
+    sync.assert_awaited_once_with(mode="incremental", source="toss")
 
 
 @pytest.mark.asyncio
@@ -239,6 +238,7 @@ async def test_task_payload_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await kr_candles_tasks.sync_kr_candles_incremental_task()
 
     assert result["status"] == "failed"
+    assert result["source"] == "toss"
     assert "task crash" in str(result["error"])
 
 

@@ -49,7 +49,11 @@ from app.extensions.kasset.automation.contracts import (
     PriceBar,
     StrategyResult,
 )
-from app.extensions.kasset.automation.policy import AITradingPolicyService
+from app.extensions.kasset.automation.policy import (
+    AITradingPolicyService,
+    AITradingSnapshot,
+    PortfolioPlan,
+)
 from app.extensions.kasset.automation.position_manager_service import (
     PaperPositionManagerService,
 )
@@ -98,6 +102,15 @@ from app.services.symbol_news_store import load_symbol_news
 logger = logging.getLogger(__name__)
 _RECOMMENDATION_LIMIT = 5
 _OWNER_COOLDOWN = timedelta(hours=1)
+
+#: 순위 상위 검토 창을 ``strategy_review_limit``의 몇 배까지 열어둘지. AI 앞단
+#: 에서 결정론적으로 걸린 행을 다음 순위 행으로 메우려면 창이 상한보다 넓어야
+#: 한다. AI로 보내는 최대 건수는 여전히 ``strategy_review_limit``이다.
+_REVIEW_WINDOW_MULTIPLIER = 2
+
+#: 앙상블 합의가 진입가를 내놓지 못해 사이징 자체가 불가능한 행.
+_PRESIZING_NO_REFERENCE_PRICE = "presizing_reference_price_unavailable"
+_PRESIZING_ZERO_QUANTITY = "presizing_zero_quantity"
 
 #: 검토 lane에 쓸 수 있는 route가 없어 cycle이 AI 없이 도는 상태의 사유.
 #: 정책 자체는 정상이므로 ``AiAvailability``의 사유 코드와 층을 구분한다.
@@ -184,6 +197,26 @@ class EvaluatedCandidate:
     ensemble: WeightedEnsembleDecision
     factor_ranking: CandidateRankResult | None = None
     regime: RegimeAssessment | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreAiSizing:
+    """One candidate's sizing, computed before AI and reused at persistence.
+
+    같은 후보를 AI 앞뒤로 두 번 사이징하면 근거가 갈라질 수 있다. 앞단에서
+    계산한 값을 그대로 들고 다녀 저장 시점 수량과 근거가 어긋나지 않게 한다.
+    """
+
+    reference_price: Decimal
+    plan: PortfolioPlan
+
+
+@dataclass(frozen=True, slots=True)
+class _PreAiExclusion:
+    """AI 슬롯을 쓰지 않고 결정론적으로 걸러낸 후보의 사유와 근거."""
+
+    reason: str
+    evidence: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +376,10 @@ class AIRecommendationVerticalSlice:
         )
         self._ranker_config = ranker_config
         self._ranker = CandidateRanker(ranker_config)
+        self._review_window_limit = min(
+            ranker_config.strategy_review_limit * _REVIEW_WINDOW_MULTIPLIER,
+            ranker_config.candidate_limit,
+        )
         self._shadow_setup_config = shadow_setup_config
         self._strategy_artifact_fingerprint = current_strategy_artifact().fingerprint
         self._position_manager = PaperPositionManagerService(
@@ -477,16 +514,7 @@ class AIRecommendationVerticalSlice:
             limit=_RECOMMENDATION_LIMIT,
             config=self._shadow_setup_config,
         )
-        ranks_for_review = ranking.for_strategy_review(
-            self._ranker_config.strategy_review_limit
-        )
         candidate_by_key = {candidate.ranker_key: candidate for candidate in candidates}
-        selected_candidates = [
-            candidate_by_key[result.key]
-            for result in ranks_for_review
-            if result.key in candidate_by_key
-        ]
-        selected_rankings = {result.key: result for result in ranks_for_review}
         regimes = {
             market: assess_market_regime(
                 {
@@ -497,26 +525,58 @@ class AIRecommendationVerticalSlice:
             )
             for market in sorted(allowed_markets)
         }
-        evaluated = self._evaluate_candidates(
-            selected_candidates,
-            bars_by_candidate,
-            regimes,
-            factor_rankings=selected_rankings,
-        )
-        actionable = [
-            item
-            for item in evaluated
-            if item.ensemble.action in {Action.BUY, Action.SELL}
-        ]
+        # 순위 상위 창을 순서대로 훑는다. AI 앞단에서 결정론적으로 걸린 행은
+        # AI 예산을 쓰지 않으므로 다음 순위 행이 그 자리를 대신한다. AI로
+        # 보내는 최대 건수는 strategy_review_limit 그대로다.
+        review_window = ranking.for_strategy_review(self._review_window_limit)
+        review_budget = self._ranker_config.strategy_review_limit
+        evaluated: list[EvaluatedCandidate] = []
+        actionable: list[EvaluatedCandidate] = []
+        sizing_by_key: dict[CandidateKey, _PreAiSizing] = {}
+        pre_ai_exclusions: Counter[str] = Counter()
+        pre_ai_exclusion_evidence: list[dict[str, object]] = []
+        review_cap_reached = False
+        spent = 0
         reviewed: list[ReviewedCandidate] = []
         review_outcomes: list[AIReviewOutcome] = []
         ai_failures = 0
         review_rejections: Counter[str] = Counter()
-        for item in actionable:
+        for result in review_window:
+            if spent >= review_budget:
+                review_cap_reached = True
+                break
+            candidate = candidate_by_key.get(result.key)
+            if candidate is None:
+                continue
+            candidate_regime = regimes.get(candidate.ranker_market)
+            if candidate_regime is None:
+                continue
+            item = self._evaluate_candidate(
+                candidate,
+                bars_by_candidate.get(candidate.ranker_key, ()),
+                candidate_regime,
+                factor_ranking=result,
+            )
+            if item is None:
+                continue
+            evaluated.append(item)
+            spent += 1
+            if item.ensemble.action not in {Action.BUY, Action.SELL}:
+                continue
+            actionable.append(item)
+            sizing = await self._pre_ai_sizing(
+                owner_user_id,
+                item,
+                candidate_regime,
+                snapshot=snapshot,
+            )
+            if isinstance(sizing, _PreAiExclusion):
+                # AI를 호출하지 않았으니 예산을 되돌려 다음 순위 행을 본다.
+                spent -= 1
+                pre_ai_exclusions[sizing.reason] += 1
+                pre_ai_exclusion_evidence.append(sizing.evidence)
+                continue
             try:
-                candidate_regime = item.regime
-                if candidate_regime is None:
-                    continue
                 (
                     reviewed_item,
                     rejection_reason,
@@ -538,6 +598,7 @@ class AIRecommendationVerticalSlice:
             if rejection_reason is not None:
                 review_rejections[rejection_reason] += 1
             if reviewed_item is not None:
+                sizing_by_key[candidate.ranker_key] = sizing
                 reviewed.append(reviewed_item)
 
         reviewed.sort(
@@ -554,7 +615,8 @@ class AIRecommendationVerticalSlice:
         total = len(ranking.ranked)
         for position, item in enumerate(reviewed[:_RECOMMENDATION_LIMIT], start=1):
             candidate_regime = item.evaluated.regime
-            if candidate_regime is None:
+            sizing = sizing_by_key.get(item.evaluated.candidate.ranker_key)
+            if candidate_regime is None or sizing is None:
                 continue
             row = await self._persist_recommendation(
                 owner_user_id,
@@ -562,7 +624,7 @@ class AIRecommendationVerticalSlice:
                 candidate_regime,
                 position=position,
                 total=total,
-                snapshot=snapshot,
+                sizing=sizing,
             )
             persisted_candidate = item.evaluated.candidate
             recommendation_id_by_candidate[
@@ -583,7 +645,7 @@ class AIRecommendationVerticalSlice:
 
         ranked_evidence = [
             result.as_evidence()
-            for result in ranking.ranked[: self._ranker_config.strategy_review_limit]
+            for result in ranking.ranked[: self._review_window_limit]
         ]
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
@@ -619,6 +681,9 @@ class AIRecommendationVerticalSlice:
             "aiReviewOutcomes": [outcome.as_dict() for outcome in review_outcomes],
             "collectionPolicy": self._collection_policy(),
             "candleSync": candle_sync,
+            "strategyEvaluationWindow": self._review_window_limit,
+            "strategyReviewCapReached": review_cap_reached,
+            "preAiExclusions": dict(sorted(pre_ai_exclusions.items())),
             "regime": (
                 next(iter(regimes.values())).regime.value
                 if len(regimes) == 1
@@ -636,8 +701,11 @@ class AIRecommendationVerticalSlice:
                 "configFingerprint": self._shadow_setup_config.fingerprint,
                 "candidates": [shadow_setups_evidence(item) for item in shadow_setups],
             },
+            # AI 앞단 제외 근거를 먼저 담는다. 감사 원장은 이 목록을 앞에서
+            # 자르므로, 새로 진단해야 하는 행이 잘려 나가지 않게 한다.
             "candidateExclusions": [
-                result.as_evidence() for result in ranking.excluded
+                *pre_ai_exclusion_evidence,
+                *(excluded.as_evidence() for excluded in ranking.excluded),
             ],
             "heldManagementOnly": [
                 {
@@ -656,6 +724,8 @@ class AIRecommendationVerticalSlice:
             )
         if not actionable:
             result["skipped"] = "no_dynamic_ensemble_signal"
+        elif not review_outcomes:
+            result["skipped"] = "no_affordable_actionable_candidate"
         elif not reviewed:
             result["skipped"] = "no_ai_confirmed_signal"
         return result
@@ -937,44 +1007,99 @@ class AIRecommendationVerticalSlice:
         await self._db.commit()
         return {"requested": len(missing), "synced": synced, "failed": failed}
 
-    def _evaluate_candidates(
+    def _evaluate_candidate(
         self,
-        candidates: Sequence[TradingCandidate],
-        bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
-        regimes: Mapping[str, RegimeAssessment],
+        candidate: TradingCandidate,
+        bars: Sequence[PriceBar],
+        regime: RegimeAssessment,
         *,
-        factor_rankings: Mapping[CandidateKey, CandidateRankResult],
-    ) -> list[EvaluatedCandidate]:
-        evaluated: list[EvaluatedCandidate] = []
-        for candidate in candidates:
-            ranking = factor_rankings.get(candidate.ranker_key)
-            if ranking is None or not ranking.included:
-                continue
-            regime = regimes.get(candidate.ranker_market)
-            if regime is None:
-                continue
-            bars = bars_by_candidate.get(candidate.ranker_key, ())
-            if len(bars) < 20:
-                continue
-            results = tuple(
-                strategy.evaluate(
-                    bars,
-                    symbol=candidate.symbol,
-                    market=cast(Any, candidate.market),
-                    as_of=self._now,
-                )
-                for strategy in STRATEGIES
+        factor_ranking: CandidateRankResult,
+    ) -> EvaluatedCandidate | None:
+        if not factor_ranking.included or len(bars) < 20:
+            return None
+        results = tuple(
+            strategy.evaluate(
+                bars,
+                symbol=candidate.symbol,
+                market=cast(Any, candidate.market),
+                as_of=self._now,
             )
-            evaluated.append(
-                EvaluatedCandidate(
-                    candidate=candidate,
-                    strategy_results=results,
-                    ensemble=compose_weighted_ensemble(results, regime.weights),
-                    factor_ranking=ranking,
-                    regime=regime,
-                )
+            for strategy in STRATEGIES
+        )
+        return EvaluatedCandidate(
+            candidate=candidate,
+            strategy_results=results,
+            ensemble=compose_weighted_ensemble(results, regime.weights),
+            factor_ranking=factor_ranking,
+            regime=regime,
+        )
+
+    async def _pre_ai_sizing(
+        self,
+        owner_user_id: int,
+        item: EvaluatedCandidate,
+        regime: RegimeAssessment,
+        *,
+        snapshot: AITradingSnapshot,
+    ) -> _PreAiSizing | _PreAiExclusion:
+        """Size the candidate before AI so unaffordable rows cost no AI slot.
+
+        Hard Risk와 AI 임계값은 그대로다. 여기서 걸리는 행은 어차피 저장
+        단계에서 수량 0으로 버려질 행이므로, AI 검토 예산만 아낀다.
+        """
+
+        candidate = item.candidate
+        reference_price_text = _level_text(item.ensemble.agreeing, "entry")
+        if reference_price_text is None:
+            return _PreAiExclusion(
+                reason=_PRESIZING_NO_REFERENCE_PRICE,
+                evidence=_presizing_exclusion_evidence(
+                    item,
+                    reason=_PRESIZING_NO_REFERENCE_PRICE,
+                    plan=None,
+                ),
             )
-        return evaluated
+        reference_price = Decimal(reference_price_text)
+        strategy_stop_text = _level_text(item.ensemble.agreeing, "stop")
+        ranking = item.factor_ranking
+        plan = await self._policy.portfolio_plan(
+            self._db,
+            owner_user_id,
+            action=item.ensemble.action.value,
+            market=candidate.market,
+            symbol=candidate.symbol,
+            reference_price=reference_price,
+            limits=snapshot.limits,
+            usage=snapshot.usage,
+            strategy_stop=(
+                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
+            ),
+            strategy_atr=ranking.atr_14 if ranking is not None else None,
+            price_as_of=ranking.data_as_of if ranking is not None else None,
+            evaluated_at=self._now,
+            regime=regime.regime,
+            average_volume=_liquidity_cap(
+                candidate.volume,
+                ranking.average_volume_20 if ranking is not None else None,
+            ),
+            average_turnover=_liquidity_cap(
+                candidate.turnover,
+                ranking.average_turnover_20 if ranking is not None else None,
+            ),
+        )
+        quantity = plan.target_quantity
+        sizing = plan.position_sizing
+        if (
+            not quantity.is_finite()
+            or quantity <= 0
+            or (sizing is not None and not sizing.actionable)
+        ):
+            reason = _presizing_exclusion_reason(plan)
+            return _PreAiExclusion(
+                reason=reason,
+                evidence=_presizing_exclusion_evidence(item, reason=reason, plan=plan),
+            )
+        return _PreAiSizing(reference_price=reference_price, plan=plan)
 
     async def _review_candidate(
         self,
@@ -1170,43 +1295,15 @@ class AIRecommendationVerticalSlice:
         *,
         position: int,
         total: int,
-        snapshot,
+        sizing: _PreAiSizing,
     ) -> AIRecommendation:
         candidate = item.evaluated.candidate
-        reference_price_text = _level_text(item.evaluated.ensemble.agreeing, "entry")
-        ranking = item.evaluated.factor_ranking
-        strategy_stop_text = _level_text(
-            item.evaluated.ensemble.agreeing,
-            "stop",
-        )
-        if reference_price_text is None:
-            raise ValueError("ensemble has no reference price")
-        reference_price = Decimal(reference_price_text)
-        plan = await self._policy.portfolio_plan(
-            self._db,
-            owner_user_id,
-            action=item.external.action.value,
-            market=candidate.market,
-            symbol=candidate.symbol,
-            reference_price=reference_price,
-            limits=snapshot.limits,
-            usage=snapshot.usage,
-            strategy_stop=(
-                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
-            ),
-            strategy_atr=ranking.atr_14 if ranking is not None else None,
-            price_as_of=ranking.data_as_of if ranking is not None else None,
-            evaluated_at=self._now,
-            regime=regime.regime,
-            average_volume=_liquidity_cap(
-                candidate.volume,
-                ranking.average_volume_20 if ranking is not None else None,
-            ),
-            average_turnover=_liquidity_cap(
-                candidate.turnover,
-                ranking.average_turnover_20 if ranking is not None else None,
-            ),
-        )
+        # AI 검토는 앙상블과 같은 action만 통과시킨다. 그래서 AI 앞단에서 이미
+        # 계산한 plan을 그대로 재사용해도 sizing 근거가 갈라지지 않는다. 이
+        # 불변식이 깨지면 조용히 다른 수량으로 저장하지 않고 멈춘다.
+        if item.external.action is not item.evaluated.ensemble.action:
+            raise ValueError("reviewed action must match the ensemble action")
+        plan = sizing.plan
         hard_risk = await self._policy.evaluate_hard_risk(
             self._db,
             owner_user_id,
@@ -1214,7 +1311,7 @@ class AIRecommendationVerticalSlice:
             market=candidate.market,
             symbol=candidate.symbol,
             quantity=plan.target_quantity,
-            reference_price=reference_price,
+            reference_price=sizing.reference_price,
             ai_confidence=item.external.confidence,
             now=self._now,
         )
@@ -1465,7 +1562,8 @@ async def run_ai_recommendation_cycle_once(
         logger.info(
             "kasset AI recommendation cycle owner=%s trace=%s skipped=%s "
             "candidates=%s "
-            "markets=%s sources=%s ranked=%s actionable=%s reviewed=%s "
+            "markets=%s sources=%s ranked=%s evaluated=%s "
+            "actionable=%s pre_ai_exclusions=%s reviewed=%s review_cap_reached=%s "
             "review_rejections=%s recommendations=%d",
             owner_id,
             cycle_trace_id,
@@ -1474,8 +1572,11 @@ async def run_ai_recommendation_cycle_once(
             result.get("candidateMarkets"),
             result.get("candidateSources"),
             result.get("rankedCount"),
+            result.get("strategyEvaluatedCount"),
             result.get("strategyActionableCount"),
+            result.get("preAiExclusions"),
             result.get("aiReviewedCount"),
+            result.get("strategyReviewCapReached"),
             result.get("aiReviewRejections"),
             produced,
         )
@@ -1556,6 +1657,43 @@ def _liquidity_cap(
         if value is not None and value.is_finite() and value > 0
     )
     return min(values) if values else None
+
+
+def _presizing_exclusion_reason(plan: PortfolioPlan) -> str:
+    """Name the deterministic sizing verdict that kept this row away from AI."""
+
+    sizing = plan.position_sizing
+    codes = (
+        ",".join(dict.fromkeys(reason.code.value for reason in sizing.zero_reasons))
+        if sizing is not None
+        else ""
+    )
+    return f"{_PRESIZING_ZERO_QUANTITY}:{codes}" if codes else _PRESIZING_ZERO_QUANTITY
+
+
+def _presizing_exclusion_evidence(
+    item: EvaluatedCandidate,
+    *,
+    reason: str,
+    plan: PortfolioPlan | None,
+) -> dict[str, object]:
+    """Shape the pre-AI rejection like a ranker exclusion so the audit reads it."""
+
+    ranking = item.factor_ranking
+    evidence: dict[str, object] = {
+        "title": "Pre-AI position sizing exclusion",
+        "source": "kasset_vertical_slice",
+        "kind": "candidate_exclusion",
+        "symbol": item.candidate.symbol,
+        "market": item.candidate.ranker_market,
+        "exclusionReason": reason,
+        "strategyAction": item.ensemble.action.value,
+        "rankPosition": ranking.rank_position if ranking is not None else None,
+    }
+    if plan is not None:
+        evidence["targetQuantity"] = str(plan.target_quantity)
+        evidence["portfolio"] = plan.as_evidence()
+    return evidence
 
 
 def _price_bars(rows: Sequence[Any]) -> tuple[PriceBar, ...]:
