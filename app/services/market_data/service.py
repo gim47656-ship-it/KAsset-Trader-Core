@@ -47,6 +47,7 @@ from app.services.market_data.toss_ohlcv import (
     fetch_daily_toss_frame,
     fetch_kr_index_intraday_toss_frame,
     fetch_kr_intraday_toss_frame,
+    fetch_us_intraday_toss_frame,
 )
 from app.services.upbit_orderbook import fetch_orderbook
 from app.services.upbit_symbol_universe_service import UpbitSymbolUniverseLookupError
@@ -728,17 +729,41 @@ async def get_ohlcv(
 
         if resolved_market == "equity_us":
             if resolved_period in US_INTRADAY_OHLCV_PERIODS:
-                frame = await read_us_intraday_candles(
+                capped_count = min(count, 200)
+                try:
+                    frame = await read_us_intraday_candles(
+                        symbol=resolved_symbol,
+                        period=resolved_period,
+                        count=capped_count,
+                        end_date=end,
+                    )
+                except Exception as kis_exc:
+                    logger.info(
+                        "KIS/DB US intraday OHLCV failed; Toss fallback symbol=%s period=%s error_type=%s",
+                        safe_log_value(resolved_symbol),
+                        resolved_period,
+                        type(kis_exc).__name__,
+                    )
+                else:
+                    if frame is not None and not frame.empty:
+                        return _to_candle_rows(
+                            frame,
+                            symbol=resolved_symbol,
+                            market=resolved_market,
+                            source="kis",
+                            period=resolved_period,
+                        )
+                frame = await fetch_us_intraday_toss_frame(
                     symbol=resolved_symbol,
                     period=resolved_period,
-                    count=min(count, 200),
+                    count=capped_count,
                     end_date=end,
                 )
                 return _to_candle_rows(
                     frame,
                     symbol=resolved_symbol,
                     market=resolved_market,
-                    source="kis",
+                    source="toss",
                     period=resolved_period,
                 )
             # ROB-639: day → DB-first read-through (kr/us_candles_1d). Falls

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from typing import override
@@ -103,14 +104,8 @@ async def test_get_ohlcv_rejects_invalid_period_message() -> None:
             count=10,
         )
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("period", ["1m", "5m", "15m", "30m", "1h"])
-async def test_get_ohlcv_us_intraday_uses_reader(
-    monkeypatch: pytest.MonkeyPatch,
-    period: str,
-) -> None:
-    frame = pd.DataFrame(
+def _us_intraday_frame() -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {
                 "datetime": pd.Timestamp("2026-02-23 10:30:00"),
@@ -126,8 +121,21 @@ async def test_get_ohlcv_us_intraday_uses_reader(
             }
         ]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("period", ["1m", "5m", "15m", "30m", "1h"])
+async def test_get_ohlcv_us_intraday_uses_reader_without_calling_toss(
+    monkeypatch: pytest.MonkeyPatch,
+    period: str,
+) -> None:
+    frame = _us_intraday_frame()
     read_mock = AsyncMock(return_value=frame)
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    toss_mock = AsyncMock()
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
 
     candles = await market_data_service.get_ohlcv(
         symbol="AAPL",
@@ -142,6 +150,7 @@ async def test_get_ohlcv_us_intraday_uses_reader(
         count=3,
         end_date=None,
     )
+    toss_mock.assert_not_awaited()
     assert len(candles) == 1
     assert candles[0].symbol == "AAPL"
     assert candles[0].source == "kis"
@@ -168,21 +177,134 @@ async def test_get_ohlcv_us_intraday_uses_reader(
         ),
     ],
 )
-async def test_get_ohlcv_us_intraday_propagates_universe_lookup_errors(
+async def test_get_ohlcv_us_intraday_falls_back_to_toss_on_reader_error(
     monkeypatch: pytest.MonkeyPatch,
     exc_type: type[Exception],
     message: str,
 ) -> None:
     read_mock = AsyncMock(side_effect=exc_type(message))
+    toss_mock = AsyncMock(return_value=_us_intraday_frame())
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
 
-    with pytest.raises(exc_type, match=message):
+    candles = await market_data_service.get_ohlcv(
+        symbol="AAPL",
+        market="us",
+        period="5m",
+        count=3,
+    )
+
+    toss_mock.assert_awaited_once_with(
+        symbol="AAPL",
+        period="5m",
+        count=3,
+        end_date=None,
+    )
+    assert len(candles) == 1
+    assert candles[0].source == "toss"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_us_intraday_falls_back_to_toss_on_empty_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    end = dt.datetime(2026, 9, 1, 14, 15, tzinfo=dt.UTC)
+    read_mock = AsyncMock(return_value=pd.DataFrame())
+    toss_mock = AsyncMock(return_value=_us_intraday_frame())
+    monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
+
+    candles = await market_data_service.get_ohlcv(
+        symbol="AAPL",
+        market="us",
+        period="5m",
+        count=250,
+        end=end,
+    )
+
+    read_mock.assert_awaited_once_with(
+        symbol="AAPL",
+        period="5m",
+        count=200,
+        end_date=end,
+    )
+    toss_mock.assert_awaited_once_with(
+        symbol="AAPL",
+        period="5m",
+        count=200,
+        end_date=end,
+    )
+    assert len(candles) == 1
+    assert candles[0].source == "toss"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_us_intraday_both_empty_remains_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_mock = AsyncMock(return_value=pd.DataFrame())
+    toss_mock = AsyncMock(return_value=pd.DataFrame())
+    monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
+
+    candles = await market_data_service.get_ohlcv(
+        symbol="AAPL",
+        market="us",
+        period="1m",
+        count=5,
+    )
+
+    assert candles == []
+    read_mock.assert_awaited_once()
+    toss_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_us_intraday_both_errors_remain_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_mock = AsyncMock(side_effect=RuntimeError("KIS unavailable"))
+    toss_mock = AsyncMock(side_effect=RuntimeError("Toss unavailable"))
+    monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
+
+    with pytest.raises(UpstreamUnavailableError, match="Toss unavailable"):
         _ = await market_data_service.get_ohlcv(
             symbol="AAPL",
             market="us",
-            period="5m",
-            count=3,
+            period="15m",
+            count=5,
         )
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_us_intraday_does_not_swallow_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_mock = AsyncMock(side_effect=asyncio.CancelledError())
+    toss_mock = AsyncMock()
+    monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
+    monkeypatch.setattr(
+        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await market_data_service.get_ohlcv(
+            symbol="AAPL",
+            market="us",
+            period="30m",
+            count=5,
+        )
+
+    toss_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

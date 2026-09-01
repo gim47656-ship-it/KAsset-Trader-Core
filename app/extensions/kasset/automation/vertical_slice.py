@@ -1613,8 +1613,14 @@ class AIRecommendationVerticalSlice:
     ) -> dict[str, bool]:
         """뉴스 수집 경로가 최근에 살아 있었는지 시장별로 한 번만 확인한다.
 
-        입증하지 못한 시장은 ``False``로 남아 종목별 shadow가 ``UNKNOWN``이 된다.
+        ``article_published_at``의 naive KST/UTC 혼재 규약에 맞춰 naive UTC
+        경계를 쓰며, 입증하지 못한 시장은 ``False``로 남아 종목별 shadow가
+        ``UNKNOWN``이 된다.
         """
+
+        cutoff = (
+            self._now.astimezone(UTC).replace(tzinfo=None) - _NEWS_HEALTH_WINDOW
+        )
 
         health: dict[str, bool] = {}
         for ranker_market in sorted(allowed_markets):
@@ -1625,8 +1631,7 @@ class AIRecommendationVerticalSlice:
                     .select_from(NewsArticle)
                     .where(
                         NewsArticle.market == market,
-                        NewsArticle.article_published_at
-                        >= self._now - _NEWS_HEALTH_WINDOW,
+                        NewsArticle.article_published_at >= cutoff,
                     )
                 )
             except Exception:  # noqa: BLE001 - health proof only, never a gate

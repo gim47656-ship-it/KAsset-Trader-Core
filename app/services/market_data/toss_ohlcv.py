@@ -12,7 +12,7 @@ from app.services.brokers.toss.candles import (
 from app.services.brokers.toss.client import TossReadClient
 from app.services.market_data.constants import KR_BENCHMARK_INDEX_SYMBOLS
 
-_KR_INTRADAY_BUCKET_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
+_INTRADAY_BUCKET_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
 
 
 def _before_from_end_date(end_date: dt.datetime | None) -> str | None:
@@ -21,17 +21,15 @@ def _before_from_end_date(end_date: dt.datetime | None) -> str | None:
     return end_date.isoformat()
 
 
-async def fetch_kr_intraday_toss_frame(
+async def _fetch_intraday_toss_frame(
     *,
     symbol: str,
     period: str,
     count: int,
     end_date: dt.datetime | None,
 ) -> pd.DataFrame:
-    bucket = _KR_INTRADAY_BUCKET_MINUTES[period]
-    # ROB-548: aggregating N buckets needs N*bucket one-minute candles. Page
-    # through them (200/page) instead of the old single-page 200 hard cap that
-    # silently truncated 5m/15m/30m/1h to ~40/13/6/3 rows.
+    bucket = _INTRADAY_BUCKET_MINUTES[period]
+    # N개 구간 집계에 필요한 1분봉을 200개 단위로 페이지 조회한다.
     request_count = count if bucket == 1 else max(count * bucket, bucket)
     client = TossReadClient.from_settings()
     try:
@@ -55,6 +53,38 @@ async def fetch_kr_intraday_toss_frame(
     return aggregated.tail(count).reset_index(drop=True)
 
 
+async def fetch_kr_intraday_toss_frame(
+    *,
+    symbol: str,
+    period: str,
+    count: int,
+    end_date: dt.datetime | None,
+) -> pd.DataFrame:
+    return await _fetch_intraday_toss_frame(
+        symbol=symbol,
+        period=period,
+        count=count,
+        end_date=end_date,
+    )
+
+
+async def fetch_us_intraday_toss_frame(
+    *,
+    symbol: str,
+    period: str,
+    count: int,
+    end_date: dt.datetime | None,
+) -> pd.DataFrame:
+    """미국 주식 장중봉을 공통 Toss 페이지 조회·분봉 집계 경로로 가져온다."""
+
+    return await _fetch_intraday_toss_frame(
+        symbol=symbol,
+        period=period,
+        count=count,
+        end_date=end_date,
+    )
+
+
 async def fetch_kr_index_intraday_toss_frame(
     *,
     symbol: str,
@@ -67,7 +97,7 @@ async def fetch_kr_index_intraday_toss_frame(
     resolved_symbol = str(symbol or "").strip().upper()
     if resolved_symbol not in KR_BENCHMARK_INDEX_SYMBOLS:
         raise ValueError(f"unsupported KR benchmark index symbol: {symbol!r}")
-    bucket = _KR_INTRADAY_BUCKET_MINUTES[period]
+    bucket = _INTRADAY_BUCKET_MINUTES[period]
     request_count = count if bucket == 1 else max(count * bucket, bucket)
     client = TossReadClient.from_settings()
     try:

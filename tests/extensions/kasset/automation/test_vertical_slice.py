@@ -1053,6 +1053,40 @@ async def test_owner_market_scope_mismatch_skips_before_candidates_or_router(
     assert router.mock_calls == []
 
 
+@pytest.mark.asyncio
+async def test_news_source_health_binds_naive_utc_cutoff() -> None:
+    captured_cutoffs: list[datetime] = []
+    captured_markets: list[str] = []
+
+    async def scalar(statement: object) -> int:
+        params = tuple(statement.compile().params.values())  # type: ignore[attr-defined]
+        cutoff = next(value for value in params if isinstance(value, datetime))
+        market = next(value for value in params if value in {"kr", "us"})
+        captured_cutoffs.append(cutoff)
+        captured_markets.append(str(market))
+        if cutoff.tzinfo is not None or cutoff.utcoffset() is not None:
+            raise TypeError("can't subtract offset-naive and offset-aware datetimes")
+        return 1
+
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=scalar)
+    instance = object.__new__(AIRecommendationVerticalSlice)
+    instance._db = db  # type: ignore[attr-defined]
+    instance._now = _NOW  # type: ignore[attr-defined]
+
+    health = await instance._news_source_health(  # noqa: SLF001 - DB 경계 회귀
+        frozenset({"KR", "US"})
+    )
+
+    assert health == {"KR": True, "US": True}
+    assert captured_markets == ["kr", "us"]
+    assert captured_cutoffs == [
+        datetime(2026, 8, 28, 1, 0),
+        datetime(2026, 8, 28, 1, 0),
+    ]
+    assert all(cutoff.tzinfo is None for cutoff in captured_cutoffs)
+
+
 def test_price_bars_restore_database_timezone_boundary() -> None:
     naive = datetime(2026, 8, 29, 1, 0)
     aware = datetime(2026, 8, 29, 10, 0, tzinfo=timezone(timedelta(hours=9)))
