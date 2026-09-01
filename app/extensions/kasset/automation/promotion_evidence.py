@@ -71,6 +71,17 @@ from app.services.strategy_experiment_registry import (
 )
 
 _FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
+_SYMBOL_EXCLUSION_REASONS = frozenset(
+    {
+        "insufficient_history",
+        "stale_bar",
+        "missing_expected_trading_days",
+        "future_bar",
+        "duplicate_bar_timestamp",
+        "invalid_ohlcv",
+        "adjustment_coverage_incomplete",
+    }
+)
 _HEX64 = frozenset("0123456789abcdef")
 
 #: 트랙 어휘와 임계 프로필은 ``strategy_promotion``이 유일한 출처다. 여기서는
@@ -262,7 +273,10 @@ async def load_portfolio_evidence_source(
             raise PromotionEvidenceBuildError(
                 f"{market_name}:active_core_query_mismatch"
             )
-        selected = _select_universe_rows(universe_rows)
+        selected = _select_universe_rows(
+            universe_rows,
+            eligible_symbols=market_readiness.eligible_symbols,
+        )
         if not selected:
             raise PromotionEvidenceBuildError(f"{market_name}:selected_universe_empty")
 
@@ -728,6 +742,12 @@ def build_promotion_raw_payload(
             "universeCounts": {
                 market: item["totalSymbolCount"] for market, item in markets.items()
             },
+            "eligibleSymbols": {
+                market: item["eligibleSymbols"] for market, item in markets.items()
+            },
+            "excludedSymbols": {
+                market: item["excludedSymbols"] for market, item in markets.items()
+            },
             "eligible252Counts": {
                 market: item["eligibleSymbolCount"] for market, item in markets.items()
             },
@@ -888,9 +908,13 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_not_found")
         if cohort.method != "latest_market_cap":
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_method_invalid")
+        if market.total_symbol_count <= 0 or market.eligible_symbol_count <= 0:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_members_not_ready"
+            )
         if (
-            market.total_symbol_count <= 0
-            or market.eligible_symbol_count != market.total_symbol_count
+            track == HISTORICAL_PIT_TRACK
+            and market.eligible_symbol_count != market.total_symbol_count
         ):
             raise PromotionEvidenceBuildError(
                 f"{market.market}:cohort_members_not_ready"
@@ -960,8 +984,16 @@ def _require_readiness(
 
 def _select_universe_rows(
     rows: Sequence[Mapping[str, object]],
+    *,
+    eligible_symbols: Sequence[str],
 ) -> tuple[Mapping[str, object], ...]:
-    active_core = [row for row in rows if str(row.get("member_kind") or "") == "active"]
+    eligible = frozenset(eligible_symbols)
+    active_core = [
+        row
+        for row in rows
+        if str(row.get("member_kind") or "") == "active"
+        and str(row.get("symbol") or "").strip().upper() in eligible
+    ]
     ordered = sorted(
         active_core,
         key=lambda row: (
@@ -1202,6 +1234,14 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
         "inactiveSymbolCount": item.inactive_symbol_count,
         "symbolsWithAtLeast252Bars": item.symbols_with_at_least_252_bars,
         "eligibleSymbolCount": item.eligible_symbol_count,
+        "eligibleSymbols": list(item.eligible_symbols),
+        "excludedSymbols": [
+            {
+                "symbol": excluded.symbol,
+                "reasons": list(excluded.reasons),
+            }
+            for excluded in item.excluded_symbols
+        ],
         "priceAdjustmentStatus": item.price_adjustment_status,
         "corporateActionStatus": item.corporate_action_status,
         "corporateActionCoveredSymbolCount": (
@@ -1382,7 +1422,10 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         raise PromotionEvidenceBuildError("strategy_source_commit_invalid")
 
     data = _required_mapping(payload.get("data"), "data")
+    universe_counts = _required_mapping(data.get("universeCounts"), "universeCounts")
     eligible = _required_mapping(data.get("eligible252Counts"), "eligible252Counts")
+    eligible_symbols = _required_mapping(data.get("eligibleSymbols"), "eligibleSymbols")
+    excluded_symbols = _required_mapping(data.get("excludedSymbols"), "excludedSymbols")
     selected = _required_mapping(data.get("selectedCounts"), "selectedCounts")
     cohorts = _required_mapping(data.get("cohorts"), "cohorts")
     period = _required_mapping(data.get("period"), "period")
@@ -1404,6 +1447,57 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         cast(Mapping[str, object], item) for item in selected_universe
     )
     for market in ("kr", "us"):
+        eligible_values = _required_sequence(
+            eligible_symbols.get(market), f"eligibleSymbols.{market}"
+        )
+        if any(
+            not isinstance(symbol, str) or not symbol.strip()
+            for symbol in eligible_values
+        ):
+            raise PromotionEvidenceBuildError(f"{market}:eligible_symbols_invalid")
+        eligible_set = {cast(str, symbol).strip().upper() for symbol in eligible_values}
+        if len(eligible_set) != len(eligible_values) or len(
+            eligible_set
+        ) != _required_int(eligible, market):
+            raise PromotionEvidenceBuildError(
+                f"{market}:eligible_symbols_count_mismatch"
+            )
+        excluded_values = _required_sequence(
+            excluded_symbols.get(market), f"excludedSymbols.{market}"
+        )
+        excluded_set: set[str] = set()
+        for raw_exclusion in excluded_values:
+            exclusion = _required_mapping(
+                raw_exclusion, f"excludedSymbols.{market}.item"
+            )
+            symbol = exclusion.get("symbol")
+            reasons = _required_sequence(
+                exclusion.get("reasons"), f"excludedSymbols.{market}.reasons"
+            )
+            if (
+                not isinstance(symbol, str)
+                or not symbol.strip()
+                or not reasons
+                or any(
+                    not isinstance(reason, str)
+                    or reason not in _SYMBOL_EXCLUSION_REASONS
+                    for reason in reasons
+                )
+                or len(set(reasons)) != len(reasons)
+            ):
+                raise PromotionEvidenceBuildError(f"{market}:excluded_symbols_invalid")
+            normalized_symbol = symbol.strip().upper()
+            if normalized_symbol in excluded_set or normalized_symbol in eligible_set:
+                raise PromotionEvidenceBuildError(f"{market}:excluded_symbols_overlap")
+            excluded_set.add(normalized_symbol)
+        if len(eligible_set) + len(excluded_set) != _required_int(
+            universe_counts, market
+        ):
+            raise PromotionEvidenceBuildError(
+                f"{market}:eligibility_partition_mismatch"
+            )
+        if historical and excluded_set:
+            raise PromotionEvidenceBuildError(f"{market}:cohort_members_not_ready")
         cohort = _required_mapping(cohorts.get(market), f"cohort.{market}")
         cohort_id = cohort.get("cohortId")
         selection_date = _required_date(cohort, "selectionDate")
@@ -1428,6 +1522,17 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         if len(market_rows) != _required_int(selected, market):
             raise PromotionEvidenceBuildError(
                 f"{market}:selected_universe_count_mismatch"
+            )
+        selected_symbols = {
+            str(row.get("symbol") or "").strip().upper() for row in market_rows
+        }
+        if (
+            "" in selected_symbols
+            or len(selected_symbols) != len(market_rows)
+            or not selected_symbols <= eligible_set
+        ):
+            raise PromotionEvidenceBuildError(
+                f"{market}:selected_universe_not_eligible"
             )
         if any(
             row.get("cohortId") != cohort_id

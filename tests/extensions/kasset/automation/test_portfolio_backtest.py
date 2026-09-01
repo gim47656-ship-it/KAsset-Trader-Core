@@ -49,6 +49,7 @@ from app.services.daily_candles.readiness import (
     CohortEvidence,
     DailyCandlesReadiness,
     MarketReadiness,
+    SymbolReadinessExclusion,
 )
 
 _START = datetime(2025, 1, 1, tzinfo=UTC)
@@ -549,6 +550,11 @@ def _ready_market(market: str, *, track: str = HISTORICAL_PIT_TRACK) -> MarketRe
         symbols_with_exactly_251_bars=0,
         symbols_with_at_least_252_bars=10,
         eligible_symbol_count=10,
+        eligible_symbols=(
+            (("005930",) if market == "kr" else ("ALPHA",))
+            + tuple(f"{market.upper()}-{index}" for index in range(9))
+        ),
+        excluded_symbols=(),
         stale_bar_count=0,
         future_bar_count=0,
         duplicate_timestamp_count=0,
@@ -804,6 +810,36 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     assert derived.as_snapshot() == expected.as_snapshot()
 
 
+def test_stored_payload_rejects_selected_symbol_outside_eligible_partition() -> None:
+    raw, _ = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    data = raw["data"]
+    assert isinstance(data, dict)
+    eligible = data["eligibleSymbols"]
+    assert isinstance(eligible, dict)
+    eligible["us"] = [f"US-{index}" for index in range(10)]
+
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="us:selected_universe_not_eligible",
+    ):
+        derive_metrics_from_stored_payload(raw)
+
+
+def test_stored_payload_rejects_eligibility_count_mismatch() -> None:
+    raw, _ = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    data = raw["data"]
+    assert isinstance(data, dict)
+    eligible = data["eligibleSymbols"]
+    assert isinstance(eligible, dict)
+    eligible["us"] = ["ALPHA"]
+
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="us:eligible_symbols_count_mismatch",
+    ):
+        derive_metrics_from_stored_payload(raw)
+
+
 def test_forward_track_payload_replays_without_historical_proof() -> None:
     """forward 코호트 근거는 PIT/상장폐지 증명 없이도 그대로 재현된다."""
 
@@ -954,7 +990,10 @@ def test_cohort_selection_uses_exact_member_rank_without_delisted_injection() ->
         }
     )
 
-    selected = _select_universe_rows(rows)
+    selected = _select_universe_rows(
+        rows,
+        eligible_symbols=tuple(f"RANK{rank}" for rank in range(1, 7)),
+    )
 
     assert [row["symbol"] for row in selected] == [
         "RANK1",
@@ -1118,6 +1157,38 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
         match="cohort_not_historical_pit",
     ):
         _require_readiness(forward, track="historical_pit")
+
+
+def test_forward_track_accepts_partial_eligible_cohort_but_historical_rejects() -> None:
+    def _partial_readiness(readiness: DailyCandlesReadiness) -> DailyCandlesReadiness:
+        kr = readiness.for_market("kr")
+        partial_kr = replace(
+            kr,
+            eligible_symbol_count=9,
+            eligible_symbols=kr.eligible_symbols[:-1],
+            excluded_symbols=(
+                SymbolReadinessExclusion(
+                    symbol="KR-8",
+                    reasons=("insufficient_history",),
+                ),
+            ),
+            price_adjustment_status="incomplete",
+            adjustment_covered_symbol_count=9,
+        )
+        return replace(
+            readiness,
+            markets=(partial_kr, readiness.for_market("us")),
+        )
+
+    forward = _partial_readiness(_readiness(track=FORWARD_PAPER_TRACK))
+    _require_readiness(forward, track=FORWARD_PAPER_TRACK)
+
+    historical = _partial_readiness(_readiness(track=HISTORICAL_PIT_TRACK))
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="kr:cohort_members_not_ready",
+    ):
+        _require_readiness(historical, track=HISTORICAL_PIT_TRACK)
 
 
 def test_require_readiness_forward_track_rejects_the_wrong_cohort_scope() -> None:
