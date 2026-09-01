@@ -118,9 +118,12 @@ def test_evidence_hash_tamper_is_rejected() -> None:
         PassedNonFundingGateEvidence.model_validate(payload)
 
 
-def test_mock_shadow_and_paper_accounts_are_not_valid_evidence() -> None:
-    with pytest.raises(ValidationError):
-        evidence(target_account_mode="upbit_shadow")
+@pytest.mark.parametrize("mode", ["upbit_shadow", "alpaca_paper"])
+def test_mock_shadow_and_paper_accounts_are_not_valid_evidence(mode: str) -> None:
+    with pytest.raises(
+        ValueError, match=f"unsupported funding target_account_mode: {mode}"
+    ):
+        evidence(target_account_mode=mode)
 
 
 def test_new_funding_evidence_rejects_kis_and_binds_active_brokers_to_markets():

@@ -50,8 +50,9 @@ async def test_all_kr_rankings_are_explicitly_provider_unsupported(
     )
 
     assert result["success"] is False
+    assert result["error"] == "provider_unsupported"
+    assert result["detail"] == "KR rankings are unavailable from Toss/NH PLUG"
     assert result["source"] == "unsupported"
-    assert "provider_unsupported" in result["error"]
 
 
 @pytest.mark.asyncio

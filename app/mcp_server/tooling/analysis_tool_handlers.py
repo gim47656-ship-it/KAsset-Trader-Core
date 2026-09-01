@@ -120,13 +120,13 @@ async def get_top_stocks_impl(
             query=f"market={market}, ranking_type={ranking_type}",
         )
     if market == "kr":
-        return analysis_screening._error_payload(
-            source="unsupported",
-            message=(
-                "provider_unsupported: KR rankings are unavailable from Toss/NH PLUG"
-            ),
-            query=f"market={market}, ranking_type={ranking_type}",
-        )
+        return {
+            "success": False,
+            "error": "provider_unsupported",
+            "detail": "KR rankings are unavailable from Toss/NH PLUG",
+            "source": "unsupported",
+            "query": f"market={market}, ranking_type={ranking_type}",
+        }
 
     try:
         if market == "us":

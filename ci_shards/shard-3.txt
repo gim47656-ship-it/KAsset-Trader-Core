@@ -396,7 +396,6 @@ tests/test_news_ingestor_bulk_tvscreener_content.py
 tests/test_news_issue_lab.py
 tests/test_ohlcv_cache_common.py
 tests/test_order_approval_config.py
-tests/test_order_live_precheck_reservation.py
 tests/test_orders_history_summary_rob657.py
 tests/test_paper_account_tools.py
 tests/test_partition_health.py

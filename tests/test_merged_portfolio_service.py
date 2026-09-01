@@ -83,12 +83,11 @@ def test_merged_portfolio_has_no_kis_runtime_surface() -> None:
             MergedPortfolioService._build_merged_portfolio
         ).parameters
     )
-    assert (
-        "kis_client"
-        not in inspect.signature(
-            MergedPortfolioService.get_domestic_merged_portfolio
-        ).parameters
-    )
+    for method in (
+        MergedPortfolioService.get_merged_portfolio_domestic,
+        MergedPortfolioService.get_merged_portfolio_overseas,
+    ):
+        assert "kis_client" not in inspect.signature(method).parameters
 
 
 def test_calculate_combined_avg_uses_all_published_holdings() -> None:

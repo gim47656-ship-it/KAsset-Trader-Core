@@ -1142,6 +1142,8 @@ def test_auto_veto_card_has_symbol_quantity_price_and_thesis_fields():
     group = _group(
         proposal_id=uuid.uuid4(),
         symbol="005930",
+        market="equity_kr",
+        account_mode="toss_live",
         side="buy",
         thesis="valuation dislocation",
         valid_until=datetime(2026, 7, 14, 1, 30, tzinfo=UTC),

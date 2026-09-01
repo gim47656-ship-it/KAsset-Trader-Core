@@ -1,8 +1,10 @@
-"""ROB-402 — watch auto_execute_mock service.
+"""Owner-scoped PAPER execution for triggered investment watches.
 
-Records an intent (audit) and, when all gates pass, places a kis_mock order.
-The executor is hard-pinned is_mock=True; the live-block guard rejects explicit
-live/non-mock accounts before any insert. Default off via gate flag.
+The historical KIS mock path is intentionally closed.  A watch can execute only
+when its ``max_action`` explicitly selects the database-simulated PAPER account
+and identifies its owner.  The Android PAPER facade remains the sole owner of
+account lookup, kill-switch checks, risk approval, idempotency, and order/fill
+ledger writes.
 """
 
 from __future__ import annotations
@@ -13,11 +15,9 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from app.core.config import settings
-from app.models.review import WatchOrderIntentLedger
+from app.extensions.kasset.api.errors import MobileApiError
+from app.extensions.kasset.api.paper_schemas import OrderRequest
 from app.services.investment_reports.auto_execute_guard import (
     AutoExecuteLiveBlocked,
     AutoExecuteUnsupported,
@@ -26,19 +26,26 @@ from app.services.investment_reports.auto_execute_guard import (
 
 logger = logging.getLogger(__name__)
 
-# Strategy label carried into review.kis_mock_signal_ledger / kis_mock_order_ledger
-# so a watch-sourced order is attributable without joining back through the
-# watch intent row.
-WATCH_AUTO_EXECUTE_STRATEGY = "watch_auto_execute_mock"
+PAPER_ACCOUNT_MODE = "db_simulated"
+PAPER_BROKER = "PAPER"
+_ACCEPTED_PAPER_ORDER_STATUSES = frozenset(
+    {"PENDING", "OPEN", "PARTIALLY_FILLED", "FILLED"}
+)
 
 
-def _to_decimal(v: Any) -> Decimal | None:
-    if v in (None, ""):
+def _to_decimal(value: Any) -> Decimal | None:
+    if value in (None, ""):
         return None
     try:
-        return Decimal(str(v))
+        return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _owner_user_id(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -46,26 +53,30 @@ class _PlaceOutcome:
     executed: bool
     reason: str | None = None
     detail: str | None = None
+    replayed: bool = False
 
 
 def _normalize_place_result(result: Any) -> _PlaceOutcome:
-    """Interpret the order function's normalized result truthfully (ROB-843).
+    """Accept only a durable, non-preview PAPER order envelope."""
 
-    Executed requires broker acceptance, a non-preview response, a broker order
-    id, and explicit durable-tracking availability. ``ledger_id=None`` alone is
-    not a failure: ROB-843's benign on-conflict path re-checks the existing
-    native row and returns ``ledger_tracking_unavailable=False`` without the id.
-    """
     if not isinstance(result, dict):
         return _PlaceOutcome(False, "malformed_result", str(result)[:200])
+
     detail = (
         result.get("detail") or result.get("response_message") or result.get("message")
     )
     normalized_detail = str(detail) if detail else None
 
     if result.get("success") is not True:
-        reason = result.get("reason") or result.get("status") or "order_failed"
+        reason = (
+            result.get("reason")
+            or result.get("error_code")
+            or result.get("status")
+            or result.get("error")
+            or "order_failed"
+        )
         return _PlaceOutcome(False, str(reason), normalized_detail)
+
     if result.get("dry_run") is not False:
         reason = (
             "dry_run_result"
@@ -73,6 +84,13 @@ def _normalize_place_result(result: Any) -> _PlaceOutcome:
             else "invalid_dry_run_flag"
         )
         return _PlaceOutcome(False, reason, normalized_detail)
+
+    if result.get("source") != "paper":
+        return _PlaceOutcome(False, "invalid_execution_source", normalized_detail)
+    if result.get("account_mode") != PAPER_ACCOUNT_MODE:
+        return _PlaceOutcome(False, "invalid_account_mode", normalized_detail)
+    if result.get("broker") != PAPER_BROKER:
+        return _PlaceOutcome(False, "invalid_broker", normalized_detail)
 
     order_no = result.get("order_no")
     if not isinstance(order_no, str) or not order_no.strip():
@@ -87,60 +105,99 @@ def _normalize_place_result(result: Any) -> _PlaceOutcome:
         )
         return _PlaceOutcome(False, reason, normalized_detail)
 
-    # ROB-1140 R1: explicit None is the ROB-843 benign-conflict signal; a
-    # missing key is a malformed contract and must not collapse into that case.
-    if "ledger_id" not in result:
+    ledger_id = result.get("ledger_id")
+    if ledger_id is None:
         return _PlaceOutcome(False, "missing_ledger_id", normalized_detail)
-
-    ledger_id = result["ledger_id"]
-    if ledger_id is not None and (
-        not isinstance(ledger_id, int) or isinstance(ledger_id, bool) or ledger_id <= 0
+    if isinstance(ledger_id, bool) or not (
+        (isinstance(ledger_id, int) and ledger_id > 0)
+        or (isinstance(ledger_id, str) and bool(ledger_id.strip()))
     ):
         return _PlaceOutcome(False, "invalid_ledger_id", normalized_detail)
 
-    return _PlaceOutcome(True)
+    order_status = str(result.get("order_status") or "").strip().upper()
+    if order_status not in _ACCEPTED_PAPER_ORDER_STATUSES:
+        return _PlaceOutcome(False, "order_not_accepted", normalized_detail)
+
+    replayed = result.get("idempotent_replay", False)
+    if not isinstance(replayed, bool):
+        return _PlaceOutcome(False, "invalid_idempotent_replay", normalized_detail)
+
+    return _PlaceOutcome(True, replayed=replayed)
 
 
-async def _default_place_order_fn(**kwargs):
-    # Lazy import to avoid heavy import at module load.
-    from app.mcp_server.tooling.order_execution import _place_order_impl
+async def _default_place_order_fn(
+    *,
+    db: Any,
+    owner_user_id: int,
+    request: OrderRequest,
+) -> dict[str, Any]:
+    """Submit only through the owner-scoped Android PAPER facade."""
 
-    return await _place_order_impl(**kwargs)
+    from app.extensions.kasset.api.paper_orders import paper_orders
+
+    envelope, replayed = await paper_orders.submit(db, owner_user_id, request)
+    order = envelope.order
+    return {
+        "success": True,
+        "source": "paper",
+        "account_mode": PAPER_ACCOUNT_MODE,
+        "broker": order.broker,
+        "dry_run": False,
+        "order_no": order.broker_order_id,
+        "ledger_id": order.id,
+        "ledger_tracking_unavailable": False,
+        "order_status": order.status,
+        "idempotent_replay": bool(replayed or envelope.idempotent_replay),
+    }
 
 
 async def maybe_auto_execute(
-    db,
+    db: Any,
     *,
-    alert,
+    alert: Any,
     correlation_id: str,
     kst_date: str,
     place_order_fn: Callable[..., Any] = _default_place_order_fn,
 ) -> dict[str, Any]:
-    """Evaluate gates and (if all pass) place a kis_mock order for the alert."""
+    """Evaluate watch gates and submit one explicit owner-scoped PAPER order."""
+
     if alert.action_mode != "auto_execute_mock":
         return {"executed": False, "skipped": "not_auto_execute_mock"}
 
-    max_action: dict = alert.max_action or {}
-    account_mode = max_action.get("account_mode") or "kis_mock"
+    max_action: dict[str, Any] = alert.max_action or {}
+    account_mode = str(max_action.get("account_mode") or "").strip().lower()
 
-    # 1) live-block guard (hard reject before any insert).
-    try:
-        assert_auto_execute_account_allowed("auto_execute_mock", account_mode)
-    except AutoExecuteLiveBlocked:
-        logger.warning(
-            "auto_execute_mock blocked for live account on alert %s", alert.alert_uuid
-        )
-        return {"executed": False, "blocked_by": "live_account"}
-    except AutoExecuteUnsupported:
-        logger.warning(
-            "auto_execute_mock unsupported account on alert %s", alert.alert_uuid
-        )
+    # No historical KIS intent is translated into a PAPER order.  Live accounts
+    # keep their stronger diagnostic, while every removed/unwired account fails
+    # closed before owner lookup, preview, or mutation.
+    if account_mode != PAPER_ACCOUNT_MODE:
+        try:
+            assert_auto_execute_account_allowed("auto_execute_mock", account_mode)
+        except AutoExecuteLiveBlocked:
+            logger.warning(
+                "auto_execute_mock blocked for live account on alert %s",
+                alert.alert_uuid,
+            )
+            return {"executed": False, "blocked_by": "live_account"}
+        except AutoExecuteUnsupported:
+            logger.warning(
+                "auto_execute_mock unsupported account on alert %s",
+                alert.alert_uuid,
+            )
+            return {"executed": False, "blocked_by": "unsupported_account"}
         return {"executed": False, "blocked_by": "unsupported_account"}
 
-    # 2) precondition checks (account is kis_mock from here on).
     reasons: list[str] = []
     if not settings.WATCH_AUTO_EXECUTE_MOCK_ENABLED:
         reasons.append("auto_execute_globally_disabled")
+
+    owner_user_id = _owner_user_id(max_action.get("owner_user_id"))
+    if owner_user_id is None:
+        reasons.append("missing_owner_user_id")
+
+    if alert.market not in {"kr", "us"}:
+        reasons.append("unsupported_market")
+
     side = max_action.get("side")
     quantity = _to_decimal(max_action.get("quantity"))
     limit_price = _to_decimal(max_action.get("limit_price"))
@@ -151,96 +208,59 @@ async def maybe_auto_execute(
     if limit_price is None or limit_price <= 0:
         reasons.append("missing_limit_price")
 
-    allowed = not reasons
-    lifecycle = "previewed" if allowed else "failed"
-    preview_line = {
-        "symbol": alert.symbol,
-        "side": side,
-        "quantity": str(quantity) if quantity is not None else None,
-        "limit_price": str(limit_price) if limit_price is not None else None,
-        "account_mode": "kis_mock",
-        "action_mode": "auto_execute_mock",
-    }
-
-    # 3) write intent row (ON CONFLICT correlation_id → idempotent skip).
-    stmt = (
-        pg_insert(WatchOrderIntentLedger)
-        .values(
-            correlation_id=correlation_id,
-            idempotency_key=f"intent:{alert.alert_uuid}:{kst_date}:{alert.threshold_key}",
-            market=alert.market,
-            target_kind=alert.target_kind,
-            symbol=alert.symbol,
-            condition_type=alert.operator,
-            threshold=_to_decimal(alert.threshold),
-            threshold_key=alert.threshold_key,
-            action="auto_execute_mock",
-            side=side if side in ("buy", "sell") else "buy",
-            account_mode="kis_mock",
-            execution_source="watch",
-            lifecycle_state=lifecycle,
-            quantity=quantity,
-            limit_price=limit_price,
-            execution_allowed=allowed,
-            approval_required=False,
-            blocking_reasons=reasons,
-            blocked_by=(reasons[0] if reasons else None),
-            preview_line=preview_line,
-            kst_date=kst_date,
-        )
-        .on_conflict_do_nothing(constraint="uq_watch_intent_correlation_id")
-        .returning(WatchOrderIntentLedger.id)
-    )
-    result = await db.execute(stmt)
-    inserted_id = result.scalar_one_or_none()
-    await db.commit()
-
-    if inserted_id is None:
-        return {"executed": False, "skipped": "duplicate"}
-    if not allowed:
+    if reasons:
         return {"executed": False, "blocking_reasons": reasons}
 
-    # 4) place the kis_mock order (executor hard-pinned is_mock=True). A raised
-    # exception is a failure too — never leave the intent 'previewed' (ROB-843).
+    assert owner_user_id is not None
+    assert side in ("buy", "sell")
+    assert quantity is not None
+    assert limit_price is not None
+
     try:
-        place_result: Any = await place_order_fn(
+        request = OrderRequest(
+            client_order_id=f"watch:{correlation_id}",
+            broker=PAPER_BROKER,
+            account_id=max_action.get("account_id"),
+            market=alert.market,
             symbol=alert.symbol,
             side=side,
-            order_type="limit",
-            quantity=float(quantity),
-            price=float(limit_price),
-            dry_run=False,
-            reason="watch auto_execute_mock",
-            is_mock=True,
-            correlation_id=correlation_id,
-            # Names the lane that owns the order. The kis_mock pre-submit
-            # attribution gate refuses to send without it; this path is still
-            # gated off by WATCH_AUTO_EXECUTE_MOCK_ENABLED either way.
-            strategy=WATCH_AUTO_EXECUTE_STRATEGY,
+            order_type="LIMIT",
+            quantity=quantity,
+            limit_price=limit_price,
         )
-    except Exception as exc:  # noqa: BLE001 — surface as a truthful failed outcome
+    except Exception as exc:  # Pydantic supplies the precise validation detail.
+        return {
+            "executed": False,
+            "reason": "invalid_order_request",
+            "detail": f"{type(exc).__name__}: {exc}"[:200],
+            "correlation_id": correlation_id,
+        }
+
+    try:
+        place_result: Any = await place_order_fn(
+            db=db,
+            owner_user_id=owner_user_id,
+            request=request,
+        )
+    except MobileApiError as exc:
+        place_result = {
+            "success": False,
+            "reason": exc.code.lower(),
+            "detail": exc.message,
+        }
+    except Exception as exc:  # noqa: BLE001 - ambiguity must fail closed.
         place_result = {
             "success": False,
             "reason": "order_exception",
             "detail": f"{type(exc).__name__}: {exc}"[:200],
         }
 
-    # 5) validate + persist the broker outcome truthfully (ROB-843). The result
-    # is never discarded: a failure flips the intent row to 'failed' with the
-    # stable reason/detail preserved, and returns executed=False.
     outcome = _normalize_place_result(place_result)
     if not outcome.executed:
         logger.warning(
-            "auto_execute_mock order failed alert=%s reason=%s",
+            "watch PAPER order failed alert=%s reason=%s",
             alert.alert_uuid,
             outcome.reason,
-        )
-        await _mark_intent_failed(
-            db,
-            correlation_id=correlation_id,
-            reason=outcome.reason,
-            detail=outcome.detail,
-            preview_line=preview_line,
         )
         return {
             "executed": False,
@@ -249,34 +269,11 @@ async def maybe_auto_execute(
             "correlation_id": correlation_id,
         }
 
+    if outcome.replayed:
+        return {
+            "executed": False,
+            "skipped": "duplicate",
+            "correlation_id": correlation_id,
+        }
+
     return {"executed": True, "correlation_id": correlation_id}
-
-
-async def _mark_intent_failed(
-    db,
-    *,
-    correlation_id: str,
-    reason: str | None,
-    detail: str | None,
-    preview_line: dict[str, Any],
-) -> None:
-    """Flip the previewed intent row to 'failed', preserving reason/detail.
-
-    Reuses existing columns only (no schema migration): ``blocked_by`` /
-    ``blocking_reasons`` carry the reason and ``preview_line.failure_detail``
-    carries the redacted broker detail.
-    """
-    reason = reason or "order_failed"
-    failed_preview = {**preview_line, "failure_detail": detail}
-    await db.execute(
-        update(WatchOrderIntentLedger)
-        .where(WatchOrderIntentLedger.correlation_id == correlation_id)
-        .values(
-            lifecycle_state="failed",
-            execution_allowed=False,
-            blocked_by=reason,
-            blocking_reasons=[reason],
-            preview_line=failed_preview,
-        )
-    )
-    await db.commit()

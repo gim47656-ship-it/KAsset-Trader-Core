@@ -66,7 +66,7 @@ async def test_pending_orders_collector_kr_uses_only_toss_kr_orders():
     assert payload["pending_orders"][0]["target_ref"]["id"] == "K1"
     assert payload["pending_orders"][0]["remaining_quantity"] == "8"
     assert payload["pending_orders"][0]["market"] == "kr"
-    assert results[0].origin == "toss_api"
+    assert results[0].source_kind == "toss_remote_debug"
     fetcher.assert_awaited_once_with()
 
 

@@ -11,9 +11,7 @@ from fastapi.testclient import TestClient
 import app.services.brokers.upbit.client as upbit
 import app.services.brokers.yahoo.client as yahoo
 from app.main import api
-from app.services.brokers.kis.client import (
-    kis as kis_client,  # kis 인스턴스를 직접 임포트
-)
+from app.services.brokers.kis.client import KISClient
 
 
 @pytest.mark.integration
@@ -54,7 +52,7 @@ class TestApplicationIntegration:
     @patch("httpx.AsyncClient")
     def test_external_services_integration(
         self,
-        mock_kis_client,
+        mock_http_client,
         mock_yahoo_ticker,
         mock_upbit_client,
         client,
@@ -141,9 +139,10 @@ class TestExternalServiceMocking:
         new_callable=AsyncMock,
     )
     @patch("httpx.AsyncClient")
-    async def test_kis_service_mocking(self, mock_kis_client, mock_ensure_token):
-        """Test KIS service mocking."""
-        mock_instance = mock_kis_client.return_value.__aenter__.return_value
+    async def test_kis_service_mocking(self, mock_http_client, mock_ensure_token):
+        """Test the dormant KIS client module against a mocked transport."""
+        kis_client = KISClient(is_mock=False)
+        mock_instance = mock_http_client.return_value.__aenter__.return_value
 
         # GET 요청(데이터 조회)에 대한 Mock 응답 설정
         mock_get_response = MagicMock()
@@ -152,7 +151,7 @@ class TestExternalServiceMocking:
 
         await kis_client.volume_rank()
 
-        assert mock_kis_client.called
+        assert mock_http_client.called
         mock_ensure_token.assert_called_once()
         mock_instance.get.assert_called_once()
 

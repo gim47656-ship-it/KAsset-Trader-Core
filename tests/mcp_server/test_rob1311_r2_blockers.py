@@ -1067,12 +1067,7 @@ def test_get_quote_description_does_not_claim_quick_batch_has_fresh_price():
         "call already includes a fresh price — quick=True (the default) is "
         "a DB-only stale projection with no live price fetch"
     )
-    if "analyze_stock_batch" in description:
-        assert "quick=false" in description.lower(), (
-            "any redundancy claim against analyze_stock_batch must be "
-            "scoped to quick=False (the only path that fetches a live "
-            "price internally)"
-        )
+    assert "get_quote is unnecessary" not in description.lower()
 
 
 def test_route_request_buy_lane_uses_real_quick_parameter_name():

@@ -748,7 +748,7 @@ async def test_get_operating_briefing_degrades_when_cost_profile_setting_fails(
 
     account = result["holdings"]["accounts"][0]
     assert account["cost_profile"] == {
-        "commission_bps": 14.7,
+        "commission_bps": 0.0,
         "fx_spread_bps": 0.0,
         "source": "default_seed",
         "review_required": True,

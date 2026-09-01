@@ -954,15 +954,36 @@ async def test_place_order_is_preview_only_and_confirm_fails_closed() -> None:
     )
 
     assert not hasattr(module, "_place_order_impl")
-    assert preview["success"] is True
-    assert preview["request"]["preview_only"] is True
-    assert preview["request"]["dry_run"] is True
-    assert preview["request"]["symbol"] == "AAPL"
-    assert rejected["success"] is False
-    assert rejected["error_code"] == "live_order_submission_unavailable"
-    assert (
-        rejected["error"] == "live order submission is not available on this endpoint"
-    )
+    assert preview == {
+        "success": True,
+        "dry_run": True,
+        "preview_only": True,
+        "market": "us",
+        "symbol": "AAPL",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 1,
+        "price": 100,
+        "amount": None,
+        "reason": "",
+        "message": "Order request preview only",
+    }
+    assert rejected == {
+        "success": False,
+        "dry_run": True,
+        "preview_only": True,
+        "market": "us",
+        "symbol": "AAPL",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 1,
+        "price": 100,
+        "amount": None,
+        "reason": "",
+        "error": "live order submission is not available on this endpoint",
+        "error_code": "live_order_submission_unavailable",
+        "message": "live order submission is not available on this endpoint",
+    }
 
 
 @pytest.mark.asyncio

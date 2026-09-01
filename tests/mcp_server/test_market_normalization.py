@@ -98,7 +98,6 @@ class TestNormalizeMarket:
             ("krx", "equity_kr"),
             ("kospi", "equity_kr"),
             ("kosdaq", "equity_kr"),
-            ("kis", "equity_kr"),
             ("equity_kr", "equity_kr"),
             ("us", "equity_us"),
             ("usa", "equity_us"),
@@ -113,6 +112,11 @@ class TestNormalizeMarket:
         from app.mcp_server.tooling.market_normalization import normalize_market
 
         assert normalize_market(alias) == expected
+
+    def test_kis_provider_alias_returns_none(self):
+        from app.mcp_server.tooling.market_normalization import normalize_market
+
+        assert normalize_market("kis") is None
 
     def test_none_returns_none(self):
         from app.mcp_server.tooling.market_normalization import normalize_market

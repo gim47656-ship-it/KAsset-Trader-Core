@@ -57,8 +57,8 @@ async def test_get_correlation_supports_mixed_kr_and_us_symbols(monkeypatch):
         "AAPL": "equity_us",
     }
     assert result["metadata"]["sources"] == {
-        "005930": "kis",
-        "AAPL": "yahoo",
+        "005930": "toss",
+        "AAPL": "toss",
     }
     assert result["correlation_matrix"] == [[1.0, 1.0], [1.0, 1.0]]
 
@@ -192,8 +192,8 @@ async def test_get_correlation_preserves_existing_market_inference(monkeypatch):
         "KRW-BTC": "crypto",
     }
     assert result["metadata"]["sources"] == {
-        "005930": "kis",
-        "AAPL": "yahoo",
+        "005930": "toss",
+        "AAPL": "toss",
         "KRW-BTC": "upbit",
     }
     assert len(result["correlation_matrix"]) == 3

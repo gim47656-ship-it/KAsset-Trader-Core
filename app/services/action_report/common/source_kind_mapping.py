@@ -38,6 +38,8 @@ _EXTERNAL_ORIGIN_TO_SOURCE_KIND: Final[dict[str, str]] = {
     "domain_db": "domain_ref",
     # KIS MCP evidence
     "kis_api": "kis_mcp",
+    # Toss first-party read-only broker evidence
+    "toss_api": "toss_remote_debug",
     # Finnhub / market events derivatives (read through auto_trader)
     "finnhub_crypto": "auto_trader_mcp",
     "finnhub": "auto_trader_mcp",

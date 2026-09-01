@@ -155,18 +155,18 @@ async def test_us_intraday_uses_toss_et_naive_frame(
 
 @pytest.mark.asyncio
 async def test_us_daily_uses_toss_after_active_gate(monkeypatch) -> None:
-    lookup = AsyncMock(return_value="NYSE")
+    lookup = AsyncMock(return_value="NASD")
     fetch = AsyncMock(return_value=_daily_frame())
     monkeypatch.setattr(market_data_quotes, "get_us_exchange_by_symbol", lookup)
     monkeypatch.setattr(market_data_quotes, "fetch_daily_toss_frame", fetch)
 
     result = await market_data_quotes._get_ohlcv_impl(
-        "BRK-B", market="us", period="day", count=5
+        "AAPL", market="us", period="day", count=5
     )
 
-    lookup.assert_awaited_once_with("BRK.B")
-    fetch.assert_awaited_once_with(symbol="BRK.B", count=5, end_date=None)
-    assert result["symbol"] == "BRK.B"
+    lookup.assert_awaited_once_with("AAPL")
+    fetch.assert_awaited_once_with(symbol="AAPL", count=5, end_date=None)
+    assert result["symbol"] == "AAPL"
     assert result["source"] == "toss"
 
 

@@ -6,9 +6,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from app.core.config import settings
-from app.mcp_server.tooling.account_routing_registration import (
-    register_account_routing_tools,
-)
 from app.mcp_server.tooling.analysis_artifact_tools import (
     analysis_artifact_get as _analysis_artifact_get,
 )
@@ -81,7 +78,6 @@ ANALYSIS_READONLY_TOOL_NAMES: set[str] = {
     "get_top_stocks",
     "get_news",
     "get_fx_rate",
-    "suggest_order_account",
     "get_holdings",
     "toss_get_positions",
     "analysis_artifact_save",
@@ -252,7 +248,6 @@ def register_analysis_readonly_tools(mcp: FastMCP) -> None:
     register_fundamentals_tools(filtered)
     register_analysis_tools(filtered)
     register_portfolio_tools(filtered)
-    register_account_routing_tools(filtered)
     register_toss_live_order_tools(filtered)
     register_forecast_tools(filtered)
     _register_persistence_tools(mcp)

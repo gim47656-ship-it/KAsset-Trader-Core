@@ -33,22 +33,6 @@ class _FakeCM:
         return False
 
 
-@pytest.fixture(autouse=True)
-def _fake_external_boundaries_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep ordinary unit paths hermetic; focused tests override these fakes."""
-
-    async def _empty_positions(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        del market_filter, is_mock
-        return [], []
-
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _empty_positions,
-    )
-
-
 @pytest.fixture
 def patched(monkeypatch):
     """Patch the session factory, ScreenerService, and build_screener_results."""
@@ -402,20 +386,17 @@ async def test_snapshot_tool_filters_exclude_watched(monkeypatch) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_snapshot_tool_exclude_held_rejected_fail_closed(monkeypatch) -> None:
-    """ROB-1309: exclude_held requires a live KIS holdings call — the DB-only
+    """ROB-1309: exclude_held requires live holdings enrichment, so the DB-only
     tool rejects it fail-closed (same redirectTool pattern as
-    min_analyst_count) instead of silently no-op'ing or calling KIS."""
+    min_analyst_count) instead of silently no-op'ing or querying Toss/Upbit."""
 
-    async def _boom_positions(market_filter, *, is_mock=False):  # noqa: ARG001
+    async def _boom_holdings(market: str):  # noqa: ARG001
         raise AssertionError(
-            "screen_stocks_snapshot must not call KIS holdings even when "
+            "screen_stocks_snapshot must not collect holdings when "
             "exclude_held=True is passed"
         )
 
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _boom_positions,
-    )
+    monkeypatch.setattr(tool, "_collect_holdings_for_market", _boom_holdings)
 
     out = await tool.screen_stocks_snapshot_impl(
         preset="consecutive_gainers", market="kr", exclude_held=True
@@ -432,9 +413,9 @@ async def test_snapshot_tool_is_held_always_false_no_holdings_call(
     monkeypatch,
 ) -> None:
     """ROB-1309: without exclude_held, screen_stocks_snapshot still never
-    calls KIS — isHeld resolves to false/none for every row and
-    holdings.status reports 'skipped' (not 'ok', which would imply a live
-    check actually happened)."""
+    calls the enrichment holdings collector — isHeld resolves to false/none
+    for every row and holdings.status reports 'skipped' (not 'ok', which would
+    imply a live check actually happened)."""
 
     class _Resp:
         def model_dump(self, mode: str | None = None) -> dict[str, Any]:  # noqa: ARG002
@@ -449,8 +430,8 @@ async def test_snapshot_tool_is_held_always_false_no_holdings_call(
         assert resolver.relation("kr", "005930") == "none"
         return _Resp()
 
-    async def _boom_positions(market_filter, *, is_mock=False):  # noqa: ARG001
-        raise AssertionError("must not call KIS holdings by default")
+    async def _boom_holdings(market: str):  # noqa: ARG001
+        raise AssertionError("must not collect holdings by default")
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
     monkeypatch.setattr(
@@ -460,10 +441,7 @@ async def test_snapshot_tool_is_held_always_false_no_holdings_call(
         "app.services.invest_view_model.screener_service.build_screener_results",
         _fake_build,
     )
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _boom_positions,
-    )
+    monkeypatch.setattr(tool, "_collect_holdings_for_market", _boom_holdings)
 
     out = await tool.screen_stocks_snapshot_impl(
         preset="consecutive_gainers", market="kr"
