@@ -26,6 +26,7 @@ from app.extensions.kasset.automation.promotion_evidence import (
     PromotionEvidenceBuildError,
     _dataset_content_hash,
     _require_readiness,
+    _require_stored_benchmark_window_coverage,
     _select_universe_rows,
     _thresholds_snapshot,
     _universe_query,
@@ -929,7 +930,7 @@ def test_stored_evidence_fails_closed_when_required_proof_is_missing(
         derive_metrics_from_stored_payload(tampered)
 
 
-def test_stored_evidence_fails_closed_when_benchmark_window_is_short() -> None:
+def test_stored_evidence_fails_closed_when_benchmark_window_is_invalid() -> None:
     raw, _metrics = _stored_evidence_payload()
     tampered = copy.deepcopy(raw)
     baseline = tampered["portfolioDiagnostics"]["baseline"]  # type: ignore[index]
@@ -938,6 +939,29 @@ def test_stored_evidence_fails_closed_when_benchmark_window_is_short() -> None:
 
     with pytest.raises(PromotionEvidenceBuildError, match="benchmark_window_mismatch"):
         derive_metrics_from_stored_payload(tampered)
+
+
+def test_benchmark_windows_allow_unsynchronized_kr_us_sessions() -> None:
+    _require_stored_benchmark_window_coverage(
+        {
+            "recordStartAt": "2026-08-31T00:00:00+00:00",
+            "recordEndAt": "2026-09-01T00:00:00+00:00",
+            "benchmarkMarkets": ["KR", "US"],
+            "benchmarkWindows": [
+                {
+                    "market": "KR",
+                    "startAt": "2026-08-31T00:00:00+00:00",
+                    "endAt": "2026-09-01T00:00:00+00:00",
+                },
+                {
+                    "market": "US",
+                    "startAt": "2026-08-31T13:30:00+00:00",
+                    "endAt": "2026-08-31T20:00:00+00:00",
+                },
+            ],
+        },
+        {"kr": 1, "us": 1},
+    )
 
 
 def test_stored_evidence_fails_closed_when_fold_benchmark_market_is_missing() -> None:

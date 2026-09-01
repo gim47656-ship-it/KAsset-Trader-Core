@@ -673,8 +673,12 @@ def _require_benchmark_window_coverage(
         raise PromotionEvidenceBuildError("benchmark_market_mismatch")
     record_start = result.equity_curve[0].timestamp
     record_end = result.equity_curve[-1].timestamp
+    # KR/US 거래일과 장 마감 시각은 일치하지 않는다. 각 benchmark는 공통
+    # portfolio window 안에서 자기 시장의 첫/마지막 완료 세션을 사용한다.
     if any(
-        item.start_at > record_start or item.end_at < record_end
+        item.start_at < record_start
+        or item.end_at > record_end
+        or item.start_at >= item.end_at
         for item in result.benchmark_by_market
     ):
         raise PromotionEvidenceBuildError("benchmark_window_mismatch")
@@ -1821,7 +1825,9 @@ def _require_stored_benchmark_window_coverage(
     if set(windows) != expected_markets:
         raise PromotionEvidenceBuildError("benchmark_market_mismatch")
     if any(
-        window_start > record_start or window_end < record_end
+        window_start < record_start
+        or window_end > record_end
+        or window_start >= window_end
         for window_start, window_end in windows.values()
     ):
         raise PromotionEvidenceBuildError("benchmark_window_mismatch")
