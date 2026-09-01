@@ -18,9 +18,33 @@ from app.extensions.kasset.automation.candidate_ranker import (
 from app.extensions.kasset.automation.contracts import (
     Action,
     ExternalEvidence,
+    PriceBar,
+    StrategyFamily,
     StrategyName,
     StrategyResult,
 )
+from app.extensions.kasset.automation.daily_setup import (
+    DAILY_SETUP_SCHEMA_VERSION,
+    DailySetup,
+    DailySetupStatus,
+)
+from app.extensions.kasset.automation.decision_evidence import (
+    AiReviewStatus,
+    ai_review_from_observation,
+    unknown_news_shadow,
+)
+from app.extensions.kasset.automation.intraday_data import CompletedIntradayBars
+from app.extensions.kasset.automation.intraday_triggers import (
+    DEFAULT_INTRADAY_TRIGGER_POLICY,
+    INTRADAY_TRIGGER_SCHEMA_VERSION,
+    OPENING_RANGE_BREAKOUT,
+    RELATIVE_VOLUME_5M,
+    IntradayTriggerDecision,
+    TriggerDecisionStatus,
+    TriggerResult,
+    TriggerStatus,
+)
+from app.extensions.kasset.automation.market_session import RegularSession
 from app.extensions.kasset.automation.policy import HardRiskResult, PortfolioPlan
 from app.extensions.kasset.automation.position_sizing import (
     PositionSizingReason,
@@ -34,9 +58,9 @@ from app.extensions.kasset.automation.regime import (
     weights_for_regime,
 )
 from app.extensions.kasset.automation.vertical_slice import (
+    AdmittedCandidate,
     AIRecommendationVerticalSlice,
     EvaluatedCandidate,
-    ReviewedCandidate,
     TradingCandidate,
 )
 from app.schemas.ai_recommendations import RecommendationRanking
@@ -80,21 +104,125 @@ def _rank_result(
     )
 
 
-def _strategy_result(symbol: str) -> StrategyResult:
+def _strategy_result(
+    symbol: str,
+    *,
+    strategy: StrategyName = StrategyName.BREAKOUT,
+) -> StrategyResult:
     return StrategyResult(
         action=Action.BUY,
         confidence=Decimal("0.80"),
         entry=Decimal("100"),
         stop=Decimal("98"),
         target=Decimal("104"),
-        rationale=("breakout",),
+        rationale=(f"{strategy.value} breakout-family signal",),
         evidence=(),
-        strategy=StrategyName.BREAKOUT,
+        strategy=strategy,
         version="1.0.0",
         symbol=symbol,
         market="KRX",
         as_of=_NOW,
         valid_until=_NOW + timedelta(hours=1),
+    )
+
+
+def _qualified_setup(ranking: CandidateRankResult) -> DailySetup:
+    results = tuple(
+        _strategy_result(ranking.symbol, strategy=name) for name in StrategyName
+    )
+    agreeing = tuple(
+        result
+        for result in results
+        if result.strategy is not StrategyName.MEAN_REVERSION
+    )
+    ensemble = WeightedEnsembleDecision(
+        family=StrategyFamily.BREAKOUT,
+        action=Action.BUY,
+        score=Decimal("0.800000"),
+        confidence=Decimal("0.800000"),
+        agreeing=agreeing,
+        votes=(),
+    )
+    return DailySetup(
+        schema_version=DAILY_SETUP_SCHEMA_VERSION,
+        symbol=ranking.symbol,
+        market="KRX",
+        family=StrategyFamily.BREAKOUT,
+        status=DailySetupStatus.QUALIFIED,
+        direction=Action.BUY,
+        features=(),
+        strategy_results=results,
+        ensemble=ensemble,
+        completed_bar_count=30,
+        completed_through=_NOW - timedelta(days=1),
+        evaluated_at=_NOW,
+        rejection_reason=None,
+        rank_position=ranking.rank_position,
+    )
+
+
+def _completed_intraday_bars(symbol: str) -> CompletedIntradayBars:
+    data_as_of = _NOW - timedelta(minutes=1)
+    session = RegularSession(
+        market="kr",
+        session_date=_NOW.date(),
+        opens_at=_NOW - timedelta(hours=1),
+        closes_at=_NOW + timedelta(hours=5),
+    )
+    return CompletedIntradayBars(
+        symbol=symbol,
+        market="KRX",
+        period="5m",
+        bar_interval=timedelta(minutes=5),
+        session=session,
+        bars=(
+            PriceBar(
+                timestamp=data_as_of - timedelta(minutes=5),
+                open=Decimal("99"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("101"),
+                volume=Decimal("2000"),
+            ),
+        ),
+        source="fixture:completed_intraday",
+        data_as_of=data_as_of,
+    )
+
+
+def _fresh_trigger_decision(symbol: str) -> IntradayTriggerDecision:
+    data_as_of = _NOW - timedelta(minutes=1)
+    triggers = (
+        TriggerResult(
+            code=OPENING_RANGE_BREAKOUT,
+            status=TriggerStatus.ACTIVE,
+            value="101",
+            threshold="100",
+            source="fixture:completed_intraday",
+            as_of=data_as_of,
+            detail="completed bar closed above the opening range",
+        ),
+        TriggerResult(
+            code=RELATIVE_VOLUME_5M,
+            status=TriggerStatus.ACTIVE,
+            value="2.0",
+            threshold="1.5",
+            source="fixture:completed_intraday",
+            as_of=data_as_of,
+            detail="completed-bar relative volume expanded",
+        ),
+    )
+    return IntradayTriggerDecision(
+        schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
+        symbol=symbol,
+        market="KRX",
+        direction=Action.BUY,
+        status=TriggerDecisionStatus.TRIGGERED,
+        triggers=triggers,
+        policy=DEFAULT_INTRADAY_TRIGGER_POLICY,
+        evaluated_at=_NOW,
+        data_as_of=data_as_of,
+        blocked_reason=None,
     )
 
 
@@ -155,14 +283,28 @@ def _stub_review_cycle(
     ranked_symbols: tuple[str, ...],
     unaffordable: frozenset[str],
     ranker_config: CandidateRankerConfig,
-) -> tuple[AIRecommendationVerticalSlice, AsyncMock, AsyncMock]:
-    """Wire one owner cycle down to the ranked-row review loop, without a DB."""
+) -> tuple[AIRecommendationVerticalSlice, AsyncMock, AsyncMock, AsyncMock]:
+    """Supply qualified daily setups and fresh triggers at their production seams."""
 
     db = MagicMock()
     db.commit = AsyncMock()
+    analyze_for_owner = AsyncMock(
+        return_value=SimpleNamespace(
+            input_hash="b" * 64,
+            provider="mcp",
+            tier="terra",
+            model_id="gpt-5.6-terra",
+            action="HOLD",
+            risk="MEDIUM",
+            bullish_score=45,
+            bearish_score=55,
+            rationale_tags=["breakout_not_confirmed"],
+            confidence=0.72,
+        )
+    )
     instance = AIRecommendationVerticalSlice(
         db,
-        MagicMock(),
+        SimpleNamespace(analyze_for_owner=analyze_for_owner),
         now=_NOW,
         allowed_markets=frozenset({"KR"}),
         ranker_config=ranker_config,
@@ -202,6 +344,13 @@ def _stub_review_cycle(
         "evaluate_ranked_shadow_setups",
         MagicMock(return_value=()),
     )
+    monkeypatch.setattr(
+        vertical_slice,
+        "evaluate_daily_setup",
+        MagicMock(
+            side_effect=lambda ranking, _bars, **_kwargs: _qualified_setup(ranking)
+        ),
+    )
     instance._load_candidates = AsyncMock(  # type: ignore[method-assign]
         return_value=[
             TradingCandidate(symbol, "KRX", None, "tvscreener_kr")
@@ -224,32 +373,51 @@ def _stub_review_cycle(
         )
     )
 
-    def _evaluate(candidate, bars, regime, *, factor_ranking):
-        strategy = _strategy_result(candidate.symbol)
-        return EvaluatedCandidate(
-            candidate=candidate,
-            strategy_results=(strategy,),
-            ensemble=WeightedEnsembleDecision(
-                action=Action.BUY,
-                score=Decimal("0.5"),
-                confidence=Decimal("0.8"),
-                agreeing=(strategy,),
-                votes=(),
-            ),
-            factor_ranking=factor_ranking,
-            regime=regime,
-        )
+    async def _load_intraday(
+        setups: tuple[DailySetup, ...],
+    ) -> dict[tuple[str, str], CompletedIntradayBars]:
+        return {
+            ("KR", setup.symbol): _completed_intraday_bars(setup.symbol)
+            for setup in setups
+        }
 
-    instance._evaluate_candidate = MagicMock(side_effect=_evaluate)  # type: ignore[method-assign]
-    review_candidate = AsyncMock(
-        side_effect=lambda _owner, item, _regime: (
-            None,
-            "low_confidence",
-            instance._review_outcome(item, reason="low_confidence"),
+    def _decide_trigger(
+        item: EvaluatedCandidate,
+        *,
+        intraday: object,
+        index_bars: object,
+    ) -> IntradayTriggerDecision:
+        del index_bars
+        assert isinstance(intraday, CompletedIntradayBars)
+        assert _NOW - intraday.data_as_of <= timedelta(minutes=12)
+        return _fresh_trigger_decision(item.candidate.symbol)
+
+    instance._load_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_load_intraday
+    )
+    instance._load_index_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        return_value={}
+    )
+    instance._decide_triggers = MagicMock(  # type: ignore[method-assign]
+        side_effect=_decide_trigger
+    )
+    instance._news_source_health = AsyncMock(  # type: ignore[method-assign]
+        return_value={"KR": False}
+    )
+    instance._news_shadow = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda _candidate, **_kwargs: unknown_news_shadow(
+            observed_at=_NOW,
+            detail="fixture source health is intentionally unproven",
         )
     )
-    instance._review_candidate = review_candidate  # type: ignore[method-assign]
-    return instance, review_candidate, portfolio_plan
+    persist_recommendation = AsyncMock(
+        side_effect=lambda _owner, item, _regime, **_kwargs: SimpleNamespace(
+            id=f"rec:{item.evaluated.candidate.symbol}",
+            action=item.decision.action.value,
+        )
+    )
+    instance._persist_recommendation = persist_recommendation  # type: ignore[method-assign]
+    return instance, analyze_for_owner, portfolio_plan, persist_recommendation
 
 
 @pytest.mark.asyncio
@@ -258,21 +426,28 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
 ) -> None:
     artifact_loader = MagicMock(return_value=SimpleNamespace(fingerprint="a" * 64))
     monkeypatch.setattr(vertical_slice, "current_strategy_artifact", artifact_loader)
-    strategy = StrategyResult(
-        action=Action.BUY,
-        confidence=Decimal("0.80"),
-        entry=Decimal("100"),
-        stop=Decimal("98"),
-        target=Decimal("104"),
-        rationale=("breakout",),
-        evidence=(),
-        strategy=StrategyName.BREAKOUT,
-        version="1.0.0",
+    ranking_result = CandidateRankResult(
         symbol="005930",
-        market="KRX",
-        as_of=_NOW,
+        market="KR",
+        total_score=Decimal("0.75"),
+        factor_scores=(),
+        penalties=(),
+        data_as_of=_NOW - timedelta(hours=1),
         valid_until=_NOW + timedelta(hours=1),
+        exclusion_reason=None,
+        atr_14=Decimal("2"),
+        average_volume_20=Decimal("1000000"),
+        average_turnover_20=Decimal("100000000"),
+        evidence=(),
+        sources=("tvscreener_kr",),
+        is_held=False,
+        is_watchlisted=False,
+        eligible_for_new_buy=True,
+        rank_position=1,
+        ranked_total=100,
     )
+    setup = _qualified_setup(ranking_result)
+    assert setup.ensemble is not None
     evaluated = EvaluatedCandidate(
         candidate=TradingCandidate(
             "005930",
@@ -282,65 +457,55 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
             turnover=Decimal("90000000"),
             volume=Decimal("900000"),
         ),
-        strategy_results=(strategy,),
-        ensemble=WeightedEnsembleDecision(
-            action=Action.BUY,
-            score=Decimal("0.5"),
-            confidence=Decimal("0.8"),
-            agreeing=(strategy,),
-            votes=(),
-        ),
-        factor_ranking=CandidateRankResult(
-            symbol="005930",
-            market="KR",
-            total_score=Decimal("0.75"),
-            factor_scores=(),
-            penalties=(),
-            data_as_of=_NOW - timedelta(hours=1),
-            valid_until=_NOW + timedelta(hours=1),
-            exclusion_reason=None,
-            atr_14=Decimal("2"),
-            average_volume_20=Decimal("1000000"),
-            average_turnover_20=Decimal("100000000"),
-            evidence=(),
-            sources=("tvscreener_kr",),
-            is_held=False,
-            is_watchlisted=False,
-            eligible_for_new_buy=True,
-            rank_position=1,
-            ranked_total=100,
-        ),
+        strategy_results=setup.strategy_results,
+        ensemble=setup.ensemble,
+        setup=setup,
+        factor_ranking=ranking_result,
+        regime=_BULL,
     )
-    reviewed = ReviewedCandidate(
+    trigger_decision = _fresh_trigger_decision("005930")
+    decision = ExternalEvidence(
+        source="kasset_technical_decision:daily_setup+intraday_triggers",
+        symbol="005930",
+        market="KRX",
+        action=Action.BUY,
+        confidence=Decimal("0.8"),
+        as_of=_NOW,
+        valid_until=_NOW + timedelta(hours=1),
+        rationale=("Daily Setup and fresh intraday triggers admitted the candidate.",),
+        evidence=(setup.as_evidence(), trigger_decision.as_evidence()),
+    )
+    ai_shadow = build_ai_shadow_observation(
+        SimpleNamespace(
+            input_hash="b" * 64,
+            provider="direct-api",
+            tier="terra",
+            model_id="configured-terra-model",
+            action="HOLD",
+            risk="MEDIUM",
+            bullish_score=45,
+            bearish_score=55,
+            rationale_tags=["breakout_not_confirmed"],
+            confidence=0.72,
+        ),
+        observed_at=_NOW,
+    )
+    admitted = AdmittedCandidate(
         evaluated=evaluated,
-        external=ExternalEvidence(
-            source="model_router:test",
-            symbol="005930",
-            market="KRX",
-            action=Action.BUY,
-            confidence=Decimal("0.8"),
-            as_of=_NOW,
-            valid_until=_NOW + timedelta(hours=1),
-            rationale=("confirmed",),
+        trigger_decision=trigger_decision,
+        decision=decision,
+        ai_review=ai_review_from_observation(
+            status=AiReviewStatus.DISAGREES,
+            observation=ai_shadow,
+            detail="technical direction=BUY aiAction=HOLD",
+        ),
+        news_shadow=unknown_news_shadow(
+            observed_at=_NOW,
+            detail="news source health was not proven",
         ),
         events=(),
-        event_score=Decimal("0"),
         score=Decimal("0.525"),
-        ai_shadow=build_ai_shadow_observation(
-            SimpleNamespace(
-                input_hash="b" * 64,
-                provider="direct-api",
-                tier="terra",
-                model_id="configured-terra-model",
-                action="BUY",
-                risk="LOW",
-                bullish_score=88,
-                bearish_score=12,
-                rationale_tags=["confirmed"],
-                confidence=0.8,
-            ),
-            observed_at=_NOW,
-        ),
+        ai_shadow=ai_shadow,
     )
     captured: dict[str, object] = {}
 
@@ -384,17 +549,20 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
 
     await instance._persist_recommendation(  # noqa: SLF001 - production seam regression
         4,
-        reviewed,
+        admitted,
         _BULL,
         position=1,
         total=100,
         sizing=sizing,
     )
 
-    # AI 앞단에서 한 번 계산한 plan을 저장 단계가 그대로 재사용한다.
     assert portfolio_plan.await_count == 1
+    assert captured["decision_evidence"] is decision
+    assert captured["strategy_family"] is StrategyFamily.BREAKOUT
     assert captured["suggested_quantity"] == Decimal("1")
-    assert captured["portfolio"]["targetQuantity"] == "1"
+    portfolio = captured["portfolio"]
+    assert isinstance(portfolio, dict)
+    assert portfolio["targetQuantity"] == "1"
     assert captured["name"] == "삼성전자"
     ranking = captured["ranking"]
     assert isinstance(ranking, dict)
@@ -413,30 +581,34 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         "version": "1.0.0",
         "artifactFingerprint": "a" * 64,
     }
-    ai_shadow = captured["ai_shadow_evidence"]
-    assert isinstance(ai_shadow, dict)
-    assert ai_shadow["kind"] == "ai_shadow"
-    assert ai_shadow["modelId"] == "configured-terra-model"
-    assert ai_shadow["selected"] is True
+    advisory = captured["advisory_evidence"]
+    assert isinstance(advisory, list)
+    assert [item["kind"] for item in advisory] == [
+        "daily_setup",
+        "intraday_triggers",
+        "ai_review",
+        "news_shadow",
+        "decision_cohorts",
+    ]
+    assert advisory[2]["gating"] is False
+    assert advisory[2]["status"] == "disagrees"
+    assert advisory[3]["gating"] is False
+    assert advisory[4]["liveCohort"] == "technical_only"
+    ai_shadow_evidence = captured["ai_shadow_evidence"]
+    assert isinstance(ai_shadow_evidence, dict)
+    assert ai_shadow_evidence["kind"] == "ai_shadow"
+    assert ai_shadow_evidence["modelId"] == "configured-terra-model"
+    assert ai_shadow_evidence["validatedResponse"]["action"] == "HOLD"
+    assert ai_shadow_evidence["selectionReason"] == (
+        "ranked_final_selection_after_technical_gate"
+    )
 
 
 @pytest.mark.asyncio
-async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
-    strategy = StrategyResult(
-        action=Action.BUY,
-        confidence=Decimal("0.80"),
-        entry=Decimal("100"),
-        stop=Decimal("98"),
-        target=Decimal("104"),
-        rationale=("breakout",),
-        evidence=(),
-        strategy=StrategyName.BREAKOUT,
-        version="1.0.0",
-        symbol="005930",
-        market="KRX",
-        as_of=_NOW,
-        valid_until=_NOW + timedelta(hours=1),
-    )
+async def test_ai_invalid_response_and_action_mismatch_are_non_gating() -> None:
+    ranking = _rank_result("005930", position=1)
+    setup = _qualified_setup(ranking)
+    assert setup.ensemble is not None
     evaluated = EvaluatedCandidate(
         candidate=TradingCandidate(
             "005930",
@@ -444,34 +616,16 @@ async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
             "삼성전자",
             "tvscreener_kr",
         ),
-        strategy_results=(strategy,),
-        ensemble=WeightedEnsembleDecision(
-            action=Action.BUY,
-            score=Decimal("0.5"),
-            confidence=Decimal("0.8"),
-            agreeing=(strategy,),
-            votes=(),
-        ),
-        factor_ranking=CandidateRankResult(
-            symbol="005930",
-            market="KR",
-            total_score=Decimal("0.75"),
-            factor_scores=(),
-            penalties=(),
-            data_as_of=_NOW - timedelta(hours=1),
-            valid_until=_NOW + timedelta(hours=1),
-            exclusion_reason=None,
-            atr_14=Decimal("2"),
-            average_volume_20=Decimal("1000000"),
-            average_turnover_20=Decimal("100000000"),
-            evidence=(),
-            sources=("tvscreener_kr",),
-            is_held=False,
-            is_watchlisted=False,
-            eligible_for_new_buy=True,
-            rank_position=1,
-            ranked_total=100,
-        ),
+        strategy_results=setup.strategy_results,
+        ensemble=setup.ensemble,
+        setup=setup,
+        factor_ranking=ranking,
+        regime=_BULL,
+    )
+    trigger_decision = _fresh_trigger_decision("005930")
+    news_shadow = unknown_news_shadow(
+        observed_at=_NOW,
+        detail="news source health was not proven",
     )
     with pytest.raises(ValueError) as invalid_response:
         _TierAnalysis.model_validate(
@@ -491,36 +645,28 @@ async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
     invalid_instance = AIRecommendationVerticalSlice(
         MagicMock(), invalid_router, now=_NOW
     )
-    invalid_instance._event_evidence = AsyncMock(  # type: ignore[method-assign]
-        return_value=()
-    )
 
-    (
-        invalid_reviewed,
-        invalid_rejection,
-        invalid_outcome,
-    ) = await invalid_instance._review_candidate(  # noqa: SLF001
+    invalid_review = await invalid_instance._review_candidate(  # noqa: SLF001
         4,
         evaluated,
-        RegimeAssessment(
-            regime=MarketRegime.BULL,
-            detail="trend",
-            breadth_above_sma20=Decimal("0.7"),
-            median_return20=Decimal("0.1"),
-            median_atr_ratio=Decimal("0.02"),
-            weights=weights_for_regime(MarketRegime.BULL),
-        ),
     )
 
-    assert invalid_reviewed is None
-    assert invalid_rejection == "invalid_ai_response"
-    assert invalid_outcome.as_dict()["reason"] == "invalid_ai_response"
+    assert invalid_review.ai_review.status is AiReviewStatus.INVALID
+    assert invalid_review.ai_review.failure_reason == "invalid_ai_response"
+    assert invalid_review.ai_shadow is None
+    admitted_after_invalid = vertical_slice._admitted_candidate(  # noqa: SLF001
+        evaluated,
+        trigger_decision=trigger_decision,
+        review=invalid_review,
+        news_shadow=news_shadow,
+        now=_NOW,
+    )
+    assert admitted_after_invalid.decision.action is Action.BUY
 
     verdict = SimpleNamespace(
         input_hash="b" * 64,
         provider="mcp",
         tier="terra",
-        tier_used="terra",
         model_id="gpt-5.6-terra",
         action="HOLD",
         risk="MEDIUM",
@@ -531,37 +677,23 @@ async def test_ai_invalid_response_and_action_mismatch_are_isolated() -> None:
     )
     router = SimpleNamespace(analyze_for_owner=AsyncMock(return_value=verdict))
     instance = AIRecommendationVerticalSlice(MagicMock(), router, now=_NOW)
-    instance._event_evidence = AsyncMock(return_value=())  # type: ignore[method-assign]
 
-    reviewed, rejection, outcome = await instance._review_candidate(  # noqa: SLF001
+    mismatch_review = await instance._review_candidate(  # noqa: SLF001
         4,
         evaluated,
-        RegimeAssessment(
-            regime=MarketRegime.BULL,
-            detail="trend",
-            breadth_above_sma20=Decimal("0.7"),
-            median_return20=Decimal("0.1"),
-            median_atr_ratio=Decimal("0.02"),
-            weights=weights_for_regime(MarketRegime.BULL),
-        ),
     )
 
-    assert reviewed is None
-    assert rejection == "action_mismatch"
-    assert outcome.as_dict() == {
-        "symbol": "005930",
-        "market": "KR",
-        "strategyAction": "BUY",
-        "aiAction": "HOLD",
-        "confidence": "0.72",
-        "reason": "action_mismatch",
-        "observedAt": "2026-08-29T01:00:00Z",
-        "provider": "mcp",
-        "tier": "terra",
-        "modelId": "gpt-5.6-terra",
-        "rationaleTags": ["breakout_not_confirmed"],
-        "recommendationId": None,
-    }
+    assert mismatch_review.ai_review.status is AiReviewStatus.DISAGREES
+    assert mismatch_review.ai_review.action == "HOLD"
+    admitted_after_mismatch = vertical_slice._admitted_candidate(  # noqa: SLF001
+        evaluated,
+        trigger_decision=trigger_decision,
+        review=mismatch_review,
+        news_shadow=news_shadow,
+        now=_NOW,
+    )
+    assert admitted_after_mismatch.decision.action is Action.BUY
+    assert admitted_after_mismatch.ai_review.status is AiReviewStatus.DISAGREES
 
 
 def test_strategy_artifact_lookup_failure_prevents_recommendation_slice(
@@ -707,20 +839,25 @@ def test_price_bars_restore_database_timezone_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unaffordable_candidate_is_replaced_before_ai_review(
+async def test_unaffordable_candidate_is_replaced_before_non_gating_ai_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instance, review_candidate, portfolio_plan = _stub_review_cycle(
-        monkeypatch,
-        ranked_symbols=("000111", "000222"),
-        unaffordable=frozenset({"000111"}),
-        ranker_config=CandidateRankerConfig(),
+    instance, analyze_for_owner, portfolio_plan, persist_recommendation = (
+        _stub_review_cycle(
+            monkeypatch,
+            ranked_symbols=("000111", "000222"),
+            unaffordable=frozenset({"000111"}),
+            ranker_config=CandidateRankerConfig(),
+        )
     )
 
     result = await instance.run_owner(7)
 
     assert result["strategyEvaluatedCount"] == 2
     assert result["strategyActionableCount"] == 2
+    assert result["dailySetupStatuses"] == {"qualified": 2}
+    assert result["dailySetupSelectedCount"] == 2
+    assert result["intradayTriggerStatuses"] == {"triggered": 2}
     assert result["preAiExclusions"] == {"presizing_zero_quantity:BELOW_MARKET_LOT": 1}
     exclusion = result["candidateExclusions"][0]
     assert exclusion["symbol"] == "000111"
@@ -730,21 +867,23 @@ async def test_unaffordable_candidate_is_replaced_before_ai_review(
     assert exclusion["rankPosition"] == 1
     zero_reasons = exclusion["portfolio"]["positionSizing"]["zeroReasons"]
     assert [reason["code"] for reason in zero_reasons] == ["BELOW_MARKET_LOT"]
-    # 사이징이 0인 행은 AI를 거치지 않고, 다음 순위 후보가 그 슬롯을 쓴다.
     assert portfolio_plan.await_count == 2
-    assert review_candidate.await_count == 1
-    assert [
-        call.args[1].candidate.symbol for call in review_candidate.await_args_list
-    ] == ["000222"]
+    assert analyze_for_owner.await_count == 1
+    assert [call.args[3]["symbol"] for call in analyze_for_owner.await_args_list] == [
+        "000222"
+    ]
     assert result["aiReviewedCount"] == 1
-    assert result["skipped"] == "no_ai_confirmed_signal"
+    assert result["aiReviewRejections"] == {"ai_disagrees": 1}
+    assert result["recommendationIds"] == ["rec:000222"]
+    assert "skipped" not in result
+    persist_recommendation.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_all_unaffordable_actionable_rows_never_reach_ai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instance, review_candidate, _plan = _stub_review_cycle(
+    instance, analyze_for_owner, _plan, persist_recommendation = _stub_review_cycle(
         monkeypatch,
         ranked_symbols=("000111", "000222"),
         unaffordable=frozenset({"000111", "000222"}),
@@ -754,17 +893,20 @@ async def test_all_unaffordable_actionable_rows_never_reach_ai(
     result = await instance.run_owner(7)
 
     assert result["strategyActionableCount"] == 2
+    assert result["dailySetupStatuses"] == {"qualified": 2}
+    assert result["intradayTriggerStatuses"] == {"triggered": 2}
     assert result["aiReviewedCount"] == 0
     assert result["preAiExclusions"] == {"presizing_zero_quantity:BELOW_MARKET_LOT": 2}
     assert result["skipped"] == "no_affordable_actionable_candidate"
-    review_candidate.assert_not_awaited()
+    analyze_for_owner.assert_not_awaited()
+    persist_recommendation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_ai_review_cap_survives_pre_ai_exclusions(
+async def test_non_gating_ai_review_is_not_capped_after_technical_exclusions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instance, review_candidate, _plan = _stub_review_cycle(
+    instance, analyze_for_owner, _plan, persist_recommendation = _stub_review_cycle(
         monkeypatch,
         ranked_symbols=("000111", "000222", "000333", "000444"),
         unaffordable=frozenset({"000111"}),
@@ -773,12 +915,21 @@ async def test_ai_review_cap_survives_pre_ai_exclusions(
 
     result = await instance.run_owner(9)
 
-    # 창은 4까지 열리지만 AI로 보내는 최대 건수는 strategy_review_limit(2)다.
     assert result["strategyEvaluationWindow"] == 4
-    assert result["strategyEvaluatedCount"] == 3
-    assert review_candidate.await_count == 2
-    assert result["aiReviewedCount"] == 2
-    assert result["strategyReviewCapReached"] is True
-    assert [
-        call.args[1].candidate.symbol for call in review_candidate.await_args_list
-    ] == ["000222", "000333"]
+    assert result["strategyEvaluatedCount"] == 4
+    assert result["dailySetupSelectedCount"] == 4
+    assert result["intradayTriggerStatuses"] == {"triggered": 4}
+    assert analyze_for_owner.await_count == 3
+    assert result["aiReviewedCount"] == 3
+    assert result["strategyReviewCapReached"] is False
+    assert [call.args[3]["symbol"] for call in analyze_for_owner.await_args_list] == [
+        "000222",
+        "000333",
+        "000444",
+    ]
+    assert result["recommendationIds"] == [
+        "rec:000222",
+        "rec:000333",
+        "rec:000444",
+    ]
+    assert persist_recommendation.await_count == 3

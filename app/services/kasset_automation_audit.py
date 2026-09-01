@@ -32,6 +32,12 @@ _EARLY_SKIP_REASONS = frozenset(
         "position_exit_recommendation_created",
         "recommendation_cooldown_active",
         "screener_candidates_unavailable",
+        # 기술 판정이 정상적으로 "오늘은 진입 후보가 없다"고 끝난 상태들.
+        # 실패가 아니라 정상 skip이므로 completed로 집계하지 않는다.
+        "daily_setup_not_qualified",
+        "no_breakout_family_direction",
+        "intraday_trigger_not_satisfied",
+        "no_affordable_actionable_candidate",
     }
 )
 _MAX_MAP_ITEMS = 16
@@ -41,6 +47,12 @@ _MAX_EXCLUSIONS = 50
 _MAX_RECOMMENDATION_IDS = 50
 _MAX_TRACE_TEXT = 64
 _MAX_REASON_TEXT = 256
+#: 제외 근거 하나에 보존하는 trigger 개수 상한. 현재 정책은 5개이며 여유를 둔다.
+_MAX_EXCLUSION_TRIGGERS = 8
+#: trigger 관측값·임계값·사유 텍스트 상한. 근거는 남기되 행이 커지지 않게 한다.
+_MAX_TRIGGER_VALUE_TEXT = 48
+_MAX_TRIGGER_SOURCE_TEXT = 64
+_MAX_TRIGGER_REASON_TEXT = 64
 
 
 def new_cycle_trace_id() -> str:
@@ -297,10 +309,17 @@ def _ranked_candidates(value: object) -> list[dict[str, object]]:
     return output
 
 
-def _candidate_exclusions(value: object) -> list[dict[str, str]]:
+def _candidate_exclusions(value: object) -> list[dict[str, object]]:
+    """Project one cycle's exclusions with their intraday trigger evidence.
+
+    장중 방아쇠가 걸리지 않아 빠진 행은 "왜 안 걸렸는지"가 진단의 전부다.
+    trigger별 상태·관측값·임계값·출처·관측시각·unavailable 사유를 상한 안에서
+    보존한다. 비밀값이나 공급자 원본 응답은 담지 않는다.
+    """
+
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
         return []
-    output: list[dict[str, str]] = []
+    output: list[dict[str, object]] = []
     for item in list(value)[:_MAX_EXCLUSIONS]:
         if not isinstance(item, Mapping):
             continue
@@ -309,8 +328,69 @@ def _candidate_exclusions(value: object) -> list[dict[str, str]]:
         reason = _optional_text(item.get("exclusionReason"), maximum=128)
         if symbol is None or market is None or reason is None:
             continue
-        output.append({"symbol": symbol, "market": market, "reason": reason})
+        entry: dict[str, object] = {
+            "symbol": symbol,
+            "market": market,
+            "reason": reason,
+        }
+        source = _optional_text(item.get("source"), maximum=_MAX_TRIGGER_SOURCE_TEXT)
+        if source is not None:
+            entry["source"] = source
+        triggers = _intraday_triggers(item.get("intradayTriggers"))
+        if triggers is not None:
+            entry["intradayTriggers"] = triggers
+        output.append(entry)
     return output
+
+
+def _intraday_triggers(value: object) -> dict[str, object] | None:
+    """Keep the bounded, secret-free shape of one intraday trigger decision."""
+
+    if not isinstance(value, Mapping):
+        return None
+    status = _optional_text(value.get("status"), maximum=32)
+    if status is None:
+        return None
+    raw_triggers = value.get("triggers")
+    triggers: list[dict[str, object]] = []
+    if isinstance(raw_triggers, Sequence) and not isinstance(raw_triggers, str | bytes):
+        for item in list(raw_triggers)[:_MAX_EXCLUSION_TRIGGERS]:
+            if not isinstance(item, Mapping):
+                continue
+            code = _optional_text(item.get("code"), maximum=64)
+            trigger_status = _optional_text(item.get("status"), maximum=32)
+            if code is None or trigger_status is None:
+                continue
+            triggers.append(
+                {
+                    "code": code,
+                    "status": trigger_status,
+                    "value": _optional_text(
+                        item.get("value"), maximum=_MAX_TRIGGER_VALUE_TEXT
+                    ),
+                    "threshold": _optional_text(
+                        item.get("threshold"), maximum=_MAX_TRIGGER_VALUE_TEXT
+                    ),
+                    "source": _optional_text(
+                        item.get("source"), maximum=_MAX_TRIGGER_SOURCE_TEXT
+                    ),
+                    "asOf": _optional_text(item.get("asOf"), maximum=40),
+                    "unavailableReason": _optional_text(
+                        item.get("unavailableReason"),
+                        maximum=_MAX_TRIGGER_REASON_TEXT,
+                    ),
+                }
+            )
+    return {
+        "schemaVersion": _optional_text(value.get("schemaVersion"), maximum=64),
+        "status": status,
+        "direction": _optional_text(value.get("direction"), maximum=16),
+        "dataAsOf": _optional_text(value.get("dataAsOf"), maximum=40),
+        "blockedReason": _optional_text(
+            value.get("blockedReason"), maximum=_MAX_REASON_TEXT
+        ),
+        "triggers": triggers,
+    }
 
 
 def _review_outcomes(value: object) -> list[dict[str, object]]:

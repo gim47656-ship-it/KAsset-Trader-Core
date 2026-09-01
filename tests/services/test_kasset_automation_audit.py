@@ -48,7 +48,55 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
                     "symbol": "0126Z0",
                     "market": "KR",
                     "exclusionReason": "insufficient_history",
-                }
+                },
+                {
+                    "title": "Intraday trigger exclusion",
+                    "source": "kasset_intraday_triggers",
+                    "kind": "candidate_exclusion",
+                    "symbol": "005930",
+                    "market": "KR",
+                    "exclusionReason": (
+                        "intraday_trigger_not_satisfied:"
+                        "opening_range_breakout=inactive,session_vwap_reclaim=inactive"
+                    ),
+                    "dailySetup": {"must": "not be copied"},
+                    "intradayTriggers": {
+                        "title": "Completed intraday entry triggers",
+                        "source": "kasset_intraday_triggers",
+                        "kind": "intraday_triggers",
+                        "schemaVersion": "kasset.intraday-triggers.v1",
+                        "symbol": "005930",
+                        "market": "KRX",
+                        "direction": "BUY",
+                        "status": "not_triggered",
+                        "evaluatedAt": "2026-08-31T05:50:00Z",
+                        "dataAsOf": "2026-08-31T05:45:00Z",
+                        "blockedReason": None,
+                        "policy": {"must": "not be copied"},
+                        "triggers": [
+                            {
+                                "code": "opening_range_breakout",
+                                "status": "inactive",
+                                "value": "101.000000",
+                                "threshold": "105.000000",
+                                "source": "toss",
+                                "asOf": "2026-08-31T05:45:00Z",
+                                "detail": "must not be copied",
+                                "unavailableReason": None,
+                            },
+                            {
+                                "code": "intraday_relative_strength",
+                                "status": "unavailable",
+                                "value": None,
+                                "threshold": "0.000000",
+                                "source": None,
+                                "asOf": None,
+                                "detail": "must not be copied",
+                                "unavailableReason": "index_intraday_unavailable",
+                            },
+                        ],
+                    },
+                },
             ],
             "aiReviewRejections": {"action_mismatch": 1},
             "aiReviewOutcomes": [
@@ -68,13 +116,12 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
                 }
             ],
             "recommendationIds": [],
-            "skipped": "no_ai_confirmed_signal",
         },
     )
 
     assert row.status == "completed"
     assert row.candidate_count == 100
-    assert row.candidate_exclusion_count == 1
+    assert row.candidate_exclusion_count == 2
     assert row.ai_reviewed_count == 1
     assert row.candidate_markets == {"KR": 94, "US": 6}
     assert row.ranked_candidates == [
@@ -86,8 +133,51 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
         }
     ]
     assert row.candidate_exclusions == [
-        {"symbol": "0126Z0", "market": "KR", "reason": "insufficient_history"}
+        {"symbol": "0126Z0", "market": "KR", "reason": "insufficient_history"},
+        {
+            "symbol": "005930",
+            "market": "KR",
+            "reason": (
+                "intraday_trigger_not_satisfied:"
+                "opening_range_breakout=inactive,session_vwap_reclaim=inactive"
+            ),
+            "source": "kasset_intraday_triggers",
+            "intradayTriggers": {
+                "schemaVersion": "kasset.intraday-triggers.v1",
+                "status": "not_triggered",
+                "direction": "BUY",
+                "dataAsOf": "2026-08-31T05:45:00Z",
+                "blockedReason": None,
+                "triggers": [
+                    {
+                        "code": "opening_range_breakout",
+                        "status": "inactive",
+                        "value": "101.000000",
+                        "threshold": "105.000000",
+                        "source": "toss",
+                        "asOf": "2026-08-31T05:45:00Z",
+                        "unavailableReason": None,
+                    },
+                    {
+                        "code": "intraday_relative_strength",
+                        "status": "unavailable",
+                        "value": None,
+                        "threshold": "0.000000",
+                        "source": None,
+                        "asOf": None,
+                        "unavailableReason": "index_intraday_unavailable",
+                    },
+                ],
+            },
+        },
     ]
+    # 세부 진단은 남기되 사람이 읽는 서술과 정책 원본은 행에 복사하지 않는다.
+    excluded = row.candidate_exclusions[1]
+    assert "dailySetup" not in excluded
+    assert "policy" not in excluded["intradayTriggers"]
+    assert all(
+        "detail" not in trigger for trigger in excluded["intradayTriggers"]["triggers"]
+    )
     assert row.ai_review_outcomes == [
         {
             "symbol": "003230",
@@ -109,9 +199,18 @@ def test_build_cycle_event_keeps_bounded_operator_evidence() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["no_regular_market_open", "no_configured_regular_market_open"],
+    [
+        "no_regular_market_open",
+        "no_configured_regular_market_open",
+        # 기술 판정이 정상적으로 진입 후보를 하나도 남기지 않은 상태들.
+        # 장애가 아니므로 completed로 집계되면 성공률 지표가 오염된다.
+        "daily_setup_not_qualified",
+        "no_breakout_family_direction",
+        "intraday_trigger_not_satisfied",
+        "no_affordable_actionable_candidate",
+    ],
 )
-def test_no_regular_market_open_is_recorded_as_skipped(reason: str) -> None:
+def test_a_normal_no_entry_cycle_is_recorded_as_skipped(reason: str) -> None:
     row = build_automation_cycle_event(
         owner_user_id=4,
         observed_at=_NOW,

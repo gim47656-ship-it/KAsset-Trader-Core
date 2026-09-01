@@ -32,6 +32,15 @@ class PromotionMetrics:
     win_rate: Decimal
     expectancy: Decimal
     excess_return: Decimal
+    #: 거래비용(수수료+슬리피지) 차감 후 이익 거래 합계와 손실 거래 합계.
+    #: 둘 다 0 이상이며 profit factor는 이 두 값으로만 만든다.
+    gross_profit: Decimal
+    gross_loss: Decimal
+    #: 거래비용 배수 stress 시나리오 중 최악의 총수익률. 비용을 배로 물려도
+    #: 성과가 남는지를 승격 조건으로 검사하기 위한 값이다.
+    cost_stressed_total_return: Decimal
+    #: baseline 경로에서 실제로 지불한 수수료와 슬리피지 합계.
+    total_costs: Decimal
     trade_count: int
     walk_forward_folds: int
     walk_forward_passed_folds: int
@@ -47,6 +56,10 @@ class PromotionMetrics:
             "win_rate",
             "expectancy",
             "excess_return",
+            "gross_profit",
+            "gross_loss",
+            "cost_stressed_total_return",
+            "total_costs",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, Decimal):
@@ -58,6 +71,9 @@ class PromotionMetrics:
             raise ValueError("max_drawdown must be in [0, 1]")
         if not _ZERO <= self.win_rate <= _ONE:
             raise ValueError("win_rate must be in [0, 1]")
+        for field_name in ("gross_profit", "gross_loss", "total_costs"):
+            if getattr(self, field_name) < _ZERO:
+                raise ValueError(f"{field_name} must be non-negative")
         for field_name in (
             "trade_count",
             "walk_forward_folds",
@@ -88,13 +104,29 @@ class PromotionMetrics:
             self.walk_forward_folds
         )
 
+    @property
+    def profit_factor(self) -> Decimal | None:
+        """비용 차감 후 이익/손실 비율. 손실 거래가 없으면 정의되지 않는다."""
+
+        if self.gross_loss == _ZERO:
+            return None
+        return self.gross_profit / self.gross_loss
+
     def as_snapshot(self) -> dict[str, object]:
+        profit_factor = self.profit_factor
         return {
             "totalReturn": _decimal_text(self.total_return),
             "maxDrawdown": _decimal_text(self.max_drawdown),
             "winRate": _decimal_text(self.win_rate),
             "expectancy": _decimal_text(self.expectancy),
             "excessReturn": _decimal_text(self.excess_return),
+            "grossProfit": _decimal_text(self.gross_profit),
+            "grossLoss": _decimal_text(self.gross_loss),
+            "profitFactor": (
+                _decimal_text(profit_factor) if profit_factor is not None else None
+            ),
+            "costStressedTotalReturn": _decimal_text(self.cost_stressed_total_return),
+            "totalCosts": _decimal_text(self.total_costs),
             "tradeCount": self.trade_count,
             "walkForwardFolds": self.walk_forward_folds,
             "walkForwardPassedFolds": self.walk_forward_passed_folds,
@@ -113,6 +145,11 @@ class PromotionThresholds:
     min_win_rate: Decimal = Decimal("0.40")
     min_expectancy: Decimal = Decimal("0")
     min_excess_return: Decimal = Decimal("0")
+    #: 비용 차감 후 이익/손실 비율 하한. 손실 거래가 없으면 이익이 실제로
+    #: 있을 때만 통과한다.
+    min_profit_factor: Decimal = Decimal("1.20")
+    #: 거래비용 stress(1x/2x/3x) 중 최악 시나리오의 총수익률 하한.
+    min_cost_stressed_total_return: Decimal = Decimal("0")
     min_trade_count: int = 30
     min_walk_forward_folds: int = 3
     min_walk_forward_pass_rate: Decimal = Decimal("0.67")
@@ -127,6 +164,8 @@ class PromotionThresholds:
             "min_win_rate",
             "min_expectancy",
             "min_excess_return",
+            "min_profit_factor",
+            "min_cost_stressed_total_return",
             "min_walk_forward_pass_rate",
         ):
             value = getattr(self, field_name)
@@ -141,6 +180,8 @@ class PromotionThresholds:
             raise ValueError("min_win_rate must be in [0, 1]")
         if not _ZERO <= self.min_walk_forward_pass_rate <= _ONE:
             raise ValueError("min_walk_forward_pass_rate must be in [0, 1]")
+        if self.min_profit_factor < _ZERO:
+            raise ValueError("min_profit_factor must be non-negative")
         for field_name in ("min_trade_count", "min_walk_forward_folds"):
             value = getattr(self, field_name)
             if type(value) is not int or value < 0:
@@ -422,6 +463,17 @@ def evaluate_thresholds(
             metrics.excess_return,
             ">=",
             thresholds.min_excess_return,
+        ),
+        _profit_factor_check(
+            gross_profit=metrics.gross_profit,
+            gross_loss=metrics.gross_loss,
+            required=thresholds.min_profit_factor,
+        ),
+        _numeric_check(
+            "cost_stressed_total_return",
+            metrics.cost_stressed_total_return,
+            ">=",
+            thresholds.min_cost_stressed_total_return,
         ),
         _integer_check("trade_count", metrics.trade_count, thresholds.min_trade_count),
         _integer_check(
@@ -709,6 +761,34 @@ def _numeric_check(
         metric=metric,
         observed=_decimal_text(observed),
         comparator=comparator,
+        required=_decimal_text(required),
+        passed=passed,
+    )
+
+
+def _profit_factor_check(
+    *,
+    gross_profit: Decimal,
+    gross_loss: Decimal,
+    required: Decimal,
+) -> ThresholdCheck:
+    """비용 차감 후 profit factor 검사.
+
+    손실 거래가 없으면 비율이 정의되지 않는다. 그때는 임의의 큰 값을 꾸며
+    통과시키지 않고, 실제 이익이 있는지만 보고 관측값에 그 사실을 적는다.
+    """
+
+    if gross_loss == _ZERO:
+        passed = gross_profit > _ZERO
+        observed = "lossless" if passed else "undefined"
+    else:
+        ratio = gross_profit / gross_loss
+        passed = ratio >= required
+        observed = _decimal_text(ratio)
+    return ThresholdCheck(
+        metric="profit_factor",
+        observed=observed,
+        comparator=">=",
         required=_decimal_text(required),
         passed=passed,
     )

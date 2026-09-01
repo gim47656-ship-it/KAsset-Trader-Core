@@ -62,6 +62,10 @@ def _passing_metrics() -> PromotionMetrics:
         win_rate=Decimal("0.52"),
         expectancy=Decimal("125.50"),
         excess_return=Decimal("0.08"),
+        gross_profit=Decimal("240"),
+        gross_loss=Decimal("100"),
+        cost_stressed_total_return=Decimal("0.04"),
+        total_costs=Decimal("12"),
         trade_count=48,
         walk_forward_folds=5,
         walk_forward_passed_folds=4,
@@ -104,6 +108,9 @@ def test_threshold_evaluation_returns_snapshot_hash_and_all_checks() -> None:
     metrics = _passing_metrics()
 
     evaluation = evaluate_thresholds(metrics)
+    assert evaluation.metrics_hash != hash_metrics_snapshot(
+        replace(metrics, total_costs=Decimal("13"))
+    )
 
     assert evaluation.passed is True
     assert evaluation.failed_metrics == ()
@@ -114,6 +121,8 @@ def test_threshold_evaluation_returns_snapshot_hash_and_all_checks() -> None:
         "win_rate",
         "expectancy",
         "excess_return",
+        "profit_factor",
+        "cost_stressed_total_return",
         "trade_count",
         "walk_forward_folds",
         "walk_forward_pass_rate",

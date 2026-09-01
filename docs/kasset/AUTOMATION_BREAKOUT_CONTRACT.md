@@ -1,15 +1,35 @@
 # KAsset PAPER Breakout Automation Contract
 
-갱신: 2026-08-29
+갱신: 2026-09-01
 
 ## 목적과 경계
 
 현재 `KAsset-Trader-Core`의 APPROVAL/AUTO_PAPER 흐름에 결정론적 후보 순위, ATR 위험 수량, 보유 포지션 관리, 실전 모듈 재사용 포트폴리오 백테스트를 추가한다. 외부 저장소를 포크하거나 런타임에 yfinance를 추가하지 않는다. LIVE 주문 경로는 만들지 않는다.
 
+## 결정 파이프라인
+
+한국 AUTO_PAPER 추천은 다음 순서로만 만들어진다. 앞 단계를 통과하지 못한 후보는 뒤 단계를 보지 않는다.
+
+1. **Candidate Ranker** (`candidate_ranker.py`) — 유동성, 모멘텀, benchmark RS로 후보를 정렬한다.
+2. **완료 일봉 Daily Setup** (`daily_setup.py`) — `market_session.py`가 공용 거래소 달력으로 계산한 "직전 완료 세션 종료시각"(cutoff)보다 이른 일봉만 쓴다. 진행 중인 부분 일봉은 섞지 않는다. setup feature는 breakout 전략군(`StrategyFamily.BREAKOUT`: Momentum, Breakout, Volatility Trend)과 daily benchmark RS이고, Mean Reversion은 `StrategyFamily.MEAN_REVERSION`으로 격리돼 이 합의에 투표하지 않는다. 결과는 `QUALIFIED|REJECTED|UNAVAILABLE`이며 QUALIFIED만 다음 단계로 간다. setup 후보 수는 config로 정하되 10~20 범위를 벗어나면 config 생성 자체가 거부된다(기본 15).
+3. **완료 장중 Intraday Trigger** (`intraday_triggers.py`, `intraday_data.py`) — Toss-first 공용 `market_data.service.get_ohlcv()`의 5분봉만 읽고, 정규장 세션 안에서 라벨+간격이 이미 지난 완료 bucket만 남긴다. 최신 bar가 12분보다 오래됐거나 세션이 닫혀 있거나 OHLCV가 비정상이면 개별 trigger가 아니라 판정 전체가 UNAVAILABLE로 fail-closed한다.
+
+   진입 정책은 generic "N개 중 2개" 정족수가 아니라 명시적 그룹 규칙이다.
+
+   - directional (1개 이상 ACTIVE 필요): Opening Range Breakout, 세션 리셋 VWAP reclaim/breakdown
+   - volume (1개 이상 ACTIVE 필요): 완료 5분봉 Relative Volume, 완료 20분봉 Relative Volume
+   - directional confirmation (available일 때만 필수): KOSPI/KOSDAQ 대비 장중 relative strength
+
+   지수 분봉이 실제로 없으면 값을 추정하거나 일봉으로 대체하지 않는다. 그 trigger만 `index_intraday_unavailable`로 UNAVAILABLE 처리하고 나머지 진입은 막지 않으며, 사유를 evidence에 남긴다.
+4. **Hard Risk와 사이징** — 기존 `policy.py::evaluate_hard_risk`, portfolio 예산, `position_sizing.py`가 그대로 마지막 관문이다.
+5. **PAPER** — `consumer.py`가 APPROVED BUY/SELL만 claim한다. Kill Switch와 owner policy 재확인 경로는 바뀌지 않았다.
+
+기술 신호(2~3단계)와 Hard Risk(4단계)가 PAPER의 유일한 관문이다. 각 trigger의 `code`, `status`, `value`, `threshold`, `source`, `asOf`, `unavailableReason`은 추천 evidence와 `KAssetAutomationCycleEvent.candidate_exclusions`에 모두 남는다. 정상적으로 진입 후보가 하나도 없이 끝난 cycle(`daily_setup_not_qualified`, `no_breakout_family_direction`, `intraday_trigger_not_satisfied`, `no_affordable_actionable_candidate`)은 실패가 아니라 `skipped`로 집계한다.
+
 ## 현재 구조 감사
 
 - `vertical_slice.py`는 관심종목을 먼저 넣고 최신 `InvestScreenerSnapshot`을 거래대금·거래량 순으로 채운 뒤, KRX 후보가 50개 미만일 때 실시간 Screener로 보완한다. PAPER 보유종목은 후보군에 강제 포함되지 않는다.
-- 후보별 최근 60개 일봉을 `DailyCandlesRepository`에서 읽고 4개 기존 전략과 `assess_market_regime`/`compose_weighted_ensemble`을 실행한다. 별도 cross-sectional factor rank는 없다.
+- 후보별 완료 일봉을 `DailyCandlesRepository`에서 읽고 `candidate_ranker.py`의 cross-sectional factor rank를 먼저 매긴 뒤, 상위 후보에 breakout 전략군과 `assess_market_regime`을 적용해 Daily Setup을 만든다. `compose_weighted_ensemble()`은 전략군(`family`)을 필수 인자로 받아 그 전략군 밖 전략에는 가중치와 점수를 0으로 준다.
 - `policy.py::portfolio_plan`은 운영예산과 종목 최대비중만으로 수량을 정한다. ATR, 손절폭, 유동성, Regime 위험배율은 수량 계산에 쓰지 않는다.
 - `consumer.py::PaperAutomationConsumer`는 APPROVED recommendation만 claim하고, 주문 직전 PAPER preview와 owner policy/Kill Switch를 다시 읽은 뒤 `PAPER` facade에 idempotency key `ai-rec:{recommendation_id}`로 제출한다. LIVE facade는 없다.
 - `backtest.py`는 단일 종목·단일 전략 long-only next-bar backtest다. Candidate Ranker, ensemble, portfolio budget, Position Manager를 재사용하지 않는다.
@@ -20,7 +40,7 @@
 | 요구 | 기존 재사용 | 추가 경계 |
 |---|---|---|
 | 후보 데이터 | `DailyCandlesRepository`, `InvestScreenerSnapshot`, `SymbolMaster`, watchlist, KRX Screener provider | `candidate_ranker.py` |
-| 전략/시장 | `STRATEGIES`, `assess_market_regime`, `compose_weighted_ensemble` | 기존 구현 유지 |
+| 전략/시장 | `STRATEGIES`, `assess_market_regime`, `compose_weighted_ensemble(family=...)` | 전략군 격리; Mean Reversion은 breakout 합의에서 제외 |
 | 수량/위험 | `AITradingLimits`, `AITradingUsage`, `evaluate_hard_risk` | `position_sizing.py`; `policy.py`는 owner DB 조회와 Hard Risk 유지 |
 | 보유 관리 | `PaperPosition`, `AIRecommendationService`, `PaperAutomationConsumer` | `position_manager.py`와 owner-scoped 상태 모델 |
 | 주문 | 기존 PAPER preview/submit facade | 변경 없음; Position Manager는 직접 호출 금지 |
@@ -63,9 +83,21 @@ owner/account/market/symbol별 활성 상태는 실제 `PaperPosition.id`와 imm
 
 ### Portfolio Backtest, readiness와 Promotion
 
-백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
+백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 런타임과 동일하게 `family=StrategyFamily.BREAKOUT`으로 앙상블을 구성하므로 Mean Reversion은 백테스트 신호에도 투표하지 않는다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
 
 승격 evidence는 새 백테스트 체계를 만들지 않고 기존 `ResearchStrategyExperiment → ResearchBacktestRun → ResearchPromotionCandidate` registry를 사용한다. DB 일봉에서 종목 수, 251/252봉, stale/future/duplicate/OHLC 이상, 거래일 누락, corporate-action 상태, point-in-time·상장폐지 포함 가능 여부, KOSPI/KOSDAQ/SPY benchmark 범위를 계산한다. evidence가 부족하거나 fallback benchmark뿐이면 승격을 fail-closed한다.
+
+승격 판정은 기존 최소 거래수와 walk-forward fold 조건을 유지한 채 다음을 추가로 검사한다. 하나라도 미달이면 승격은 fail-closed다.
+
+| 기준 | 임계값 | 근거 |
+|---|---|---|
+| `max_drawdown` | ≤ 0.20 | baseline MDD |
+| `profit_factor` | ≥ 1.20 | 총이익 / 총손실. 손실이 0이면 `lossless`로 통과하고, 이익도 손실도 0이면 `undefined`로 실패한다 |
+| `cost_stressed_total_return` | ≥ 0 | 수수료·slippage stress(1x/2x/3x) 중 최악 시나리오의 총수익률 |
+| `total_return`, `win_rate`, `expectancy`, `excess_return` | 기존 값 유지 | |
+| `trade_count` ≥ 30, `walk_forward_folds` ≥ 3, pass rate ≥ 0.67 | 기존 값 유지 | |
+
+`gross_profit`, `gross_loss`, `total_costs`, `cost_stressed_total_return`은 백테스트 체결 원장의 `net_pnl`과 비용 stress diagnostics에서 산출한다. cost stress 시나리오가 없는 evidence는 `cost_stress_scenarios_missing`으로 거부한다.
 
 전략 상태는 `DRAFT`, `BACKTESTED`, `PAPER_APPROVED`, `PAPER_SUSPENDED`, `RETIRED`다. 운영자는 persisted candidate ID와 사유만 넘길 수 있고 raw metrics를 CLI로 주입할 수 없다. 승인·추천 생성·AUTO_PAPER submit 직전의 strategy artifact fingerprint가 모두 같아야 하며, Ranker/Regime/Ensemble/Sizer/Manager/Backtest/비용 설정과 schema evidence version 변경은 새 backtest/promotion을 요구한다. Git SHA는 source lineage로 별도 저장하고 문서·UI·테스트 변경은 artifact fingerprint에서 제외한다.
 
@@ -90,7 +122,9 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 ## AI 공급자 역할
 
 - 후보 factor, 수량, stop, exit와 deterministic backtest/promotion metrics는 AI를 호출하지 않는다.
-- 추천의 설명·검토만 AI provider를 사용한다.
+- AI는 추천의 설명, 보조순위, 사후분석만 담당한다. **AI는 BUY/SELL을 허용하거나 차단할 권한이 없다.** provider 실패, 기술 판정과의 불일치, 낮은 confidence는 `ai_review` evidence에 `AGREES|DISAGREES|LOW_CONFIDENCE|INVALID|UNAVAILABLE|NOT_REQUESTED` 상태로 기록되고 순위 보조 가중치에만 반영된다. AI가 전부 실패해도 기술 판정과 PAPER 적격성은 바뀌지 않는다.
+- 뉴스·공시는 `news_shadow` evidence로 격리한다. 항목이 있으면 `FOUND`, 항목이 없고 시장 뉴스 경로가 최근 24시간 안에 살아 있음이 입증되면 `NOT_FOUND`, 입증하지 못하면 `NOT_FOUND`로 단정하지 않고 `UNKNOWN`이다. 세 값 모두 매매 판단에 쓰지 않는다.
+- 같은 결정에 technical-only, technical+AI, technical+AI+news 세 코호트 evidence를 함께 기록해 AI와 뉴스가 실제로 결과를 바꾸는지 사후 비교할 수 있게 한다. 실제로 집행되는 live 코호트는 technical-only다.
 - 복잡한 후보/거래 검토는 MCP 직결을 우선하고 direct OpenAI-compatible API, OpenRouter 순으로 availability fallback한다.
 - 뉴스·공시 요약은 direct API 담당으로 두고 OpenRouter fallback을 사용한다. OpenRouter fallback 모델은 공식 slug `z-ai/glm-5.3-flash`다.
 - 일반 뉴스 structured output은 `summary`(한국어 2~4문장)와 `translated_title`, `translated_excerpt`를 분리한다. 번역 필드는 각 원문이 영문 우세일 때만 생성하며, 본문 앞부분 4,000자만 입력하고 번역 발췌는 6,000자 이하로 저장한다. 한국어 title/body의 대응 번역 필드와 본문이 없을 때의 `translated_excerpt`, 기존 분석 행의 두 필드는 `null`을 허용하고 원문 URL은 `/market/news`와 daily routine alert에 그대로 제공한다.
