@@ -1160,33 +1160,35 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
 
 
 def test_forward_track_accepts_partial_eligible_cohort_but_historical_rejects() -> None:
-    readiness = _readiness(track=HISTORICAL_PIT_TRACK)
-    kr = readiness.for_market("kr")
-    partial_kr = replace(
-        kr,
-        eligible_symbol_count=9,
-        eligible_symbols=kr.eligible_symbols[:-1],
-        excluded_symbols=(
-            SymbolReadinessExclusion(
-                symbol="KR-8",
-                reasons=("insufficient_history",),
+    def _partial_readiness(readiness: DailyCandlesReadiness) -> DailyCandlesReadiness:
+        kr = readiness.for_market("kr")
+        partial_kr = replace(
+            kr,
+            eligible_symbol_count=9,
+            eligible_symbols=kr.eligible_symbols[:-1],
+            excluded_symbols=(
+                SymbolReadinessExclusion(
+                    symbol="KR-8",
+                    reasons=("insufficient_history",),
+                ),
             ),
-        ),
-        price_adjustment_status="incomplete",
-        adjustment_covered_symbol_count=9,
-    )
-    partial = replace(
-        readiness,
-        markets=(partial_kr, readiness.for_market("us")),
-    )
+            price_adjustment_status="incomplete",
+            adjustment_covered_symbol_count=9,
+        )
+        return replace(
+            readiness,
+            markets=(partial_kr, readiness.for_market("us")),
+        )
 
-    _require_readiness(partial, track=FORWARD_PAPER_TRACK)
+    forward = _partial_readiness(_readiness(track=FORWARD_PAPER_TRACK))
+    _require_readiness(forward, track=FORWARD_PAPER_TRACK)
 
+    historical = _partial_readiness(_readiness(track=HISTORICAL_PIT_TRACK))
     with pytest.raises(
         PromotionEvidenceBuildError,
         match="kr:cohort_members_not_ready",
     ):
-        _require_readiness(partial, track=HISTORICAL_PIT_TRACK)
+        _require_readiness(historical, track=HISTORICAL_PIT_TRACK)
 
 
 def test_require_readiness_forward_track_rejects_the_wrong_cohort_scope() -> None:
