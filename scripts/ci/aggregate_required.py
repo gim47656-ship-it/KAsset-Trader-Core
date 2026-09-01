@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Fail-closed aggregator behind the stable ``ci-required`` check.
 
-ROB-1294 (R2B). Branch protection today names six checks directly (``lint``,
-``taskiq-smoke``, ``test (3.13, 1..4)``), so any change to shard count or lane
-topology is a branch-protection edit. This script is the evaluation half of a
-single fixed-name check that could later stand in for all of them.
-
-**This PR does not make ``ci-required`` a required check.** See
-``docs/runbooks/ci-required-aggregator.md`` for the operator-only cutover.
+Branch protection requires this fixed-name check together with
+``migration (PostgreSQL 15)`` and ``frontend``. The aggregate evaluates
+``lint``, ``taskiq-smoke``, the four-test-shard matrix result, and the change
+classifier. Skips are red unless the workflow explicitly authorizes the three
+aggregate children for a proven HANDOFF-only change.
 
 Truth table (per required child)
 --------------------------------

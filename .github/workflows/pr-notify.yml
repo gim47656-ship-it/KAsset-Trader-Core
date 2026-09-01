@@ -30,8 +30,8 @@ jobs:
         run: |
           WEBHOOK_URL="${DISCORD_PR_WEBHOOK_URL:-$DISCORD_WEBHOOK_URL}"
           if [ -z "$WEBHOOK_URL" ]; then
-            echo "No Discord webhook configured"
-            exit 1
+            echo "::notice::No Discord webhook configured; skipping PR notification."
+            exit 0
           fi
 
           # draft PR opened/reopened는 제외, ready_for_review 때 알림
@@ -111,4 +111,4 @@ jobs:
                 }
               ]
             }' \
-          | curl -s -H "Content-Type: application/json" -d @- "$WEBHOOK_URL"
+          | curl --fail-with-body --silent --show-error -H "Content-Type: application/json" -d @- "$WEBHOOK_URL"

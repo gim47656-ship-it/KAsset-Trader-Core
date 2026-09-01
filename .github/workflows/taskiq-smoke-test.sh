@@ -25,7 +25,7 @@ run_case() {
   local log_path="$test_dir/$name.log"
   local actual_status=0
 
-  TASKIQ_READINESS_POLLS=3 \
+  TASKIQ_READINESS_POLLS="${TASKIQ_READINESS_POLLS:-3}" \
     TASKIQ_READINESS_INTERVAL=0.05 \
     TASKIQ_TERM_GRACE_POLLS=3 \
     TASKIQ_TERM_GRACE_INTERVAL=0.05 \
@@ -75,7 +75,7 @@ run_case normal-shutdown 0 bash -c \
 
 term_ignore_pids="$test_dir/term-ignore.pids"
 # shellcheck disable=SC2016  # The nested bash processes expand these expressions.
-run_case term-ignore 0 bash -c \
+TASKIQ_READINESS_POLLS=40 run_case term-ignore 0 bash -c \
   'trap "" TERM; printf "%s\n" "$$" > "$1"; bash -c '"'"'trap "" TERM; printf "%s\n" "$$" >> "$1"; while :; do sleep 1; done'"'"' _ "$1" & while [[ $(wc -l < "$1") -lt 2 ]]; do sleep 0.01; done; printf "READY\n"; wait' \
   _ "$term_ignore_pids"
 assert_processes_gone "$term_ignore_pids"

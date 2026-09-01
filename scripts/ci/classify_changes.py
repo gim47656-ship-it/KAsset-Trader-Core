@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic changed-path classifier for CI resource lanes.
 
-ROB-1294 (R2B) ships this as **shadow output only**: nothing in
-``.github/workflows/test.yml`` consumes its outputs to skip a job. It exists so
-that a later change can move shard/lane topology behind a stable required
-check without inventing the fail-closed semantics at that moment.
+The classifier is consumed by ``.github/workflows/test.yml`` only for the
+proven HANDOFF-only fast path. Every mixed lane, unknown path, unsafe status,
+or classifier uncertainty preserves full CI coverage.
 
 Fail-closed contract
 --------------------
@@ -48,8 +47,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 
 #: Every CI job name the classifier can address. ``run_all`` selects all of
-#: them; these strings are the vocabulary a later resource-lane change would
-#: bind actual job ``if:`` conditions to.
+#: them. The workflow currently consumes only the empty docs job set; broader
+#: lane-based skipping remains disabled.
 ALL_JOBS: tuple[str, ...] = (
     "lint",
     "test",
@@ -97,10 +96,14 @@ _RENAME_STATUS_RE = re.compile(r"\A[RC]\d{0,3}\Z")
 #: statuses so it forces ``run_all`` instead of being classified by path.
 _REWRITE_STATUS_RE = re.compile(r"\AM\d{1,3}\Z")
 
-# Ordered rule table. First match wins, so shared infrastructure must precede
-# the broad directory lanes it lives inside (``scripts/ci/`` before
-# ``scripts/``, ``tests/conftest.py`` before ``tests/``).
+# Ordered rule table. First match wins. Shared infrastructure and test-pinned
+# documentation must precede broad directory lanes. Only HANDOFF.md is proven
+# metadata-only and may take the zero-job docs lane.
 _EXACT_RULES: tuple[tuple[str, str], ...] = (
+    ("HANDOFF.md", "docs"),
+    ("README.md", "ci_shared"),
+    ("CLAUDE.md", "ci_shared"),
+    ("AGENTS.md", "ci_shared"),
     ("pyproject.toml", "ci_shared"),
     ("uv.lock", "ci_shared"),
     ("Makefile", "ci_shared"),
@@ -119,7 +122,7 @@ _EXACT_RULES: tuple[tuple[str, str], ...] = (
 _PREFIX_RULES: tuple[tuple[str, str], ...] = (
     (".github/", "ci_shared"),
     ("scripts/ci/", "ci_shared"),
-    ("docs/", "docs"),
+    ("docs/", "ci_shared"),
     ("app/", "app"),
     ("tests/", "tests"),
     ("research/", "research"),
@@ -130,13 +133,9 @@ _PREFIX_RULES: tuple[tuple[str, str], ...] = (
     ("config/", "config"),
 )
 
-#: Suffix rules apply to **top-level files only** (no ``/`` in the path).
-#: A bare ``*.md`` rule would otherwise swallow every unmatched nested
-#: markdown path -- a fixture under a directory the prefix table does not know
-#: yet, or a directory whose name merely resembles a known one (git tracks
-#: ``" docs/only.md"``, with a leading space, as a *different* directory).
-#: Those must stay ``unknown`` and force ``run_all``.
-_TOP_LEVEL_SUFFIX_RULES: tuple[tuple[str, str], ...] = ((".md", "docs"),)
+#: Unlisted top-level files stay ``unknown`` and force ``run_all``. Do not add
+#: a broad Markdown suffix: several top-level guides are test-pinned contracts.
+_TOP_LEVEL_SUFFIX_RULES: tuple[tuple[str, str], ...] = ()
 
 
 class ClassifierError(RuntimeError):
@@ -175,9 +174,9 @@ def classify_path(path: str) -> str:
     Matching is against the **literal** path git reported. Nothing is
     stripped or otherwise normalized first: git happily tracks a file named
     ``" docs/only.md"`` (leading space) and emits it verbatim under
-    ``--name-status -z``, and a classifier that trimmed it would answer
-    "docs-only, no jobs needed" for a path that is not in ``docs/`` at all.
-    An unmatched literal is ``unknown``, which forces ``run_all``.
+    ``--name-status -z``. A classifier that trimmed or normalized such paths
+    could incorrectly select a zero-job lane. An unmatched literal is
+    ``unknown``, which forces ``run_all``.
     """
 
     if not path:
@@ -388,8 +387,8 @@ def build_outputs(classification: Classification) -> dict[str, str]:
         "lanes": ",".join(classification.lanes),
         "jobs": ",".join(classification.jobs),
         "changed_path_count": str(classification.changed_path_count),
-        # Shadow marker: ROB-1294 wires no job condition to these outputs.
-        "shadow": "true",
+        # Compatibility output for older consumers; classification is active.
+        "shadow": "false",
     }
     for job in ALL_JOBS:
         key = "run_" + job.replace("-", "_")
@@ -417,7 +416,7 @@ def _write_step_summary(lines: Iterable[str]) -> None:
 
 def _summary_lines(report: Mapping[str, object]) -> list[str]:
     lines = [
-        "### Change classifier (shadow — drives no job skip)",
+        "### Change classifier (active)",
         "",
         "| field | value |",
         "|---|---|",
@@ -467,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         "path_lanes": {},
         "forcing_paths": [],
         "changed_path_count": 0,
-        "shadow": True,
+        "shadow": False,
         "error": None,
     }
     outputs: dict[str, str] = {}
@@ -559,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"CHANGE CLASSIFIER: {report['result'].upper()} — "  # type: ignore[union-attr]
             f"reason={report['reason']} lanes={report['lanes']} "
-            f"jobs={report['jobs']} (shadow: drives no job skip)"
+            f"jobs={report['jobs']} (active classifier)"
         )
     return exit_code
 

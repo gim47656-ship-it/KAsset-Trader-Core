@@ -36,6 +36,8 @@ WORKFLOW_PATH = (
 MERGE_JOB_ID = "merge"
 BUILD_STEP_NAME = "Build call-phase duration artifact"
 VALIDATE_STEP_NAME = "Validate call-phase duration freshness"
+PREFLIGHT_JOB_ID = "preflight"
+PULL_REQUEST_JOB_ID = "pull-request"
 
 DIRECT_SCRIPT_INVOCATION = "python scripts/call_durations.py"
 MODULE_SAFE_INVOCATION = "python -m scripts.call_durations"
@@ -75,3 +77,28 @@ def test_call_durations_step_uses_module_safe_invocation(
 def test_no_direct_script_invocation_anywhere_in_workflow() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     assert DIRECT_SCRIPT_INVOCATION not in text
+
+
+def test_missing_refresh_token_keeps_measurement_jobs_runnable(
+    workflow: dict[str, Any],
+) -> None:
+    preflight = workflow["jobs"][PREFLIGHT_JOB_ID]
+    token_step = _step(workflow, PREFLIGHT_JOB_ID, "Detect DURATIONS_REFRESH_TOKEN")
+    script = token_step["run"]
+
+    assert preflight["outputs"]["can_open_pr"] == (
+        "${{ steps.token.outputs.can_open_pr }}"
+    )
+    assert 'echo "can_open_pr=false" >> "$GITHUB_OUTPUT"' in script
+    assert "exit 1" not in script
+    assert "needs" not in workflow["jobs"]["collect-authoritative"]
+    assert "needs" not in workflow["jobs"]["measure"]
+
+
+def test_auto_pr_requires_the_refresh_token_output(
+    workflow: dict[str, Any],
+) -> None:
+    pull_request = workflow["jobs"][PULL_REQUEST_JOB_ID]
+
+    assert set(pull_request["needs"]) == {MERGE_JOB_ID, PREFLIGHT_JOB_ID}
+    assert "needs.preflight.outputs.can_open_pr == 'true'" in pull_request["if"]
