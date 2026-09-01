@@ -281,6 +281,31 @@ def test_intraday_relative_strength_uses_the_shared_completed_window() -> None:
     assert result.value == "0.090000"
 
 
+def test_intraday_relative_strength_sell_direction_requires_underperformance() -> None:
+    bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="100", high="100", low="95", close="95", volume="1"),
+    ]
+    index_bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="100", high="100", low="99", close="99", volume="1"),
+    ]
+
+    result = intraday_relative_strength(
+        bars,
+        index_bars,
+        direction=Action.SELL,
+        threshold=Decimal("0.01"),
+        bar_interval=_INTERVAL,
+        source="toss",
+        index_source="toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "-0.040000"
+    assert result.threshold == "-0.010000"
+
+
 def test_intraday_relative_strength_is_unavailable_without_index_bars() -> None:
     result = intraday_relative_strength(
         _long_session(),

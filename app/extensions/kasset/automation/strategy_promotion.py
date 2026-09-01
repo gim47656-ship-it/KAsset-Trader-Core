@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -195,7 +196,54 @@ class PromotionThresholds:
                 raise ValueError(f"{field_name} must be a boolean")
 
 
+#: 승격 근거 트랙. ``forward_paper``는 현재 설정된 소스(Toss/Naver/Yahoo)로 실제
+#: 수집 가능한 근거만 요구한다. ``historical_pit``은 point-in-time 멤버십, 상장폐지
+#: 생존자, KSD 액션 원장, primary provider 시세까지 모두 증명된 경우만 통과한다.
+PromotionTrack = Literal["forward_paper", "historical_pit"]
+FORWARD_PAPER_TRACK: PromotionTrack = "forward_paper"
+HISTORICAL_PIT_TRACK: PromotionTrack = "historical_pit"
+PROMOTION_TRACKS: frozenset[str] = frozenset(
+    {FORWARD_PAPER_TRACK, HISTORICAL_PIT_TRACK}
+)
+
+#: historical 근거를 모두 증명한 트랙의 임계. 기존 값에서 하나도 완화하지 않는다.
 DEFAULT_PROMOTION_THRESHOLDS = PromotionThresholds()
+HISTORICAL_PIT_PROMOTION_THRESHOLDS = DEFAULT_PROMOTION_THRESHOLDS
+
+#: forward PAPER 트랙 임계.
+#:
+#: 성과(총수익률/초과수익률/기대값/승률), MDD, profit factor, 비용 stress 후
+#: 수익률, 표본 수(거래 수·walk-forward fold·통과율), 데이터 품질, 결정성은
+#: historical 트랙과 **완전히 동일**하다. 오직 ``require_survivorship_evidence``
+#: 하나만 빠진다. 이 값은 "과거 시점 멤버십과 상장폐지 생존자가 증명됐다"는
+#: historical 주장이며, forward 코호트에서는 정의상 증명할 수 없다. PAPER는 그
+#: 근거를 만들어내는 단계이므로 PAPER 진입 조건으로 요구하면 PAPER 자체가 영구히
+#: 도달 불가가 된다. 완화가 아니라 트랙 경계다: 생존편향 주의는 payload의
+#: ``readiness.unresolvedEvidence``와 SURVIVORSHIP 근거 코드에 그대로 남고,
+#: ``historical_pit`` 트랙은 계속 fail-closed다. 이 승인은 PAPER 주문만 낼 수
+#: 있는 상태(``PromotionState``에 LIVE 없음, AUTO_PAPER는 ``paper=True`` 고정)로
+#: 끝나며 실거래로 넘어가지 않는다.
+FORWARD_PAPER_PROMOTION_THRESHOLDS = PromotionThresholds(
+    require_survivorship_evidence=False,
+)
+
+_THRESHOLDS_BY_TRACK: dict[str, PromotionThresholds] = {
+    FORWARD_PAPER_TRACK: FORWARD_PAPER_PROMOTION_THRESHOLDS,
+    HISTORICAL_PIT_TRACK: HISTORICAL_PIT_PROMOTION_THRESHOLDS,
+}
+
+
+def promotion_thresholds_for_track(track: str) -> PromotionThresholds:
+    """The only accepted threshold profile for one promotion track.
+
+    Callers never pass a threshold profile of their own: the profile is derived
+    from the track recorded in the immutable evidence payload, so a laxer
+    profile cannot be smuggled in through an API argument or a stored payload.
+    """
+    profile = _THRESHOLDS_BY_TRACK.get(track)
+    if profile is None:
+        raise ValueError(f"unsupported promotion track: {track!r}")
+    return profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,6 +883,11 @@ __all__ = [
     "DEFAULT_PAPER_STRATEGY_KEY",
     "DEFAULT_PAPER_STRATEGY_VERSION",
     "DEFAULT_PROMOTION_THRESHOLDS",
+    "FORWARD_PAPER_PROMOTION_THRESHOLDS",
+    "FORWARD_PAPER_TRACK",
+    "HISTORICAL_PIT_PROMOTION_THRESHOLDS",
+    "HISTORICAL_PIT_TRACK",
+    "PROMOTION_TRACKS",
     "IllegalPromotionTransition",
     "PaperApprovalDecision",
     "PromotionEvidence",
@@ -843,6 +896,7 @@ __all__ = [
     "PromotionState",
     "PromotionThresholdNotMet",
     "PromotionThresholds",
+    "PromotionTrack",
     "StrategyPromotion",
     "ThresholdCheck",
     "ThresholdEvaluation",
@@ -850,5 +904,6 @@ __all__ = [
     "evaluate_thresholds",
     "hash_metrics_snapshot",
     "paper_approval_for",
+    "promotion_thresholds_for_track",
     "transition_promotion",
 ]

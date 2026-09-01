@@ -52,11 +52,13 @@ class _ReadOnlySession:
         members: dict[str, list[dict[str, object]]],
         benchmarks: dict[str, list[dict[str, object]]],
         coverage: list[dict[str, object]] | None = None,
+        sessions: list[dict[str, object]] | None = None,
     ) -> None:
         self._cohorts = cohorts
         self._members = members
         self._benchmarks = benchmarks
         self._coverage = coverage or []
+        self._sessions = sessions or []
         self.statements: list[str] = []
         self.parameters: list[dict[str, object]] = []
 
@@ -71,6 +73,8 @@ class _ReadOnlySession:
             if f"daily_candles_readiness:cohort:{market}" in sql:
                 row = self._cohorts.get(market)
                 return _Rows([row] if row is not None else [])
+            if f"daily_candles_readiness:sessions:{market}" in sql:
+                return _Rows(self._sessions)
             if f"daily_candles_readiness:market:{market}" in sql:
                 return _Rows(self._members.get(market, []))
             if f"daily_candles_readiness:benchmark:{market}" in sql:
@@ -83,6 +87,32 @@ class _ReadOnlySession:
 def _sessions(count: int = 252) -> tuple[date, ...]:
     start = date(2025, 1, 1)
     return tuple(start + timedelta(days=index) for index in range(count))
+
+
+def _session_rows(
+    sessions: tuple[date, ...],
+    *,
+    member_count: int = 1,
+    benchmark_count: int = 1,
+    absent: tuple[date, ...] = (),
+    benchmark_only: tuple[date, ...] = (),
+) -> list[dict[str, object]]:
+    """Per-session cohort observation rows the readiness probe reads."""
+
+    rows: list[dict[str, object]] = []
+    for session_day in sessions:
+        if session_day in absent:
+            continue
+        rows.append(
+            {
+                "session_date": session_day,
+                "member_symbol_count": (
+                    0 if session_day in benchmark_only else member_count
+                ),
+                "benchmark_symbol_count": benchmark_count,
+            }
+        )
+    return rows
 
 
 def _cohort(
@@ -224,13 +254,14 @@ async def _measure(
     benchmark: list[dict[str, object]] | None = None,
     coverage: list[dict[str, object]] | None = None,
     sessions: tuple[date, ...] | None = None,
+    session_rows: list[dict[str, object]] | None = None,
     cohort_ids: dict[str, str] | None = None,
 ) -> tuple[Any, _ReadOnlySession]:
-    expected = _sessions() if sessions is None else sessions
+    candidates = _sessions() if sessions is None else sessions
     monkeypatch.setattr(
         readiness_module,
-        "_completed_expected_sessions",
-        lambda selected_market, as_of: expected,
+        "_completed_candidate_sessions",
+        lambda selected_market, as_of: candidates,
     )
     resolved_cohort = cohort if cohort is not None else _cohort(market)
     resolved_benchmark = benchmark
@@ -241,6 +272,7 @@ async def _measure(
         members={market: members},
         benchmarks={market: resolved_benchmark},
         coverage=coverage,
+        sessions=(_session_rows(candidates) if session_rows is None else session_rows),
     )
     result = await DailyCandlesReadinessService(db).measure(
         as_of=_AS_OF,
@@ -256,7 +288,7 @@ async def test_no_cohort_fails_closed_without_querying_the_live_universe(
 ) -> None:
     monkeypatch.setattr(
         readiness_module,
-        "_completed_expected_sessions",
+        "_completed_candidate_sessions",
         lambda market, as_of: _sessions(),
     )
     db = _ReadOnlySession(
@@ -276,6 +308,8 @@ async def test_no_cohort_fails_closed_without_querying_the_live_universe(
     assert market.daily_history_ready is False
     assert result.promotion_ready is False
     assert market.daily_history_blockers == ("us:cohort_not_found",)
+    assert market.historical_evidence_ready is False
+    assert market.historical_evidence_blockers == ("us:cohort_not_found",)
     assert len(db.statements) == 1
     assert db.parameters[0]["cohort_id"] == "missing"
 
@@ -447,7 +481,7 @@ async def test_252_bar_threshold_and_quality_checks_are_not_weakened(
 
 
 @pytest.mark.asyncio
-async def test_current_forward_history_can_be_ready_while_promotion_is_blocked(
+async def test_forward_cohort_reaches_promotion_ready_with_unresolved_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -466,14 +500,24 @@ async def test_current_forward_history_can_be_ready_while_promotion_is_blocked(
     market = result.for_market("us")
     assert market.daily_history_ready is True
     assert result.daily_history_ready is True
-    assert market.promotion_ready is False
-    assert result.promotion_ready is False
-    assert "us:cohort_not_historical_pit" in market.blockers
-    assert "us:cohort_window_predates_effective_date" in market.blockers
+    # Forward PAPER promotion only needs the obtainable evidence.
+    assert market.promotion_ready is True
+    assert result.promotion_ready is True
+    assert market.blockers == ()
+    # The historical claims stay explicitly unproven, never silently dropped.
+    assert market.historical_evidence_ready is False
+    assert result.historical_evidence_ready is False
+    assert "us:cohort_not_historical_pit" in market.historical_evidence_blockers
+    assert (
+        "us:cohort_window_predates_effective_date"
+        in market.historical_evidence_blockers
+    )
+    assert set(market.historical_evidence_blockers) <= set(market.unresolved_evidence)
+    assert set(market.historical_evidence_blockers) <= set(market.reasons)
 
 
 @pytest.mark.asyncio
-async def test_historical_pit_label_without_delisted_evidence_is_not_promotion_ready(
+async def test_historical_pit_label_without_delisted_evidence_is_not_proven(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -487,9 +531,10 @@ async def test_historical_pit_label_without_delisted_evidence_is_not_promotion_r
     market = result.for_market("us")
     assert market.includes_delisted is False
     assert market.daily_history_ready is True
-    assert market.promotion_ready is False
-    assert result.promotion_ready is False
-    assert "us:delisted_members_absent" in market.blockers
+    assert market.promotion_ready is True
+    assert market.historical_evidence_ready is False
+    assert result.historical_evidence_ready is False
+    assert "us:delisted_members_absent" in market.historical_evidence_blockers
     cohort_sql = next(
         sql for sql in db.statements if "daily_candles_readiness:cohort:us" in sql
     )
@@ -500,7 +545,7 @@ async def test_historical_pit_label_without_delisted_evidence_is_not_promotion_r
 
 
 @pytest.mark.asyncio
-async def test_historical_pit_cohort_with_delisted_survivor_is_promotion_ready(
+async def test_historical_pit_cohort_with_delisted_survivor_is_fully_proven(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -523,10 +568,13 @@ async def test_historical_pit_cohort_with_delisted_survivor_is_promotion_ready(
     assert market.delist_date_covered_inactive_count == 1
     assert market.blockers == ()
     assert market.promotion_ready is True
+    assert market.historical_evidence_blockers == ()
+    assert market.historical_evidence_ready is True
+    assert market.unresolved_evidence == ()
 
 
 @pytest.mark.asyncio
-async def test_missing_list_date_blocks_promotion_without_blocking_daily_history(
+async def test_missing_list_date_blocks_history_evidence_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -545,13 +593,14 @@ async def test_missing_list_date_blocks_promotion_without_blocking_daily_history
     assert market.list_date_covered_symbol_count == 1
     assert market.point_in_time_available is False
     assert market.daily_history_ready is True
-    assert market.promotion_ready is False
-    assert "us:list_date_coverage_incomplete" in market.blockers
-    assert "us:point_in_time_unavailable" in market.blockers
+    assert market.promotion_ready is True
+    assert market.historical_evidence_ready is False
+    assert "us:list_date_coverage_incomplete" in market.historical_evidence_blockers
+    assert "us:point_in_time_unavailable" in market.historical_evidence_blockers
 
 
 @pytest.mark.asyncio
-async def test_member_listed_after_cohort_start_blocks_promotion(
+async def test_member_listed_after_cohort_start_blocks_history_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -571,12 +620,13 @@ async def test_member_listed_after_cohort_start_blocks_promotion(
     assert market.members_listed_after_cohort_start == 1
     assert market.point_in_time_available is False
     assert market.daily_history_ready is True
-    assert market.promotion_ready is False
-    assert "us:member_listed_after_cohort_start" in market.blockers
+    assert market.promotion_ready is True
+    assert market.historical_evidence_ready is False
+    assert "us:member_listed_after_cohort_start" in market.historical_evidence_blockers
 
 
 @pytest.mark.asyncio
-async def test_inactive_member_without_delist_date_blocks_promotion(
+async def test_inactive_member_without_delist_date_blocks_history_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -602,9 +652,9 @@ async def test_inactive_member_without_delist_date_blocks_promotion(
     assert market.delist_date_covered_inactive_count == 0
     assert market.inactive_symbol_count == 1
     assert market.point_in_time_available is False
-    assert market.promotion_ready is False
-    assert "us:delist_date_coverage_incomplete" in market.blockers
-    assert "us:delisted_members_absent" in market.blockers
+    assert market.historical_evidence_ready is False
+    assert "us:delist_date_coverage_incomplete" in market.historical_evidence_blockers
+    assert "us:delisted_members_absent" in market.historical_evidence_blockers
 
 
 @pytest.mark.asyncio
@@ -638,7 +688,7 @@ async def test_later_inactive_member_is_retained_only_after_cohort_effective_dat
     assert historical_misuse.for_market("us").includes_delisted is False
     assert (
         "us:cohort_window_predates_effective_date"
-        in historical_misuse.for_market("us").blockers
+        in historical_misuse.for_market("us").historical_evidence_blockers
     )
 
 
@@ -660,14 +710,17 @@ async def test_kr_success_coverage_is_clear_for_zero_or_real_action_rows(
 
     market = result.for_market("kr")
     assert market.corporate_action_status == "clear"
+    assert market.price_adjustment_status == "covered"
     assert market.corporate_action_covered_symbol_count == 1
     assert market.adjustment_covered_symbol_count == 1
     assert market.daily_history_ready is True
+    assert "kr:corporate_action_unknown" not in market.historical_evidence_blockers
+    assert "kr:corporate_action_unknown" not in market.unresolved_evidence
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["failed", "gap", "missing"])
-async def test_kr_failed_missing_or_gapped_coverage_is_unknown(
+async def test_kr_missing_action_ledger_is_unresolved_not_a_daily_blocker(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
@@ -692,7 +745,13 @@ async def test_kr_failed_missing_or_gapped_coverage_is_unknown(
     market = result.for_market("kr")
     assert market.corporate_action_status == "unknown"
     assert market.corporate_action_covered_symbol_count == 0
-    assert "kr:corporate_action_unknown" in market.daily_history_blockers
+    # The obtainable adjusted-price evidence is intact, so the daily history is
+    # usable; the missing KSD ledger is recorded, not faked and not ignored.
+    assert market.price_adjustment_status == "covered"
+    assert market.daily_history_ready is True
+    assert "kr:corporate_action_unknown" not in market.daily_history_blockers
+    assert "kr:corporate_action_unknown" in market.historical_evidence_blockers
+    assert "kr:corporate_action_unknown" in market.unresolved_evidence
 
 
 @pytest.mark.asyncio
@@ -711,6 +770,8 @@ async def test_kr_requires_explicit_adjusted_candle_source(
     market = result.for_market("kr")
     assert market.corporate_action_status == "unknown"
     assert market.adjustment_covered_symbol_count == 0
+    assert market.price_adjustment_status == "incomplete"
+    assert "kr:adjustment_coverage_incomplete" in market.daily_history_blockers
 
 
 @pytest.mark.asyncio
@@ -736,7 +797,7 @@ async def test_us_adjusted_close_difference_is_expected_not_suspected(
 
 
 @pytest.mark.asyncio
-async def test_us_missing_or_invalid_adjusted_close_is_unknown(
+async def test_us_missing_adjusted_close_blocks_the_daily_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -749,11 +810,13 @@ async def test_us_missing_or_invalid_adjusted_close_is_unknown(
 
     market = result.for_market("us")
     assert market.corporate_action_status == "unknown"
-    assert "us:corporate_action_unknown" in market.daily_history_blockers
+    assert market.price_adjustment_status == "incomplete"
+    assert "us:adjustment_coverage_incomplete" in market.daily_history_blockers
+    assert "us:corporate_action_unknown" in market.historical_evidence_blockers
 
 
 @pytest.mark.asyncio
-async def test_fallback_only_history_never_becomes_promotion_ready(
+async def test_fallback_only_history_never_proves_historical_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -766,8 +829,9 @@ async def test_fallback_only_history_never_becomes_promotion_ready(
 
     market = result.for_market("us")
     assert market.daily_history_ready is True
-    assert market.promotion_ready is False
-    assert "us:fallback_only" in market.blockers
+    assert market.promotion_ready is True
+    assert market.historical_evidence_ready is False
+    assert "us:fallback_only" in market.historical_evidence_blockers
 
 
 @pytest.mark.asyncio
@@ -786,3 +850,196 @@ async def test_benchmark_requires_61_bars_for_a_60_session_return(
     market = result.for_market("us")
     assert market.benchmark.status == "insufficient"
     assert "us:benchmark_unavailable" in market.daily_history_blockers
+
+
+@pytest.mark.asyncio
+async def test_window_rolls_back_one_unsynced_session_instead_of_going_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cron gap between session close and ingest is lag, not a data defect."""
+
+    candidates = _sessions(253)
+    stored = candidates[:-1]
+    result, db = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member(
+                "AAPL",
+                sessions=stored,
+                bar_count=252,
+                observed_expected=252,
+                latest_day=stored[-1],
+            )
+        ],
+        sessions=candidates,
+        session_rows=_session_rows(stored),
+    )
+
+    market = result.for_market("us")
+    assert market.latest_completed_session == candidates[-1]
+    assert market.evaluated_window_end == stored[-1]
+    assert market.evaluated_window_start == stored[0]
+    assert market.ingest_lag_session_count == 1
+    assert market.stale_bar_count == 0
+    assert market.missing_expected_trading_day_count == 0
+    assert market.daily_history_ready is True
+    assert "us:ingest_lag_window_rolled_back" in market.unresolved_evidence
+    member_params = next(
+        params
+        for statement, params in zip(db.statements, db.parameters, strict=True)
+        if "daily_candles_readiness:market:us" in statement
+    )
+    assert member_params["expected_sessions"] == list(stored)
+
+
+@pytest.mark.asyncio
+async def test_ingest_lag_beyond_the_tolerance_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _sessions(255)
+    stored = candidates[:-3]
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member(
+                "AAPL",
+                sessions=stored,
+                bar_count=252,
+                observed_expected=252,
+                latest_day=stored[-1],
+            )
+        ],
+        sessions=candidates,
+        session_rows=_session_rows(stored),
+    )
+
+    market = result.for_market("us")
+    assert market.ingest_lag_session_count == 3
+    assert market.daily_history_ready is False
+    assert "us:ingest_lag_exceeded" in market.daily_history_blockers
+
+
+@pytest.mark.asyncio
+async def test_empty_store_keeps_the_calendar_anchor_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _sessions(253)
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member("AAPL", sessions=candidates, bar_count=0, observed_expected=0)
+        ],
+        sessions=candidates,
+        session_rows=[],
+    )
+
+    market = result.for_market("us")
+    assert market.evaluated_window_end == candidates[-1]
+    assert market.ingest_lag_session_count == len(candidates)
+    assert market.stale_bar_count == 1
+    assert market.daily_history_ready is False
+    assert {
+        "us:ingest_lag_exceeded",
+        "us:stale_bar",
+        "us:insufficient_history",
+    }.issubset(market.daily_history_blockers)
+
+
+@pytest.mark.asyncio
+async def test_session_no_source_evidences_is_recorded_not_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A calendar session absent from every durable source is uncertainty."""
+
+    candidates = _sessions(252)
+    closed_day = candidates[100]
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member(
+                "AAPL",
+                sessions=candidates,
+                bar_count=252,
+                observed_expected=251,
+            )
+        ],
+        sessions=candidates,
+        session_rows=_session_rows(candidates, absent=(closed_day,)),
+    )
+
+    market = result.for_market("us")
+    assert market.unevidenced_session_count == 1
+    assert market.unevidenced_sessions == (closed_day,)
+    assert market.missing_expected_trading_day_count == 0
+    assert market.daily_history_ready is True
+    assert "us:calendar_session_unevidenced" in market.unresolved_evidence
+
+
+@pytest.mark.asyncio
+async def test_session_the_benchmark_evidences_is_still_a_missing_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The benchmark proves the session traded, so a symbol gap stays a defect."""
+
+    candidates = _sessions(252)
+    traded_day = candidates[100]
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        members=[
+            _member(
+                "AAPL",
+                sessions=candidates,
+                bar_count=252,
+                observed_expected=251,
+            )
+        ],
+        sessions=candidates,
+        session_rows=_session_rows(candidates, benchmark_only=(traded_day,)),
+    )
+
+    market = result.for_market("us")
+    assert market.unevidenced_session_count == 0
+    assert market.missing_expected_trading_day_count == 1
+    assert market.daily_history_ready is False
+    assert "us:missing_expected_trading_days" in market.daily_history_blockers
+
+
+@pytest.mark.asyncio
+async def test_member_delisted_inside_the_window_is_not_stale_or_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _sessions(252)
+    delist_day = candidates[200]
+    survivors = candidates[:201]
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", requested_size=2),
+        members=[
+            _member("AAPL", sessions=candidates),
+            _member(
+                "OLDCO",
+                sessions=survivors,
+                rank=2,
+                active=False,
+                listing_status="delisted",
+                delist_date=delist_day,
+                bar_count=252,
+                observed_expected=len(survivors),
+                latest_day=delist_day,
+            ),
+        ],
+        sessions=candidates,
+        session_rows=_session_rows(candidates),
+    )
+
+    market = result.for_market("us")
+    assert market.stale_bar_count == 0
+    assert market.missing_expected_trading_day_count == 0
+    assert market.eligible_symbol_count == 2
+    assert market.daily_history_ready is True

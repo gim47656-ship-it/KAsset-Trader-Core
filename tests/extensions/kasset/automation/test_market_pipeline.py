@@ -412,6 +412,13 @@ def test_market_event_task_is_registered() -> None:
     assert kasset_market_events_tasks.kasset_google_news_us_sync.labels["schedule"] == [
         {"cron": "50 */3 * * *", "cron_offset": "Asia/Seoul"}
     ]
+    assert (
+        kasset_market_events_tasks.kasset_price_alert_push.task_name
+        == "kasset.push.price_alerts"
+    )
+    assert kasset_market_events_tasks.kasset_price_alert_push.labels["schedule"] == [
+        {"cron": "*/10 * * * *", "cron_offset": "Asia/Seoul"}
+    ]
 
 
 @pytest.mark.asyncio

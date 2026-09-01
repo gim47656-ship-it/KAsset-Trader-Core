@@ -595,7 +595,9 @@ async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
         "as_of": "2026-08-30T02:50:00+00:00",
         "daily_history_ready": True,
         "promotion_ready": True,
+        "historical_evidence_ready": False,
         "blockers": [],
+        "unresolved_evidence": ["kr:cohort_not_historical_pit"],
         "markets": [
             {
                 "market": "kr",
@@ -608,10 +610,13 @@ async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
                 "duplicate_timestamp_count": 0,
                 "ohlc_anomaly_count": 0,
                 "missing_expected_trading_day_count": None,
+                "ingest_lag_session_count": 1,
+                "unevidenced_session_count": 0,
                 "benchmark_symbol": "069500",
                 "benchmark_status": "available",
                 "benchmark_count": 300,
                 "blockers": [],
+                "unresolved_evidence": ["kr:cohort_not_historical_pit"],
             }
         ],
     }
@@ -636,7 +641,10 @@ async def test_readiness_panel_uses_the_cache_before_measuring(db_session):
     assert panel.rows[0].cells[0] == "국내 (KR)"
     # missing_expected_trading_day_count is NULL upstream — stays unmeasured.
     assert panel.rows[0].cells[6] is None
-    assert panel.metrics[2].hint == "캐시"
+    # The rolled-back ingest lag is reported next to it.
+    assert panel.rows[0].cells[7] == "1"
+    assert panel.rows[0].cells[-1] == "kr:cohort_not_historical_pit"
+    assert panel.metrics[3].hint == "캐시"
 
 
 async def test_readiness_cache_miss_measures_and_writes_back(db_session):
@@ -651,6 +659,10 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         cohort=None,
         evaluated_window_start=None,
         evaluated_window_end=None,
+        latest_completed_session=None,
+        ingest_lag_session_count=0,
+        unevidenced_session_count=0,
+        unevidenced_sessions=(),
         total_symbol_count=0,
         cohort_active_member_count=0,
         forced_member_count=0,
@@ -666,6 +678,7 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         ohlc_anomaly_count=0,
         missing_expected_trading_day_count=None,
         calendar_status="unavailable",
+        price_adjustment_status="incomplete",
         corporate_action_status="unknown",
         corporate_action_covered_symbol_count=0,
         adjustment_covered_symbol_count=0,
@@ -690,8 +703,11 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         ),
         daily_history_ready=False,
         promotion_ready=False,
+        historical_evidence_ready=False,
         daily_history_blockers=("kr:cohort_missing",),
         blockers=("kr:cohort_missing",),
+        historical_evidence_blockers=("kr:cohort_not_found",),
+        unresolved_evidence=("kr:cohort_not_found",),
         reasons=(),
     )
     readiness = DailyCandlesReadiness(
@@ -700,8 +716,11 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
         markets=(market,),
         daily_history_ready=False,
         promotion_ready=False,
+        historical_evidence_ready=False,
         daily_history_blockers=("kr:cohort_missing",),
         blockers=("kr:cohort_missing",),
+        historical_evidence_blockers=("kr:cohort_not_found",),
+        unresolved_evidence=("kr:cohort_not_found",),
         reasons=(),
     )
     ctx = OpsContext(db=db_session, now=_NOW)
@@ -722,7 +741,7 @@ async def test_readiness_cache_miss_measures_and_writes_back(db_session):
 
     assert panel.status is PanelStatus.WARN
     assert "kr:cohort_missing" in panel.summary
-    assert panel.metrics[2].hint == "방금 측정"
+    assert panel.metrics[3].hint == "방금 측정"
     # The write-back is what keeps the 7-statement measurement off the 2 vCPU
     # production database on every page load.
     client.set.assert_awaited_once()

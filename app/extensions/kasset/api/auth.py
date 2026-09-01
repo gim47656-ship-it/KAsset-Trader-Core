@@ -32,6 +32,7 @@ from app.auth.token_repository import hash_refresh_token
 from app.core.config import settings
 from app.core.db import get_db
 from app.extensions.kasset.api.errors import MobileApiError, unauthorized
+from app.extensions.kasset.api.push_tokens import detach_fcm_token
 from app.extensions.kasset.api.schemas import (
     CurrentUserResponse,
     GoogleLoginRequest,
@@ -294,7 +295,12 @@ class MobileAuthService:
         session_record = result.scalar_one_or_none()
         if session_record is None:
             raise unauthorized()
-        session_record.revoked_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        session_record.revoked_at = now
+        # Logout must stop push in the same transaction that kills the session;
+        # otherwise a revoked device keeps receiving another person's alerts if
+        # the phone changes hands.
+        detach_fcm_token(session_record, now=now)
         await db.commit()
 
     async def current_user(

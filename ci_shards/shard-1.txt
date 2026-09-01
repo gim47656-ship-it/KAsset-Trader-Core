@@ -249,6 +249,7 @@ tests/services/research/test_rob944_campaign_controller.py
 tests/services/research/test_rob984_cp6_diagnostics.py
 tests/services/research/test_strategy_learning_event_service.py
 tests/services/research_candles/test_promotion.py
+tests/services/research_candles/test_toss_minute_persistence.py
 tests/services/social_sentiment_probe/test_cli.py
 tests/services/social_sentiment_probe/test_sources.py
 tests/services/spike_attribution/test_cache.py

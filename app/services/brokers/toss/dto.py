@@ -331,7 +331,7 @@ class TossCandle:
     low_price: Decimal
     close_price: Decimal
     volume: Decimal
-    currency: str
+    currency: str | None
 
 
 @dataclass(frozen=True)
@@ -352,6 +352,32 @@ def parse_candles(raw: dict[str, Any]) -> TossCandlesPage:
             close_price=parse_decimal_string(row["closePrice"]),
             volume=parse_decimal_string(row["volume"]),
             currency=str(row["currency"]),
+        )
+        for row in raw["candles"]
+    ]
+    next_before = raw.get("nextBefore")
+    return TossCandlesPage(
+        candles=candles,
+        next_before=str(next_before) if next_before is not None else None,
+    )
+
+
+def parse_market_indicator_candles(raw: dict[str, Any]) -> TossCandlesPage:
+    """Parse the currency-less candle shape returned for market indicators."""
+
+    if "candles" not in raw or not isinstance(raw["candles"], list):
+        raise ValueError(
+            "Malformed Toss market indicator candles response: expected candles list"
+        )
+    candles = [
+        TossCandle(
+            timestamp=str(row["timestamp"]),
+            open_price=parse_decimal_string(row["openPrice"]),
+            high_price=parse_decimal_string(row["highPrice"]),
+            low_price=parse_decimal_string(row["lowPrice"]),
+            close_price=parse_decimal_string(row["closePrice"]),
+            volume=parse_decimal_string(row["volume"]),
+            currency=None,
         )
         for row in raw["candles"]
     ]

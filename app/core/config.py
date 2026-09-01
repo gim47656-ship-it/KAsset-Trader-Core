@@ -737,6 +737,16 @@ class Settings(BaseSettings):
     KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
     KASSET_AI_OPENROUTER_MODEL_FLASH: str = "z-ai/glm-5.3-flash"
     KASSET_AI_OPENROUTER_MODEL_PRO: str = "z-ai/glm-5.3-flash"
+    # 등락 push 발송. 기본 off이며, service-account 자격이 없으면 켜져 있어도
+    # 외부 요청 없이 fail closed로 멈춘다.
+    KASSET_FCM_ENABLED: bool = False
+    # Firebase 콘솔에서 받은 service-account JSON 전체를 base64로 인코딩한 값.
+    # .env 한 줄에 개행 포함 private key를 담기 위한 형식이며, 복호화한 원문은
+    # 로그/응답/예외 어디에도 싣지 않는다.
+    KASSET_FIREBASE_SERVICE_ACCOUNT_JSON_B64: SecretStr | None = None
+    KASSET_FCM_TIMEOUT_SECONDS: Annotated[
+        float, Field(gt=0.0, le=60.0, allow_inf_nan=False)
+    ] = 10.0
 
     # JWT Authentication settings
     SECRET_KEY: str

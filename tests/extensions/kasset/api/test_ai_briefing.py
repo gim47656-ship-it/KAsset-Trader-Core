@@ -329,6 +329,7 @@ def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(
                 "Trump 행정부는 저장된 영문 기사에서 관세 정책 변경을 밝혔다."
             ),
             "symbol": None,
+            "market": None,
             "source": "Reuters",
             "url": None,
             "occurredAt": body["routineAlerts"][0]["occurredAt"],

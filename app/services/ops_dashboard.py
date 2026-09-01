@@ -71,7 +71,7 @@ _LEDGER_WINDOW = timedelta(days=30)
 # most, so a 15-minute shared TTL bounds it to <=4 heavy runs per hour across
 # every worker while keeping the number fresh enough to act on.
 _READINESS_CACHE_TTL_SECONDS = 900
-_READINESS_CACHE_KEY = "ops_dashboard:daily_candles_readiness:v1"
+_READINESS_CACHE_KEY = "ops_dashboard:daily_candles_readiness:v2"
 
 _ERROR_DETAIL_MAX_CHARS = 200
 
@@ -1359,7 +1359,9 @@ def _readiness_snapshot(readiness: DailyCandlesReadiness) -> dict[str, Any]:
         "as_of": readiness.as_of.isoformat(),
         "daily_history_ready": readiness.daily_history_ready,
         "promotion_ready": readiness.promotion_ready,
+        "historical_evidence_ready": readiness.historical_evidence_ready,
         "blockers": list(readiness.blockers),
+        "unresolved_evidence": list(readiness.unresolved_evidence),
         "markets": [
             {
                 "market": market.market,
@@ -1376,10 +1378,13 @@ def _readiness_snapshot(readiness: DailyCandlesReadiness) -> dict[str, Any]:
                 "missing_expected_trading_day_count": (
                     market.missing_expected_trading_day_count
                 ),
+                "ingest_lag_session_count": market.ingest_lag_session_count,
+                "unevidenced_session_count": market.unevidenced_session_count,
                 "benchmark_symbol": market.benchmark.symbol,
                 "benchmark_status": market.benchmark.status,
                 "benchmark_count": market.benchmark.count,
                 "blockers": list(market.blockers),
+                "unresolved_evidence": list(market.unresolved_evidence),
             }
             for market in readiness.markets
         ],
@@ -1431,10 +1436,17 @@ async def _readiness_panel(ctx: OpsContext) -> OpsPanel:
                 _count(market["symbols_with_at_least_252_bars"]),
                 _count(market["stale_bar_count"]),
                 _opt_count(market["missing_expected_trading_day_count"]),
+                _count(market["ingest_lag_session_count"]),
+                _count(market["unevidenced_session_count"]),
                 _count(market["duplicate_timestamp_count"]),
                 _count(market["ohlc_anomaly_count"]),
                 f"{market['benchmark_symbol'] or '-'} ({market['benchmark_status']})",
                 ", ".join(market["blockers"]) if market["blockers"] else "-",
+                (
+                    ", ".join(market["unresolved_evidence"])
+                    if market["unresolved_evidence"]
+                    else "-"
+                ),
             )
         )
         for market in markets
@@ -1467,6 +1479,11 @@ async def _readiness_panel(ctx: OpsContext) -> OpsPanel:
                 "준비됨" if snapshot["promotion_ready"] else "미달",
             ),
             OpsMetric(
+                "historical 근거",
+                "증명됨" if snapshot["historical_evidence_ready"] else "미증명",
+                hint="forward PAPER 승격에는 요구하지 않음",
+            ),
+            OpsMetric(
                 "측정 시각",
                 _ts(datetime.fromisoformat(measured_at)) if measured_at else None,
                 hint="캐시" if from_cache else "방금 측정",
@@ -1480,10 +1497,13 @@ async def _readiness_panel(ctx: OpsContext) -> OpsPanel:
             "252봉 이상",
             "오래된 봉",
             "결측 거래일",
+            "수집 지연",
+            "무근거 세션",
             "중복",
             "이상치",
             "기준 종목",
             "차단 사유",
+            "미해결 근거",
         ),
         rows=rows,
         window=f"캐시 TTL {_READINESS_CACHE_TTL_SECONDS // 60}분",

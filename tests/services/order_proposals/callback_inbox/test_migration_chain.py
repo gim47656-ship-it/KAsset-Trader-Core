@@ -96,6 +96,7 @@ def _admin_kwargs(url, *, database: str) -> dict[str, object]:
 _POST_PARENT_TABLES: tuple[str, ...] = (
     "kasset_research_cohort_members",
     "kasset_research_cohorts",
+    "research.kr_candles_1m_toss",
     "kasset_corporate_action_fetch_coverage",
     "kr_corporate_action_evidence",
     "kr_stock_lifecycle_observations",
@@ -113,6 +114,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "review.kasset_strategy_promotions",
     "kasset_paper_position_states",
     "kasset_ai_daily_routine_settings",
+    "kasset_push_deliveries",
     "kasset_android_paper_orders",
     "kasset_android_paper_accounts",
     "kasset_android_runtime_state",

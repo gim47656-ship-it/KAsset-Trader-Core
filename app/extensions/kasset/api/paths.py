@@ -35,6 +35,7 @@ _EXACT_PATHS = frozenset(
         "/api/v1/ai/trading/state",
         "/api/v1/ai/trading/promotion-bypass",
         "/api/v1/watchlist",
+        "/api/v1/push/token",
     }
 )
 _DYNAMIC_PREFIXES = (

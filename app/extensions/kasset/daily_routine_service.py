@@ -25,6 +25,7 @@ from app.extensions.kasset.api.daily_routine_schemas import (
     RoutineKey,
 )
 from app.extensions.kasset.api.paper_schemas import Quote
+from app.extensions.kasset.api.schemas import WatchlistMarket
 from app.extensions.kasset.models import KAssetDailyRoutineSetting
 from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.trading import Instrument, InstrumentType, UserWatchItem
@@ -151,7 +152,7 @@ class _EffectiveSelection:
 class _WatchSymbol:
     symbol: str
     name: str
-    market: str
+    market: WatchlistMarket
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,7 +473,7 @@ class DailyRoutineService:
                 .order_by(UserWatchItem.id)
             )
         ).all()
-        market_by_type = {
+        market_by_type: dict[InstrumentType, WatchlistMarket] = {
             InstrumentType.equity_kr: "KRX",
             InstrumentType.equity_us: "US",
             InstrumentType.crypto: "CRYPTO",
@@ -493,12 +494,17 @@ class DailyRoutineService:
         enabled: frozenset[str],
     ) -> list[DailyRoutineAlert]:
         watch_symbols = await self._load_watch_symbols(db, owner_user_id)
-        by_market: dict[str, list[_WatchSymbol]] = {"KRX": [], "US": [], "CRYPTO": []}
+        by_market: dict[WatchlistMarket, list[_WatchSymbol]] = {
+            "KRX": [],
+            "US": [],
+            "CRYPTO": [],
+        }
         for item in watch_symbols:
             by_market[item.market].append(item)
 
         alerts: list[DailyRoutineAlert] = []
-        for market in ("KRX", "US"):
+        quoted_markets: tuple[WatchlistMarket, ...] = ("KRX", "US")
+        for market in quoted_markets:
             items = by_market[market]
             if not items:
                 continue
@@ -577,7 +583,7 @@ class DailyRoutineService:
     @staticmethod
     def _price_alert_from_values(
         *,
-        market: str,
+        market: WatchlistMarket,
         symbol: str,
         name: str,
         rate: Decimal,
@@ -621,6 +627,7 @@ class DailyRoutineService:
                 "원 시각과 출처를 그대로 표시합니다."
             ),
             symbol=symbol,
+            market=market,
             source=source,
             url=None,
             occurred_at=occurred_at,

@@ -13,6 +13,7 @@ tests/ci/test_file_shard_plan.py
 tests/extensions/kasset/ai/test_ai_call_ledger.py
 tests/extensions/kasset/ai/test_ai_runtime_config.py
 tests/extensions/kasset/ai_mcp_sidecar/test_ai_mcp_sidecar.py
+tests/extensions/kasset/api/test_fcm_push.py
 tests/extensions/kasset/api/test_market_quote_coverage.py
 tests/extensions/kasset/api/test_market_warmup.py
 tests/extensions/kasset/api/test_system_status.py

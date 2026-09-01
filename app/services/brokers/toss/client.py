@@ -19,6 +19,7 @@ from app.services.brokers.toss.dto import (
     parse_candles,
     parse_commissions,
     parse_holdings,
+    parse_market_indicator_candles,
     parse_market_indicator_prices,
     parse_order,
     parse_order_operation_result,
@@ -323,6 +324,36 @@ class TossReadClient:
                 "GET",
                 "/api/v1/candles",
                 group=TossApiGroup.MARKET_DATA_CHART,
+                params=params,
+            )
+        )
+
+    async def market_indicator_candles(
+        self,
+        symbol: str,
+        *,
+        interval: str,
+        count: int | None = None,
+        before: str | None = None,
+    ) -> Any:
+        if interval not in {"1m", "1d"}:
+            raise ValueError(
+                "Toss market indicator candle interval must be '1m' or '1d'"
+            )
+        params = {
+            key: value
+            for key, value in {
+                "interval": interval,
+                "count": count,
+                "before": before,
+            }.items()
+            if value is not None
+        }
+        return parse_market_indicator_candles(
+            await self._request(
+                "GET",
+                f"/api/v1/market-indicators/{symbol}/candles",
+                group=TossApiGroup.MARKET_INDICATOR_CHART,
                 params=params,
             )
         )

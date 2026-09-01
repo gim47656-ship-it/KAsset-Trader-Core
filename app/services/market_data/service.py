@@ -31,6 +31,7 @@ from app.services.domain_errors import (
 )
 from app.services.kr_hourly_candles_read_service import read_kr_intraday_candles
 from app.services.market_data.constants import (
+    KR_BENCHMARK_INDEX_SYMBOLS,
     KR_INTRADAY_OHLCV_PERIODS,
     ORDERBOOK_ASOF_MAX_AGE_S148_N5,
     US_INTRADAY_OHLCV_PERIODS,
@@ -44,6 +45,7 @@ from app.services.market_data.contracts import (
 )
 from app.services.market_data.toss_ohlcv import (
     fetch_daily_toss_frame,
+    fetch_kr_index_intraday_toss_frame,
     fetch_kr_intraday_toss_frame,
 )
 from app.services.upbit_orderbook import fetch_orderbook
@@ -776,6 +778,30 @@ async def get_ohlcv(
                 symbol=resolved_symbol,
                 market=resolved_market,
                 source=source,
+                period=resolved_period,
+            )
+
+        if (
+            resolved_symbol in KR_BENCHMARK_INDEX_SYMBOLS
+            and resolved_period in KR_INTRADAY_OHLCV_PERIODS
+            and resolved_period != "1h"
+        ):
+            # KOSPI/KOSDAQ are Toss market indicators, not equity symbols.
+            # Provider failure stays unavailable: routing an index identifier
+            # through the stock KIS/DB fallback would not prove index bars.
+            frame = await fetch_kr_index_intraday_toss_frame(
+                symbol=resolved_symbol,
+                period=resolved_period,
+                count=min(count, 200),
+                end_date=end,
+            )
+            if frame is None or len(frame) == 0:
+                raise ValueError("Toss returned an empty KR index intraday frame")
+            return _to_candle_rows(
+                frame,
+                symbol=resolved_symbol,
+                market=resolved_market,
+                source="toss",
                 period=resolved_period,
             )
 

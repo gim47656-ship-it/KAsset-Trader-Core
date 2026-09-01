@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Final
 
 # §148차 운영 위임: orderbook as_of의 최대 나이는 N=5분이다.
 # 경계는 엄격하지 않다: 정확히 5:00은 fresh이고, 5:00을 초과한 순간부터 stale이다.
@@ -47,6 +48,15 @@ ALL_OHLCV_MARKETS = frozenset({"equity_kr", "equity_us", "crypto"})
 KR_OHLCV_PERIODS = frozenset({"day", "week", "month", "1m", "5m", "15m", "30m", "1h"})
 KR_INTRADAY_OHLCV_PERIODS = frozenset({"1m", "5m", "15m", "30m", "1h"})
 US_INTRADAY_OHLCV_PERIODS = frozenset({"1m", "5m", "15m", "30m", "1h"})
+
+# Canonical benchmark identities shared by daily ranking and the intraday
+# market-indicator route. These are real Toss market-indicator symbols, not
+# proxy equities or ETFs.
+KR_BENCHMARK_SYMBOL_BY_EXCHANGE: Final[dict[str, str]] = {
+    "KOSPI": "KOSPI",
+    "KOSDAQ": "KOSDAQ",
+}
+KR_BENCHMARK_INDEX_SYMBOLS: Final = frozenset(KR_BENCHMARK_SYMBOL_BY_EXCHANGE.values())
 US_OHLCV_PERIODS = frozenset({"day", "week", "month", "1m", "5m", "15m", "30m", "1h"})
 CRYPTO_OHLCV_PERIODS = frozenset(
     {"day", "week", "month", "1m", "5m", "15m", "30m", "1h", "4h"}
@@ -102,6 +112,8 @@ __all__ = [
     "CRYPTO_OHLCV_PERIODS",
     "CRYPTO_ONLY_OHLCV_PERIODS",
     "KR_OHLCV_PERIODS",
+    "KR_BENCHMARK_INDEX_SYMBOLS",
+    "KR_BENCHMARK_SYMBOL_BY_EXCHANGE",
     "KR_INTRADAY_OHLCV_PERIODS",
     "US_INTRADAY_OHLCV_PERIODS",
     "OHLCV_ALLOWED_PERIODS",

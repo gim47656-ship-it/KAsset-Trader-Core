@@ -36,6 +36,7 @@ from app.tasks import (
     telegram_callback_inbox_tasks,
     toss_live_reconcile_tasks,
     toss_manual_activity_tasks,
+    toss_minute_candles_tasks,
     toss_warnings_sync_tasks,
     truth_social_tasks,
     upbit_symbol_universe_tasks,
@@ -90,6 +91,7 @@ TASKIQ_TASK_MODULES = (
     telegram_callback_inbox_tasks,
     toss_live_reconcile_tasks,
     toss_manual_activity_tasks,
+    toss_minute_candles_tasks,
     toss_warnings_sync_tasks,
     truth_social_tasks,
 )

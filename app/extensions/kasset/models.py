@@ -200,6 +200,18 @@ class KAssetDeviceSession(Base):
             "owner_user_id",
             "revoked_at",
         ),
+        # One FCM registration token belongs to exactly one live session. The
+        # opaque token itself is never an index key; the fingerprint is.
+        Index(
+            "uq_kasset_device_session_fcm_token_hash",
+            "fcm_token_hash",
+            unique=True,
+            postgresql_where=text("fcm_token_hash IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "(fcm_token IS NULL) = (fcm_token_hash IS NULL)",
+            name="ck_kasset_device_session_fcm_token_paired",
+        ),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -215,6 +227,14 @@ class KAssetDeviceSession(Base):
         TIMESTAMP(timezone=True), nullable=False
     )
     revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # Firebase registration token owned by this device session. Push delivery
+    # needs the plaintext, so it stays column-local: it is never returned by an
+    # API, logged, or embedded in an exception.
+    fcm_token: Mapped[str | None] = mapped_column(Text)
+    fcm_token_hash: Mapped[str | None] = mapped_column(Text)
+    fcm_token_updated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -224,6 +244,62 @@ class KAssetDeviceSession(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class KAssetPushDelivery(Base):
+    """One attempted price-alert push to one device session.
+
+    ``dedupe_key`` is deliberately not the routine alert id: that id folds the
+    quote timestamp and change rate in, so it churns on every intraday tick and
+    would push the same symbol repeatedly. The key is KST routine date + kind +
+    market + symbol, which makes at most one push per device, per symbol, per
+    direction, per day.
+    """
+
+    __tablename__ = "kasset_push_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_session_id",
+            "dedupe_key",
+            name="uq_kasset_push_delivery_session_dedupe",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'retry', 'sent', 'failed')",
+            name="ck_kasset_push_delivery_status",
+        ),
+        Index(
+            "ix_kasset_push_delivery_due",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    device_session_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("kasset_device_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    routine_date: Mapped[date] = mapped_column(Date, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    alert_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    market: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending"
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # Only a whitelisted Firebase error code. Never a raw response body,
+    # exception text, Authorization header, or registration token.
+    last_error_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
 
 class BrokerCredential(Base):

@@ -863,6 +863,16 @@ class DailyCandleSyncService:
             "skipped": skipped,
         }
 
+    _COHORT_MEMBER_SQL = """
+        SELECT DISTINCT member.symbol AS symbol, universe.exchange AS exchange
+        FROM public.kasset_research_cohort_members AS member
+        JOIN public.kasset_research_cohorts AS cohort
+          ON cohort.cohort_id = member.cohort_id
+        LEFT JOIN public.{universe_table} AS universe
+          ON universe.symbol = member.symbol
+        WHERE cohort.market = :market
+    """
+
     async def _resolve_universe(self, *, market: str) -> list[SyncTarget]:
         """Return list of (market, symbol, partition) targets to sync.
 
@@ -878,6 +888,12 @@ class DailyCandleSyncService:
         every day while three manually seeded symbols were the only stored
         candles). Universe-table rows win on partition when a symbol appears
         in both sources.
+
+        Research cohort members are unioned in for the same reason: readiness
+        and PAPER promotion are measured against the immutable cohort, so a
+        member that leaves the active universe (suspended, delisted, master
+        refresh) must keep being synced or its cohort row goes stale forever
+        and the promotion gate can never close again.
         """
         from sqlalchemy import text
 
@@ -903,6 +919,16 @@ class DailyCandleSyncService:
             )
             for row in result:
                 targets.setdefault(row.symbol, "KRX")
+            result = await session.execute(
+                text(
+                    self._COHORT_MEMBER_SQL.format(universe_table="kr_symbol_universe")
+                ),
+                {"market": market},
+            )
+            for row in result:
+                symbol = str(row.symbol).strip().upper()
+                if symbol:
+                    targets.setdefault(symbol, "KRX")
             return [
                 SyncTarget(market=MarketKey.KR, symbol=symbol, partition=partition)
                 for symbol, partition in sorted(targets.items())
@@ -928,6 +954,31 @@ class DailyCandleSyncService:
             )
             for row in result:
                 targets.setdefault(row.symbol, _us_partition(row.exchange))
+            result = await session.execute(
+                text(
+                    self._COHORT_MEMBER_SQL.format(universe_table="us_symbol_universe")
+                ),
+                {"market": market},
+            )
+            unresolved: list[str] = []
+            for row in result:
+                symbol = str(row.symbol).strip().upper()
+                if not symbol or symbol in targets:
+                    continue
+                # Never guess a partition for a cohort member: writing a symbol
+                # into the wrong exchange partition corrupts its daily history.
+                partition = _backfill_us_partition(row.exchange)
+                if partition is None:
+                    unresolved.append(symbol)
+                    continue
+                targets[symbol] = partition
+            if unresolved:
+                logger.warning(
+                    "코호트 멤버의 US exchange를 확인할 수 없어 일봉 동기화에서 "
+                    "제외 count=%d symbols=%s",
+                    len(unresolved),
+                    unresolved,
+                )
             return [
                 SyncTarget(market=MarketKey.US, symbol=symbol, partition=partition)
                 for symbol, partition in sorted(targets.items())

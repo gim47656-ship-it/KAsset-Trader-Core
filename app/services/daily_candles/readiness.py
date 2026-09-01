@@ -22,10 +22,19 @@ from app.services.market_events.session_calendar import (
 MarketName = Literal["kr", "us"]
 CalendarStatus = Literal["available", "unavailable"]
 CorporateActionStatus = Literal["suspected", "clear", "unknown"]
+PriceAdjustmentStatus = Literal["covered", "incomplete"]
 BenchmarkStatus = Literal["available", "insufficient", "unavailable"]
 
 REQUIRED_HISTORY_BARS = 252
 REQUIRED_BENCHMARK_BARS = 61  # 60-session return requires both endpoints
+#: 방금 닫힌 세션의 일봉이 아직 저장소에 없는 상태는 데이터 결함이 아니라 수집
+#: cron이 아직 돌지 않았다는 사실이다(KR 16:30 KST, US 22:00 UTC). 평가 창을
+#: 실제로 적재된 최신 세션까지 되감고 되감은 세션 수를 증거로 남긴다. 이 한도를
+#: 넘으면 수집이 실제로 밀린 것이므로 fail-closed한다.
+MAX_INGEST_LAG_SESSIONS = 1
+#: 되감기 폭을 측정하기 위해 252 창 위에 얹는 여유 세션 수. 이보다 더 밀리면
+#: lag는 이 값에서 포화하고 blocker만 남는다.
+_INGEST_LAG_PROBE_SESSIONS = 10
 _CALENDAR_LOOKBACK_DAYS = 550
 _FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
 _DELISTED_STATUSES = frozenset({"delisted", "상장폐지"})
@@ -93,6 +102,10 @@ class MarketReadiness:
     cohort: CohortEvidence | None
     evaluated_window_start: date | None
     evaluated_window_end: date | None
+    latest_completed_session: date | None
+    ingest_lag_session_count: int
+    unevidenced_session_count: int
+    unevidenced_sessions: tuple[date, ...]
     total_symbol_count: int
     cohort_active_member_count: int
     forced_member_count: int
@@ -108,6 +121,7 @@ class MarketReadiness:
     ohlc_anomaly_count: int
     missing_expected_trading_day_count: int | None
     calendar_status: CalendarStatus
+    price_adjustment_status: PriceAdjustmentStatus
     corporate_action_status: CorporateActionStatus
     corporate_action_covered_symbol_count: int
     adjustment_covered_symbol_count: int
@@ -123,8 +137,11 @@ class MarketReadiness:
     benchmark: BenchmarkCoverage
     daily_history_ready: bool
     promotion_ready: bool
+    historical_evidence_ready: bool
     daily_history_blockers: tuple[str, ...]
     blockers: tuple[str, ...]
+    historical_evidence_blockers: tuple[str, ...]
+    unresolved_evidence: tuple[str, ...]
     reasons: tuple[str, ...]
 
 
@@ -137,8 +154,11 @@ class DailyCandlesReadiness:
     markets: tuple[MarketReadiness, ...]
     daily_history_ready: bool
     promotion_ready: bool
+    historical_evidence_ready: bool
     daily_history_blockers: tuple[str, ...]
     blockers: tuple[str, ...]
+    historical_evidence_blockers: tuple[str, ...]
+    unresolved_evidence: tuple[str, ...]
     reasons: tuple[str, ...]
 
     @property
@@ -283,6 +303,10 @@ def _market_query(market: MarketName, config: _MarketConfig):
                       u.list_date IS NULL
                       OR (p.time AT TIME ZONE 'UTC')::date >= u.list_date
                   )
+                  AND (
+                      u.delist_date IS NULL
+                      OR (p.time AT TIME ZONE 'UTC')::date <= u.delist_date
+                  )
             ) AS observed_expected_session_count,
             MIN(p.time) FILTER (WHERE p.time <= :as_of) AS first_bar_at,
             MAX(p.time) FILTER (WHERE p.time <= :as_of) AS latest_bar_at,
@@ -343,6 +367,46 @@ def _benchmark_query(market: MarketName, config: _MarketConfig):
     )
 
 
+def _session_coverage_query(market: MarketName, config: _MarketConfig):
+    """Per-session observation counts for the cohort over the candidate window.
+
+    The evaluated window is anchored on data the store actually holds, and a
+    calendar session that neither an active member nor the durable benchmark
+    evidences is recorded as unevidenced instead of being charged to every
+    symbol as a missing trading day. Identifiers come from ``_CONFIG`` only.
+    """
+    return text(
+        f"""/* daily_candles_readiness:sessions:{market} */
+        WITH cohort_symbols AS (
+            SELECT symbol, member_kind
+            FROM public.kasset_research_cohort_members
+            WHERE cohort_id = :cohort_id
+              AND member_kind IN ('active', 'benchmark')
+        ),
+        observed AS (
+            SELECT
+                (c.time AT TIME ZONE 'UTC')::date AS session_date,
+                s.member_kind,
+                c.symbol
+            FROM public.{config.candle_table} AS c
+            JOIN cohort_symbols AS s ON s.symbol = c.symbol
+            WHERE c.time <= :as_of
+              AND (c.time AT TIME ZONE 'UTC')::date =
+                  ANY(CAST(:candidate_sessions AS date[]))
+        )
+        SELECT
+            session_date,
+            COUNT(DISTINCT symbol) FILTER (WHERE member_kind = 'active')
+                AS member_symbol_count,
+            COUNT(DISTINCT symbol) FILTER (WHERE member_kind = 'benchmark')
+                AS benchmark_symbol_count
+        FROM observed
+        GROUP BY session_date
+        ORDER BY session_date
+        """
+    )
+
+
 def _kr_coverage_query():
     return text(
         """/* daily_candles_readiness:corporate_actions:kr */
@@ -378,10 +442,12 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _completed_expected_sessions(
+def _completed_candidate_sessions(
     market: MarketName,
     as_of: datetime,
 ) -> tuple[date, ...]:
+    """The newest completed sessions: the 252 window plus the lag probe margin."""
+
     start = as_of.date() - timedelta(days=_CALENDAR_LOOKBACK_DAYS)
     sessions = trading_sessions_in_range(market, start, as_of.date())
     if not sessions:
@@ -395,7 +461,72 @@ def _completed_expected_sessions(
         bounds = regular_session_bounds(market, session_day)
         if bounds is not None and bounds[1].astimezone(UTC) <= as_of:
             completed.append(session_day)
-    return tuple(completed[-REQUIRED_HISTORY_BARS:])
+    limit = REQUIRED_HISTORY_BARS + _INGEST_LAG_PROBE_SESSIONS
+    return tuple(completed[-limit:])
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionWindow:
+    """The 252-session window the store can actually be held to."""
+
+    expected: tuple[date, ...]
+    latest_completed: date | None
+    ingest_lag_sessions: int
+    unevidenced: tuple[date, ...]
+
+
+def _resolve_session_window(
+    candidate_sessions: tuple[date, ...],
+    session_rows: Sequence[Mapping[str, object]],
+) -> _SessionWindow:
+    """Anchor the evaluated window on the newest session the cohort evidences.
+
+    Sessions newer than that anchor are ingest lag, not per-symbol data gaps;
+    sessions inside the window that neither an active member nor the benchmark
+    evidences are calendar uncertainty and are reported, not charged.
+    """
+    if not candidate_sessions:
+        return _SessionWindow(
+            expected=(),
+            latest_completed=None,
+            ingest_lag_sessions=0,
+            unevidenced=(),
+        )
+    member_counts: dict[date, int] = {}
+    benchmark_counts: dict[date, int] = {}
+    for row in session_rows:
+        session_day = row.get("session_date")
+        if not isinstance(session_day, date):
+            continue
+        member_counts[session_day] = _int(row, "member_symbol_count")
+        benchmark_counts[session_day] = _int(row, "benchmark_symbol_count")
+
+    observed_indexes = [
+        index
+        for index, session_day in enumerate(candidate_sessions)
+        if member_counts.get(session_day, 0) > 0
+    ]
+    if observed_indexes:
+        end_index = observed_indexes[-1]
+        lag = len(candidate_sessions) - 1 - end_index
+    else:
+        # Nothing stored at all: keep the calendar anchor so stale/missing fire.
+        end_index = len(candidate_sessions) - 1
+        lag = len(candidate_sessions)
+    start_index = max(end_index + 1 - REQUIRED_HISTORY_BARS, 0)
+    expected = candidate_sessions[start_index : end_index + 1]
+    unevidenced = tuple(
+        session_day
+        for session_day in expected
+        if member_counts.get(session_day, 0) == 0
+        and benchmark_counts.get(session_day, 0) == 0
+    )
+    return _SessionWindow(
+        expected=expected,
+        latest_completed=candidate_sessions[-1],
+        ingest_lag_sessions=lag,
+        unevidenced=unevidenced,
+    )
 
 
 def _int(row: Mapping[str, object], key: str) -> int:
@@ -541,13 +672,21 @@ def _evaluate_market(
     market: MarketName,
     cohort: CohortEvidence | None,
     rows: Sequence[Mapping[str, object]],
-    expected_sessions: tuple[date, ...],
+    window: _SessionWindow,
     benchmark: BenchmarkCoverage,
     benchmark_member_count: int,
     coverage_rows: Sequence[Mapping[str, object]],
 ) -> MarketReadiness:
+    expected_sessions = window.expected
     window_start = expected_sessions[0] if expected_sessions else None
     window_end = expected_sessions[-1] if expected_sessions else None
+    unevidenced = frozenset(window.unevidenced)
+    # Only sessions some durable source evidences can be charged to a symbol.
+    evaluable_sessions = tuple(
+        session_day
+        for session_day in expected_sessions
+        if session_day not in unevidenced
+    )
     core_rows = [row for row in rows if row.get("member_kind") == "active"]
     total = len(core_rows)
     cohort_active = total
@@ -568,26 +707,36 @@ def _evaluate_market(
     calendar_status: CalendarStatus = (
         "available" if expected_sessions else "unavailable"
     )
-    latest_expected = expected_sessions[-1] if expected_sessions else None
     stale = 0
     missing: int | None = 0 if expected_sessions else None
     eligible = 0
     adjustment_covered = 0
     for row in core_rows:
         latest = cast(datetime | None, row.get("latest_bar_at"))
+        listed = cast(date | None, row.get("list_date"))
+        delisted = cast(date | None, row.get("delist_date"))
+        # A member that stopped trading inside the window is not stale for the
+        # sessions it could not have traded in.
+        row_last_session = window_end
+        if (
+            window_end is not None
+            and isinstance(delisted, date)
+            and delisted < window_end
+        ):
+            row_last_session = delisted
         row_stale = bool(
-            latest_expected is not None
-            and (latest is None or latest.astimezone(UTC).date() < latest_expected)
+            row_last_session is not None
+            and (latest is None or latest.astimezone(UTC).date() < row_last_session)
         )
         stale += int(row_stale)
 
         row_missing = 0
         if expected_sessions:
-            listed = cast(date | None, row.get("list_date"))
             expected_count = sum(
                 1
-                for session_day in expected_sessions
-                if listed is None or session_day >= listed
+                for session_day in evaluable_sessions
+                if (listed is None or session_day >= listed)
+                and (not isinstance(delisted, date) or session_day <= delisted)
             )
             row_missing = max(
                 expected_count - _int(row, "observed_expected_session_count"),
@@ -684,11 +833,18 @@ def _evaluate_market(
         else frozenset()
     )
     corporate_action_covered = len(kr_covered) if market == "kr" else adjustment_covered
-    if (
-        total > 0
-        and calendar_status == "available"
-        and adjustment_covered == total
-        and (market == "us" or len(kr_covered) == total)
+    # Split-adjusted price coverage is obtainable from the configured sources
+    # (KIS/Toss for KR, adjusted close for US) and gates the daily history.
+    price_adjustment_status: PriceAdjustmentStatus = (
+        "covered"
+        if total > 0 and calendar_status == "available" and adjustment_covered == total
+        else "incomplete"
+    )
+    # The KSD action ledger is a strictly stronger, independent proof. Without it
+    # the action history stays unknown; that is historical-track evidence and is
+    # reported as unresolved rather than faked.
+    if price_adjustment_status == "covered" and (
+        market == "us" or len(kr_covered) == total
     ):
         corporate_action: CorporateActionStatus = "clear"
     else:
@@ -725,47 +881,72 @@ def _evaluate_market(
             daily_block("invalid_ohlcv")
         if calendar_status == "unavailable":
             daily_block("calendar_unavailable")
-        elif missing:
-            daily_block("missing_expected_trading_days")
+        else:
+            if len(expected_sessions) < REQUIRED_HISTORY_BARS:
+                daily_block("expected_session_window_incomplete")
+            if window.ingest_lag_sessions > MAX_INGEST_LAG_SESSIONS:
+                daily_block("ingest_lag_exceeded")
+            if missing:
+                daily_block("missing_expected_trading_days")
         if benchmark_member_count != 1:
             daily_block("benchmark_member_count_invalid")
         if benchmark.status != "available":
             daily_block("benchmark_unavailable")
-        if corporate_action == "unknown":
-            daily_block("corporate_action_unknown")
+        if price_adjustment_status != "covered":
+            daily_block("adjustment_coverage_incomplete")
 
+    # Forward PAPER promotion is gated on evidence the configured sources can
+    # actually produce. Historical-fidelity claims (point-in-time membership,
+    # delisted survivors, the KSD action ledger, a primary-provider price
+    # series) form a separate track that stays explicitly unproven until the
+    # underlying evidence exists.
     promotion_blockers = list(daily_blockers)
-    if cohort is not None:
-        if cohort.evidence_scope != "historical_pit":
-            promotion_blockers.append(_issue(market, "cohort_not_historical_pit"))
-        if not membership_period_usable:
-            promotion_blockers.append(
-                _issue(market, "cohort_window_predates_effective_date")
-            )
-        if list_date_covered < total:
-            promotion_blockers.append(_issue(market, "list_date_coverage_incomplete"))
-        if listed_after_cohort_start:
-            promotion_blockers.append(
-                _issue(market, "member_listed_after_cohort_start")
-            )
-        if delist_date_covered_inactive < inactive:
-            promotion_blockers.append(_issue(market, "delist_date_coverage_incomplete"))
-        if not point_in_time:
-            promotion_blockers.append(_issue(market, "point_in_time_unavailable"))
-        if not includes_delisted:
-            promotion_blockers.append(_issue(market, "delisted_members_absent"))
-        if fallback_only:
-            promotion_blockers.append(_issue(market, "fallback_only"))
+    historical_blockers: list[str] = []
+
+    def historical_block(code: str) -> None:
+        historical_blockers.append(_issue(market, code))
+
+    if cohort is None:
+        historical_block("cohort_not_found")
+    else:
         if not benchmark.sources:
             promotion_blockers.append(_issue(market, "benchmark_source_missing"))
+        if cohort.evidence_scope != "historical_pit":
+            historical_block("cohort_not_historical_pit")
+        if not membership_period_usable:
+            historical_block("cohort_window_predates_effective_date")
+        if list_date_covered < total:
+            historical_block("list_date_coverage_incomplete")
+        if listed_after_cohort_start:
+            historical_block("member_listed_after_cohort_start")
+        if delist_date_covered_inactive < inactive:
+            historical_block("delist_date_coverage_incomplete")
+        if not point_in_time:
+            historical_block("point_in_time_unavailable")
+        if not includes_delisted:
+            historical_block("delisted_members_absent")
+        if corporate_action != "clear":
+            historical_block("corporate_action_unknown")
+        if fallback_only:
+            historical_block("fallback_only")
         if benchmark.sources and set(benchmark.sources) <= _FALLBACK_SOURCES:
-            promotion_blockers.append(_issue(market, "benchmark_fallback_only"))
+            historical_block("benchmark_fallback_only")
+
+    unresolved = list(historical_blockers)
+    if window.unevidenced:
+        unresolved.append(_issue(market, "calendar_session_unevidenced"))
+    if window.ingest_lag_sessions:
+        unresolved.append(_issue(market, "ingest_lag_window_rolled_back"))
 
     return MarketReadiness(
         market=market,
         cohort=cohort,
         evaluated_window_start=window_start,
         evaluated_window_end=window_end,
+        latest_completed_session=window.latest_completed,
+        ingest_lag_session_count=window.ingest_lag_sessions,
+        unevidenced_session_count=len(window.unevidenced),
+        unevidenced_sessions=window.unevidenced,
         total_symbol_count=total,
         cohort_active_member_count=cohort_active,
         forced_member_count=forced,
@@ -781,6 +962,7 @@ def _evaluate_market(
         ohlc_anomaly_count=ohlc,
         missing_expected_trading_day_count=missing,
         calendar_status=calendar_status,
+        price_adjustment_status=price_adjustment_status,
         corporate_action_status=corporate_action,
         corporate_action_covered_symbol_count=corporate_action_covered,
         adjustment_covered_symbol_count=adjustment_covered,
@@ -796,9 +978,12 @@ def _evaluate_market(
         benchmark=benchmark,
         daily_history_ready=not daily_blockers,
         promotion_ready=not promotion_blockers,
+        historical_evidence_ready=not historical_blockers,
         daily_history_blockers=tuple(daily_blockers),
         blockers=tuple(promotion_blockers),
-        reasons=tuple(promotion_blockers),
+        historical_evidence_blockers=tuple(historical_blockers),
+        unresolved_evidence=tuple(unresolved),
+        reasons=tuple(promotion_blockers) + tuple(historical_blockers),
     )
 
 
@@ -853,7 +1038,7 @@ class DailyCandlesReadinessService:
                         market=market,
                         cohort=None,
                         rows=(),
-                        expected_sessions=(),
+                        window=_resolve_session_window((), ()),
                         benchmark=_empty_benchmark(market),
                         benchmark_member_count=0,
                         coverage_rows=(),
@@ -861,7 +1046,23 @@ class DailyCandlesReadinessService:
                 )
                 continue
 
-            expected_sessions = _completed_expected_sessions(market, measured_at)
+            candidate_sessions = _completed_candidate_sessions(market, measured_at)
+            session_rows: Sequence[Mapping[str, object]] = ()
+            if candidate_sessions:
+                session_result = await self._db.execute(
+                    _session_coverage_query(market, config),
+                    {
+                        "cohort_id": cohort.cohort_id,
+                        "as_of": measured_at,
+                        "candidate_sessions": list(candidate_sessions),
+                    },
+                )
+                session_rows = cast(
+                    Sequence[Mapping[str, object]],
+                    session_result.mappings().all(),
+                )
+            window = _resolve_session_window(candidate_sessions, session_rows)
+            expected_sessions = window.expected
             member_result = await self._db.execute(
                 _market_query(market, config),
                 {
@@ -905,7 +1106,7 @@ class DailyCandlesReadinessService:
                     market=market,
                     cohort=cohort,
                     rows=rows,
-                    expected_sessions=expected_sessions,
+                    window=window,
                     benchmark=benchmark,
                     benchmark_member_count=len(benchmark_rows),
                     coverage_rows=coverage_rows,
@@ -920,6 +1121,14 @@ class DailyCandlesReadinessService:
         blockers = tuple(
             blocker for item in market_results for blocker in item.blockers
         )
+        historical_blockers = tuple(
+            blocker
+            for item in market_results
+            for blocker in item.historical_evidence_blockers
+        )
+        unresolved = tuple(
+            code for item in market_results for code in item.unresolved_evidence
+        )
         reasons = tuple(reason for item in market_results for reason in item.reasons)
         return DailyCandlesReadiness(
             as_of=measured_at,
@@ -927,8 +1136,11 @@ class DailyCandlesReadinessService:
             markets=tuple(market_results),
             daily_history_ready=not daily_history_blockers,
             promotion_ready=not blockers,
+            historical_evidence_ready=not historical_blockers,
             daily_history_blockers=daily_history_blockers,
             blockers=blockers,
+            historical_evidence_blockers=historical_blockers,
+            unresolved_evidence=unresolved,
             reasons=reasons,
         )
 
@@ -938,6 +1150,7 @@ __all__ = [
     "CohortEvidence",
     "DailyCandlesReadiness",
     "DailyCandlesReadinessService",
+    "MAX_INGEST_LAG_SESSIONS",
     "MarketReadiness",
     "REQUIRED_BENCHMARK_BARS",
     "REQUIRED_HISTORY_BARS",
