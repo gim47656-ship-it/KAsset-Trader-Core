@@ -112,9 +112,9 @@ def _is_reclaimable_execution_claim(
 
 # 무인 sweep 전용 기준 시세 신선도 게이트.
 #
-# 정규장 중 실시간 공급자(토스 → NH 공용)가 모두 실패하면
-# ``krx_quotes.quote_for_market()``은 저장 일봉으로 강등되고 그 종가는 전 거래일
-# 값이다. 주문 경로는 ``price``만 읽고 ``source``/``asOf``를 검증하지 않으므로,
+# 정규장 중 실시간 공급자 토스가 실패하면 ``krx_quotes.quote_for_market()``은
+# 저장 일봉으로 강등되고 그 종가는 전 거래일 값이다.
+# 주문 경로는 ``price``만 읽고 ``source``/``asOf``를 검증하지 않으므로,
 # 사람이 보지 않는 sweep은 추천 판단과 무관한 가격으로 원장에 체결을 남긴다.
 # 장 마감 후에는 같은 종가가 정상 최신값이라 정규장이 열려 있을 때만 차단한다.
 # 수동 경로(`POST /orders`, ``run_approved_recommendation_once``)는 사람이 화면

@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -25,7 +22,6 @@ from app.extensions.kasset.api.paper_schemas import (
     CashBalance,
     Position,
     PositionsResponse,
-    Quote,
 )
 from app.services.brokers.nhplug.account_guard import MockAccountAllowlist
 from app.services.brokers.nhplug.auth import NHPlugAuthClient
@@ -36,8 +32,6 @@ from app.services.brokers.nhplug.errors import (
     NHPlugMockError,
 )
 from app.services.brokers.nhplug.gating import mock_enabled
-
-_KRX_SYMBOL_RE = re.compile(r"^\d{6}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,41 +132,6 @@ class NHAndroidAdapter:
             )
         return PositionsResponse(positions=positions)
 
-    async def quote(
-        self,
-        db: AsyncSession,
-        owner_user_id: int,
-        *,
-        market: str,
-        symbol: str,
-    ) -> Quote:
-        normalized_market = market.strip().upper()
-        normalized_symbol = symbol.strip()
-        if (
-            normalized_market != "KRX"
-            or _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is None
-        ):
-            raise MobileApiError(
-                422,
-                "VALIDATION_ERROR",
-                "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
-            )
-        context = await self.prepare_read(db, owner_user_id)
-        try:
-            payload = await context.client.fetch_quote(
-                market=normalized_market,
-                symbol=normalized_symbol,
-            )
-        except (NHPlugMockError, httpx.HTTPError) as err:
-            raise MobileApiError(
-                502,
-                "NH_QUOTE_FAILED",
-                "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
-            ) from err
-        return _quote_from_payload(
-            payload, market=normalized_market, symbol=normalized_symbol
-        )
-
     async def prepare_read(
         self, db: AsyncSession, owner_user_id: int
     ) -> VerifiedNHClient:
@@ -256,191 +215,6 @@ class NHAndroidAdapter:
             return auth_client
 
 
-class NHSharedMarketData:
-    """계좌 연동과 무관한 서버 공용 KRX 시세 채널.
-
-    사용자별 볼트 자격은 계좌·주문에만 쓰고, 시세는 서버 env 자격
-    (NHPLUG_APP_KEY/SECRET + NHPLUG_MOCK_ACCOUNT_NO)으로 모두에게 제공한다.
-    """
-
-    _FRESH_TTL_SECONDS = 3.0
-    _STALE_TTL_SECONDS = 120.0
-    # NH 모의 서버는 초당 호출 유량 제한(429)이 빡빡하다. 전 종목 공용으로
-    # 호출 간격을 강제하고, 429는 기존 토큰 그대로 1회만 재시도한다(공식 가이드).
-    _MIN_CALL_INTERVAL_SECONDS = 0.45
-    _RETRY_AFTER_429_SECONDS = 1.0
-
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._cached: NHPlugMockClient | None = None
-        self._quote_cache: dict[str, tuple[float, Quote]] = {}
-        self._symbol_locks: dict[str, asyncio.Lock] = {}
-        self._pace_lock = asyncio.Lock()
-        self._last_call_at = 0.0
-
-    async def _paced_fetch(
-        self, client: NHPlugMockClient, *, market: str, symbol: str
-    ) -> dict[str, Any]:
-        for attempt in (0, 1):
-            async with self._pace_lock:
-                wait = (
-                    self._last_call_at
-                    + self._MIN_CALL_INTERVAL_SECONDS
-                    - time.monotonic()
-                )
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                try:
-                    return await client.fetch_quote(market=market, symbol=symbol)
-                except httpx.HTTPStatusError as err:
-                    if err.response.status_code != 429 or attempt == 1:
-                        raise
-                finally:
-                    self._last_call_at = time.monotonic()
-            await asyncio.sleep(self._RETRY_AFTER_429_SECONDS)
-        raise AssertionError("unreachable")
-
-    async def _client(self) -> NHPlugMockClient:
-        if not mock_enabled():
-            raise MobileApiError(
-                409,
-                "BROKER_NOT_CONNECTED",
-                "NH PLUG 모의투자 조회 기능이 서버에서 비활성화되어 있습니다.",
-            )
-        app_key = os.environ.get("NHPLUG_APP_KEY", "").strip()
-        app_secret = os.environ.get("NHPLUG_APP_SECRET", "").strip()
-        account_no = os.environ.get("NHPLUG_MOCK_ACCOUNT_NO", "").strip()
-        if not (app_key and app_secret and account_no):
-            raise MobileApiError(
-                409,
-                "BROKER_NOT_CONNECTED",
-                "서버 공용 NH PLUG 시세 자격이 설정되지 않았습니다.",
-            )
-        async with self._lock:
-            if self._cached is not None:
-                return self._cached
-            try:
-                auth_client = NHPlugAuthClient(app_key=app_key, app_secret=app_secret)
-                client = NHPlugMockClient(
-                    app_key=app_key,
-                    app_secret=app_secret,
-                    token_provider=auth_client.get_access_token,
-                )
-                payload = await client.list_accounts()
-                allowlist = MockAccountAllowlist.from_acctinfo_response(
-                    payload=payload,
-                    configured_account_no=account_no,
-                )
-                client.bind_account_allowlist(allowlist)
-            except (NHPlugMockError, httpx.HTTPError) as err:
-                raise MobileApiError(
-                    502,
-                    "NH_CONNECTION_FAILED",
-                    "NH PLUG 모의투자 서버 연결을 확인하지 못했습니다.",
-                ) from err
-            self._cached = client
-            return client
-
-    async def quote(self, *, market: str, symbol: str) -> Quote:
-        normalized_market = market.strip().upper()
-        normalized_symbol = symbol.strip()
-        if (
-            normalized_market != "KRX"
-            or _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is None
-        ):
-            raise MobileApiError(
-                422,
-                "VALIDATION_ERROR",
-                "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
-            )
-        now = time.monotonic()
-        cached = self._quote_cache.get(normalized_symbol)
-        if cached is not None and now - cached[0] < self._FRESH_TTL_SECONDS:
-            return cached[1]
-        # 종목별 단일비행: 같은 종목 동시 요청이 NH 레이트리밋(429)을 두드리지 않게 한다.
-        symbol_lock = self._symbol_locks.setdefault(normalized_symbol, asyncio.Lock())
-        async with symbol_lock:
-            now = time.monotonic()
-            cached = self._quote_cache.get(normalized_symbol)
-            if cached is not None and now - cached[0] < self._FRESH_TTL_SECONDS:
-                return cached[1]
-            client = await self._client()
-            try:
-                payload = await self._paced_fetch(
-                    client,
-                    market=normalized_market,
-                    symbol=normalized_symbol,
-                )
-            except (NHPlugMockError, httpx.HTTPError) as err:
-                # 레이트리밋·일시 장애: 최근 스냅샷이 있으면 그것으로 응답한다.
-                if cached is not None and now - cached[0] < self._STALE_TTL_SECONDS:
-                    return cached[1]
-                if not isinstance(err, httpx.HTTPStatusError):
-                    self._cached = None
-                raise MobileApiError(
-                    502,
-                    "NH_QUOTE_FAILED",
-                    "NH PLUG 모의투자 현재가를 조회하지 못했습니다.",
-                ) from err
-            quote = _quote_from_payload(
-                payload, market=normalized_market, symbol=normalized_symbol
-            )
-            self._quote_cache[normalized_symbol] = (time.monotonic(), quote)
-            return quote
-
-
-def _quote_from_payload(payload: dict[str, Any], *, market: str, symbol: str) -> Quote:
-    row = _object_block(payload, "Output_0")
-    response_symbol = _required_string(row, "iem_cd")
-    if response_symbol != symbol:
-        raise MobileApiError(
-            502,
-            "NH_RESPONSE_INVALID",
-            "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
-        )
-    price = Decimal(_decimal_string(row, "stck_prpr"))
-    raw_previous_close = row.get("stck_prdy_clpr")
-    if raw_previous_close not in {None, ""}:
-        previous_close = Decimal(_decimal_string(row, "stck_prdy_clpr"))
-        change = price - previous_close
-        rate_magnitude = abs(Decimal(_decimal_string(row, "prdy_ctrt")))
-        change_rate = (
-            rate_magnitude
-            if change > 0
-            else -rate_magnitude
-            if change < 0
-            else Decimal("0")
-        )
-    else:
-        change = _signed_change(
-            Decimal(_decimal_string(row, "prdy_vrss")),
-            row.get("prdy_vrss_sign"),
-        )
-        previous_close = price - change
-        change_rate = _signed_change(
-            Decimal(_decimal_string(row, "prdy_ctrt")),
-            row.get("prdy_vrss_sign"),
-        )
-    name_value = row.get("iem_nm")
-    name = name_value.strip() if isinstance(name_value, str) else None
-    return Quote(
-        broker="NH",
-        market=market,
-        symbol=response_symbol,
-        name=name or None,
-        currency="KRW",
-        price=format(price, "f"),
-        previous_close=format(previous_close, "f"),
-        change_amount=format(change, "f"),
-        change_rate=format(change_rate, "f"),
-        as_of=iso_z(),
-        source="NH_PLUG_MOCK",
-    )
-
-
-nh_market_data = NHSharedMarketData()
-
-
 def _object_block(payload: dict[str, Any], name: str) -> dict[str, Any]:
     block = payload.get(name)
     if not isinstance(block, dict):
@@ -497,18 +271,6 @@ def _required_string(row: dict[str, Any], field_name: str) -> str:
             "NH PLUG 모의투자 응답 형식이 올바르지 않습니다.",
         )
     return value.strip()
-
-
-def _signed_change(value: Decimal, sign_code: Any) -> Decimal:
-    code = str(sign_code).strip()
-    magnitude = abs(value)
-    if code in {"1", "2", "6", "7"}:
-        return magnitude
-    if code in {"4", "5", "8", "9"}:
-        return -magnitude
-    if code in {"0", "3"}:
-        return Decimal("0")
-    return value
 
 
 nh_adapter = NHAndroidAdapter()

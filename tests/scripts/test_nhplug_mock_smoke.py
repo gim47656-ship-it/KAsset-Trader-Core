@@ -1,4 +1,4 @@
-"""Offline contract tests for the three-mode NHPLUG mock smoke CLI."""
+"""Offline contract tests for the NHPLUG mock preflight/account smoke CLI."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from app.services.brokers.nhplug.errors import NHPlugMockBrokerRejected
 from scripts import nhplug_mock_smoke as smoke
 
 pytestmark = pytest.mark.unit
@@ -174,62 +173,9 @@ def test_account_mode_verifies_type_then_reads_balance_without_leaking_values(
     assert payload["balance"]["rsp_cd"] == "00166"
 
 
-def test_quote_rejection_is_a_clear_nonzero_result_not_fake_success(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    env_file = _write_minimal_env(tmp_path / ".env.nhplug-mock.native")
-    monkeypatch.setenv("NHPLUG_MOCK_ENABLED", "true")
-
-    class _FakeAuth:
-        def __init__(self, **_: Any) -> None:
-            pass
-
-        async def get_access_token(
-            self,
-            *,
-            force_refresh: bool = False,
-            failed_token: str | None = None,
-        ) -> str:
-            del force_refresh, failed_token
-            return "unused-fake-token"
-
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            pass
-
-        async def list_accounts(self) -> dict[str, Any]:
-            return {
-                "rsp_cd": "00000",
-                "Output_0": [{"acct_no": SENTINEL_ACCOUNT, "acct_type": "03"}],
-            }
-
-        def bind_account_allowlist(self, _: Any) -> None:
-            pass
-
-        async def fetch_quote(self, **_: Any) -> dict[str, Any]:
-            raise NHPlugMockBrokerRejected(response_code="mock_quote_unavailable")
-
-    monkeypatch.setattr(smoke, "NHPlugAuthClient", _FakeAuth)
-    monkeypatch.setattr(smoke, "NHPlugMockClient", _FakeClient)
-
-    assert (
-        smoke.main(["--env-file", str(env_file), "--mode", "quote", "--confirm-read"])
-        == 2
-    )
-    rendered = capsys.readouterr().out
-    _assert_values_redacted(rendered)
-    payload = json.loads(rendered)
-    assert payload == {
-        "broker_response_code": "mock_quote_unavailable",
-        "error_type": "NHPlugMockBrokerRejected",
-        "mode": "quote",
-        "status": "failed",
-    }
-
-
-def test_only_the_three_readonly_modes_exist() -> None:
+def test_only_preflight_and_account_readonly_modes_exist() -> None:
     parser = smoke.build_parser()
     mode_action = next(action for action in parser._actions if action.dest == "mode")
-    assert set(mode_action.choices) == {"preflight", "account", "quote"}
+    assert set(mode_action.choices) == {"preflight", "account"}
+    argument_destinations = {action.dest for action in parser._actions}
+    assert {"symbol", "market"}.isdisjoint(argument_destinations)
