@@ -202,7 +202,6 @@ KIWOOM_KR_BASE_PROFILE_TOOL_NAMES: frozenset[str] = frozenset(
         "session_context_get_recent",
         "set_user_setting",
         "stage_analysis_get",
-        "suggest_order_account",
         "sweep_expired_watches",
         "trade_retrospective_pending",
         "update_manual_holdings",

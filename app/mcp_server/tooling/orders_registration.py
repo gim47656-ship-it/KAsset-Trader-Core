@@ -232,7 +232,9 @@ def register_order_tools(mcp: FastMCP) -> None:
             "LIMIT 주문을 미리보기 또는 제출합니다. 주식은 Toss, 암호화폐는 "
             "Upbit를 사용합니다. dry_run=True가 기본이며 Toss 실주문은 "
             "confirm=True와 승인 해시 등 기존 Toss 안전 경계를 그대로 적용합니다. "
-            "KIS account_mode는 운영 경로가 아니므로 명시적으로 거부합니다."
+            "defensive_trim=True는 live direct order 경로가 아니며 "
+            "order_proposal_create를 사용해야 합니다. KIS account_mode는 운영 "
+            "경로가 아니므로 명시적으로 거부합니다."
         ),
     )
     async def place_order(
@@ -332,6 +334,8 @@ def register_order_tools(mcp: FastMCP) -> None:
                 "account_mode": routing.account_mode,
                 "symbol": symbol,
             }
+        if market_type == "equity_us":
+            normalized_symbol = normalized_symbol.upper()
         if market_type == "crypto":
             crypto_routing = _routing_for_implicit_crypto(
                 routing=routing,

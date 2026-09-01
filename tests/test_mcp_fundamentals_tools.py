@@ -1598,10 +1598,14 @@ class TestGetShortInterest:
     async def test_kr_short_interest_is_explicitly_provider_unsupported(self):
         result = await build_tools()["get_short_interest"]("005930", days=20)
 
-        assert result["success"] is False
-        assert result["source"] == "unsupported"
-        assert result["symbol"] == "005930"
-        assert "provider_unsupported" in result["error"]
+        assert result == {
+            "success": False,
+            "error": "provider_unsupported",
+            "detail": "short-interest data is unavailable from Toss/NH PLUG",
+            "source": "unsupported",
+            "symbol": "005930",
+            "instrument_type": "equity_kr",
+        }
 
     @pytest.mark.parametrize("symbol", ["AAPL", "KRW-BTC", "5930"])
     async def test_rejects_non_kr_equity_symbols(self, symbol):
@@ -4674,6 +4678,7 @@ async def test_analyze_stock_kr_reuses_preloaded_ohlcv_and_bundled_naver(monkeyp
         "volume": 1000000,
         "value": 75000000000.0,
         "source": "toss",
+        "price_source": "toss_daily_close",
         "price_as_of": "2024-01-01T00:00:00+09:00",
         "is_stale_price": True,
         "price_freshness": "stale",

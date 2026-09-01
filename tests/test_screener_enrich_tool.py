@@ -37,13 +37,18 @@ class _FakeCM:
 @pytest.fixture(autouse=True)
 def _fake_external_boundaries_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _empty_positions(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        del market_filter, is_mock
-        return [], []
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        assert market_filter in {"equity_kr", "equity_us"}
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return [], [], True
 
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
         _empty_positions,
     )
 
@@ -341,12 +346,21 @@ async def test_enrich_min_analyst_buy_and_total_count_filters(monkeypatch) -> No
     assert [r["symbol"] for r in out["results"]] == ["S1", "S2"]
 
 
-def _fake_kis_positions(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _empty(market_filter, *, is_mock=False):  # noqa: ARG001
-        return [], []
+def _fake_toss_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _empty(
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        assert market_filter in {"equity_kr", "equity_us"}
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return [], [], True
 
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions", _empty
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _empty,
     )
 
 
@@ -381,7 +395,7 @@ async def test_screen_stocks_enrich_is_the_path_that_reaches_providers(
     internals aren't the object under test here) and asserts the
     fetch_kr_sector/opinion_provider callables it's handed are live and reach
     the real provider hooks."""
-    _fake_kis_positions(monkeypatch)
+    _fake_toss_positions(monkeypatch)
     _fake_build_single(monkeypatch, {"symbol": "005930", "market": "kr"})
 
     calls: dict[str, int] = {"sector": 0, "opinions": 0}
@@ -506,7 +520,7 @@ async def test_negative_cache_hit_skips_provider_retry_within_ttl() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_enrich_holdings_marks_kis_live_held_rows(monkeypatch) -> None:
+async def test_enrich_holdings_marks_toss_live_held_rows(monkeypatch) -> None:
     class _HeldResp:
         def model_dump(self, mode: str | None = None) -> dict[str, Any]:  # noqa: ARG002
             return {
@@ -531,12 +545,29 @@ async def test_enrich_holdings_marks_kis_live_held_rows(monkeypatch) -> None:
         assert resolver.relation("kr", "005930") == "held"
         return _HeldResp()
 
-    async def _fake_collect_kis_positions(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _fake_collect_toss_api_positions(
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         assert market_filter == "equity_kr"
-        assert is_mock is False
-        return ([{"market": "kr", "symbol": "005930"}], [])
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return (
+            [
+                {
+                    "account": "toss",
+                    "broker": "toss",
+                    "source": "toss_api",
+                    "instrument_type": "equity_kr",
+                    "market": "kr",
+                    "symbol": "005930",
+                }
+            ],
+            [],
+            True,
+        )
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
     monkeypatch.setattr(
@@ -547,8 +578,8 @@ async def test_enrich_holdings_marks_kis_live_held_rows(monkeypatch) -> None:
         _fake_build,
     )
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _fake_collect_kis_positions,
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _fake_collect_toss_api_positions,
     )
 
     out = await enrich_tool.screen_stocks_enrich_impl(
@@ -559,13 +590,13 @@ async def test_enrich_holdings_marks_kis_live_held_rows(monkeypatch) -> None:
 
     assert out["results"][0]["isHeld"] is True
     assert "holdings" in out
-    assert out["holdings"]["source"] == "kis_live"
+    assert out["holdings"]["source"] == "toss_live"
     assert out["holdings"]["held_count"] == 1
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_enrich_holdings_marks_us_kis_live_held_rows(monkeypatch) -> None:
+async def test_enrich_holdings_marks_us_toss_live_held_rows(monkeypatch) -> None:
     class _HeldResp:
         def model_dump(self, mode: str | None = None) -> dict[str, Any]:  # noqa: ARG002
             return {
@@ -588,12 +619,29 @@ async def test_enrich_holdings_marks_us_kis_live_held_rows(monkeypatch) -> None:
         assert resolver.relation("us", "BRK/B") == "held"
         return _HeldResp()
 
-    async def _fake_collect_kis_positions(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _fake_collect_toss_api_positions(
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         assert market_filter == "equity_us"
-        assert is_mock is False
-        return ([{"market": "us", "symbol": "BRK.B"}], [])
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return (
+            [
+                {
+                    "account": "toss",
+                    "broker": "toss",
+                    "source": "toss_api",
+                    "instrument_type": "equity_us",
+                    "market": "us",
+                    "symbol": "BRK.B",
+                }
+            ],
+            [],
+            True,
+        )
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
     monkeypatch.setattr(
@@ -604,8 +652,8 @@ async def test_enrich_holdings_marks_us_kis_live_held_rows(monkeypatch) -> None:
         _fake_build,
     )
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _fake_collect_kis_positions,
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _fake_collect_toss_api_positions,
     )
 
     out = await enrich_tool.screen_stocks_enrich_impl(
@@ -615,6 +663,7 @@ async def test_enrich_holdings_marks_us_kis_live_held_rows(monkeypatch) -> None:
     )
 
     assert out["results"][0]["isHeld"] is True
+    assert out["holdings"]["source"] == "toss_live"
     assert out["holdings"]["held_count"] == 1
 
 
@@ -634,11 +683,16 @@ async def test_enrich_holdings_holdings_failure_warns_and_keeps_results(
     async def _fake_build(**_kwargs: Any) -> _Resp:
         return _Resp()
 
-    async def _fail_collect_kis_positions(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        del market_filter, is_mock
-        raise RuntimeError("kis unavailable")
+    async def _fail_collect_toss_api_positions(
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        assert market_filter == "equity_kr"
+        assert need_sellable is False
+        assert fresh_sellable is False
+        raise RuntimeError("toss unavailable")
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
     monkeypatch.setattr(
@@ -649,8 +703,8 @@ async def test_enrich_holdings_holdings_failure_warns_and_keeps_results(
         _fake_build,
     )
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
-        _fail_collect_kis_positions,
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _fail_collect_toss_api_positions,
     )
 
     out = await enrich_tool.screen_stocks_enrich_impl(
@@ -659,8 +713,8 @@ async def test_enrich_holdings_holdings_failure_warns_and_keeps_results(
     )
 
     assert out["results"][0]["symbol"] == "005930"
-    assert any("KIS live 보유종목 확인 실패" in w for w in out["warnings"])
-    assert out["holdings"]["source"] == "kis_live"
+    assert any("Toss live 보유종목 확인 실패" in w for w in out["warnings"])
+    assert out["holdings"]["source"] == "toss_live"
     assert out["holdings"]["status"] == "error"
 
 
@@ -681,13 +735,18 @@ async def test_enrich_holdings_holdings_error_tuple_warns_and_keeps_results(
         return _Resp()
 
     async def _collect_with_errors(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         assert market_filter == "equity_kr"
-        assert is_mock is False
+        assert need_sellable is False
+        assert fresh_sellable is False
         return (
             [],
-            [{"source": "kis", "market": "kr", "error": "token expired"}],
+            [{"source": "toss_api", "market": "kr", "error": "token expired"}],
+            False,
         )
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
@@ -699,7 +758,7 @@ async def test_enrich_holdings_holdings_error_tuple_warns_and_keeps_results(
         _fake_build,
     )
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
         _collect_with_errors,
     )
 
@@ -713,7 +772,7 @@ async def test_enrich_holdings_holdings_error_tuple_warns_and_keeps_results(
     assert out["holdings"]["status"] == "error"
     assert out["holdings"]["held_count"] == 0
     assert out["holdings"]["warning_count"] == 1
-    assert any("KIS live 보유종목 확인 실패" in w for w in out["warnings"])
+    assert any("Toss live 보유종목 확인 실패" in w for w in out["warnings"])
 
 
 @pytest.mark.unit
@@ -739,13 +798,33 @@ async def test_enrich_holdings_holdings_partial_tuple_warns_and_marks_rows(
         return _Resp()
 
     async def _collect_partial(
-        market_filter: str | None, *, is_mock: bool = False
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         assert market_filter == "equity_kr"
-        assert is_mock is False
+        assert need_sellable is False
+        assert fresh_sellable is False
         return (
-            [{"symbol": "005930", "market": "kr"}],
-            [{"source": "kis", "market": "us", "error": "temporary failure"}],
+            [
+                {
+                    "account": "toss",
+                    "broker": "toss",
+                    "source": "toss_api",
+                    "instrument_type": "equity_kr",
+                    "symbol": "005930",
+                    "market": "kr",
+                }
+            ],
+            [
+                {
+                    "source": "toss_api",
+                    "market": "kr",
+                    "error": "temporary failure",
+                }
+            ],
+            True,
         )
 
     monkeypatch.setattr(tool, "_session_factory", lambda: lambda: _FakeCM())
@@ -757,7 +836,7 @@ async def test_enrich_holdings_holdings_partial_tuple_warns_and_marks_rows(
         _fake_build,
     )
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions",
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
         _collect_partial,
     )
 
@@ -769,7 +848,7 @@ async def test_enrich_holdings_holdings_partial_tuple_warns_and_marks_rows(
     assert out["holdings"]["status"] == "partial"
     assert out["holdings"]["held_count"] == 1
     assert out["holdings"]["warning_count"] == 1
-    assert any("KIS live 보유종목 확인 실패" in w for w in out["warnings"])
+    assert any("Toss live 보유종목 확인 실패" in w for w in out["warnings"])
 
 
 @pytest.mark.unit
@@ -819,12 +898,21 @@ async def test_enrich_holdings_reports_excluded_held_count(monkeypatch) -> None:
     assert len(out2["results"]) == 3
 
 
-def _fake_kis_positions_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _empty(market_filter, *, is_mock=False):  # noqa: ARG001
-        return [], []
+def _fake_toss_positions_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _empty(
+        market_filter: str | None,
+        *,
+        need_sellable: bool = False,
+        fresh_sellable: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        assert market_filter in {"equity_kr", "equity_us"}
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return [], [], True
 
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions", _empty
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _empty,
     )
 
 
@@ -838,7 +926,7 @@ async def test_enrich_sector_no_data_return_is_recorded_as_negative_not_success(
     data (the exact delisted/unrecognized-symbol case this cache exists
     for). That must be recorded as a failure (and reported), not treated as
     a successful fetch that clears the negative cache."""
-    _fake_kis_positions_empty(monkeypatch)
+    _fake_toss_positions_empty(monkeypatch)
     _fake_build_single(monkeypatch, {"symbol": "DELISTED", "market": "kr"})
 
     calls = {"n": 0}
@@ -905,7 +993,7 @@ async def test_enrich_analyst_count_filter_failure_is_negative_cached(
     a provider failure there must ALSO go through the negative cache (same
     kind="consensus" bucket the per-page enrichment uses), not bypass it
     and retry unconditionally on every call."""
-    _fake_kis_positions_empty(monkeypatch)
+    _fake_toss_positions_empty(monkeypatch)
     _fake_build_single(monkeypatch, {"symbol": "005930", "market": "kr"})
 
     calls = {"n": 0}
@@ -949,7 +1037,7 @@ async def test_enrich_analyst_count_filter_raising_provider_is_negative_cached(
     analyst_consensus_cache.resolve_consensus's own outer try/except (which
     would hide the failure from the wrapper's negcache bookkeeping and cause
     an unbounded retry on every subsequent call)."""
-    _fake_kis_positions_empty(monkeypatch)
+    _fake_toss_positions_empty(monkeypatch)
     _fake_build_single(monkeypatch, {"symbol": "005930", "market": "kr"})
 
     calls = {"n": 0}
@@ -1031,7 +1119,7 @@ async def test_enrich_chronic_failures_excluded_from_results_and_reported(
     per-call cleanup pattern named in the ticket, mirroring
     meta.halted_suspect_excluded) and reported under
     meta.chronic_failure_candidates — never silently dropped."""
-    _fake_kis_positions_empty(monkeypatch)
+    _fake_toss_positions_empty(monkeypatch)
     _fake_build_single(monkeypatch, {"symbol": "CHRONIC", "market": "kr"})
 
     async def _no_redis():

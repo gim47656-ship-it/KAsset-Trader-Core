@@ -243,11 +243,11 @@ async def handle_get_short_interest(
         )
 
     _ = days
-    return _error_payload(
-        source="unsupported",
-        message=(
-            "provider_unsupported: short-interest data is unavailable from Toss/NH PLUG"
-        ),
-        symbol=symbol,
-        instrument_type="equity_kr",
-    )
+    return {
+        "success": False,
+        "error": "provider_unsupported",
+        "detail": "short-interest data is unavailable from Toss/NH PLUG",
+        "source": "unsupported",
+        "symbol": symbol,
+        "instrument_type": "equity_kr",
+    }

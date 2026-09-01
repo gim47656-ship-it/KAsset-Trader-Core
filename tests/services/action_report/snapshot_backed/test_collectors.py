@@ -1539,7 +1539,7 @@ async def test_symbol_collector_us_universe_empty_reason():
 async def test_symbol_collector_kr_missing_has_no_unresolved_field():
     from app.services.investment_snapshots.collectors import CollectorRequest
 
-    # KR uses the single-query stock_info path; missing rows stay bulk-only.
+    # KR resolves metadata, then reads the Toss/snapshot quote fallback.
     session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
     req = CollectorRequest(
         market="kr",
@@ -1554,8 +1554,10 @@ async def test_symbol_collector_kr_missing_has_no_unresolved_field():
     partial = next(r for r in results if r.freshness_status == "partial")
     assert partial.payload_json["missing_symbols"] == ["000660"]
     assert "unresolved" not in partial.payload_json
-    # KR path issues exactly one query (no universe fallback).
-    assert session.execute.await_count == 1
+    resolved = next(r for r in results if r.symbol == "005930")
+    assert resolved.payload_json["quote"]["venue"] == "toss"
+    assert resolved.payload_json["quote"]["session"] == "snapshot"
+    assert session.execute.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1826,7 +1828,7 @@ async def test_candidate_universe_kr_emits_candidate_evidence():
     assert payload["freshness_status"] == "fresh"
     assert payload["candidates"][0]["symbol"] == "005930"
     assert payload["candidates"][0]["score"] == 6.5
-    assert payload["source_coverage"] == {"toss": 1}
+    assert payload["source_coverage"] == {"external_reference": 1}
     assert payload["missing_data"] is None
 
 

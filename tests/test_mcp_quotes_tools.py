@@ -92,7 +92,14 @@ async def test_us_quote_validates_universe_before_toss(monkeypatch) -> None:
 
     result = await tools._get_quote_impl("AAPL", "us")
 
-    assert result["success"] is False
+    assert result == {
+        "error": "AAPL",
+        "source": "toss",
+        "symbol": "AAPL",
+        "instrument_type": "equity_us",
+        "success": False,
+        "detail": "AAPL",
+    }
     prices.assert_not_awaited()
 
 
@@ -239,9 +246,14 @@ async def test_us_intraday_provider_failure_is_error_payload(monkeypatch) -> Non
 
     result = await tools._get_ohlcv_impl("AAPL", 5, "15m", market="us")
 
-    assert result["success"] is False
-    assert "toss unavailable" in result["error"]
-    assert result["source"] == "toss"
+    assert result == {
+        "error": "toss unavailable",
+        "source": "toss",
+        "symbol": "AAPL",
+        "instrument_type": "equity_us",
+        "success": False,
+        "detail": "toss unavailable",
+    }
 
 
 @pytest.mark.asyncio

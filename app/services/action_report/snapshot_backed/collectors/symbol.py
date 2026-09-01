@@ -123,7 +123,9 @@ class SymbolSnapshotCollector:
             return (self._equity_quote_client, False, "krx", "toss_live")
         if request.market == "us" and request.account_scope == "toss_live":
             return (self._equity_quote_client, False, "us", "toss_live")
-        if request.account_scope.startswith("kis"):
+        if request.account_scope is not None and request.account_scope.startswith(
+            "kis"
+        ):
             venue = "us" if request.market == "us" else "krx"
             return (None, False, venue, "provider_unsupported: KIS is non-operational")
         if request.market == "crypto" and request.account_scope == "upbit_live":

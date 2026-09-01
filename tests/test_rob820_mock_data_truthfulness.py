@@ -161,9 +161,6 @@ async def test_kr_quote_missing_or_epoch_asof_is_unavailable(monkeypatch, frame)
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
     )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
-    )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", frame)
 
@@ -183,9 +180,6 @@ async def test_kr_quote_old_asof_is_stale_and_not_usable(monkeypatch):
     )
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
-    )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
     )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", frame)
@@ -209,15 +203,13 @@ async def test_kr_live_quote_missing_asof_is_unavailable(monkeypatch):
                 "instrument_type": "equity_kr",
                 "price": 71_000.0,
                 "price_as_of": None,
-                "source": "kis",
+                "source": "toss",
+                "price_source": "toss_price",
             }
         ),
     )
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
-    )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
     )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", pd.DataFrame())

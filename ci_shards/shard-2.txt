@@ -95,6 +95,7 @@ tests/scripts/b0x/test_derivation.py
 tests/scripts/b0x/test_envelope_and_locks.py
 tests/scripts/b0x/test_sidecar.py
 tests/scripts/b0x/test_table_gate.py
+tests/scripts/test_archived_kis_entrypoints.py
 tests/scripts/test_binance_demo_strategy_loop.py
 tests/scripts/test_binance_public_smoke.py
 tests/scripts/test_deploy_mcp_profile_release_verification.py

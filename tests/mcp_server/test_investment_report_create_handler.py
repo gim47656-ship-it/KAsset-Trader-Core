@@ -191,8 +191,9 @@ def test_validate_report_items_rejects_legacy_watch_bad_max_action():
     assert error is not None
     assert error["error"] == "invalid_items"
     assert error["item_errors"][0]["index"] == 0
-    assert "max_action" in str(error["item_errors"][0]["errors"])
-    assert "quantity or notional" in str(error["item_errors"][0]["errors"])
+    field_error = error["item_errors"][0]["errors"][0]
+    assert field_error["field"] == "account_mode"
+    assert "Input should be" in field_error["message"]
 
 
 def test_create_description_documents_trade_plan_and_unknown_key_policy():

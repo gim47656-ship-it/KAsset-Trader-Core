@@ -905,11 +905,12 @@ def test_single_share_exit_rule_is_provisional_shadow_only():
         "sell.single_share_exit"
     ]
 
+    assert rule.lanes == []
     assert rule.activation_state == "shadow"
     assert rule.proposal_enabled is False
     assert rule.scope.markets == ["kr"]
-    assert rule.scope.brokers == ["kis", "toss"]
-    assert rule.scope.required_broker_inventory == ["kis", "toss"]
+    assert rule.scope.brokers == ["toss", "nhplug"]
+    assert rule.scope.required_broker_inventory == ["toss", "nhplug"]
     assert rule.scope.order_routable_required is True
     assert rule.conditions.symbol_routable_sellable_quantity_eq == 1
     assert rule.conditions.profit_pct_min == 8
@@ -965,11 +966,11 @@ def test_single_share_exit_rule_rejects_live_activation_or_enabled_proposal():
         TradingPolicyDocument.model_validate(enabled)
 
 
-def test_single_share_exit_rule_requires_both_kis_and_toss_inventory():
+def test_single_share_exit_rule_requires_both_toss_and_nhplug_inventory():
     raw = _raw()
     raw["decision_rules"]["sell.single_share_exit"]["scope"][
         "required_broker_inventory"
-    ] = ["kis"]
+    ] = ["toss"]
 
     with pytest.raises(ValidationError):
         TradingPolicyDocument.model_validate(raw)
@@ -1254,6 +1255,27 @@ def test_rob_1289_preserves_all_preexisting_policy_keys_and_values():
     reserve_base["owned_symbol_add_exempt_from_symbol_cap"] = reserve_cur[
         "owned_symbol_add_exempt_from_symbol_cap"
     ]
+    # Toss/NH PLUG clean cutover — the historical baseline names the retired
+    # KIS evidence pair and an evaluable sell lane. The current shadow record
+    # is deliberately deactivated and its provider exact set contains only the
+    # supported KR sources. Patch only these enumerated fields so the historical
+    # fixture can be parsed by the current closed schema; every other field
+    # remains covered by the equality assertion below.
+    baseline_single_share = baseline["decision_rules"]["sell.single_share_exit"]
+    current_single_share = current_raw["decision_rules"]["sell.single_share_exit"]
+    assert baseline_single_share["lanes"] == ["sell"]
+    assert current_single_share["lanes"] == []
+    baseline_scope = baseline_single_share["scope"]
+    current_scope = current_single_share["scope"]
+    assert baseline_scope["brokers"] == ["kis", "toss"]
+    assert baseline_scope["required_broker_inventory"] == ["kis", "toss"]
+    assert current_scope["brokers"] == ["toss", "nhplug"]
+    assert current_scope["required_broker_inventory"] == ["toss", "nhplug"]
+    baseline_single_share["lanes"] = current_single_share["lanes"]
+    baseline_scope["brokers"] = current_scope["brokers"]
+    baseline_scope["required_broker_inventory"] = current_scope[
+        "required_broker_inventory"
+    ]
     baseline_dump = TradingPolicyDocument.model_validate(baseline).model_dump()
     current_dump = TradingPolicyDocument.model_validate(current_raw).model_dump()
 
@@ -1437,10 +1459,10 @@ def test_rob_1289_preserves_all_preexisting_policy_keys_and_values():
             "tie_breaks"
         ][key]
 
-    # Only the six explicitly enumerated cap deltas and the enumerated
-    # §115차 additions are accepted; every other pre-existing key/value,
-    # including the retained exclusions list, must still
-    # match the ROB-1289 baseline exactly.
+    # Only the explicitly enumerated cap deltas, §115차 additions, and the
+    # single-share Toss/NH PLUG provider/lane cutover are accepted; every other
+    # pre-existing key/value, including the retained exclusions list, must
+    # still match the ROB-1289 baseline exactly.
     assert normalized_current_dump == baseline_dump
 
 

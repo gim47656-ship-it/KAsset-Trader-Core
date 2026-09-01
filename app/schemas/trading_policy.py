@@ -32,7 +32,7 @@ PostureStateName = Literal[
 ThresholdValue = int | float | str | list[int | float]
 RuleConditionValue = int | float | str | bool | list[int | float | str | bool]
 PolicyComparison = Literal["gt", "gte", "lt", "lte", "eq"]
-KrBroker = Literal["kis", "toss"]
+KrBroker = Literal["toss", "nhplug"]
 
 
 class OneShareExceptionPolicy(BaseModel):
@@ -905,15 +905,15 @@ class SingleShareExitScope(BaseModel):
     order_routable_required: Literal[True]
 
     @model_validator(mode="after")
-    def validate_kis_toss_scope(self) -> SingleShareExitScope:
-        required = {"kis", "toss"}
+    def validate_toss_nhplug_scope(self) -> SingleShareExitScope:
+        required = {"toss", "nhplug"}
         if set(self.brokers) != required or len(self.brokers) != len(required):
-            raise ValueError("brokers must contain exactly kis and toss")
+            raise ValueError("brokers must contain exactly toss and nhplug")
         if set(self.required_broker_inventory) != required or len(
             self.required_broker_inventory
         ) != len(required):
             raise ValueError(
-                "required_broker_inventory must contain exactly kis and toss"
+                "required_broker_inventory must contain exactly toss and nhplug"
             )
         return self
 

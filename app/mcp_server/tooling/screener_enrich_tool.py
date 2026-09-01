@@ -331,7 +331,7 @@ async def screen_stocks_enrich_impl(
     (KR Naver / US yfinance, persisted via the pre-existing
     `symbol_sectors_service`), analyst-consensus fetch (KR AND US both via
     the Redis cache-aside in `analyst_consensus_cache.py` — a cache hit
-    skips the provider on either market), a live KIS holdings lookup for
+    skips the provider on either market), a live Toss holdings lookup for
     `isHeld`/`exclude_held` (the one call `screen_stocks_snapshot` no
     longer makes), and — only for the final returned page — a fresh
     lightweight current-price fetch for target-upside recomputation.

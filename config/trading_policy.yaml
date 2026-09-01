@@ -837,7 +837,7 @@ decision_rules:
       - no_resistance_reference
       - composite_gates
   sell.single_share_exit:
-    # KIS 제거 후에도 [kis, toss] 증거 계약은 보존하되 평가 lane에서 제외한다.
+    # Active provider evidence is closed to Toss + NH PLUG after KIS removal.
     lanes: []
     semantics: >-
       DEPRECATED AS THE GENERAL SINGLE-SHARE EXCLUSION/FALLBACK. Retained without
@@ -852,8 +852,8 @@ decision_rules:
     proposal_enabled: false
     scope:
       markets: [kr]
-      brokers: [kis, toss]
-      required_broker_inventory: [kis, toss]
+      brokers: [toss, nhplug]
+      required_broker_inventory: [toss, nhplug]
       order_routable_required: true
     conditions:
       symbol_routable_sellable_quantity_eq: 1

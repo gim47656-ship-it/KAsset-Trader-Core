@@ -6,6 +6,7 @@ holdings management, position tracking, and average cost simulation.
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
@@ -1667,6 +1668,15 @@ async def test_fetch_price_map_us_fail_closed_when_all_sources_fail(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+def _use_direct_toss_holdings_path(monkeypatch) -> None:
+    """Keep direct Toss-reader tests independent from the shared snapshot cache."""
+    monkeypatch.setattr(
+        portfolio_holdings,
+        "get_shared_portfolio_snapshot_cache",
+        lambda: SimpleNamespace(usable=False),
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_holdings_toss_api_enabled_adds_read_only_toss_account(monkeypatch):
     from decimal import Decimal
@@ -1676,6 +1686,8 @@ async def test_get_holdings_toss_api_enabled_adds_read_only_toss_account(monkeyp
         TossPortfolioPosition,
         TossPortfolioSnapshot,
     )
+
+    _use_direct_toss_holdings_path(monkeypatch)
 
     async def fake_collect_upbit_positions(*args, **kwargs):
         return [], []
@@ -1692,20 +1704,21 @@ async def test_get_holdings_toss_api_enabled_adds_read_only_toss_account(monkeyp
                     account_name="Toss",
                     broker="toss",
                     source="toss_api",
-                    instrument_type="equity_us",
-                    market="us",
-                    symbol="BRK.B",
-                    name="Berkshire Hathaway B",
-                    quantity=Decimal("1.5"),
-                    avg_buy_price=Decimal("400"),
-                    current_price=Decimal("430.12"),
-                    evaluation_amount=Decimal("645.18"),
-                    profit_loss=Decimal("45.18"),
-                    profit_rate=Decimal("0.0753"),
+                    instrument_type="equity_kr",
+                    market="kr",
+                    symbol="005930",
+                    name="삼성전자",
+                    quantity=Decimal("10"),
+                    avg_buy_price=Decimal("70000"),
+                    current_price=Decimal("72000"),
+                    evaluation_amount=Decimal("720000"),
+                    profit_loss=Decimal("20000"),
+                    profit_rate=Decimal("2.8571"),
+                    sellable_quantity=None,
                 )
             ],
-            cash_krw=Decimal("0"),
-            cash_usd=Decimal("789.01"),
+            cash_krw=Decimal("100000"),
+            cash_usd=Decimal("0"),
         )
 
     monkeypatch.setattr(portfolio_holdings.settings, "toss_api_enabled", True)
@@ -1719,12 +1732,14 @@ async def test_get_holdings_toss_api_enabled_adds_read_only_toss_account(monkeyp
         portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch_toss_snapshot
     )
 
-    result = await portfolio_holdings._get_holdings_impl(minimum_value=0)
+    result = await portfolio_holdings._get_holdings_impl(
+        include_current_price=False, minimum_value=0
+    )
 
     assert result["accounts"][0]["account"] == "toss"
     assert result["accounts"][0]["broker"] == "toss"
     assert result["accounts"][0]["order_routable"] is False
-    assert result["accounts"][0]["positions"][0]["symbol"] == "BRK.B"
+    assert result["accounts"][0]["positions"][0]["symbol"] == "005930"
     assert "sellable_quantity" not in result["accounts"][0]["positions"][0]
 
 
@@ -1738,6 +1753,8 @@ async def test_get_holdings_toss_api_market_filter_keeps_us_position(monkeypatch
         TossPortfolioSnapshot,
     )
 
+    _use_direct_toss_holdings_path(monkeypatch)
+
     async def fake_collect_upbit_positions(*args, **kwargs):
         return [], []
 
@@ -1763,6 +1780,7 @@ async def test_get_holdings_toss_api_market_filter_keeps_us_position(monkeypatch
                     evaluation_amount=Decimal("645.18"),
                     profit_loss=Decimal("45.18"),
                     profit_rate=Decimal("0.0753"),
+                    sellable_quantity=None,
                 )
             ],
         )
@@ -1778,7 +1796,9 @@ async def test_get_holdings_toss_api_market_filter_keeps_us_position(monkeypatch
         portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch_toss_snapshot
     )
 
-    result = await portfolio_holdings._get_holdings_impl(market="us", minimum_value=0)
+    result = await portfolio_holdings._get_holdings_impl(
+        market="us", include_current_price=False, minimum_value=0
+    )
 
     assert result["filters"]["market"] == "us"
     assert result["accounts"][0]["account"] == "toss"
@@ -1794,6 +1814,8 @@ async def test_get_holdings_toss_api_success_hides_duplicate_toss_manual(monkeyp
         TossPortfolioPosition,
         TossPortfolioSnapshot,
     )
+
+    _use_direct_toss_holdings_path(monkeypatch)
 
     async def fake_collect_upbit_positions(*args, **kwargs):
         return [], []
@@ -1837,6 +1859,7 @@ async def test_get_holdings_toss_api_success_hides_duplicate_toss_manual(monkeyp
                     evaluation_amount=Decimal("645.18"),
                     profit_loss=Decimal("45.18"),
                     profit_rate=Decimal("0.0753"),
+                    sellable_quantity=None,
                 )
             ]
         )
@@ -1852,7 +1875,9 @@ async def test_get_holdings_toss_api_success_hides_duplicate_toss_manual(monkeyp
         portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch_toss_snapshot
     )
 
-    result = await portfolio_holdings._get_holdings_impl(minimum_value=0)
+    result = await portfolio_holdings._get_holdings_impl(
+        include_current_price=False, minimum_value=0
+    )
 
     accounts = result["accounts"]
     assert len(accounts) == 1
@@ -1863,6 +1888,8 @@ async def test_get_holdings_toss_api_success_hides_duplicate_toss_manual(monkeyp
 @pytest.mark.asyncio
 async def test_get_holdings_toss_api_failure_keeps_manual_fallback(monkeypatch):
     from app.mcp_server.tooling import portfolio_holdings
+
+    _use_direct_toss_holdings_path(monkeypatch)
 
     async def fake_collect_upbit_positions(*args, **kwargs):
         return [], []
@@ -1902,7 +1929,9 @@ async def test_get_holdings_toss_api_failure_keeps_manual_fallback(monkeypatch):
         portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch_toss_snapshot
     )
 
-    result = await portfolio_holdings._get_holdings_impl(minimum_value=0)
+    result = await portfolio_holdings._get_holdings_impl(
+        include_current_price=False, minimum_value=0
+    )
 
     assert result["accounts"][0]["order_routable"] is False
     assert result["accounts"][0]["positions"][0]["source"] == "manual"

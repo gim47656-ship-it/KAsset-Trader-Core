@@ -438,6 +438,8 @@ async def get_order_history_impl(
             "success": False,
             "account_mode": "kis_mock",
             "error": "provider kis is not operational",
+            "detail": "KIS mock order history is provider_unsupported",
+            "source": "unsupported",
             "orders": [],
             "errors": [
                 {

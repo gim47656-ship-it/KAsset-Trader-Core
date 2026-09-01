@@ -102,21 +102,34 @@ def _no_provider_calls_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _boom_kis_positions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ROB-1309 checkpoint fix: screen_stocks_snapshot must be zero-HTTP for
-    EVERY option combination, including the pre-existing KIS-live holdings
-    lookup — so this spy raises rather than stubbing a benign empty result,
-    proving the call genuinely never happens (not merely that its output is
-    ignorable)."""
+def _boom_holdings_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every current holdings seam must remain unreachable from the DB-only tool."""
 
-    async def _boom(market_filter, *, is_mock=False):  # noqa: ARG001
-        raise AssertionError(
-            "screen_stocks_snapshot must not call KIS holdings "
-            f"(market_filter={market_filter!r})"
-        )
+    def _raiser(seam: str):
+        async def _boom(*args: Any, **kwargs: Any):
+            raise AssertionError(
+                "screen_stocks_snapshot must not call holdings "
+                f"seam={seam} args={args!r} kwargs={kwargs!r}"
+            )
+
+        return _boom
 
     monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_kis_positions", _boom
+        snapshot_tool,
+        "_collect_holdings_for_market",
+        _raiser("_collect_holdings_for_market"),
+    )
+    monkeypatch.setattr(
+        "app.mcp_server.tooling.portfolio_holdings._collect_portfolio_positions",
+        _raiser("_collect_portfolio_positions"),
+    )
+    monkeypatch.setattr(
+        "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
+        _raiser("_collect_toss_api_positions"),
+    )
+    monkeypatch.setattr(
+        "app.mcp_server.tooling.portfolio_holdings._collect_upbit_positions",
+        _raiser("_collect_upbit_positions"),
     )
 
 
@@ -141,7 +154,7 @@ async def test_screen_stocks_snapshot_makes_zero_enrichment_http_calls(
     monkeypatch: pytest.MonkeyPatch, market: str
 ) -> None:
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     _fake_build(
         monkeypatch,
         [{"symbol": "005930", "market": market, "marketCapValue": 1.0}],
@@ -177,7 +190,7 @@ async def test_screen_stocks_snapshot_db_fields_and_pagination_survive(
     """DB snapshot rows, holdings metadata, and pagination are unchanged by
     the enrichment split — only the enrichment fields are gone."""
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     rows = [{"symbol": f"S{i}", "market": "kr"} for i in range(5)]
     _fake_build(monkeypatch, rows)
 
@@ -194,7 +207,7 @@ async def test_screen_stocks_snapshot_db_fields_and_pagination_survive(
         "has_more": True,
         "next_offset": 3,
     }
-    assert out["holdings"]["source"] == "kis_live"
+    assert out["holdings"]["source"] == "toss_live"
     assert out["holdings"]["status"] == "skipped"
     assert out["discoveryFilters"]["min_analyst_count"] is None
     assert out["discoveryFilters"]["min_analyst_buy_count"] is None
@@ -208,7 +221,7 @@ async def test_screen_stocks_snapshot_rejects_analyst_filters_fail_closed(
     """min_analyst_* must not be silently ignored or trigger a network call —
     it's a fail-closed redirect to screen_stocks_enrich."""
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     _fake_build(monkeypatch, [{"symbol": "005930", "market": "kr"}])
 
     out = await snapshot_tool.screen_stocks_snapshot_impl(
@@ -301,7 +314,7 @@ async def test_screen_stocks_snapshot_consecutive_gainers_fails_closed_not_gener
     an empty DB result — never fall through to the real
     ScreenerService.list_screening (the generic live/tvscreener path)."""
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     list_screening_calls = _boom_list_screening(monkeypatch)
 
     async def _no_partition(*_args: Any, **_kwargs: Any):
@@ -333,7 +346,7 @@ async def test_screen_stocks_snapshot_us_growth_expectation_fails_closed_not_gen
     closed (via snapshot_only) rather than reaching the real
     ScreenerService.list_screening."""
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     list_screening_calls = _boom_list_screening(monkeypatch)
     monkeypatch.setattr(snapshot_tool, "_session_factory", lambda: lambda: _FakeCM())
 
@@ -355,7 +368,7 @@ async def test_screen_stocks_snapshot_crypto_high_volume_fails_closed_not_generi
     crypto snapshot partition (loader returns None) must fail closed rather
     than falling through to the real ScreenerService.list_screening."""
     _no_provider_calls_guard(monkeypatch)
-    _boom_kis_positions(monkeypatch)
+    _boom_holdings_reads(monkeypatch)
     list_screening_calls = _boom_list_screening(monkeypatch)
 
     async def _no_partition(*_args: Any, **_kwargs: Any):

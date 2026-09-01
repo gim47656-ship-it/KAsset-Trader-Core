@@ -4,74 +4,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.mcp_server.tooling import order_execution
+from app.mcp_server.tooling import orders_toss_variants
 
 
-@pytest.mark.asyncio
-async def test_shared_buy_preview_includes_concentration(monkeypatch):
-    async def _fake_conc(**kwargs):
-        return {
-            "verdict": "over",
-            "cluster": "semis_memory",
-            "cap_pct": 10,
-            "current_pct": 8.0,
-            "projected_pct": 11.5,
-            "fail_open": False,
-            "warning": "semis_memory projected 11.5% exceeds sector-cluster cap 10%",
-        }
-
-    monkeypatch.setattr(
-        order_execution, "evaluate_sector_concentration", _fake_conc, raising=False
-    )
-    monkeypatch.setattr(
-        order_execution, "_fetch_current_price", AsyncMock(return_value=55000.0)
-    )
-    monkeypatch.setattr(
-        order_execution,
-        "_build_preview",
-        AsyncMock(
-            return_value={
-                "price": 55000,
-                "quantity": 10,
-                "estimated_value": 550000.0,
-                "fee": 0,
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        order_execution, "_check_balance_and_warn", AsyncMock(return_value=(None, None))
-    )
-    monkeypatch.setattr(order_execution, "_record_order_history", AsyncMock())
-
-    result = await order_execution._place_order_impl(
-        symbol="005930",
-        side="buy",
-        order_type="limit",
-        quantity=10,
-        price=55000.0,
-        dry_run=True,
-        is_mock=True,
-    )
-
-    assert result["success"] is True
-    assert "sector_concentration" in result
-    assert result["sector_concentration"]["verdict"] == "over"
-    assert (
-        result["sector_concentration"]["warning"]
-        == "semis_memory projected 11.5% exceeds sector-cluster cap 10%"
-    )
-
-
-@pytest.mark.asyncio
-async def test_toss_buy_preview_includes_concentration(monkeypatch):
-    # Enable Toss preview environment
+def _configure_toss_preview(
+    monkeypatch,
+    *,
+    current_price: str,
+    currency: str = "KRW",
+):
     from app.core.config import settings
-    from app.mcp_server.tooling import orders_toss_variants
 
     monkeypatch.setattr(settings, "toss_api_enabled", True)
     monkeypatch.setattr(orders_toss_variants, "validate_toss_api_config", lambda: [])
 
-    # Stub cost context and currency rate helpers
     async def _stub_toss_costs():
         return {
             "version": 1,
@@ -102,7 +48,6 @@ async def test_toss_buy_preview_includes_concentration(monkeypatch):
         raising=False,
     )
 
-    # Mock Toss Client
     class _FakeTossClient:
         async def aclose(self):
             return None
@@ -110,19 +55,74 @@ async def test_toss_buy_preview_includes_concentration(monkeypatch):
         async def list_orders(self, **kwargs):
             return SimpleNamespace(orders=[])
 
-        async def fetch_multiple_current_prices(self, symbols):
-            return {"005930": Decimal("50000")}
+        async def warnings(self, symbol):
+            return []
+
+        async def prices(self, symbols):
+            return [
+                SimpleNamespace(
+                    symbol=symbol,
+                    last_price=Decimal(current_price),
+                    currency=currency,
+                )
+                for symbol in symbols
+            ]
 
     class _FakeClientContext:
         async def __aenter__(self):
             return _FakeTossClient()
 
         async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
+            return None
 
     monkeypatch.setattr(
         orders_toss_variants, "_client_context", lambda: _FakeClientContext()
     )
+
+
+@pytest.mark.asyncio
+async def test_shared_buy_preview_includes_concentration(monkeypatch):
+    _configure_toss_preview(monkeypatch, current_price="100", currency="USD")
+
+    async def _fake_conc(**kwargs):
+        return {
+            "verdict": "over",
+            "cluster": "semis_memory",
+            "cap_pct": 10,
+            "current_pct": 8.0,
+            "projected_pct": 11.5,
+            "fail_open": False,
+            "warning": "semis_memory projected 11.5% exceeds sector-cluster cap 10%",
+        }
+
+    monkeypatch.setattr(
+        orders_toss_variants,
+        "evaluate_sector_concentration",
+        _fake_conc,
+        raising=False,
+    )
+
+    result = await orders_toss_variants.toss_preview_order(
+        symbol="AAPL",
+        side="buy",
+        market="us",
+        order_type="limit",
+        quantity=10,
+        price="100",
+        account_mode="toss_live",
+    )
+
+    assert result["success"] is True
+    assert result["sector_concentration"]["verdict"] == "over"
+    assert (
+        result["sector_concentration"]["warning"]
+        == "semis_memory projected 11.5% exceeds sector-cluster cap 10%"
+    )
+
+
+@pytest.mark.asyncio
+async def test_toss_buy_preview_includes_concentration(monkeypatch):
+    _configure_toss_preview(monkeypatch, current_price="50000")
 
     async def _fake_conc(**kwargs):
         return {
@@ -172,9 +172,9 @@ async def test_toss_buy_preview_includes_concentration(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shared_buy_preview_uses_whole_portfolio_scope(monkeypatch):
-    # ROB-646 Finding 1: the KIS/crypto call site must pass a whole-portfolio
-    # account_ctx (only is_mock, no account/market filter) so its denominator
-    # matches the Toss path.
+    # Toss is live-only, so concentration must use the whole live portfolio
+    # rather than narrowing the denominator by account or market.
+    _configure_toss_preview(monkeypatch, current_price="50000")
     captured: dict = {}
 
     async def _capture_conc(**kwargs):
@@ -189,38 +189,23 @@ async def test_shared_buy_preview_uses_whole_portfolio_scope(monkeypatch):
         }
 
     monkeypatch.setattr(
-        order_execution, "evaluate_sector_concentration", _capture_conc, raising=False
+        orders_toss_variants,
+        "evaluate_sector_concentration",
+        _capture_conc,
+        raising=False,
     )
-    monkeypatch.setattr(
-        order_execution, "_fetch_current_price", AsyncMock(return_value=55000.0)
-    )
-    monkeypatch.setattr(
-        order_execution,
-        "_build_preview",
-        AsyncMock(
-            return_value={
-                "price": 55000,
-                "quantity": 10,
-                "estimated_value": 550000.0,
-                "fee": 0,
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        order_execution, "_check_balance_and_warn", AsyncMock(return_value=(None, None))
-    )
-    monkeypatch.setattr(order_execution, "_record_order_history", AsyncMock())
 
-    await order_execution._place_order_impl(
+    result = await orders_toss_variants.toss_preview_order(
         symbol="005930",
         side="buy",
+        market="kr",
         order_type="limit",
         quantity=10,
-        price=55000.0,
-        dry_run=True,
-        is_mock=True,
+        price="50000",
+        account_mode="toss_live",
     )
 
-    assert captured["account_ctx"] == {"is_mock": True}
+    assert result["success"] is True
+    assert captured["account_ctx"] == {"is_mock": False}
     assert "account" not in captured["account_ctx"]
     assert "market" not in captured["account_ctx"]

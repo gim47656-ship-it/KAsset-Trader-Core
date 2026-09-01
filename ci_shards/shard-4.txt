@@ -432,6 +432,7 @@ tests/test_symbol_analysis_floor.py
 tests/test_taskiq_broker.py
 tests/test_toss_approval.py
 tests/test_toss_consumer_transport.py
+tests/test_toss_report_scope_migration.py
 tests/test_toss_symbol_master_cli.py
 tests/test_toss_warnings_job.py
 tests/test_trade_journal_mock_unblock.py

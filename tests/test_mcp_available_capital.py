@@ -418,19 +418,13 @@ async def test_get_available_capital_adds_cost_profiles(monkeypatch):
         return {
             "accounts": [
                 {
-                    "account": "kis_domestic",
-                    "broker": "kis",
-                    "currency": "KRW",
-                    "orderable": 1_000_000.0,
-                },
-                {
                     "account": "toss",
                     "broker": "toss",
                     "currency": "KRW",
                     "orderable": 1_000_000.0,
                 },
             ],
-            "summary": {"total_krw": 2_000_000.0, "total_usd": 0.0},
+            "summary": {"total_krw": 1_000_000.0, "total_usd": 0.0},
             "errors": [],
         }
 
@@ -439,10 +433,6 @@ async def test_get_available_capital_adds_cost_profiles(monkeypatch):
             "version": 1,
             "routing": {"position_consolidation_threshold_bps": {"kr": 25, "us": 40}},
             "accounts": {
-                "kis_domestic": {
-                    "broker": "kis",
-                    "markets": {"kr": {"commission_bps": 1.4, "fx_spread_bps": 0}},
-                },
                 "toss": {
                     "broker": "toss",
                     "markets": {"kr": {"commission_bps": 0, "fx_spread_bps": 0}},
@@ -467,15 +457,13 @@ async def test_get_available_capital_adds_cost_profiles(monkeypatch):
 
     result = await portfolio_cash.get_available_capital_impl()
 
-    kis = next(row for row in result["accounts"] if row["account"] == "kis_domestic")
     toss = next(row for row in result["accounts"] if row["account"] == "toss")
-    assert kis["cost_profile"] == {
-        "commission_bps": 1.4,
+    assert toss["cost_profile"] == {
+        "commission_bps": 0.0,
         "fx_spread_bps": 0.0,
         "source": "user_setting",
         "review_required": False,
     }
-    assert toss["cost_profile"]["commission_bps"] == pytest.approx(0)
 
 
 @pytest.mark.asyncio
@@ -488,8 +476,8 @@ async def test_get_available_capital_degrades_when_cost_profile_setting_fails(
         return {
             "accounts": [
                 {
-                    "account": "kis_domestic",
-                    "broker": "kis",
+                    "account": "toss",
+                    "broker": "toss",
                     "currency": "KRW",
                     "orderable": 1_000_000.0,
                 }
@@ -519,7 +507,7 @@ async def test_get_available_capital_degrades_when_cost_profile_setting_fails(
     result = await portfolio_cash.get_available_capital_impl()
 
     assert result["accounts"][0]["cost_profile"] == {
-        "commission_bps": 14.7,
+        "commission_bps": 0.0,
         "fx_spread_bps": 0.0,
         "source": "default_seed",
         "review_required": True,

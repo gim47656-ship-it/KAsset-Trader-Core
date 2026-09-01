@@ -2283,13 +2283,10 @@ async def test_record_approval_dispatch_missing_proposal_raises(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Final-review Finding 1 — account_mode/market submit-routing allowlist.
-# `_place_order_impl` (the submit path's default binding) has no
-# `account_mode` param at all: it routes purely by `market` and always
-# submits `is_mock=False`. A proposal created with an account_mode the submit
-# path doesn't actually honor (kis_mock, toss_live, db_simulated) must be
-# rejected at create time -- never persisted -- rather than silently routed
-# to LIVE KIS on approval.
+# Final-review Finding 1 — account_mode/market/action submit allowlist.
+# Toss owns KR/US equities and Upbit owns crypto. Removed KIS modes and other
+# unsupported tuples must fail closed at proposal creation instead of
+# persisting an unexecutable intent or silently rerouting it to Toss.
 # ---------------------------------------------------------------------------
 
 
@@ -2383,8 +2380,7 @@ async def test_create_proposal_rejects_kis_mock_equity_kr(db_session):
         )
     assert str(exc_info.value) == (
         "unsupported account_mode/market/action: kis_mock/equity_kr/place "
-        "(allowed: kis_live×equity_kr|equity_us, "
-        "toss_live×equity_kr|equity_us, upbit×crypto; "
+        "(allowed: toss_live×equity_kr|equity_us, upbit×crypto; "
         "market aliases kr→equity_kr, us→equity_us)"
     )
 
