@@ -62,10 +62,9 @@ NH PLUG 정본은 `https://www.nhplug.com/llms-full.txt` 및 그 문서가 지�
 - 배치 응답은 `{"quotes": [Quote, ...]}`이며 `Quote`는 단일 조회와 완전히 같은 camelCase 계약(`broker`, `market`, `symbol`, `name`, `currency`, `price`, `previousClose`, `changeAmount`, `changeRate`, `session`, `regularClose`, `sessionChangeAmount`, `sessionChangeRate`, `asOf`, `source`)이다. 모든 가격·등락 값은 JSON number가 아닌 십진수 문자열이다.
 - `symbols`는 콤마 구분 1~50개다. `KRX`(`KR`)는 6자리 종목코드, `US`(`NASDAQ`·`NYSE`·`AMEX`)는 미국 티커만 허용한다. 중복은 서버가 제거하고 응답에서도 한 번만 나온다. 개수·형식·시장 위반은 `422 VALIDATION_ERROR`다.
 - 조회에 실패한 종목은 값을 만들어내지 않고 응답 배열에서 제외한다. 요청 순서는 성공한 종목 사이에서 유지된다.
-- KRX 시세 우선순위는 **토스 인증 REST 배치 → 서버 공용 NH PLUG 채널 → 저장 일봉(PAPER)**, US는 **토스 인증 REST 배치 → 저장 일봉(PAPER)** 이다. 앞 단계가 실패하면 조용히 다음 단계로 강등하며, 어떤 단계도 서버 현재 시각을 시세 시각으로 위조하지 않는다. `source`가 실제 채널을 구분하며 자격증명이나 공급자 원문 예외는 응답·로그 어디에도 담지 않는다.
-- `TOSS_API_ENABLED`가 꺼져 있으면 토스 가격 단계를 시도하지 않고 기존 폴백 경로를 쓴다.
+- KRX와 US 시세 우선순위는 모두 **토스 인증 REST 배치 → 저장 일봉(PAPER)** 이다. 토스가 실패하면 저장 일봉으로 강등하며 서버 현재 시각을 시세 시각으로 위조하지 않는다. `source`가 실제 근거를 구분하고 자격증명이나 공급자 원문 예외는 응답·로그에 담지 않는다.
+- `TOSS_API_ENABLED`가 꺼져 있으면 토스 가격 단계를 시도하지 않고 저장 일봉을 사용한다.
 - 토스 가격 단계는 종목당 2초 캐시 + 종목별 단일비행으로 보호한다. 같은 종목을 동시에 조회하는 여러 요청은 한 번의 배치 호출로 합쳐지고, 배치 호출 실패 직후 2초는 재호출하지 않는다. `TossReadClient`는 프로세스에서 한 번 만들어 재사용하고 앱 lifespan 종료 때 닫는다.
-- 배치에서 NH 공용 채널은 전 종목 공용 호출 간격(0.45초)에 묶여 있어 총 2.5초 예산까지만 시도하고, 예산을 넘긴 종목은 저장 일봉으로 강등한다. 응답 안에서 종목별 `source`가 서로 다를 수 있다.
 - `asOf`는 항상 UTC `Z` 표기다. 토스가 `+09:00` 오프셋으로 준 시각은 UTC로 정규화하며, 공급자가 시각을 주지 않거나 오프셋 없는 시각을 주면 그 종목은 다음 폴백으로 내려간다. 저장 일봉 시세의 `asOf`는 그 일봉 거래일의 `T00:00:00Z`다.
 - `session`은 Toss market calendar 원문 구간을 `DAY_MARKET`, `PRE_MARKET`, `REGULAR`, `AFTER_MARKET`, `CLOSED`로 옮긴 값이다. US만 `DAY_MARKET`을 가질 수 있다. KR calendar는 KRX+NXT 통합 구간만 주므로 별도 `NXT` 상태를 만들지 않는다. `singlePriceAuctionStart/End`는 상위 구간 안의 동시호가 경계라 별도 상태로 쪼개지 않으며, 공급자 명세가 제외한 시간외종가·시간외단일가는 이 계약에도 포함하지 않는다. KRX의 `PRE_MARKET`·`AFTER_MARKET`은 NXT 전용이므로 종목 universe의 최신 `nxt_eligible`·`nxt_trading_suspended`가 참여 가능함을 증명할 때만 그 상태를 내리고, 미지원·정지 종목은 `CLOSED`, 근거가 없거나 오래되었으면 `null`이다. calendar 조회 자체가 실패해도 휴장으로 만들지 않고 `null`이다.
 - `price`는 현재 세션 최신가이고 `previousClose`는 전일 정규장 종가다. `changeAmount`·`changeRate`는 정규장 진행 중에는 현재가, 정규장 종료 뒤에는 `regularClose`를 `previousClose`와 비교한다. `regularClose`는 완료된 정규장의 마지막 1분봉 종가이며 정규장 진행 중에는 `null`이다. `sessionChangeAmount`·`sessionChangeRate`는 현재가를 `regularClose`와 비교한다. 정규장 종가를 증명할 수 없으면 세 필드는 `null`이고, 기존 `changeAmount`·`changeRate`는 이전 호환 동작인 현재가-전일종가로 강등한다. 등락률 단위는 퍼센트 포인트이고 소수 둘째 자리로 반올림한다.

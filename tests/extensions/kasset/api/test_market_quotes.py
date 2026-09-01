@@ -22,7 +22,6 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.auth import get_mobile_session
-from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.paper_schemas import Quote
 from app.extensions.kasset.api.toss_market_data import (
@@ -132,34 +131,6 @@ def _candle_row(*, symbol: str, day: str, close: float) -> dict[str, Any]:
         "value": 0.0,
         "source": "test",
     }
-
-
-class _StubNh:
-    def __init__(self, quote: Quote | None = None) -> None:
-        self._quote = quote
-        self.symbols: list[str] = []
-
-    async def quote(self, *, market: str, symbol: str) -> Quote:
-        self.symbols.append(symbol)
-        if self._quote is None:
-            raise MobileApiError(502, "NH_QUOTE_FAILED", "조회하지 못했습니다.")
-        return self._quote.model_copy(update={"symbol": symbol})
-
-
-def _nh_quote(symbol: str) -> Quote:
-    return Quote(
-        broker="NH",
-        market="KRX",
-        symbol=symbol,
-        name="엔에이치",
-        currency="KRW",
-        price="71500",
-        previous_close="71000",
-        change_amount="500",
-        change_rate="0.7",
-        as_of="2026-08-28T09:44:00Z",
-        source="NH_PLUG_MOCK",
-    )
 
 
 @pytest.fixture
@@ -339,22 +310,10 @@ def test_batch_quotes_reject_contract_violations(query: str, message: str) -> No
     }
 
 
-def test_batch_quotes_degrade_to_nh_then_stored_candles_when_toss_fails(
+def test_batch_quotes_degrade_to_stored_candles_when_toss_fails(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     _install_toss(monkeypatch, _StubTossClient(error=RuntimeError("toss unavailable")))
-
-    class _PartialNh(_StubNh):
-        """005930만 응답하는 NH 공용 채널."""
-
-        async def quote(self, *, market: str, symbol: str) -> Quote:
-            self.symbols.append(symbol)
-            if symbol == "005930":
-                return _nh_quote(symbol)
-            raise MobileApiError(502, "NH_QUOTE_FAILED", "조회하지 못했습니다.")
-
-    partial = _PartialNh()
-    monkeypatch.setattr(krx_quotes, "nh_market_data", partial)
     db = _FakeDb(
         candles={
             "000660": [
@@ -368,38 +327,31 @@ def test_batch_quotes_degrade_to_nh_then_stored_candles_when_toss_fails(
         response = client.get("/api/v1/market/quotes?market=KRX&symbols=005930,000660")
 
     assert response.status_code == 200
-    quotes = response.json()["quotes"]
-    # 우선순위: 토스 실패 → NH 공용 → 저장 일봉.
-    assert partial.symbols == ["005930", "000660"]
-    assert [(quote["symbol"], quote["source"]) for quote in quotes] == [
-        ("005930", "NH_PLUG_MOCK"),
-        ("000660", "PAPER_CANDLES"),
+    assert response.json()["quotes"] == [
+        {
+            "broker": "PAPER",
+            "market": "KRX",
+            "symbol": "000660",
+            "name": None,
+            "currency": "KRW",
+            "price": "180000",
+            "previousClose": "175000",
+            "changeAmount": "5000",
+            "changeRate": "2.86",
+            "session": "REGULAR",
+            "regularClose": None,
+            "sessionChangeAmount": None,
+            "sessionChangeRate": None,
+            "asOf": "2026-08-27T00:00:00Z",
+            "source": "PAPER_CANDLES",
+        }
     ]
-    assert quotes[0]["broker"] == "PAPER"
-    assert quotes[1] == {
-        "broker": "PAPER",
-        "market": "KRX",
-        "symbol": "000660",
-        "name": None,
-        "currency": "KRW",
-        "price": "180000",
-        "previousClose": "175000",
-        "changeAmount": "5000",
-        "changeRate": "2.86",
-        "session": "REGULAR",
-        "regularClose": None,
-        "sessionChangeAmount": None,
-        "sessionChangeRate": None,
-        "asOf": "2026-08-27T00:00:00Z",
-        "source": "PAPER_CANDLES",
-    }
 
 
 def test_batch_quotes_omit_symbols_no_channel_can_serve(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     _install_toss(monkeypatch, _StubTossClient(error=RuntimeError("down")))
-    monkeypatch.setattr(krx_quotes, "nh_market_data", _StubNh())
 
     with _client(_FakeDb()) as client:
         response = client.get("/api/v1/market/quotes?market=KRX&symbols=005930,000660")
@@ -413,7 +365,6 @@ def test_batch_quotes_never_leak_provider_internals(
 ) -> None:
     secret = "toss-client-secret-do-not-leak"
     _install_toss(monkeypatch, _StubTossClient(error=RuntimeError(secret)))
-    monkeypatch.setattr(krx_quotes, "nh_market_data", _StubNh())
     db = _FakeDb(
         candles={
             "005930": [_candle_row(symbol="005930", day="2026-08-27", close=250000.0)]
@@ -448,13 +399,11 @@ def test_batch_quotes_require_authentication() -> None:
     }
 
 
-def test_single_krx_quote_prefers_toss_over_shared_nh_channel(
+def test_single_krx_quote_uses_toss(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     toss = _StubTossClient({"005930": _toss_price("005930", price="256500")})
     _install_toss(monkeypatch, toss)
-    nh = _StubNh(_nh_quote("005930"))
-    monkeypatch.setattr(krx_quotes, "nh_market_data", nh)
     db = _FakeDb(
         candles={
             "005930": [_candle_row(symbol="005930", day="2026-08-27", close=250000.0)]
@@ -473,14 +422,32 @@ def test_single_krx_quote_prefers_toss_over_shared_nh_channel(
     assert body["price"] == "256500"
     assert body["previousClose"] == "250000"
     assert body["asOf"] == "2026-08-28T09:44:26Z"
-    assert nh.symbols == []
+
+
+def test_legacy_nh_quote_request_uses_shared_toss_provider(
+    monkeypatch: pytest.MonkeyPatch, toss_enabled: None
+) -> None:
+    toss = _StubTossClient({"005930": _toss_price("005930", price="256500")})
+    _install_toss(monkeypatch, toss)
+    db = _FakeDb(
+        candles={
+            "005930": [_candle_row(symbol="005930", day="2026-08-27", close=250000.0)]
+        },
+        names={"005930": "삼성전자"},
+    )
+
+    with _client(db) as client:
+        response = client.get("/api/v1/market/quote?broker=NH&market=KRX&symbol=005930")
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "TOSS_API_PRICES"
+    assert response.json()["price"] == "256500"
 
 
 def test_single_krx_quote_degrades_to_existing_paper_path_when_channels_fail(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     _install_toss(monkeypatch, _StubTossClient(error=RuntimeError("down")))
-    monkeypatch.setattr(krx_quotes, "nh_market_data", _StubNh())
     paper_quote = AsyncMock(
         return_value=Quote(
             broker="PAPER",

@@ -13,7 +13,6 @@ from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.broker_registry import broker_registry
 from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.installation import install_android_compat_api
-from app.extensions.kasset.api.nh_adapter import nh_adapter
 from app.middleware.auth import AuthMiddleware
 
 ORDER = {
@@ -243,103 +242,6 @@ def test_nh_history_reads_return_empty_contracts() -> None:
     assert orders.json() == {"orders": []}
     assert fills.status_code == 200
     assert fills.json() == {"fills": []}
-
-
-def test_nh_quote_rejects_invalid_input_before_credential_access() -> None:
-    with _client() as client:
-        response = client.get("/api/v1/market/quote?broker=NH&market=NYSE&symbol=AAPL")
-
-    assert response.status_code == 422
-    assert response.json() == {
-        "error": {
-            "code": "VALIDATION_ERROR",
-            "message": "NH PLUG 조회는 KRX 6자리 종목코드만 지원합니다.",
-        }
-    }
-
-
-def test_nh_quote_normalizes_official_current_price_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fetch_quote = AsyncMock(
-        return_value={
-            "Output_0": {
-                "iem_cd": "005930",
-                "iem_nm": "삼성전자",
-                "stck_prpr": 71500,
-                "stck_prdy_clpr": 71000,
-                "prdy_vrss_sign": "2",
-                "prdy_vrss": 500,
-                "prdy_ctrt": 0.70,
-            }
-        }
-    )
-    context = SimpleNamespace(client=SimpleNamespace(fetch_quote=fetch_quote))
-    monkeypatch.setattr(
-        nh_adapter,
-        "prepare_read",
-        AsyncMock(return_value=context),
-    )
-
-    quote = asyncio.run(
-        nh_adapter.quote(  # type: ignore[arg-type]
-            object(), 101, market="krx", symbol="005930"
-        )
-    )
-
-    assert quote.model_dump(by_alias=True) == {
-        "broker": "NH",
-        "market": "KRX",
-        "symbol": "005930",
-        "name": "삼성전자",
-        "currency": "KRW",
-        "price": "71500",
-        "previousClose": "71000",
-        "changeAmount": "500",
-        "changeRate": "0.7",
-        "session": None,
-        "regularClose": None,
-        "sessionChangeAmount": None,
-        "sessionChangeRate": None,
-        "asOf": quote.as_of,
-        "source": "NH_PLUG_MOCK",
-    }
-    assert quote.as_of.endswith("Z")
-    fetch_quote.assert_awaited_once_with(market="KRX", symbol="005930")
-
-
-def test_nh_quote_uses_previous_close_when_mock_sign_field_is_blank(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fetch_quote = AsyncMock(
-        return_value={
-            "Output_0": {
-                "iem_cd": "005930",
-                "iem_nm": "삼성전자",
-                "stck_prpr": 257000,
-                "stck_prdy_clpr": 266000,
-                "prdy_vrss_sign": "",
-                "prdy_vrss": 9000,
-                "prdy_ctrt": 3.38,
-            }
-        }
-    )
-    context = SimpleNamespace(client=SimpleNamespace(fetch_quote=fetch_quote))
-    monkeypatch.setattr(
-        nh_adapter,
-        "prepare_read",
-        AsyncMock(return_value=context),
-    )
-
-    quote = asyncio.run(
-        nh_adapter.quote(  # type: ignore[arg-type]
-            object(), 101, market="krx", symbol="005930"
-        )
-    )
-
-    assert quote.previous_close == "266000"
-    assert quote.change_amount == "-9000"
-    assert quote.change_rate == "-3.38"
 
 
 def test_paper_kr_quote_falls_back_to_stored_candles(

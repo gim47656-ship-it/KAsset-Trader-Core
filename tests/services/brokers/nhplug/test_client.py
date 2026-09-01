@@ -15,7 +15,6 @@ from app.services.brokers.nhplug.client import (
     BALANCE_PATH,
     MOCK_HOST,
     MOCK_PORT,
-    QUOTE_PATH,
     NHPlugMockClient,
 )
 from app.services.brokers.nhplug.errors import (
@@ -85,12 +84,11 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NHPLUG_MOCK_ENABLED", "true")
 
 
-def test_readonly_allowlist_is_exactly_the_three_stage_one_paths() -> None:
+def test_readonly_allowlist_is_exactly_account_discovery_and_balance() -> None:
     assert ALLOWED_READONLY_PATHS == frozenset(
         {
             "/n2/acctinfo",
             "/krstock/inquiry/v1/balance",
-            "/krstock/quote/v1/currentPrice",
         }
     )
 
@@ -374,30 +372,6 @@ async def test_redirect_is_not_followed(armed: None) -> None:
     assert len(seen) == 1
     assert seen[0].url.host == MOCK_HOST
     assert seen[0].url.port == MOCK_PORT
-
-
-@pytest.mark.asyncio
-async def test_quote_requires_the_same_verified_account_and_exact_symbol(
-    armed: None,
-) -> None:
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, json={"rsp_cd": "00000", "Output_0": {}})
-
-    client, _ = _client(httpx.MockTransport(handler))
-    client.bind_account_allowlist(_allowlist())
-    await client.fetch_quote(
-        symbol="005930",
-        market="KRX",
-    )
-
-    assert len(seen) == 1
-    assert seen[0].url.path == QUOTE_PATH
-    assert json.loads(seen[0].content) == {
-        "Input_0": {"iem_cd": "005930", "market_cd": "KRX"}
-    }
 
 
 @pytest.mark.asyncio

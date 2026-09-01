@@ -1,4 +1,4 @@
-"""Pinned NHPLUG mock data client: account, balance, and quote reads only.
+"""Pinned NHPLUG mock data client: account discovery and balance reads only.
 
 This module never imports the OAuth implementation and never contains the
 production hostname.  It has an exact mock host-and-port allowlist, a short
@@ -8,7 +8,6 @@ read-only path allowlist checked before token resolution, and no mutation API.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Final, Protocol
 
 import httpx
@@ -30,16 +29,13 @@ MOCK_PORT: Final[int] = 8443
 
 ACCOUNT_INFO_PATH: Final[str] = "/n2/acctinfo"
 BALANCE_PATH: Final[str] = "/krstock/inquiry/v1/balance"
-QUOTE_PATH: Final[str] = "/krstock/quote/v1/currentPrice"
 ALLOWED_READONLY_PATHS: Final[frozenset[str]] = frozenset(
-    {ACCOUNT_INFO_PATH, BALANCE_PATH, QUOTE_PATH}
+    {ACCOUNT_INFO_PATH, BALANCE_PATH}
 )
 
 _SUCCESS_RESPONSE_CODES: Final[frozenset[str]] = frozenset(
     {"00000", "00166", "00221", "13578"}
 )
-_KR_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(r"^\d{6}$")
-_ALLOWED_MARKETS: Final[frozenset[str]] = frozenset({"KRX"})
 
 
 class TokenProvider(Protocol):
@@ -163,27 +159,6 @@ class NHPlugMockClient:
             act_no=act_no,
         )
 
-    async def fetch_quote(
-        self,
-        *,
-        symbol: str,
-        market: str,
-    ) -> dict[str, Any]:
-        """Read one Korean equity quote after the same configured-account check."""
-
-        if not isinstance(symbol, str) or _KR_SYMBOL_RE.fullmatch(symbol) is None:
-            raise NHPlugMockConfigurationError(
-                "symbol must be an exact six-digit KRX code"
-            )
-        if market not in _ALLOWED_MARKETS:
-            raise NHPlugMockConfigurationError(
-                "market must be KRX for this read-only stage"
-            )
-        return await self._post_readonly(
-            path=QUOTE_PATH,
-            input_0={"iem_cd": symbol, "market_cd": market},
-        )
-
     async def _post_readonly(
         self,
         *,
@@ -201,19 +176,13 @@ class NHPlugMockClient:
             )
         account_allowlist: MockAccountAllowlist | None = None
         verified_act_no: str | None = None
-        if path != ACCOUNT_INFO_PATH:
+        if path == BALANCE_PATH:
             account_allowlist = self._require_account_allowlist()
-            verified_act_no = account_allowlist.configured_account_no
-            if path == BALANCE_PATH:
-                if not isinstance(act_no, str) or input_0.get("act_no") != act_no:
-                    raise NHPlugMockConfigurationError(
-                        "balance reads require the bound configured account"
-                    )
-                verified_act_no = act_no
-            elif act_no is not None:
+            if not isinstance(act_no, str) or input_0.get("act_no") != act_no:
                 raise NHPlugMockConfigurationError(
-                    "only balance reads may supply an account number"
+                    "balance reads require the bound configured account"
                 )
+            verified_act_no = act_no
             if verified_act_no != account_allowlist.configured_account_no:
                 raise NHPlugMockAccountRejected(
                     "account-scoped reads may use only the configured mock account"

@@ -74,8 +74,8 @@ gradlew.bat :app:assembleDebug
 5. 같은 `clientOrderId` 재시도는 기존 주문을 반환하고 새 주문을 만들지 않는다.
 6. Kill Switch를 켠 뒤 신규 주문이 거절되는지 확인한다.
 
-`PAPER`와 NH는 같은 Android `Balance`, `Position`, `Quote` DTO를 사용하지만 주문
-capability는 다르다.
+`PAPER`와 NH는 같은 Android `Balance`, `Position` DTO를 사용한다. 시세는 계좌
+연동과 무관하게 Toss 공용 경로를 사용하고, NH는 주문 capability가 없다.
 
 ## 5. NH Credential 등록과 조회
 
@@ -98,17 +98,16 @@ API 응답에는 masked App Key와 masked 계좌번호만 있고 App Secret은 �
 4. 입력 계좌가 응답 계좌 목록에 있는지 확인하고 allowlist에 결합
 5. `lastVerifiedAt` 기록
 
-검증 성공 후 지원하는 조회:
+검증 성공 후 지원하는 NH 조회:
 
 - `GET /api/v1/account/balance?broker=NH`
 - `GET /api/v1/positions?broker=NH`
-- `GET /api/v1/market/quote?broker=NH&market=KRX&symbol=005930`
 
-NH data 요청은 `https://moapi.nhplug.com:8443`와 아래 path만 허용한다.
+기존 `GET /api/v1/market/quote?broker=NH&...` 요청은 Android 호환을 위해
+받지만 provider는 NH가 아니라 공용 Toss 시세다.
 
-- `/n2/acctinfo`
-- `/krstock/inquiry/v1/balance`
-- `/krstock/quote/v1/currentPrice`
+NH data 요청은 `https://moapi.nhplug.com:8443`의 `/n2/acctinfo`와
+`/krstock/inquiry/v1/balance`만 허용한다.
 
 OAuth는 `https://api.nhplug.com:8443`만 사용한다. redirect, 다른 host/port/path,
 미검증 계좌는 fail closed다.
@@ -161,11 +160,10 @@ NHPLUG_MOCK_ACCOUNT_NO=...
 NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke
 ```
 
-실제 Mock 조회는 운영자가 명시적으로 `--confirm-read`를 붙일 때만 실행한다.
+실제 Mock 계좌·잔고 조회는 운영자가 명시적으로 `--confirm-read`를 붙일 때만 실행한다.
 
 ```sh
 NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke --mode account --confirm-read
-NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke --mode quote --symbol 005930 --confirm-read
 ```
 
 출력은 credential, token, 계좌번호, broker response body를 표시하지 않는다. 실제

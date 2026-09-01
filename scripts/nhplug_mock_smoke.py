@@ -1,22 +1,20 @@
 #!/usr/bin/env python
 """Read-only NHPLUG mock smoke CLI.
 
-Modes are deliberately closed to ``preflight``, ``account``, and ``quote``.
-There is no order-like mode.  The default preflight validates the gate, the
-dedicated minimal env file, and the code allowlists with *zero* network calls.
+Modes are deliberately closed to ``preflight`` and ``account``. There is no
+order-like mode. The default preflight validates the gate, the dedicated
+minimal env file, and the code allowlists with *zero* network calls.
 
 Examples (only after an operator has created the dedicated three-key file):
 
     NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke
     NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke \
       --mode account --confirm-read
-    NHPLUG_MOCK_ENABLED=true uv run python -m scripts.nhplug_mock_smoke \
-      --mode quote --symbol 005930 --confirm-read
 
 Credential values, tokens, account numbers, and broker response bodies are
 never printed. Access tokens reuse the secure process-independent cache, and
-only a token-invalid response may trigger one refresh retry. A rejected mock
-quote exits non-zero rather than faking success.
+only a token-invalid response may trigger one refresh retry. A rejected read
+exits non-zero rather than faking success.
 """
 
 from __future__ import annotations
@@ -202,28 +200,13 @@ async def run(args: argparse.Namespace) -> int:
             "account_type_counts": dict(allowlist.account_type_counts),
         }
 
-        if args.mode == "account":
-            balance_payload = await client.fetch_balance(act_no=credentials.account_no)
-            _emit(
-                {
-                    "mode": "account",
-                    "status": "ok",
-                    "account_verification": account_summary,
-                    "balance": _response_summary(balance_payload),
-                }
-            )
-            return 0
-
-        quote_payload = await client.fetch_quote(
-            symbol=args.symbol,
-            market=args.market,
-        )
+        balance_payload = await client.fetch_balance(act_no=credentials.account_no)
         _emit(
             {
-                "mode": "quote",
+                "mode": "account",
                 "status": "ok",
                 "account_verification": account_summary,
-                "quote": _response_summary(quote_payload),
+                "balance": _response_summary(balance_payload),
             }
         )
         return 0
@@ -235,16 +218,12 @@ async def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=str(DEFAULT_ENV_FILE))
-    parser.add_argument(
-        "--mode", choices=("preflight", "account", "quote"), default="preflight"
-    )
+    parser.add_argument("--mode", choices=("preflight", "account"), default="preflight")
     parser.add_argument(
         "--confirm-read",
         action="store_true",
-        help="required for account or quote network requests; preflight is always offline",
+        help="required for account network requests; preflight is always offline",
     )
-    parser.add_argument("--symbol", default="005930")
-    parser.add_argument("--market", default="KRX")
     return parser
 
 
