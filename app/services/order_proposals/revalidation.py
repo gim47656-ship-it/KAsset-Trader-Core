@@ -36,7 +36,7 @@ from typing import Any, Literal
 
 from app.core.timezone import now_kst
 from app.models.order_proposals import OrderProposal, OrderProposalRung
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
+from app.services.brokers.pre_send import PreSendFreshnessError
 from app.services.live_correlation import live_correlation_id
 from app.services.order_proposals.approval_window import (
     ApprovalWindowCode,
@@ -559,19 +559,10 @@ def _adapt_toss_submit_response(
 def _adapt_live_submit_response(
     submit: dict[str, Any], *, order_type: str
 ) -> dict[str, Any]:
-    """Translate a real live-submit response into ``_classify_submit``'s shape.
+    """Upbit accepted-only 응답을 제안 제출 결과 형식으로 변환한다.
 
-    The real ``_place_order_impl(dry_run=False)`` response (see
-    ``_record_kis_live_order`` in ``kis_live_ledger.py`` and
-    ``_record_live_order`` in ``live_order_ledger.py``) is accepted-only at
-    send: it carries ``broker_status in ("accepted", "rejected")`` and
-    ``order_id``/``correlation_id`` — never a synchronous acked-vs-resting
-    distinction, because that distinction doesn't exist in the broker's
-    real-time API contract (it's an order_proposals-internal concept; fills
-    are booked later by reconcile from broker evidence, per the KIS Live
-    Order Fill-Evidence Gate / US & Crypto Live Order Fill-Evidence Gate
-    design). Adapt the real shape into ``{status, broker_order_id}`` here so
-    ``_classify_submit``'s existing tested contract stays untouched.
+    브로커 접수는 체결이 아니므로 여기서는 acked/resting 상태만 기록하며 실제
+    체결은 이후 브로커 증거 기반 reconcile에서 반영한다.
     """
     broker_status = submit.get("broker_status")
     if broker_status == "rejected":
@@ -673,6 +664,21 @@ async def _default_place_order_fn(**kwargs: Any) -> dict[str, Any]:
             submit,
             order_type=str(kwargs.get("order_type")),
         )
+
+    if account_mode in {"kis_live", "kis_mock"}:
+        return {
+            "success": False,
+            "mutation_sent": False,
+            "account_mode": account_mode,
+            "error": "provider kis is not operational",
+        }
+    if account_mode != "upbit":
+        return {
+            "success": False,
+            "mutation_sent": False,
+            "account_mode": account_mode,
+            "error": f"unsupported proposal account_mode: {account_mode}",
+        }
 
     from app.mcp_server.tooling.order_execution import _place_order_impl
 

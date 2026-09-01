@@ -177,12 +177,13 @@ async def test_reconcile_repairs_terminal_filled_proposal_projection(db_session)
     group = await service.create_proposal(
         symbol="214150",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="rob900-test",
         rungs=[RungInput(0, "buy", Decimal("1"), Decimal("50000"), None)],
     )
+    group.account_mode = "kis_live"
     for state in ("revalidating", "approved", "submitting"):
         await service.transition_rung(group.proposal_id, 0, new_state=state)
     await service.record_resting(
@@ -259,12 +260,13 @@ async def test_terminal_repair_skips_terminal_and_resting_key_conflict(db_sessio
         group = await service.create_proposal(
             symbol="214150",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="buy",
             order_type="limit",
             proposer="rob900-conflict-test",
             rungs=[RungInput(0, "buy", Decimal("1"), Decimal("50000"), None)],
         )
+        group.account_mode = "kis_live"
         for state in ("revalidating", "approved", "submitting"):
             await service.transition_rung(group.proposal_id, 0, new_state=state)
         await service.record_resting(
@@ -351,12 +353,13 @@ async def test_reconcile_new_filled_row_converges_proposal_in_same_pass(db_sessi
     group = await service.create_proposal(
         symbol="214150",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="rob900-immediate-test",
         rungs=[RungInput(0, "buy", Decimal("1"), Decimal("50000"), None)],
     )
+    group.account_mode = "kis_live"
     for state in ("revalidating", "approved", "submitting"):
         await service.transition_rung(group.proposal_id, 0, new_state=state)
     await service.record_resting(

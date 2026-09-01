@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock
 import pandas as pd
 import pytest
 
-import app.services.brokers.yahoo.client as yahoo_service
 from app.analysis.stages.base import StageContext
 from app.analysis.stages.market_stage import MarketStageAnalyzer
 from app.schemas.research_pipeline import MarketSignals, StageVerdict
@@ -102,19 +101,8 @@ async def test_fetch_market_snapshot_us_overlays_live_last_close(monkeypatch):
         AsyncMock(return_value=df),
     )
     monkeypatch.setattr(
-        yahoo_service,
-        "fetch_fast_info",
-        AsyncMock(
-            return_value={
-                "symbol": "PLTR",
-                "close": 157.24,  # live intraday last price
-                "previous_close": 143.34,
-                "open": 144.0,
-                "high": 158.0,
-                "low": 143.0,
-                "volume": 1,
-            }
-        ),
+        "app.analysis.stages.market_stage.fetch_us_live_last_price",
+        AsyncMock(return_value=157.24),
     )
 
     from app.analysis.stages.market_stage import _fetch_market_snapshot
@@ -122,7 +110,7 @@ async def test_fetch_market_snapshot_us_overlays_live_last_close(monkeypatch):
     res = await _fetch_market_snapshot("PLTR", "equity_us")
 
     assert res["last_close"] == pytest.approx(157.24)
-    assert res["last_close_source"] == "yahoo_live"
+    assert res["last_close_source"] == "toss_live"
 
 
 @pytest.mark.unit
@@ -146,9 +134,8 @@ async def test_fetch_market_snapshot_us_degrades_to_close(monkeypatch):
         AsyncMock(return_value=df),
     )
     monkeypatch.setattr(
-        yahoo_service,
-        "fetch_fast_info",
-        AsyncMock(side_effect=RuntimeError("'NoneType' object is not subscriptable")),
+        "app.analysis.stages.market_stage.fetch_us_live_last_price",
+        AsyncMock(return_value=None),
     )
 
     from app.analysis.stages.market_stage import _fetch_market_snapshot

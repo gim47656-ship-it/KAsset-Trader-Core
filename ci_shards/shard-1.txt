@@ -331,10 +331,7 @@ tests/test_kasset_research_cohort_service.py
 tests/test_kis_constants.py
 tests/test_kis_market_adapters_helpers.py
 tests/test_kis_mock_cancel_modify.py
-tests/test_kis_mock_loss_sell_guard.py
 tests/test_kis_mock_reconciliation_job_scope.py
-tests/test_kis_mock_scalping_exit_wiring.py
-tests/test_kis_mock_scalping_sell_guard.py
 tests/test_kis_mock_signal_migration_additive.py
 tests/test_kis_ohlcv_cache.py
 tests/test_kis_order_history_pagination_rob903.py

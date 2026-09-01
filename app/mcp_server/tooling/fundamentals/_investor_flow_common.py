@@ -1,8 +1,7 @@
-"""ROB-626: shared confirmed-daily investor-flow helpers (Naver-backed).
+"""``get_investor_trends``용 Naver 확정 일별 투자자 수급 헬퍼.
 
-Pure ownership/derivation helpers + a best-effort confirmed-daily block
-builder, shared by ``get_investor_trends`` (daily enrichment) and
-``get_intraday_investor_flow`` (confirmed block embed + freshness anchor).
+소유 비율 파생과 확정 일별 블록 생성 로직을 제공한다. 장중 KIS 추정
+도구가 제거된 뒤에도 일별 Naver 계약은 그대로 유지한다.
 """
 
 from __future__ import annotations

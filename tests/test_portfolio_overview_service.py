@@ -35,7 +35,7 @@ async def test_get_overview_collects_sources_concurrently(monkeypatch) -> None:
         active_count -= 1
         return []
 
-    service._collector._collect_kis_components = lambda *args, **kwargs: gated("kis")
+    service._collector._collect_toss_components = lambda *args, **kwargs: gated("toss")
     service._collector._collect_upbit_components = lambda *args, **kwargs: gated(
         "upbit"
     )
@@ -60,36 +60,6 @@ async def test_get_overview_collects_sources_concurrently(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_collect_kis_components_fetches_kr_and_us_concurrently() -> None:
-    service = PortfolioOverviewService(AsyncMock())
-    kis_client = AsyncMock()
-    release = asyncio.Event()
-    started: set[str] = set()
-    active_count = 0
-    max_active = 0
-
-    async def gated(name: str):
-        nonlocal active_count, max_active
-        active_count += 1
-        max_active = max(max_active, active_count)
-        started.add(name)
-        if len(started) == 2:
-            release.set()
-        try:
-            await asyncio.wait_for(release.wait(), timeout=0.1)
-        except TimeoutError:
-            pass
-        active_count -= 1
-        return []
-
-    kis_client.fetch_my_stocks = lambda: gated("kr")
-    kis_client.fetch_my_us_stocks = lambda: gated("us")
-
-    await service._collector._collect_kis_components(kis_client, [])
-    assert max_active == 2, f"Only {max_active} KIS tasks ran concurrently, expected 2"
-
-
-@pytest.mark.asyncio
 async def test_fill_missing_prices_fetches_market_buckets_concurrently(
     monkeypatch,
 ) -> None:
@@ -111,17 +81,18 @@ async def test_fill_missing_prices_fetches_market_buckets_concurrently(
         except TimeoutError:
             pass
         active_count -= 1
-        if "kr_upstream" in name or "us_upstream" in name:
+        if "kr_upstream" in name:
+            return {"005930": 100.0}
+        if "us_upstream" in name:
             return pd.DataFrame([{"close": 100.0}])
         if "crypto_upstream" in name:
             return {"KRW-BTC": 100000000.0}
         return {}
 
-    # Patch the classes directly
-    from app.services.brokers.kis.client import KISClient
-
     monkeypatch.setattr(
-        KISClient, "inquire_price", lambda *args, **kwargs: gated("kr_upstream")
+        portfolio_overview_module.InvestQuoteService,
+        "fetch_kr_prices",
+        lambda *args, **kwargs: gated("kr_upstream"),
     )
     monkeypatch.setattr(
         portfolio_overview_module.yahoo_service,
@@ -150,7 +121,7 @@ async def test_fill_missing_prices_fetches_market_buckets_concurrently(
         },
     ]
 
-    await service._fill_missing_prices(KISClient(), components, [])
+    await service._fill_missing_prices(components, [])
     assert max_active == 3, (
         f"Only {max_active} market buckets ran concurrently, expected 3"
     )
@@ -162,9 +133,9 @@ def _sample_components() -> list[dict[str, object]]:
             "market_type": "KR",
             "symbol": "005930",
             "name": "삼성전자",
-            "account_key": "live:kis",
-            "broker": "kis",
-            "account_name": "KIS 실계좌",
+            "account_key": "live:toss",
+            "broker": "toss",
+            "account_name": "Toss 실계좌",
             "source": "live",
             "quantity": 10.0,
             "avg_price": 70000.0,
@@ -226,7 +197,7 @@ async def test_get_overview_filters_by_selected_account_keys() -> None:
     service = PortfolioOverviewService(AsyncMock())
     components = _sample_components()
 
-    service._collector._collect_kis_components = AsyncMock(return_value=components[:1])
+    service._collector._collect_toss_components = AsyncMock(return_value=components[:1])
     service._collector._collect_upbit_components = AsyncMock(
         return_value=components[3:]
     )
@@ -238,7 +209,7 @@ async def test_get_overview_filters_by_selected_account_keys() -> None:
     overview = await service.get_overview(
         user_id=1,
         market="ALL",
-        account_keys=["live:kis", "manual:1"],
+        account_keys=["live:toss", "manual:1"],
         q=None,
     )
 
@@ -255,7 +226,7 @@ async def test_get_overview_applies_market_and_q_filters() -> None:
     service = PortfolioOverviewService(AsyncMock())
     components = _sample_components()
 
-    service._collector._collect_kis_components = AsyncMock(return_value=components[:1])
+    service._collector._collect_toss_components = AsyncMock(return_value=components[:1])
     service._collector._collect_upbit_components = AsyncMock(
         return_value=components[3:]
     )
@@ -281,9 +252,9 @@ async def test_get_overview_applies_market_and_q_filters() -> None:
 async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
-    async def collect_kis(_kis_client, warnings):
-        warnings.append("KIS warning")
-        warnings.append("KIS warning")
+    async def collect_toss(*, warnings):
+        warnings.append("Toss warning")
+        warnings.append("Toss warning")
         return []
 
     async def collect_upbit(
@@ -302,11 +273,11 @@ async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
         enforce_upbit_universe=True,
     ):
         _ = active_upbit_markets, enforce_upbit_universe
-        warnings.append("KIS warning")
+        warnings.append("Toss warning")
         return []
 
     # Collection methods are now on the collector; patch via _collector attribute
-    service._collector._collect_kis_components = collect_kis
+    service._collector._collect_toss_components = collect_toss
     service._collector._collect_upbit_components = collect_upbit
     service._collector._collect_manual_components = collect_manual
     service._fill_missing_prices = AsyncMock(return_value=None)
@@ -323,7 +294,7 @@ async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
     )
 
     overview = await service.get_overview(user_id=1)
-    assert overview["warnings"] == ["KIS warning", "Upbit warning"]
+    assert overview["warnings"] == ["Toss warning", "Upbit warning"]
 
 
 def test_aggregate_positions_recalculates_totals_when_some_components_missing_eval() -> (
@@ -337,9 +308,9 @@ def test_aggregate_positions_recalculates_totals_when_some_components_missing_ev
                 "market_type": "KR",
                 "symbol": "005930",
                 "name": "삼성전자",
-                "account_key": "live:kis",
-                "broker": "kis",
-                "account_name": "KIS 실계좌",
+                "account_key": "live:toss",
+                "broker": "toss",
+                "account_name": "Toss 실계좌",
                 "source": "live",
                 "quantity": 10.0,
                 "avg_price": 70000.0,
@@ -411,7 +382,7 @@ async def test_fill_missing_prices_uses_us_provider_for_missing_us_prices(
     ]
     warnings: list[str] = []
 
-    await service._fill_missing_prices(AsyncMock(), components, warnings)
+    await service._fill_missing_prices(components, warnings)
 
     mock_fetch_price.assert_awaited_once_with("AAPL")
     assert components[0]["current_price"] == pytest.approx(195.0)
@@ -472,7 +443,7 @@ async def test_fill_missing_prices_raises_on_us_yahoo_error(
     warnings: list[str] = []
 
     with pytest.raises(RuntimeError, match="upstream timeout"):
-        await service._fill_missing_prices(AsyncMock(), components, warnings)
+        await service._fill_missing_prices(components, warnings)
 
     assert components[0]["current_price"] is None
     assert components[1]["current_price"] is None
@@ -536,7 +507,7 @@ async def test_fill_missing_prices_filters_invalid_us_symbols_before_provider_fe
     ]
     warnings: list[str] = []
 
-    await service._fill_missing_prices(AsyncMock(), components, warnings)
+    await service._fill_missing_prices(components, warnings)
 
     mock_fetch_price.assert_awaited_once_with("AAPL")
     assert components[0]["current_price"] == pytest.approx(205.0)
@@ -772,7 +743,7 @@ async def test_fill_missing_prices_uses_resilient_fetch_helper_for_manual_crypto
     ]
     warnings: list[str] = []
 
-    await service._fill_missing_prices(AsyncMock(), components, warnings)
+    await service._fill_missing_prices(components, warnings)
 
     service._fetch_upbit_prices_resilient.assert_awaited_once_with(
         ["KRW-BTC"],
@@ -882,7 +853,7 @@ async def test_fill_missing_prices_crypto_targets_all_sources() -> None:
     ]
     warnings: list[str] = []
 
-    await service._fill_missing_prices(AsyncMock(), components, warnings)
+    await service._fill_missing_prices(components, warnings)
 
     # Both KRW-BTC (manual) and KRW-ETH (live) should be included in the batch
     service._fetch_upbit_prices_resilient.assert_awaited_once_with(
@@ -925,7 +896,7 @@ async def test_get_overview_keeps_crypto_when_universe_lookup_fails(
             }
         ]
 
-    service._collector._collect_kis_components = AsyncMock(return_value=[])
+    service._collector._collect_toss_components = AsyncMock(return_value=[])
     service._collector._collect_upbit_components = collect_upbit
     service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
@@ -979,7 +950,7 @@ async def test_get_overview_excludes_non_tradable_manual_crypto_everywhere(
     service._collector.manual_holdings_service.get_holdings_by_user = AsyncMock(
         return_value=holdings
     )
-    service._collector._collect_kis_components = AsyncMock(return_value=[])
+    service._collector._collect_toss_components = AsyncMock(return_value=[])
     service._collector._collect_upbit_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 
@@ -1014,9 +985,9 @@ async def test_get_overview_excludes_non_tradable_manual_crypto_everywhere(
 @pytest.mark.asyncio
 async def test_get_overview_skips_missing_price_fill_when_requested() -> None:
     service = PortfolioOverviewService(AsyncMock())
-    service._collect_kis_components = AsyncMock(return_value=[])
-    service._collect_upbit_components = AsyncMock(return_value=[])
-    service._collect_manual_components = AsyncMock(return_value=[])
+    service._collector._collect_toss_components = AsyncMock(return_value=[])
+    service._collector._collect_upbit_components = AsyncMock(return_value=[])
+    service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock()
 
     await service.get_overview(user_id=1, skip_missing_prices=True)
@@ -1025,62 +996,6 @@ async def test_get_overview_skips_missing_price_fill_when_requested() -> None:
 
     await service.get_overview(user_id=1, skip_missing_prices=False)
     service._fill_missing_prices.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_collect_kis_kr_components_converts_percent_rate_to_decimal() -> None:
-    service = PortfolioOverviewService(AsyncMock())
-    kis_client = AsyncMock()
-    # KIS KR API returns percentage as e.g. "1.16" meaning 1.16%
-    kis_client.fetch_my_stocks = AsyncMock(
-        return_value=[
-            {
-                "pdno": "005930",
-                "prdt_name": "삼성전자",
-                "hldg_qty": "100",
-                "pchs_avg_pric": "70000",
-                "prpr": "75000",
-                "evlu_amt": "7500000",
-                "evlu_pfls_amt": "500000",
-                "evlu_pfls_rt": "1.16",  # 1.16%
-            }
-        ]
-    )
-
-    components, warnings = await service._collector._collect_kis_kr_components(
-        kis_client, []
-    )
-    assert len(components) == 1
-    assert components[0]["profit_rate"] == pytest.approx(0.0116)
-    assert not warnings
-
-
-@pytest.mark.asyncio
-async def test_collect_kis_us_components_converts_percent_rate_to_decimal() -> None:
-    service = PortfolioOverviewService(AsyncMock())
-    kis_client = AsyncMock()
-    # KIS US API returns percentage as e.g. "-1.67" meaning -1.67%
-    kis_client.fetch_my_us_stocks = AsyncMock(
-        return_value=[
-            {
-                "ovrs_pdno": "TSLA",
-                "ovrs_item_name": "Tesla",
-                "ovrs_cblc_qty": "10",
-                "pchs_avg_pric": "200.0",
-                "now_pric2": "196.66",
-                "ovrs_stck_evlu_amt": "1966.6",
-                "frcr_evlu_pfls_amt": "-33.4",
-                "evlu_pfls_rt": "-1.67",  # -1.67%
-            }
-        ]
-    )
-
-    components, warnings = await service._collector._collect_kis_us_components(
-        kis_client, []
-    )
-    assert len(components) == 1
-    assert components[0]["profit_rate"] == pytest.approx(-0.0167)
-    assert not warnings
 
 
 @pytest.mark.unit
@@ -1129,22 +1044,21 @@ class TestAggregatePositions:
     ) -> None:
         """Issue #327: Regression test for mixed US cost basis.
 
-        Even if KIS profit_rate is -1.67% (0.0167), if we mix manual holdings
-        with KRW avg_price, the cost_basis must be normalized to USD before
-        the final profit_rate is calculated.
+        Toss live와 KRW 기준 manual holding을 섞어도 cost_basis를 USD로
+        정규화한 뒤 최종 profit_rate를 계산해야 한다.
         """
         service = self._make_service()
         usd_krw = 1350.0
 
         components = [
-            # KIS live: GOOGL, 5 shares, $150 avg, $160 current
+            # Toss live: GOOGL, 5 shares, $150 avg, $160 current
             {
                 "market_type": "US",
                 "symbol": "GOOGL",
                 "name": "Alphabet Inc.",
-                "account_key": "live:kis",
-                "broker": "kis",
-                "account_name": "KIS",
+                "account_key": "live:toss",
+                "broker": "toss",
+                "account_name": "Toss",
                 "source": "live",
                 "quantity": 5.0,
                 "avg_price": 150.0,
@@ -1192,9 +1106,9 @@ class TestAggregatePositions:
 async def test_get_overview_includes_exchange_rate(monkeypatch) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
-    service._collect_kis_components = AsyncMock(return_value=[])
-    service._collect_upbit_components = AsyncMock(return_value=[])
-    service._collect_manual_components = AsyncMock(return_value=[])
+    service._collector._collect_toss_components = AsyncMock(return_value=[])
+    service._collector._collect_upbit_components = AsyncMock(return_value=[])
+    service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
@@ -1217,9 +1131,9 @@ async def test_get_overview_includes_exchange_rate(monkeypatch) -> None:
 async def test_get_overview_exchange_rate_none_on_failure(monkeypatch) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
-    service._collect_kis_components = AsyncMock(return_value=[])
-    service._collect_upbit_components = AsyncMock(return_value=[])
-    service._collect_manual_components = AsyncMock(return_value=[])
+    service._collector._collect_toss_components = AsyncMock(return_value=[])
+    service._collector._collect_upbit_components = AsyncMock(return_value=[])
+    service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
@@ -1246,8 +1160,8 @@ class TestGroupComponentsByPosition:
                 "market_type": "US",
                 "symbol": "AAPL",
                 "name": "Apple",
-                "account_key": "kis:main",
-                "broker": "kis",
+                "account_key": "toss:main",
+                "broker": "toss",
                 "account_name": "main",
                 "source": "live",
                 "quantity": 5.0,
@@ -1288,7 +1202,7 @@ class TestGroupComponentsByPosition:
                 "symbol": "005930",
                 "name": "",
                 "account_key": "a",
-                "broker": "kis",
+                "broker": "toss",
                 "account_name": "a",
                 "source": "live",
                 "quantity": 10,

@@ -32,7 +32,7 @@ PostureStateName = Literal[
 ThresholdValue = int | float | str | list[int | float]
 RuleConditionValue = int | float | str | bool | list[int | float | str | bool]
 PolicyComparison = Literal["gt", "gte", "lt", "lte", "eq"]
-KrBroker = Literal["kis", "toss"]
+KrBroker = Literal["toss"]
 
 
 class OneShareExceptionPolicy(BaseModel):
@@ -905,16 +905,12 @@ class SingleShareExitScope(BaseModel):
     order_routable_required: Literal[True]
 
     @model_validator(mode="after")
-    def validate_kis_toss_scope(self) -> SingleShareExitScope:
-        required = {"kis", "toss"}
-        if set(self.brokers) != required or len(self.brokers) != len(required):
-            raise ValueError("brokers must contain exactly kis and toss")
-        if set(self.required_broker_inventory) != required or len(
-            self.required_broker_inventory
-        ) != len(required):
-            raise ValueError(
-                "required_broker_inventory must contain exactly kis and toss"
-            )
+    def validate_toss_only_scope(self) -> SingleShareExitScope:
+        required = ["toss"]
+        if self.brokers != required:
+            raise ValueError("brokers must contain exactly toss")
+        if self.required_broker_inventory != required:
+            raise ValueError("required_broker_inventory must contain exactly toss")
         return self
 
 
@@ -971,19 +967,20 @@ class SingleShareExitProposal(BaseModel):
 
 
 class SingleShareExitDecisionRule(BaseModel):
-    """Deprecated general fallback retained as a KR shadow/replay policy.
+    """KR Toss-only single-share far-resistance shadow policy.
 
     This rule intentionally has a distinct shape from the tiered trim rule:
-    ``sell.trim_preplace`` now includes one-share positions for a full-exit
-    advisory review, while this legacy path can only classify the narrower KR
-    far-resistance shadow cohort while ``proposal_enabled`` is false. Its
-    candidate metadata is manual-approval-only for a separately authorized
-    future activation; this schema never enables an order.
+    ``sell.trim_preplace`` includes one-share positions for a full-exit advisory
+    review, while this path classifies the narrower KR Toss far-resistance
+    cohort with ``proposal_enabled`` pinned false. Retired KIS accounts may
+    appear only as non-routable historical replay evidence; NH PLUG is not an
+    account broker. Candidate metadata remains manual-approval-only for a
+    separately authorized future activation; this schema never enables an order.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    lanes: list[Literal["sell"]]
+    lanes: list[Literal["sell"]] = Field(min_length=1, max_length=1)
     semantics: str
     activation_state: Literal["shadow"]
     proposal_enabled: Literal[False]

@@ -134,10 +134,7 @@ SEAM_TARGETS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     ("fetch_ohlcv", ("app.services.brokers.yahoo.client",)),
     ("fetch_52w_high_date", ("app.services.brokers.yahoo.client",)),
     ("fetch_price", ("app.services.brokers.yahoo.client",)),
-    (
-        "fetch_fast_info",
-        ("app.services.brokers.yahoo.client", "app.services.market_data.service"),
-    ),
+    ("fetch_fast_info", ("app.services.brokers.yahoo.client",)),
     ("fetch_prepost_quote", ("app.services.brokers.yahoo.client",)),
     ("fetch_fundamental_info", ("app.services.brokers.yahoo.client",)),
     # CoinGecko / alternative.me / Binance public.

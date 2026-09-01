@@ -34,7 +34,7 @@ def test_upbit_daily_candle_partition_rejects_ambiguous_symbols(symbol: str) -> 
 
 
 def _row(
-    symbol: str, partition: str, t: datetime, close: float, source: str = "kis"
+    symbol: str, partition: str, t: datetime, close: float, source: str = "toss"
 ) -> DailyCandleRow:
     return DailyCandleRow(
         time_utc=t,
@@ -70,7 +70,7 @@ class TestUpsertRows:
         assert len(payload) == 2
         assert {p["symbol"] for p in payload} == {"AAPL", "MSFT"}
         assert all(p["exchange"] == "NASD" for p in payload)
-        assert all(p["source"] == "kis" for p in payload)
+        assert all(p["source"] == "toss" for p in payload)
         assert all("adj_close" in p for p in payload)
         assert result == 2
 

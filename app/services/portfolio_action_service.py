@@ -1,7 +1,7 @@
 """ROB-116 — Read-only aggregator for the holdings action board.
 
 Combines:
-  - MergedPortfolioService (KIS + manual holdings, KR + US)
+  - MergedPortfolioService (Toss + manual holdings, KR + US)
   - Upbit balances via existing helpers (CRYPTO)
   - ResearchPipelineService latest summary (decision/verdict/levels)
   - TradeJournal presence check (journal_status)
@@ -112,7 +112,6 @@ class PortfolioActionService:
     async def _load_holdings(
         self, user_id: int, market_filter: str | None
     ) -> tuple[list[Any], float, list[str]]:
-        from app.services.brokers.kis import KISClient
         from app.services.merged_portfolio_service import MergedPortfolioService
 
         service = MergedPortfolioService(self.db)
@@ -121,18 +120,14 @@ class PortfolioActionService:
 
         if market_filter in (None, "KR"):
             try:
-                holdings.extend(
-                    await service.get_merged_portfolio_domestic(user_id, KISClient())
-                )
+                holdings.extend(await service.get_merged_portfolio_domestic(user_id))
             except Exception as exc:
-                warnings.append(f"KR holdings unavailable: {type(exc).__name__}")
+                warnings.append(f"Toss KR holdings unavailable: {type(exc).__name__}")
         if market_filter in (None, "US"):
             try:
-                holdings.extend(
-                    await service.get_merged_portfolio_overseas(user_id, KISClient())
-                )
+                holdings.extend(await service.get_merged_portfolio_overseas(user_id))
             except Exception as exc:
-                warnings.append(f"US holdings unavailable: {type(exc).__name__}")
+                warnings.append(f"Toss US holdings unavailable: {type(exc).__name__}")
         if market_filter in (None, "CRYPTO"):
             holdings.extend(await self._load_crypto_holdings(user_id))
 

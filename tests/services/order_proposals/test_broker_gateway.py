@@ -62,11 +62,9 @@ def _toss_rung(**overrides):
 
 
 @pytest.mark.unit
-def test_supported_target_actions_are_live_kis_toss_and_upbit():
+def test_supported_target_actions_are_toss_and_upbit():
     assert SUPPORTED_TARGET_ACTIONS == frozenset(
         {
-            ("kis_live", "equity_kr"),
-            ("kis_live", "equity_us"),
             ("toss_live", "equity_kr"),
             ("toss_live", "equity_us"),
             ("upbit", "crypto"),
@@ -918,121 +916,20 @@ async def test_operator_void_toss_scan_fails_closed_on_invalid_pagination(cursor
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_operator_void_kis_history_distinguishes_absent_and_filled():
+async def test_operator_void_kis_lookup_is_explicitly_unsupported():
     from app.services.order_proposals import broker_gateway
 
-    rung = SimpleNamespace(
-        rung_index=0,
-        idempotency_key=None,
-        broker_order_id="kis-order-1",
-        created_at=NOW - timedelta(days=1),
-    )
-
-    async def absent_history(**_kwargs):
-        return {"orders": [], "errors": []}
-
-    absent = await broker_gateway.fetch_operator_void_evidence(
+    rung = _toss_rung(rung_index=0)
+    evidence = await broker_gateway.fetch_operator_void_evidence(
         account_mode="kis_live",
         market="equity_kr",
         symbol="005930",
         rungs=[rung],
         now=NOW,
-        history_fn=absent_history,
-    )
-
-    async def filled_history(**_kwargs):
-        return {
-            "orders": [{"order_id": "kis-order-1", "status": "filled"}],
-            "errors": [],
-        }
-
-    found = await broker_gateway.fetch_operator_void_evidence(
-        account_mode="kis_live",
-        market="equity_kr",
-        symbol="005930",
-        rungs=[rung],
-        now=NOW,
-        history_fn=filled_history,
-    )
-
-    assert absent[0].outcome == "absent"
-    assert found[0].outcome == "found"
-    assert found[0].broker_state == "filled"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_operator_void_kis_us_empty_history_is_not_absence_proof():
-    from app.services.order_proposals import broker_gateway
-
-    rung = SimpleNamespace(
-        rung_index=0,
-        idempotency_key=None,
-        broker_order_id="kis-us-order-1",
-        created_at=NOW - timedelta(days=1),
-    )
-
-    async def empty_history(**_kwargs):
-        return {"orders": [], "errors": [], "truncated": False}
-
-    evidence = await broker_gateway.fetch_operator_void_evidence(
-        account_mode="kis_live",
-        market="equity_us",
-        symbol="AAPL",
-        rungs=[rung],
-        now=NOW,
-        history_fn=empty_history,
     )
 
     assert evidence[0].outcome == "unknown"
-    assert "cannot be proven complete" in (evidence[0].reason or "")
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("history_result", "reason_fragment"),
-    [
-        ({"orders": [], "errors": [], "truncated": True}, "truncated"),
-        (
-            {
-                "orders": [],
-                "errors": [{"market": "equity_us", "error": "page 2 failed"}],
-                "truncated": False,
-            },
-            "page 2 failed",
-        ),
-    ],
-)
-async def test_operator_void_kis_history_fails_closed_when_incomplete(
-    history_result, reason_fragment
-):
-    from app.services.order_proposals import broker_gateway
-
-    captured = {}
-
-    async def incomplete_history(**kwargs):
-        captured.update(kwargs)
-        return history_result
-
-    rung = SimpleNamespace(
-        rung_index=0,
-        idempotency_key=None,
-        broker_order_id="kis-order-1",
-        created_at=NOW - timedelta(days=1),
-    )
-    evidence = await broker_gateway.fetch_operator_void_evidence(
-        account_mode="kis_live",
-        market="equity_us",
-        symbol="AAPL",
-        rungs=[rung],
-        now=NOW,
-        history_fn=incomplete_history,
-    )
-
-    assert captured["limit"] == -1
-    assert evidence[0].outcome == "unknown"
-    assert reason_fragment in (evidence[0].reason or "")
+    assert evidence[0].reason == "operator void lookup unsupported"
 
 
 @pytest.mark.unit

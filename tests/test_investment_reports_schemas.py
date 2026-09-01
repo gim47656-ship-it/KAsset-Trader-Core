@@ -131,11 +131,12 @@ def test_watch_item_full_inserts() -> None:
     assert item.watch_condition.metric == "rsi"
 
 
-def test_kis_live_with_mock_preview_rejected() -> None:
+@pytest.mark.parametrize("account_scope", ["kis_live", "toss_live"])
+def test_live_scope_with_mock_preview_rejected(account_scope: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
         IngestReportRequest(
             **_base_report_kwargs(
-                account_scope="kis_live", execution_mode="mock_preview"
+                account_scope=account_scope, execution_mode="mock_preview"
             )
         )
     assert "advisory_only" in str(exc_info.value)
@@ -149,11 +150,14 @@ def test_nxt_session_with_mock_preview_rejected() -> None:
     assert "advisory_only" in str(exc_info.value)
 
 
-def test_kis_live_with_advisory_only_allowed() -> None:
+@pytest.mark.parametrize("account_scope", ["kis_live", "toss_live"])
+def test_live_scope_with_advisory_only_allowed(account_scope: str) -> None:
     req = IngestReportRequest(
-        **_base_report_kwargs(account_scope="kis_live", execution_mode="advisory_only")
+        **_base_report_kwargs(
+            account_scope=account_scope, execution_mode="advisory_only"
+        )
     )
-    assert req.account_scope == "kis_live"
+    assert req.account_scope == account_scope
 
 
 def test_decision_request_minimal() -> None:

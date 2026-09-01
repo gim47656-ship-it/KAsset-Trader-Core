@@ -1,13 +1,13 @@
-"""ROB-402 — auto-execute account guard. live is permanently blocked."""
+"""투자 리포트 자동 실행 계정 가드."""
 
 from __future__ import annotations
 
-_LIVE_ACCOUNT_MODES = frozenset({"kis_live", "upbit_live"})
-_AUTO_EXECUTE_ALLOWED = frozenset({"kis_mock"})  # kiwoom_mock = ROB-399 follow-up
+_LIVE_ACCOUNT_MODES = frozenset({"toss_live", "upbit", "upbit_live"})
+_AUTO_EXECUTE_ALLOWED: frozenset[str] = frozenset()
 
 
 class AutoExecuteLiveBlocked(Exception):
-    """auto_execute_mock attempted against a live account — never allowed."""
+    """실계좌에서 auto_execute_mock을 요청하면 발생한다."""
 
     def __init__(self, account_mode: str) -> None:
         super().__init__(
@@ -18,7 +18,7 @@ class AutoExecuteLiveBlocked(Exception):
 
 
 class AutoExecuteUnsupported(Exception):
-    """auto_execute_mock against a non-live, non-kis_mock account (not yet wired)."""
+    """운영 자동 실행을 지원하지 않는 계정에서 발생한다."""
 
     def __init__(self, account_mode: str) -> None:
         super().__init__(

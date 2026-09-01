@@ -412,3 +412,35 @@ def test_order_endpoint_calls_service(
     assert response.status_code == 200
     assert response.json()["success"] is True
     fake_service.place_order.assert_awaited_once()
+
+
+def test_order_endpoint_surfaces_confirm_fail_closed_response(
+    client: tuple[TestClient, _FakeScreenerService],
+) -> None:
+    test_client, fake_service = client
+    fake_service.place_order.return_value = {
+        "success": False,
+        "error": "live order submission is not available on this endpoint",
+        "error_code": "live_order_submission_unavailable",
+    }
+
+    response = test_client.post(
+        "/api/screener/order",
+        json={
+            "market": "us",
+            "symbol": "AAPL",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 1,
+            "price": 100,
+            "confirm": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": False,
+        "error": "live order submission is not available on this endpoint",
+        "error_code": "live_order_submission_unavailable",
+    }
+    assert fake_service.place_order.await_args.kwargs["confirm"] is True

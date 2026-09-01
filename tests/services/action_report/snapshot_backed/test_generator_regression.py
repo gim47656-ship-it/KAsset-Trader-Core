@@ -41,7 +41,7 @@ async def test_generator_uses_legacy_path_by_default(db_session):
 
     request = ReportGenerationRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         created_by_profile="PROFILER",
         title="Title",
         summary="Summary",
@@ -58,7 +58,7 @@ async def test_generator_uses_legacy_path_by_default(db_session):
 
 @pytest.mark.asyncio
 async def test_intraday_report_never_empty_items() -> None:
-    # market=kr/account=kis_live, user_id=None (portfolio unavailable),
+    # market=kr/account=toss_live, user_id=None (portfolio unavailable),
     # 빈 후보 -> 생성 결과 items_count >= 1, floor item은 data_gap.
     ensure = _FakeEnsureService(
         _ensure_response(

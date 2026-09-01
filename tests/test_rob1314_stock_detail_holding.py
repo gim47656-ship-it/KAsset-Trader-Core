@@ -157,7 +157,7 @@ async def test_get_symbol_holding_projects_from_shared_snapshot_without_readers(
         "held_pairs": [["kr", "005930"]],
         "response": {
             "homeSummary": {
-                "includedSources": ["kis"],
+                "includedSources": ["toss_api"],
                 "excludedSources": [],
                 "totalValueKrw": 720000,
             },
@@ -181,7 +181,7 @@ async def test_get_symbol_holding_projects_from_shared_snapshot_without_readers(
                     "valueKrw": 720000.0,
                     "pnlKrw": 20000.0,
                     "pnlRate": 20000 / 700000,
-                    "includedSources": ["kis"],
+                    "includedSources": ["toss_api"],
                     "sourceBreakdown": [],
                 }
             ],
@@ -198,7 +198,6 @@ async def test_get_symbol_holding_projects_from_shared_snapshot_without_readers(
     monkeypatch.setattr(svc_mod, "_fetch_reader_result", None)  # readers unusable
 
     service = InvestHomeService(
-        kis_reader=None,
         upbit_reader=None,
         manual_reader=_Reader(),
         snapshot_cache=cache,

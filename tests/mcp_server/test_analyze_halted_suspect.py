@@ -81,7 +81,7 @@ async def _analyze(frame: pd.DataFrame) -> dict:
                 "symbol": SYMBOL,
                 "instrument_type": "equity_kr",
                 "price": FROZEN_PRICE,
-                "source": "kis",
+                "source": "toss",
                 "data_state": "fresh",
                 "price_usable": True,
                 "is_stale_price": False,

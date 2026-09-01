@@ -14,6 +14,8 @@ from app.services.order_proposals.broker_gateway import SubmitEvidence
 from app.services.order_proposals.errors import OrderProposalError
 from app.services.order_proposals.revalidation import (
     _adapt_live_submit_response,
+    _adapt_toss_preview_response,
+    _adapt_toss_submit_response,
     preview_loss_cut_confirmation,
 )
 from app.services.order_proposals.revalidation import (
@@ -32,7 +34,7 @@ def _known_market_session(monkeypatch):
 
 
 async def revalidate_and_submit(**kwargs):
-    """Bind legacy unit calls to the same policy a card/auto path persisted."""
+    """Bind policy evidence and keep provider-backed cash reads out of unit tests."""
     if kwargs.get("expected_policy_stamp") is None:
         group, _rungs = await kwargs["service"].get_proposal(kwargs["proposal_id"])
         observed_at = kwargs["now"]
@@ -40,6 +42,7 @@ async def revalidate_and_submit(**kwargs):
         kwargs["expected_policy_stamp"] = decision.policy_stamp
         kwargs.setdefault("window_evaluator", allow_known_session)
         kwargs.setdefault("now_fn", lambda: observed_at)
+    kwargs.setdefault("buying_power_claimer", lambda **_: None)
     return await _production_revalidate_and_submit(**kwargs)
 
 
@@ -51,16 +54,66 @@ def _bound_toss_context():
     return context
 
 
+def _toss_preview_response(
+    kwargs,
+    *,
+    price,
+    quantity,
+    approval_hash="TESTTOKEN",
+    **extra,
+):
+    assert kwargs["dry_run"] is True
+    assert kwargs["account_mode"] == "toss_live"
+    payload_preview = {
+        "clientOrderId": kwargs["proposal_client_order_id"],
+        "quantity": str(quantity),
+    }
+    if price is not None:
+        payload_preview["price"] = str(price)
+    return _adapt_toss_preview_response(
+        {
+            "success": True,
+            "source": "toss",
+            "account_mode": "toss_live",
+            "dry_run": True,
+            "mutation_sent": False,
+            "client_order_id": kwargs["proposal_client_order_id"],
+            "approval_hash": approval_hash,
+            "payload_preview": payload_preview,
+            **extra,
+        }
+    )
+
+
+def _toss_submit_response(kwargs, response):
+    assert kwargs["dry_run"] is False
+    assert kwargs["account_mode"] == "toss_live"
+    assert kwargs["approval_hash"]
+    raw = {
+        "source": "toss",
+        "account_mode": "toss_live",
+        "dry_run": False,
+        "mutation_sent": response.get("success") is True,
+        **response,
+    }
+    raw.setdefault("client_order_id", kwargs["proposal_client_order_id"])
+    return _adapt_toss_submit_response(raw, order_type=kwargs["order_type"])
+
+
 def _fake_place_order(*, preview_price, preview_qty, submit_result):
+    preview_client_order_id = None
+
     async def _fn(**kw):
-        if kw.get("dry_run"):
-            return {
-                "success": True,
-                "approval_hash": "TESTTOKEN",
-                "price": str(preview_price),
-                "quantity": str(preview_qty),
-            }
-        return submit_result
+        nonlocal preview_client_order_id
+        if kw["dry_run"]:
+            preview_client_order_id = kw["proposal_client_order_id"]
+            return _toss_preview_response(
+                kw,
+                price=preview_price,
+                quantity=preview_qty,
+            )
+        assert kw["proposal_client_order_id"] == preview_client_order_id
+        return _toss_submit_response(kw, submit_result)
 
     return _fn
 
@@ -70,7 +123,7 @@ async def _create_proposal(db_session):
     group = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -86,7 +139,7 @@ async def test_unchanged_submits_resting(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -98,10 +151,8 @@ async def test_unchanged_submits_resting(db_session):
         preview_qty=Decimal("10"),
         submit_result={
             "success": True,
-            "status": "resting",
-            "broker_order_id": "B1",
+            "order_id": "B1",
             "correlation_id": "c1",
-            "idempotency_key": "k1",
             "approval_hash_digest": "d1",
         },
     )
@@ -115,6 +166,9 @@ async def test_unchanged_submits_resting(db_session):
     _, rungs = await svc.get_proposal(g.proposal_id)
     assert rungs[0].state == "resting"
     assert rungs[0].filled_qty is None  # accepted != filled
+    assert rungs[0].idempotency_key is not None
+    assert rungs[0].idempotency_key.startswith("tosprop-")
+    assert rungs[0].approval_hash_digest == "d1"
 
 
 @pytest.mark.asyncio
@@ -148,22 +202,20 @@ async def test_unchanged_submits_acked(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
-        order_type="limit",
+        order_type="market",
         proposer="p",
-        rungs=[RungInput(0, "buy", Decimal("10"), Decimal("2226000"), None)],
+        rungs=[RungInput(0, "buy", Decimal("10"), None, None)],
     )
     await db_session.commit()
     fn = _fake_place_order(
-        preview_price=Decimal("2226000"),
+        preview_price=None,
         preview_qty=Decimal("10"),
         submit_result={
             "success": True,
-            "status": "acked",
-            "broker_order_id": "B2",
+            "order_id": "B2",
             "correlation_id": "c2",
-            "idempotency_key": "k2",
             "approval_hash_digest": "d2",
         },
     )
@@ -177,6 +229,9 @@ async def test_unchanged_submits_acked(db_session):
     _, rungs = await svc.get_proposal(g.proposal_id)
     assert rungs[0].state == "acked"
     assert rungs[0].filled_qty is None  # accepted != filled
+    assert rungs[0].idempotency_key is not None
+    assert rungs[0].idempotency_key.startswith("tosprop-")
+    assert rungs[0].approval_hash_digest == "d2"
 
 
 @pytest.mark.asyncio
@@ -185,7 +240,7 @@ async def test_price_change_needs_reconfirm_no_submit(db_session):
     g = await svc.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -218,13 +273,12 @@ async def test_submit_time_eligibility_veto_degrades_to_pending_approval(db_sess
     async def place_order(**kwargs):
         broker_calls.append(kwargs)
         assert kwargs["dry_run"] is True
-        return {
-            "success": True,
-            "approval_hash": "TESTTOKEN",
-            "price": "2226000",
-            "quantity": "10",
-            "current_price": "2250000",
-        }
+        return _toss_preview_response(
+            kwargs,
+            price="2226000",
+            quantity="10",
+            current_price="2250000",
+        )
 
     async def eligibility_gate(**kwargs):
         assert kwargs["preview"]["current_price"] == "2250000"
@@ -255,7 +309,7 @@ async def test_auto_eligibility_multi_rung_degrades_before_any_preview(db_sessio
     group = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -292,7 +346,7 @@ async def test_qty_change_needs_reconfirm_no_submit(db_session):
     g = await svc.create_proposal(
         symbol="067160",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -323,7 +377,7 @@ async def test_guard_block_fail_closed(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -385,15 +439,15 @@ async def test_preview_insufficient_cash_is_guard_blocked(db_session):
 
 
 @pytest.mark.asyncio
-async def test_preview_kis_no_sellable_holdings_is_guard_blocked(db_session):
+async def test_preview_toss_no_sellable_holdings_is_guard_blocked(db_session):
     service, group = await _create_proposal(db_session)
 
     async def no_sellable_holdings(**kwargs):
         return {
             "success": False,
             "error": (
-                "No sellable holdings for A in the KIS subaccount that "
-                "kis_live routes to."
+                "No sellable holdings for A in the Toss account that "
+                "toss_live routes to."
             ),
         }
 
@@ -422,7 +476,7 @@ async def test_loss_cut_bindings_forwarded_to_preview_and_submit(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -438,17 +492,19 @@ async def test_loss_cut_bindings_forwarded_to_preview_and_submit(
     async def accepted(**kwargs):
         calls.append(kwargs)
         if kwargs["dry_run"]:
-            return {
+            return _toss_preview_response(
+                kwargs,
+                price="65000",
+                quantity="1",
+            )
+        return _toss_submit_response(
+            kwargs,
+            {
                 "success": True,
-                "approval_hash": "TESTTOKEN",
-                "price": "65000",
-                "quantity": "1",
-            }
-        return {
-            "success": True,
-            "status": "resting",
-            "broker_order_id": "B-loss-cut",
-        }
+                "order_id": "B-loss-cut",
+                "approval_hash_digest": "loss-cut-digest",
+            },
+        )
 
     outcomes = await revalidate_and_submit(
         service=service,
@@ -469,6 +525,8 @@ async def test_loss_cut_bindings_forwarded_to_preview_and_submit(
         expected,
         expected,
     ]
+    assert calls[0]["proposal_client_order_id"] == calls[1]["proposal_client_order_id"]
+    assert calls[1]["approval_hash"] == "TESTTOKEN"
 
 
 @pytest.mark.asyncio
@@ -493,7 +551,7 @@ async def test_loss_cut_confirmation_preview_is_read_only_and_builds_evidence(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -587,7 +645,7 @@ async def test_loss_cut_confirmation_preview_rejects_quantity_above_sellable(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -711,7 +769,7 @@ async def test_submit_rejected_records_rejected(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -721,7 +779,13 @@ async def test_submit_rejected_records_rejected(db_session):
     fn = _fake_place_order(
         preview_price=Decimal("2226000"),
         preview_qty=Decimal("10"),
-        submit_result={"success": False, "error": "broker_rejected"},
+        submit_result={
+            "success": False,
+            "mutation_sent": True,
+            "status_code": 400,
+            "code": "ORDER_REJECTED",
+            "message": "broker_rejected",
+        },
     )
     out = await revalidate_and_submit(
         service=svc,
@@ -732,6 +796,7 @@ async def test_submit_rejected_records_rejected(db_session):
     assert out[0].result == "error"
     _, rungs = await svc.get_proposal(g.proposal_id)
     assert rungs[0].state == "rejected"
+    assert rungs[0].void_reason == "Toss ORDER_REJECTED: broker_rejected"
 
 
 @pytest.mark.asyncio
@@ -740,7 +805,7 @@ async def test_submit_ambiguous_records_unverified(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -750,7 +815,12 @@ async def test_submit_ambiguous_records_unverified(db_session):
     fn = _fake_place_order(
         preview_price=Decimal("2226000"),
         preview_qty=Decimal("10"),
-        submit_result={"success": True, "status": "unknown"},
+        submit_result={
+            "success": False,
+            "mutation_sent": True,
+            "status_code": 503,
+            "error": "broker response unavailable after send",
+        },
     )
     out = await revalidate_and_submit(
         service=svc,
@@ -761,6 +831,12 @@ async def test_submit_ambiguous_records_unverified(db_session):
     assert out[0].result == "unverified"
     _, rungs = await svc.get_proposal(g.proposal_id)
     assert rungs[0].state == "unverified"
+    assert (
+        rungs[0].void_reason
+        == "ambiguous_submit_response:broker response unavailable after send"
+    )
+    assert rungs[0].idempotency_key is not None
+    assert rungs[0].idempotency_key.startswith("tosprop-")
 
 
 @pytest.mark.asyncio
@@ -769,7 +845,7 @@ async def test_submit_exception_records_unverified(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -778,13 +854,12 @@ async def test_submit_exception_records_unverified(db_session):
     await db_session.commit()
 
     async def flaky_fn(**kw):
-        if kw.get("dry_run"):
-            return {
-                "success": True,
-                "approval_hash": "TESTTOKEN",
-                "price": "2226000",
-                "quantity": "10",
-            }
+        if kw["dry_run"]:
+            return _toss_preview_response(
+                kw,
+                price="2226000",
+                quantity="10",
+            )
         raise TimeoutError("broker timeout")
 
     out = await revalidate_and_submit(
@@ -796,6 +871,9 @@ async def test_submit_exception_records_unverified(db_session):
     assert out[0].result == "unverified"
     _, rungs = await svc.get_proposal(g.proposal_id)
     assert rungs[0].state == "unverified"
+    assert rungs[0].void_reason == "submit_exception:broker timeout"
+    assert rungs[0].idempotency_key is not None
+    assert rungs[0].idempotency_key.startswith("tosprop-")
 
 
 @pytest.mark.asyncio
@@ -804,7 +882,7 @@ async def test_only_pending_approval_rungs_are_revalidated(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -835,10 +913,8 @@ async def test_only_pending_approval_rungs_are_revalidated(db_session):
         preview_qty=Decimal("10"),
         submit_result={
             "success": True,
-            "status": "resting",
-            "broker_order_id": "B0",
+            "order_id": "B0",
             "correlation_id": "c0",
-            "idempotency_key": "k0",
             "approval_hash_digest": "d0",
         },
     )
@@ -859,9 +935,8 @@ async def test_only_pending_approval_rungs_are_revalidated(db_session):
 
 # ---------------------------------------------------------------------------
 # Finding 1 — `_adapt_live_submit_response` unit tests (no network; adapts a
-# fixture dict shaped like the real `_record_kis_live_order`/
-# `_record_live_order` accepted-only-at-send response into the
-# `{status, broker_order_id}` shape `_classify_submit` expects).
+# 실제 주문 응답을 `{status, broker_order_id}` 형태로 변환하는
+# `_adapt_live_submit_response` 단위 테스트.
 # ---------------------------------------------------------------------------
 
 
@@ -921,10 +996,25 @@ def test_adapt_live_submit_response_unknown_broker_status_passes_through():
     assert adapted == submit
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_mode", ["kis_live", "kis_mock"])
+async def test_default_place_order_rejects_non_operational_kis(account_mode):
+    from app.services.order_proposals.revalidation import _default_place_order_fn
+
+    result = await _default_place_order_fn(account_mode=account_mode)
+
+    assert result == {
+        "success": False,
+        "mutation_sent": False,
+        "account_mode": account_mode,
+        "error": "provider kis is not operational",
+    }
+
+
 # ---------------------------------------------------------------------------
-# Finding 2 — market-order rungs must not be permanently stuck in
-# needs_reconfirm just because the live preview backfills `price` with the
-# current market price (rung.limit_price is always None for market orders).
+# Toss market previews carry the observed quote as ``current_price`` while the
+# market-order payload has no limit price. Revalidation must therefore compare
+# quantity only instead of manufacturing a price mismatch against stored None.
 # ---------------------------------------------------------------------------
 
 
@@ -934,7 +1024,7 @@ async def test_market_order_unchanged_quantity_submits(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="market",
         proposer="p",
@@ -943,21 +1033,22 @@ async def test_market_order_unchanged_quantity_submits(db_session):
     await db_session.commit()
 
     async def fn(**kw):
-        if kw.get("dry_run"):
-            return {
+        if kw["dry_run"]:
+            return _toss_preview_response(
+                kw,
+                price=None,
+                quantity="10",
+                current_price="2226000",
+            )
+        return _toss_submit_response(
+            kw,
+            {
                 "success": True,
-                "approval_hash": "TESTTOKEN",
-                "price": "2226000",  # live current price, no stored limit_price
-                "quantity": "10",
-            }
-        return {
-            "success": True,
-            "status": "acked",
-            "broker_order_id": "B-mkt",
-            "correlation_id": "c-mkt",
-            "idempotency_key": "k-mkt",
-            "approval_hash_digest": "d-mkt",
-        }
+                "order_id": "B-mkt",
+                "correlation_id": "c-mkt",
+                "approval_hash_digest": "d-mkt",
+            },
+        )
 
     out = await revalidate_and_submit(
         service=svc,
@@ -976,7 +1067,7 @@ async def test_market_order_qty_change_still_needs_reconfirm(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="market",
         proposer="p",
@@ -985,13 +1076,13 @@ async def test_market_order_qty_change_still_needs_reconfirm(db_session):
     await db_session.commit()
 
     async def fn(**kw):
-        if kw.get("dry_run"):
-            return {
-                "success": True,
-                "approval_hash": "TESTTOKEN",
-                "price": "2226000",
-                "quantity": "9",  # changed
-            }
+        if kw["dry_run"]:
+            return _toss_preview_response(
+                kw,
+                price=None,
+                quantity="9",
+                current_price="2226000",
+            )
         return {"success": True}  # should never be reached for submit
 
     out = await revalidate_and_submit(
@@ -1019,7 +1110,7 @@ async def test_preview_exception_returns_to_pending_approval(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -1044,11 +1135,10 @@ async def test_preview_exception_returns_to_pending_approval(db_session):
 
 
 class TestDefaultPlaceOrderFnDecimalCoercion:
-    """2026-07-11 activation smoke regression: the proposal ledger hands
-    Decimal quantity/limit_price to the default place_order binding, but
-    `_place_order_impl`'s numeric paths (e.g. `_preview_buy` fee math)
-    assume float — Decimal raised TypeError which was mislabeled as
-    guard_blocked. The default fn must coerce Decimal kwargs to float."""
+    """The Upbit proposal adapter hands Decimal quantity/limit_price to
+    `_place_order_impl`, whose numeric paths (e.g. `_preview_buy` fee math)
+    assume float. Keep coercion at that surviving provider boundary so Decimal
+    cannot become a misleading guard failure."""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1072,6 +1162,7 @@ class TestDefaultPlaceOrderFnDecimalCoercion:
         monkeypatch.setattr(oe, "_place_order_impl", fake_impl)
         result = await mod._default_place_order_fn(
             dry_run=True,
+            account_mode="upbit",
             symbol="KRW-BTC",
             side="buy",
             market="crypto",
@@ -1393,15 +1484,22 @@ async def test_toss_live_replace_end_to_end_uses_toss_client_order_id(db_session
     submit_calls = []
 
     async def place_order_fn(**kwargs):
-        if kwargs.get("dry_run"):
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "71000",
-                "quantity": "10",
-            }
+        if kwargs["dry_run"]:
+            return _toss_preview_response(
+                kwargs,
+                price="71000",
+                quantity="10",
+                approval_hash="fresh",
+            )
         submit_calls.append(kwargs)
-        return {"success": True, "status": "resting", "broker_order_id": "new-1"}
+        return _toss_submit_response(
+            kwargs,
+            {
+                "success": True,
+                "order_id": "new-1",
+                "approval_hash_digest": "replace-digest",
+            },
+        )
 
     async def no_opposite_pending(**kwargs):
         return None
@@ -1473,16 +1571,16 @@ async def test_toss_live_replace_opposite_pending_blocks_before_cancel(db_sessio
             return _toss_broker_order(status="PENDING")
 
     async def place_order_fn(**kwargs):
-        assert kwargs.get("dry_run") is True, (
+        assert kwargs["dry_run"] is True, (
             "opposite-pending must block before the cancel-then-place "
             "pipeline ever reaches a live submit"
         )
-        return {
-            "success": True,
-            "approval_hash": "fresh",
-            "price": "71000",
-            "quantity": "10",
-        }
+        return _toss_preview_response(
+            kwargs,
+            price="71000",
+            quantity="10",
+            approval_hash="fresh",
+        )
 
     cancel_calls = []
 

@@ -1,9 +1,9 @@
 """Tests for MCP profile-driven tool registration.
 
 Verifies that:
-- DEFAULT profile registers legacy ambiguous order tools AND typed variants.
-- HERMES_PAPER_KIS profile registers only kis_mock_* order tools; live surface absent.
-- resolve_mcp_profile handles None/empty/valid/invalid inputs correctly.
+- DEFAULT profile은 generic Toss/Upbit 및 typed Toss 도구만 등록합니다.
+- 모든 활성 profile에서 KIS 주문 도구가 물리적으로 제외됩니다.
+- resolve_mcp_profile은 제거된 legacy profile을 거부합니다.
 """
 
 from __future__ import annotations
@@ -37,15 +37,13 @@ from app.mcp_server.tooling.kiwoom_kr_registration import (
     KIWOOM_KR_TOOL_NAMES,
     kiwoom_kr_profile_tool_names,
 )
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.market_quote_snapshot_tools import (
     MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
 )
 from app.mcp_server.tooling.order_proposal_tools import ORDER_PROPOSAL_TOOL_NAMES
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
-)
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_TOOL_NAMES,
 )
@@ -71,17 +69,27 @@ from app.mcp_server.tooling.tradingcodex_execution_registration import (
     TRADINGCODEX_EXECUTION_FORBIDDEN_TOOL_NAMES,
     TRADINGCODEX_EXECUTION_TOOL_NAMES,
 )
-from app.mcp_server.tooling.us_dual_paper import US_DUAL_PAPER_TOOL_NAMES
 from tests._mcp_tooling_support import DummyMCP
 
-_LEGACY_ORDER_TOOL_NAMES = ORDER_TOOL_NAMES  # {place_order, cancel_order, ...}
+_ACTIVE_GENERIC_ORDER_TOOL_NAMES = ORDER_TOOL_NAMES
+_RETIRED_KIS_ORDER_TOOL_NAMES = {
+    "kis_live_place_order",
+    "kis_live_cancel_order",
+    "kis_live_modify_order",
+    "kis_live_get_order_history",
+    "kis_live_reconcile_orders",
+    "kis_mock_place_order",
+    "kis_mock_cancel_order",
+    "kis_mock_modify_order",
+    "kis_mock_get_order_history",
+}
 _ALPACA_PAPER_TOOL_NAMES = (
     ALPACA_PAPER_READONLY_TOOL_NAMES
     | ALPACA_PAPER_PREVIEW_TOOL_NAMES
     | ALPACA_PAPER_MUTATING_TOOL_NAMES
     | MARKET_QUOTE_SNAPSHOT_TOOL_NAMES
 )
-_US_PAPER_TOOL_NAMES = _ALPACA_PAPER_TOOL_NAMES | US_DUAL_PAPER_TOOL_NAMES
+_US_PAPER_TOOL_NAMES = _ALPACA_PAPER_TOOL_NAMES
 _DB_PAPER_TOOL_NAMES = (
     PAPER_ACCOUNT_TOOL_NAMES | PAPER_ANALYTICS_TOOL_NAMES | PAPER_JOURNAL_TOOL_NAMES
 )
@@ -128,17 +136,15 @@ def _build_mcp(profile: McpProfile) -> DummyMCP:
 
 
 class TestDefaultProfile:
-    def test_registers_legacy_order_tools(self) -> None:
+    def test_registers_generic_orders_and_upbit_reconcile(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert _LEGACY_ORDER_TOOL_NAMES <= mcp.tools.keys()
+        assert (
+            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
+        ) <= mcp.tools.keys()
 
-    def test_registers_typed_kis_live_variants(self) -> None:
+    def test_does_not_register_retired_kis_order_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIS_LIVE_ORDER_TOOL_NAMES <= mcp.tools.keys()
-
-    def test_registers_typed_kis_mock_variants(self) -> None:
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIS_MOCK_ORDER_TOOL_NAMES <= mcp.tools.keys()
+        assert _RETIRED_KIS_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
     def test_registers_typed_toss_live_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
@@ -161,43 +167,6 @@ class TestAlpacaPaperPreviewProfile:
     def test_preview_tool_not_registered_default_profile(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
         assert "alpaca_paper_preview_order" not in mcp.tools
-
-    def test_preview_tool_not_registered_hermes_paper_kis_profile(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        assert "alpaca_paper_preview_order" not in mcp.tools
-
-
-class TestHermesPaperKisProfile:
-    def test_does_not_register_legacy_order_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        for name in _LEGACY_ORDER_TOOL_NAMES:
-            assert name not in mcp.tools, (
-                f"hermes-paper-kis must not register legacy tool '{name}'"
-            )
-
-    def test_does_not_register_live_order_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        for name in KIS_LIVE_ORDER_TOOL_NAMES:
-            assert name not in mcp.tools, (
-                f"hermes-paper-kis must not register live tool '{name}'"
-            )
-
-    def test_registers_kis_mock_order_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        assert KIS_MOCK_ORDER_TOOL_NAMES <= mcp.tools.keys()
-
-    def test_registers_readonly_research_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        # Representative read-only tools that must be present in paper profile
-        expected_readonly = {"get_quote", "get_holdings", "get_cash_balance"}
-        for name in expected_readonly:
-            assert name in mcp.tools, (
-                f"hermes-paper-kis must register read-only tool '{name}'"
-            )
-
-    def test_does_not_register_alpaca_paper_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.HERMES_PAPER_KIS)
-        assert _ALPACA_PAPER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
 
 class TestUsPaperProfile:
@@ -283,18 +252,17 @@ class TestCryptoProfile:
         mcp = _build_mcp(McpProfile.CRYPTO)
         assert "get_crypto_top_movers" in mcp.tools
 
-    def test_registers_crypto_trading_surface(self) -> None:
-        # A crypto session must be able to trade and settle: generic
-        # account_mode order tools are the only Upbit entry point and
-        # live_reconcile_orders is the US/crypto settle path.
+    def test_registers_crypto_trading_and_reconcile_surface(self) -> None:
+        # Generic account_mode orders and the crypto/Upbit-pinned reconcile
+        # wrapper are the active Upbit entry points.
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert _LEGACY_ORDER_TOOL_NAMES <= mcp.tools.keys()
-        assert LIVE_RECONCILE_TOOL_NAMES <= mcp.tools.keys()
+        assert (
+            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
+        ) <= mcp.tools.keys()
 
-    def test_does_not_register_kis_typed_order_tools(self) -> None:
+    def test_does_not_register_retired_kis_order_tools(self) -> None:
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert KIS_LIVE_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
-        assert KIS_MOCK_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
+        assert _RETIRED_KIS_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
 
 class TestKiwoomProfile:
@@ -370,11 +338,10 @@ class TestKiwoomKrProfile:
         }
         assert kr_names <= kiwoom_kr.tools.keys()
         assert KIWOOM_MOCK_TOOL_NAMES <= kiwoom_kr.tools.keys()
-        # ROB-1173 also removes the shared KIS mock mirror broker mutation.
-        assert kiwoom.tools.keys() - kiwoom_kr.tools.keys() == (
-            KIWOOM_MOCK_US_TOOL_NAMES | MIRROR_COUNTERFACTUAL_TOOL_NAMES
-        )
+        assert kiwoom.tools.keys() - kiwoom_kr.tools.keys() == KIWOOM_MOCK_US_TOOL_NAMES
         assert kiwoom_kr.tools.keys() - kiwoom.tools.keys() == set()
+        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom.tools)
+        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom_kr.tools)
 
     def test_kiwoom_profile_still_registers_us_namespace(self) -> None:
         # The split is additive: MCP_PROFILE=kiwoom is deliberately unchanged by
@@ -426,15 +393,14 @@ class TestKiwoomDefaultProfileGate:
 _ALPACA_MUTATING = ALPACA_PAPER_MUTATING_TOOL_NAMES
 _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.DEFAULT: (
-        _LEGACY_ORDER_TOOL_NAMES
-        | KIS_LIVE_ORDER_TOOL_NAMES
-        | KIS_MOCK_ORDER_TOOL_NAMES
+        _ACTIVE_GENERIC_ORDER_TOOL_NAMES
         | LIVE_RECONCILE_TOOL_NAMES
         | TOSS_LIVE_ORDER_TOOL_NAMES
         | PAPER_LIMIT_ORDER_TOOL_NAMES
     ),
-    McpProfile.HERMES_PAPER_KIS: set(KIS_MOCK_ORDER_TOOL_NAMES),
-    McpProfile.CRYPTO: _LEGACY_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES,
+    McpProfile.CRYPTO: (
+        set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES) | LIVE_RECONCILE_TOOL_NAMES
+    ),
     McpProfile.US_PAPER: set(_ALPACA_MUTATING) | ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
     McpProfile.DB_PAPER: set(),
     McpProfile.KIWOOM: KIWOOM_MOCK_TOOL_NAMES | KIWOOM_MOCK_US_TOOL_NAMES,
@@ -444,13 +410,11 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     # (frozen-context read + policy + route_request only, early-return).
     McpProfile.SHADOW_REPLAY: set(),
     McpProfile.ANALYSIS_READONLY: {"toss_get_positions"},
-    # ROB-760 — account_read exposes read-only order-history tools (they are
-    # in _ALL_ORDER_TOOL_NAMES via ORDER/KIS_LIVE/TOSS_LIVE sets), so they must
-    # be listed here; separate forbidden-surface tests below prove the
-    # mutation/write tools stay absent.
+    # ROB-760 — account_read exposes the active generic and Toss read-only
+    # order-history tools, so they must be listed here; separate
+    # forbidden-surface tests below prove the mutation/write tools stay absent.
     McpProfile.ACCOUNT_READ: {
         "get_order_history",
-        "kis_live_get_order_history",
         "kiwoom_mock_get_order_history",
         "kiwoom_mock_get_positions",
         "kiwoom_mock_get_orderable_cash",
@@ -464,9 +428,6 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
         "get_order_history",
         "sell_ladder_fill_preview",
         "buy_ladder_fill_preview",
-        "kis_live_place_order",
-        "kis_live_cancel_order",
-        "kis_live_get_order_history",
         # ROB-1155 — the explicit tradingcodex allowlist, NOT the full
         # KIWOOM_MOCK_TOOL_NAMES set: kiwoom_mock_get_order_detail (kt00007) is
         # registered on the KIWOOM profile only and must stay out of this
@@ -489,9 +450,8 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.WATCH_REPRICING: set(),
 }
 _ALL_ORDER_TOOL_NAMES = (
-    _LEGACY_ORDER_TOOL_NAMES
-    | KIS_LIVE_ORDER_TOOL_NAMES
-    | KIS_MOCK_ORDER_TOOL_NAMES
+    _ACTIVE_GENERIC_ORDER_TOOL_NAMES
+    | _RETIRED_KIS_ORDER_TOOL_NAMES
     | LIVE_RECONCILE_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES
     | KIWOOM_MOCK_US_TOOL_NAMES
@@ -754,7 +714,6 @@ class TestAccountReadProfile:
             "get_cash_balance",
             "toss_get_orderable_cash",
             "get_order_history",
-            "kis_live_get_order_history",
             "kiwoom_mock_get_positions",
             "kiwoom_mock_get_orderable_cash",
             "kiwoom_mock_get_order_history",
@@ -806,19 +765,15 @@ class TestTradingCodexExecutionProfile:
             "get_holdings",
             "get_cash_balance",
             "get_order_history",
-            "kis_live_get_order_history",
             "toss_get_order_history",
             "place_order",
             "cancel_order",
-            "kis_live_place_order",
-            "kis_live_cancel_order",
             *_EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES,
             "toss_preview_order",
             "toss_place_order",
             "toss_cancel_order",
             "sell_ladder_fill_preview",
             "buy_ladder_fill_preview",
-            "suggest_order_account",
             "get_fx_rate",
             "route_request",
             "get_trading_policy",
@@ -913,7 +868,7 @@ class TestTradingCodexExecutionProfile:
         result = await tool(
             symbol="005930",
             instrument_type="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             outcome="filled",
             created_by_profile=" ",
         )
@@ -1034,8 +989,9 @@ class TestResolveMcpProfile:
     def test_explicit_default(self) -> None:
         assert resolve_mcp_profile("default") is McpProfile.DEFAULT
 
-    def test_hermes_paper_kis(self) -> None:
-        assert resolve_mcp_profile("hermes-paper-kis") is McpProfile.HERMES_PAPER_KIS
+    def test_removed_hermes_paper_kis_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):
+            resolve_mcp_profile("hermes-paper-kis")
 
     def test_us_paper(self) -> None:
         assert resolve_mcp_profile("us-paper") is McpProfile.US_PAPER

@@ -200,6 +200,29 @@ def service(*, external_rows=None):
 
 
 @pytest.mark.asyncio
+async def test_historical_kis_candidate_is_rejected_before_repository_access() -> None:
+    active = event()
+    legacy_evidence = active.evidence.model_copy(
+        update={
+            "target_account_mode": "kis_live",
+            "market": "equity_kr",
+            "symbol": "005930",
+        }
+    )
+    legacy = active.model_copy(update={"evidence": legacy_evidence})
+    instance, repository, session = service()
+
+    result = await instance.evaluate_candidate_event(legacy, now=NOW)
+
+    assert result == {
+        "status": "not_triggered",
+        "reason": "provider_kis_not_operational",
+    }
+    assert repository.locks == []
+    assert session.commits == 0
+
+
+@pytest.mark.asyncio
 async def test_shortfall_is_candidate_only_and_other_pending_is_disclosed() -> None:
     instance, repository, session = service(external_rows=[external_cash_view()])
 

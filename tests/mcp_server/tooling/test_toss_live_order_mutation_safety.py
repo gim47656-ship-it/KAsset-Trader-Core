@@ -38,9 +38,7 @@ def _patch_session_factory(db_session):
     mock_cm.__aenter__.return_value = db_session
     mock_cm.__aexit__.return_value = None
 
-    with patch.object(
-        toss_live_ledger, "_order_session_factory", return_value=lambda: mock_cm
-    ):
+    with patch.object(toss_live_ledger, "AsyncSessionLocal", return_value=mock_cm):
         yield
 
 

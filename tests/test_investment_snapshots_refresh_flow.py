@@ -42,6 +42,25 @@ def test_flow_file_defaults_to_kr_action_report_purpose() -> None:
     )
 
 
+def test_flow_file_defaults_public_entrypoints_to_toss_live() -> None:
+    text = _FLOW_PATH.read_text()
+    assert text.count('account_scope: str | None = "toss_live"') == 3
+    assert 'account_scope: str | None = "kis_live"' not in text
+
+
+def test_flow_file_rejects_explicit_kis_scope_before_session_access() -> None:
+    text = _FLOW_PATH.read_text()
+    run_body = text.split("async def run_snapshot_bundle_refresh(", maxsplit=1)[1]
+    run_body = run_body.split('@task(name="investment_snapshots_refresh")', maxsplit=1)[
+        0
+    ]
+    assert 'normalized.startswith("kis_")' in text
+    assert 'raise ValueError("provider kis is not operational")' in text
+    assert run_body.index("_reject_non_operational_account_scope(") < run_body.index(
+        "async with _session_factory()() as session:"
+    )
+
+
 def test_flow_file_uses_scheduler_requested_by() -> None:
     text = _FLOW_PATH.read_text()
     assert 'requested_by="scheduler"' in text, (

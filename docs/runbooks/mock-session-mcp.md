@@ -5,8 +5,9 @@ Claude가 종료되면 child와 임시 config도 함께 종료·삭제하는 실
 
 ## 안전 경계
 
-- 허용 profile은 `hermes-paper-kis`, `kiwoom_kr`, `us-paper`뿐이다.
-- `default`, 과거의 full `kiwoom`, 빈 값, unknown profile은 spawn 전에 거부한다.
+- 허용 profile은 `kiwoom_kr`, `us-paper`뿐이다. KIS 전용
+  `hermes-paper-kis`와 `default`, 과거의 full `kiwoom`, 빈 값, unknown
+  profile은 spawn 전에 거부한다.
 - Claude만 profile-isolated adapter가 있다. Codex/Kiro mock lane은 adapter가 생기기
   전까지 spawn 전에 fail-close한다. full/default MCP fallback은 없다.
 - 생성 JSON에는 stdio server가 정확히 하나뿐이고 credential 값이나 credential env

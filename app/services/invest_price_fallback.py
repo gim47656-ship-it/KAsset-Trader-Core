@@ -1,4 +1,4 @@
-"""ROB-696 — fail-open price fallback chain for /invest (KIS → Toss → snapshot)."""
+"""``/invest``용 Toss → 과거 snapshot fail-open 가격 체인."""
 
 from __future__ import annotations
 
@@ -13,42 +13,29 @@ logger = logging.getLogger(__name__)
 PriceMap = dict[str, float | None]
 Fetcher = Callable[[list[str]], Awaitable[PriceMap]]
 
-KIS_FIRST_ORDER: tuple[str, ...] = ("kis", "toss", "snapshot")
-TOSS_FIRST_ORDER: tuple[str, ...] = ("toss", "kis", "snapshot")
-_KNOWN_LAYERS = frozenset(KIS_FIRST_ORDER)
+TOSS_FIRST_ORDER: tuple[str, ...] = ("toss", "snapshot")
 
 
 class PriceFallbackResolver:
-    """Pure orchestration: run injected fetchers KIS → Toss → snapshot, merge
-    only non-None values, shrink the missing-set each layer, None for the rest.
-    Every layer is wrapped fail-open (exception → {} for that layer)."""
+    """Toss에서 찾지 못한 가격을 과거 snapshot으로 보강한다."""
 
     def __init__(
         self,
         *,
-        kis_fetch: Fetcher,
         toss_fetch: Fetcher | None,
         snapshot_fetch: Fetcher,
         market: str,
-        order: tuple[str, ...] = KIS_FIRST_ORDER,
     ) -> None:
-        if len(order) != len(_KNOWN_LAYERS) or set(order) != _KNOWN_LAYERS:
-            # Fail-loud: a typo must not silently drop a fallback layer.
-            raise ValueError(
-                f"order must be a permutation of {sorted(_KNOWN_LAYERS)}, got {order!r}"
-            )
-        self._kis_fetch = kis_fetch
         self._toss_fetch = toss_fetch
         self._snapshot_fetch = snapshot_fetch
         self._market = market
-        self._order = order
+        self._order = TOSS_FIRST_ORDER
 
     async def resolve(self, symbols: list[str]) -> PriceMap:
         if not symbols:
             return {}
         results: PriceMap = dict.fromkeys(symbols, None)
         layers: dict[str, Fetcher | None] = {
-            "kis": self._kis_fetch,
             "toss": self._toss_fetch,
             "snapshot": self._snapshot_fetch,
         }
@@ -110,10 +97,13 @@ def _chunk(symbols: list[str], size: int = _TOSS_PRICE_BATCH) -> list[list[str]]
 async def fetch_toss_batch_prices(
     client: TossPriceClient, symbols: list[str]
 ) -> dict[str, float | None]:
-    """ONE batched Toss /api/v1/prices call per ≤200 chunk; fail-open to {}."""
+    """200개 이하 chunk마다 Toss ``/api/v1/prices``를 한 번 호출한다.
+
+    호출이 실패하면 fail-open으로 빈 결과를 반환한다.
+    """
     if not symbols:
         return {}
-    # Map uppercased-echo -> requested symbol so we return the caller's keys.
+    # 대문자로 정규화된 provider 응답을 호출자가 요청한 symbol key에 다시 연결한다.
     by_upper = {s.upper(): s for s in symbols}
     out: dict[str, float | None] = {}
     try:

@@ -15,7 +15,7 @@ from app.mcp_server.tooling.market_data_indicators import (
     _fetch_ohlcv_for_indicators,
 )
 from app.schemas.n8n.sell_signal import N8nSellCondition
-from app.services.brokers.kis.client import KISClient
+from app.services.brokers.toss.client import TossReadClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,32 +32,48 @@ async def _get_redis() -> aioredis.Redis:
     )
 
 
+def _default_toss_client() -> TossReadClient:
+    return TossReadClient.from_settings()
+
+
 async def _fetch_current_price(
-    kis: KISClient, symbol: str
+    client: TossReadClient | None,
+    symbol: str,
 ) -> tuple[float | None, str | None]:
+    if client is None:
+        return None, "Toss client unavailable"
     try:
-        df = await kis.inquire_price(symbol)
-        if df.empty:
-            return None, None
-        row = df.iloc[0]
-        return float(row["close"]), None
+        prices = await client.prices([symbol])
+        quote = next(
+            (item for item in prices if item.symbol.upper() == symbol.upper()),
+            None,
+        )
+        return (float(quote.last_price), None) if quote is not None else (None, None)
     except Exception as exc:
         return None, str(exc)
 
 
-async def _fetch_stock_name(kis: KISClient, symbol: str) -> str:
+async def _fetch_stock_name(client: TossReadClient | None, symbol: str) -> str:
+    if client is None:
+        return symbol
     try:
-        info = await kis.fetch_fundamental_info(symbol)
-        return info.get("종목명", symbol)
+        stocks = await client.stocks([symbol])
+        info = next(
+            (item for item in stocks if item.symbol.upper() == symbol.upper()),
+            None,
+        )
+        return info.name if info is not None and info.name else symbol
     except Exception:
         return symbol
 
 
 async def _check_trailing_stop(
-    kis: KISClient, symbol: str, threshold: float
+    client: TossReadClient | None,
+    symbol: str,
+    threshold: float,
 ) -> tuple[N8nSellCondition, float | None, list[dict[str, Any]]]:
     errors: list[dict[str, Any]] = []
-    price, err = await _fetch_current_price(kis, symbol)
+    price, err = await _fetch_current_price(client, symbol)
     if err:
         errors.append({"condition": "trailing_stop", "error": err})
 
@@ -121,55 +137,20 @@ async def _check_stoch_rsi(
 
 
 async def _check_foreign_selling(
-    kis: KISClient, symbol: str, consecutive_days: int
+    symbol: str,
+    consecutive_days: int,
 ) -> tuple[N8nSellCondition, list[dict[str, Any]]]:
-    errors: list[dict[str, Any]] = []
-    try:
-        rows = await kis.inquire_investor(symbol)
-        if not rows or len(rows) < consecutive_days:
-            return (
-                N8nSellCondition(
-                    name="foreign_selling",
-                    met=False,
-                    value=None,
-                    detail="투자자 데이터 부족",
-                ),
-                errors,
-            )
-
-        net_sells = 0
-        for row in rows[:consecutive_days]:
-            frgn_ntby = float(row.get("frgn_ntby_qty", 0))
-            if frgn_ntby < 0:
-                net_sells += 1
-
-        met = net_sells >= consecutive_days
-        detail_parts = []
-        for i, row in enumerate(rows[:consecutive_days]):
-            qty = float(row.get("frgn_ntby_qty", 0))
-            label = "순매도" if qty < 0 else "순매수"
-            detail_parts.append(f"D-{i}: {label} {abs(qty):,.0f}주")
-
-        return (
-            N8nSellCondition(
-                name="foreign_selling",
-                met=met,
-                value=None,
-                detail=f"{net_sells}일 연속 순매도" if met else "; ".join(detail_parts),
-            ),
-            errors,
-        )
-    except Exception as exc:
-        errors.append({"condition": "foreign_selling", "error": str(exc)})
-        return (
-            N8nSellCondition(
-                name="foreign_selling",
-                met=False,
-                value=None,
-                detail=str(exc),
-            ),
-            errors,
-        )
+    _ = symbol, consecutive_days
+    reason = "provider_unsupported: investor flow is unavailable"
+    return (
+        N8nSellCondition(
+            name="foreign_selling",
+            met=False,
+            value=None,
+            detail=reason,
+        ),
+        [{"condition": "foreign_selling", "error": reason}],
+    )
 
 
 async def _check_rsi_momentum(
@@ -335,21 +316,36 @@ async def evaluate_sell_signal(
     rsi_low_mark: float = 65,
     bb_upper_ref: float = 1_142_000,
 ) -> dict[str, Any]:
-    kis = KISClient()
     all_errors: list[dict[str, Any]] = []
+    toss: TossReadClient | None = None
+    try:
+        toss = _default_toss_client()
+    except Exception as exc:
+        all_errors.append(
+            {"condition": "toss_read", "error": f"{type(exc).__name__}: {exc}"}
+        )
 
-    stock_name = await _fetch_stock_name(kis, symbol)
-
-    trailing_cond, current_price, errs = await _check_trailing_stop(
-        kis, symbol, price_threshold
-    )
+    try:
+        stock_name = await _fetch_stock_name(toss, symbol)
+        trailing_cond, current_price, errs = await _check_trailing_stop(
+            toss,
+            symbol,
+            price_threshold,
+        )
+    finally:
+        if toss is not None:
+            try:
+                await toss.aclose()
+            except Exception:
+                logger.warning("Toss sell-signal client close failed", exc_info=True)
     all_errors.extend(errs)
 
     stoch_cond, errs = await _check_stoch_rsi(symbol, stoch_rsi_threshold)
     all_errors.extend(errs)
 
     foreign_cond, errs = await _check_foreign_selling(
-        kis, symbol, foreign_consecutive_days
+        symbol,
+        foreign_consecutive_days,
     )
     all_errors.extend(errs)
 

@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from app.schemas.investment_reports import IngestReportItem, IngestReportRequest
 from app.schemas.investment_snapshots_mcp import (
@@ -173,7 +174,7 @@ def _ensure_response(
 def _make_request(**overrides: Any) -> ReportGenerationRequest:
     base = {
         "market": "kr",
-        "account_scope": "kis_live",
+        "account_scope": "toss_live",
         "status": "published",
         "created_by_profile": "test-runner",
         "title": "Snapshot-backed KR advisory",
@@ -284,11 +285,7 @@ async def test_happy_path_crypto_published() -> None:
 
 @pytest.mark.asyncio
 async def test_unsupported_market_account_pair_rejected() -> None:
-    """crypto/kis_live etc. are rejected at the generator's pair validator.
-
-    Post ROB-297, ``us/kis_live`` is the canonical KIS overseas pair and
-    must NOT raise; see ``test_happy_path_us_kis_live_published``.
-    """
+    """crypto/toss_live처럼 시장과 운영 scope가 어긋난 pair는 거부한다."""
     ensure = _FakeEnsureService(_ensure_response())
     ingest = _FakeIngestionService()
     gen = SnapshotBackedReportGenerator(
@@ -297,32 +294,29 @@ async def test_unsupported_market_account_pair_rejected() -> None:
         ingestion_service=ingest,
         snapshots_repository=_FakeSnapshotsRepository(),
     )
-    req = _make_request(market="crypto", account_scope="kis_live")
+    req = _make_request(market="crypto", account_scope="toss_live")
     with pytest.raises(SnapshotBackedReportGeneratorError):
         await gen.generate(req)
     assert ingest.calls == []
 
 
 # ---------------------------------------------------------------------------
-# ROB-297 — market="us" + account_scope="kis_live" canonical pair.
-#
-# Guardrails (see ROB-297 pre-implementation comment):
-# - market="us" is a single market; brokers are separated by account_scope.
-# - canonical KIS overseas combo is ("us", "kis_live"); no kis_overseas_live
-#   alias is introduced.
-# - the existing ("kr", "kis_live") and ("crypto", "upbit_live") paths must
-#   keep working without regression.
+# 주식 운영 보고서의 canonical pair는 KR/US 모두 toss_live이다.
 # ---------------------------------------------------------------------------
-def test_request_schema_accepts_us_kis_live() -> None:
-    """ReportGenerationRequest accepts market='us' with account_scope='kis_live'."""
-    req = _make_request(market="us", account_scope="kis_live")
+def test_request_schema_rejects_new_kis_generation() -> None:
+    with pytest.raises(ValidationError):
+        _make_request(market="us", account_scope="kis_live")
+
+
+def test_request_schema_accepts_us_toss_live() -> None:
+    req = _make_request(market="us", account_scope="toss_live")
     assert req.market == "us"
-    assert req.account_scope == "kis_live"
+    assert req.account_scope == "toss_live"
 
 
 @pytest.mark.asyncio
-async def test_happy_path_us_kis_live_published() -> None:
-    """US/kis_live published flow: validator passes, bundle ensure called with us."""
+async def test_happy_path_us_toss_live_published() -> None:
+    """US/toss_live 요청이 bundle ensure와 ingestion까지 동일 scope를 유지한다."""
     ensure = _FakeEnsureService(_ensure_response())
     ingest = _FakeIngestionService()
     gen = SnapshotBackedReportGenerator(
@@ -331,14 +325,13 @@ async def test_happy_path_us_kis_live_published() -> None:
         ingestion_service=ingest,
         snapshots_repository=_FakeSnapshotsRepository(),
     )
-    response = await gen.generate(_make_request(market="us", account_scope="kis_live"))
+    response = await gen.generate(_make_request(market="us", account_scope="toss_live"))
 
     assert response.report_uuid == ingest.report_uuid
     assert ensure.calls[0].market == "us"
-    assert ensure.calls[0].account_scope == "kis_live"
-    # Round-trip: ingestion service received market="us" + account_scope="kis_live".
+    assert ensure.calls[0].account_scope == "toss_live"
     assert ingest.calls[0].market == "us"
-    assert ingest.calls[0].account_scope == "kis_live"
+    assert ingest.calls[0].account_scope == "toss_live"
 
 
 @pytest.mark.asyncio
@@ -705,8 +698,8 @@ async def test_generator_surfaces_unavailable_pending_orders_to_classifier():
 async def test_user_id_is_forwarded_from_report_request_to_bundle_ensure() -> None:
     """ROB-278 — ReportGenerationRequest.user_id flows into EnsureBundleRequest.user_id.
 
-    Policy: callers must pass user_id explicitly to enable kis_live broker
-    reads; the generator does not invent a default.
+    운영 broker read를 활성화하려면 user_id를 명시해야 하며 생성기는 임의의
+    기본값을 만들지 않는다.
     """
     ensure = _FakeEnsureService(_ensure_response())
     ingest = _FakeIngestionService()
@@ -822,7 +815,7 @@ async def test_generator_calls_symbol_derivation_and_forwards_symbols() -> None:
     assert len(derivation.calls) == 1
     call = derivation.calls[0]
     assert call["market"] == "kr"
-    assert call["account_scope"] == "kis_live"
+    assert call["account_scope"] == "toss_live"
     assert call["user_id"] == 42
 
     # Derived symbols reached EnsureBundleRequest.symbols.
@@ -1031,13 +1024,12 @@ async def test_auto_emit_from_evidence_appends_review_items_from_bundle() -> Non
         symbol=None,
         snapshot_uuid=uuid4(),
         payload_json={
-            "primary_source": "kis",
+            "primary_source": "toss",
             "holdings": [
                 {
                     "ticker": "005930",
                     "quantity": 10,
-                    "sellable_quantity": 8,
-                    "source": "kis",
+                    "source": "toss",
                     "market": "KR",
                 }
             ],
@@ -1111,7 +1103,7 @@ async def test_auto_emit_from_evidence_respects_request_candidate_limit() -> Non
         symbol=None,
         snapshot_uuid=uuid4(),
         payload_json={
-            "primary_source": "kis",
+            "primary_source": "toss",
             "holdings": [],
             "reference_holdings": [],
             "count": 0,
@@ -1597,11 +1589,10 @@ async def test_descriptors_freeze_numeric_baseline_from_payload() -> None:
     }
     portfolio = _FakeSnap(kind="portfolio")
     portfolio.payload_json = {
-        "primary_source": "kis_live",
+        "primary_source": "toss_live",
         "cash": {"usd_cash": 3095.26, "usd_orderable": 3078.32},
         "buying_power": {"usd": 3078.32},
-        "sellable_summary": {"count": 4},
-        "holdings": [{"ticker": "BAC"}, {"ticker": "TMUS"}],  # heavy list excluded
+        "holdings": [{"ticker": "BAC"}, {"ticker": "TMUS"}],
     }
     repo = _FakeSnapshotsRepository(
         bundle=type("B", (), {"id": 7})(),
@@ -1631,8 +1622,8 @@ async def test_descriptors_freeze_numeric_baseline_from_payload() -> None:
     pb = sent.portfolio_snapshot["baseline"]
     assert pb["cash"] == {"usd_cash": 3095.26, "usd_orderable": 3078.32}
     assert pb["buying_power"] == {"usd": 3078.32}
-    assert pb["sellable_summary"] == {"count": 4}
-    assert pb["primary_source"] == "kis_live"
+    assert "sellable_summary" not in pb
+    assert pb["primary_source"] == "toss_live"
     assert pb["holdings_count"] == 2
     assert "holdings" not in pb
 

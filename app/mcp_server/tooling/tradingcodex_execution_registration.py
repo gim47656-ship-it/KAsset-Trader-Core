@@ -10,9 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from app.core.config import settings
 from app.mcp_server.tooling.account_read_registration import ACCOUNT_READ_TOOL_NAMES
-from app.mcp_server.tooling.account_routing_registration import (
-    register_account_routing_tools,
-)
 from app.mcp_server.tooling.analysis_artifact_registration import (
     ANALYSIS_ARTIFACT_TOOL_NAMES,
 )
@@ -37,12 +34,6 @@ from app.mcp_server.tooling.operating_briefing_registration import (
 from app.mcp_server.tooling.order_proposal_tools import (
     ORDER_PROPOSAL_TOOL_NAMES,
     register_order_proposal_tools,
-)
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
-    register_kis_live_order_tools,
 )
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_TOOL_NAMES,
@@ -90,8 +81,6 @@ if TYPE_CHECKING:
 _TRADINGCODEX_EXECUTION_ORDER_TOOL_NAMES: set[str] = {
     "place_order",
     "cancel_order",
-    "kis_live_place_order",
-    "kis_live_cancel_order",
     "toss_preview_order",
     "toss_place_order",
     "toss_cancel_order",
@@ -114,7 +103,6 @@ KIWOOM_MOCK_EXECUTION_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 _TRADINGCODEX_EXECUTION_ADVISORY_TOOL_NAMES: set[str] = {
-    "suggest_order_account",
     "get_fx_rate",
     "route_request",
     "get_trading_policy",
@@ -171,9 +159,6 @@ _TRADINGCODEX_EXECUTION_INVESTMENT_REPORT_FILTER_TOOL_NAMES: set[str] = (
 
 TRADINGCODEX_EXECUTION_FORBIDDEN_TOOL_NAMES: set[str] = (
     (ORDER_TOOL_NAMES - TRADINGCODEX_EXECUTION_TOOL_NAMES)
-    | (KIS_LIVE_ORDER_TOOL_NAMES - TRADINGCODEX_EXECUTION_TOOL_NAMES)
-    | KIS_MOCK_ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
     | (KIWOOM_MOCK_TOOL_NAMES - KIWOOM_MOCK_EXECUTION_TOOL_NAMES)
     | KIWOOM_MOCK_US_TOOL_NAMES
     | PAPER_LIMIT_ORDER_TOOL_NAMES
@@ -426,10 +411,8 @@ def register_tradingcodex_execution_tools(mcp: FastMCP) -> None:
     filtered = cast("FastMCP", _AllowlistedMCP(mcp, TRADINGCODEX_EXECUTION_TOOL_NAMES))
     register_portfolio_tools(filtered)
     register_order_tools(filtered)
-    register_kis_live_order_tools(filtered)
     register_toss_live_order_tools(filtered)
     register_kiwoom_mock_tools(filtered)
-    register_account_routing_tools(filtered)
     register_fundamentals_tools(filtered)
     register_trading_policy_tools(filtered)
     register_route_request_tools(filtered)

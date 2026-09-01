@@ -33,9 +33,6 @@ from app.mcp_server.tooling.fundamentals._financials import (
     handle_get_insider_transactions,
 )
 from app.mcp_server.tooling.fundamentals._fx_rates import handle_get_fx_rate
-from app.mcp_server.tooling.fundamentals._intraday_investor_flow import (
-    handle_get_intraday_investor_flow,
-)
 from app.mcp_server.tooling.fundamentals._market_index import (
     handle_get_market_index,
 )
@@ -88,7 +85,6 @@ FUNDAMENTALS_TOOL_NAMES: set[str] = {
     "get_insider_transactions",
     "get_earnings_calendar",
     "get_investor_trends",
-    "get_intraday_investor_flow",
     "get_investment_opinions",
     "get_analyst_consensus",
     "get_valuation",
@@ -155,7 +151,7 @@ def _register_fundamentals_tools_impl(
             "Sweep recent catalyst headlines for a basket of symbols in ONE "
             "call. Pass symbols=[...] (cross-market: KR 6-digit codes, US "
             "tickers, KRW-/USDT- crypto) or OMIT symbols to sweep your CURRENT "
-            "holdings across all accounts (KIS/Toss/manual/Upbit). Each symbol "
+            "holdings across all accounts (Toss/manual/Upbit). Each symbol "
             "returns up to limit_per_symbol lean items "
             "{title,url,source,published_at,relevance}. Symbols are capped at "
             "30 (top-level degraded_reason notes the cap). A per-symbol fetch "
@@ -255,39 +251,6 @@ def _register_fundamentals_tools_impl(
         period: str = "day",
     ) -> dict[str, Any]:
         return await handle_get_investor_trends(symbol, days, period)
-
-    @mcp.tool(
-        name="get_intraday_investor_flow",
-        description=(
-            "Get same-day intraday provisional foreign/institution net-buy "
-            "quantity estimates for a Korean stock, PLUS an embedded confirmed "
-            "multi-day series. Korean stocks only. The KIS intraday payload "
-            "carries no date, so session attribution is deterministic and "
-            "conservative via these ADDITIVE fields: `confidence` ('observed' = "
-            "KRX session live before 14:30 and the rows are positively today's; "
-            "'inferred' = today's confirmed daily row already exists; "
-            "'carry_over' = future slot or non-session day, rows belong to a "
-            "prior session; 'provisional_unconfirmed' = could be today OR a prior "
-            "session and today could NOT be positively confirmed — e.g. live "
-            "after 14:30, or after close before the confirmed daily is posted), "
-            "`today_available` (bool — true only when today's data is positively "
-            "confirmed), `as_of_date` (ISO DATE; null for provisional_unconfirmed; "
-            "prior XKRX session DATE for carry_over — never a fabricated time), "
-            "`is_prior_session` (bool), `warning` ({code, message} when carry_over, "
-            "else null), and `last_confirmed_session_date` (most recent confirmed "
-            "session). `as_of` is a full ISO datetime only for observed/inferred "
-            "and is null for carry_over/provisional_unconfirmed — never silently "
-            "upgraded. The `confirmed` object (source 'naver') carries "
-            "`foreign_ownership_pct` (외인소진율), `foreign_ownership_trend` "
-            "(up/down/flat), and `history` (last 5 confirmed days of foreign/"
-            "institution/individual net-buy + close). Existing `as_of`/`note` keys "
-            "are unchanged for back-compat."
-        ),
-    )
-    async def get_intraday_investor_flow(
-        symbol: str,
-    ) -> dict[str, Any]:
-        return await handle_get_intraday_investor_flow(symbol)
 
     @mcp.tool(
         name="get_investment_opinions",

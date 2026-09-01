@@ -19,7 +19,7 @@ def _create_kwargs() -> dict:
     return {
         "symbol": "005930",
         "market": "equity_kr",
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "side": "buy",
         "order_type": "limit",
         "proposer": "post-commit-probe",

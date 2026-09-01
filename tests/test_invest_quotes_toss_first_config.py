@@ -7,20 +7,8 @@ from app.core.config import Settings
 pytestmark = pytest.mark.unit
 
 
-class TestInvestQuotesTossFirstFlags:
-    def test_defaults_are_kis_first(self):
-        s = Settings()
-        assert s.invest_quotes_toss_first_kr is False
-        assert s.invest_quotes_toss_first_us is False
+def test_obsolete_kis_toss_precedence_flags_are_not_registered() -> None:
+    settings = Settings()
 
-    def test_kwarg_override(self):
-        s = Settings(invest_quotes_toss_first_kr=True)
-        assert s.invest_quotes_toss_first_kr is True
-        assert s.invest_quotes_toss_first_us is False  # per-market independent
-
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("INVEST_QUOTES_TOSS_FIRST_KR", "true")
-        monkeypatch.setenv("INVEST_QUOTES_TOSS_FIRST_US", "false")
-        s = Settings()
-        assert s.invest_quotes_toss_first_kr is True
-        assert s.invest_quotes_toss_first_us is False
+    assert not hasattr(settings, "invest_quotes_toss_first_kr")
+    assert not hasattr(settings, "invest_quotes_toss_first_us")

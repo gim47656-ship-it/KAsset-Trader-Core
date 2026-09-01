@@ -116,7 +116,6 @@ def normalize_symbol_input(symbol: str | int, market: str | None = None) -> str:
         "korea",
         "kospi",
         "kosdaq",
-        "kis",
         "equity_kr",
         "naver",
     ):
@@ -146,7 +145,6 @@ def normalize_market(market: str | None) -> str | None:
         "korea": "equity_kr",
         "kospi": "equity_kr",
         "kosdaq": "equity_kr",
-        "kis": "equity_kr",
         "equity_kr": "equity_kr",
         "us": "equity_us",
         "usa": "equity_us",
@@ -168,6 +166,8 @@ def _strip_kr_a_prefix(symbol: str) -> str:
 
 def resolve_market_type(symbol: str, market: str | None) -> tuple[str, str]:
     market_type = normalize_market(market)
+    if market is not None and str(market).strip() and market_type is None:
+        raise ValueError(f"Unsupported market: {market}")
 
     if market_type == "crypto":
         symbol = symbol.upper()

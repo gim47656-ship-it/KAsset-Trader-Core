@@ -837,11 +837,13 @@ decision_rules:
       - no_resistance_reference
       - composite_gates
   sell.single_share_exit:
+    # Toss is the only active KR account broker. NH PLUG may supply mock
+    # read-only market evidence but is never account inventory or an order route.
+    # Retired KIS rows are accepted only as non-routable historical replay data.
     lanes: [sell]
     semantics: >-
-      DEPRECATED AS THE GENERAL SINGLE-SHARE EXCLUSION/FALLBACK. Retained without
-      key deletion or activation change for historical KR KIS+Toss shadow and
-      replay evidence only. The replacement advisory path is
+      NARROW KR TOSS SINGLE-SHARE FAR-RESISTANCE SHADOW CLASSIFIER. The general
+      one-share advisory path remains
       sell.trim_preplace.single_share_full_exit_review, with disposition by
       phase25.10_single_share_exit_choice. This shadow rule cannot narrow that
       general advisory eligibility and cannot create, approve, or execute a
@@ -851,8 +853,8 @@ decision_rules:
     proposal_enabled: false
     scope:
       markets: [kr]
-      brokers: [kis, toss]
-      required_broker_inventory: [kis, toss]
+      brokers: [toss]
+      required_broker_inventory: [toss]
       order_routable_required: true
     conditions:
       symbol_routable_sellable_quantity_eq: 1
@@ -894,14 +896,14 @@ decision_rules:
     operator_approval_required: true
     recalibration_note: >-
       Fable governance advisory Q3-#4 Phase 1 seed; follow-up sell-policy
-      research must recalibrate this initial threshold. Deprecated as a general
-      fallback by D5 on 2026-07-27 and retained only for the existing KR
-      far-resistance shadow/replay cohort. General one-share advisory eligibility
-      is replaced by
+      research must recalibrate this initial threshold. D5 narrowed this rule
+      to the existing KR Toss far-resistance shadow/replay cohort on 2026-07-27.
+      General one-share advisory eligibility remains with
       sell.trim_preplace.single_share_full_exit_review and its 8% threshold
       sell.single_share_profit_pct_min; phase25.10_single_share_exit_choice owns
-      the full-static-target versus full-trailing verdict. Shadow evidence must
-      still be adversarially validated before proposal_enabled can be considered
+      the full-static-target versus full-trailing verdict. Retired KIS evidence
+      is non-routable replay context only. Shadow evidence must still be
+      adversarially validated before proposal_enabled can be considered
       separately by the operator.
 
   # GPT Pro trading retrospective Phase 2.5 (received 2026-07-25).

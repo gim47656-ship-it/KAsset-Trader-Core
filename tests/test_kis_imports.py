@@ -1,7 +1,7 @@
-"""Import smoke tests for KIS client module.
+"""Import smoke tests for the dormant KIS client modules.
 
-This module verifies that all KIS components can be imported correctly
-and that the facade pattern is properly wired.
+KIS components remain directly importable for historical parsing and client
+maintenance, but the package must not expose an eager runtime facade.
 """
 
 import asyncio
@@ -30,21 +30,17 @@ class TestKISImports:
         assert hasattr(BaseKISClient, "close")
 
     def test_facade_import(self):
-        """Test KISClient facade can be imported."""
-        from app.services.brokers.kis.client import KISClient, kis
+        """Test the dormant KISClient facade remains directly importable."""
+        from app.services.brokers.kis.client import KISClient
 
         assert KISClient is not None
-        assert kis is not None
-        assert isinstance(kis, KISClient)
 
     def test_sub_clients_import(self):
         """Test all sub-clients can be imported."""
-        from app.services.brokers.kis import (
-            AccountClient,
-            DomesticOrderClient,
-            MarketDataClient,
-            OverseasOrderClient,
-        )
+        from app.services.brokers.kis.account import AccountClient
+        from app.services.brokers.kis.domestic_orders import DomesticOrderClient
+        from app.services.brokers.kis.market_data import MarketDataClient
+        from app.services.brokers.kis.overseas_orders import OverseasOrderClient
 
         assert AccountClient is not None
         assert DomesticOrderClient is not None
@@ -169,15 +165,24 @@ class TestKISFacadeDelegation:
 class TestKISClientLifecycle:
     """Test KISClient lifecycle management."""
 
-    def test_singleton_instance(self):
-        """Test that kis singleton is properly initialized."""
-        from app.services.brokers.kis.client import KISClient, kis
+    def test_no_eager_singleton_or_package_facade_export(self):
+        """Dormant KIS support must not instantiate or export a runtime facade."""
+        import app.services.brokers.kis as kis_package
+        import app.services.brokers.kis.client as client_module
 
-        assert isinstance(kis, KISClient)
-        assert hasattr(kis, "_market_data")
-        assert hasattr(kis, "_account")
-        assert hasattr(kis, "_domestic_orders")
-        assert hasattr(kis, "_overseas_orders")
+        assert kis_package.__all__ == ()
+        assert not hasattr(client_module, "kis")
+        for export_name in (
+            "AccountClient",
+            "BaseKISClient",
+            "CorporateActionsClient",
+            "DomesticOrderClient",
+            "KISClient",
+            "KISClientProtocol",
+            "MarketDataClient",
+            "OverseasOrderClient",
+        ):
+            assert not hasattr(kis_package, export_name)
 
     @pytest.mark.asyncio
     async def test_close_is_idempotent(self):

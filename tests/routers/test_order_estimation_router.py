@@ -373,3 +373,41 @@ def test_filtering_and_skipping_rules(base_app):
         # threshold, XRP is not in tradable_currencies, ADA has no analysis.
         assert data["total_symbols"] == 1
         assert data["symbols"][0]["symbol"] == "KRW-BTC"
+
+
+@pytest.mark.unit
+def test_domestic_pending_cost_unavailable_is_explicit_503(base_app):
+    from app.services.order_estimation_service import (
+        PendingBuyCostUnavailableError,
+    )
+
+    with (
+        patch(
+            "app.routers.order_estimation.get_user_from_request",
+            new=AsyncMock(return_value=_user()),
+        ),
+        patch(
+            "app.routers.order_estimation.SymbolTradeSettingsService"
+        ) as MockSettingsSvc,
+        patch("app.routers.order_estimation.StockAnalysisService"),
+        patch(
+            "app.routers.order_estimation.fetch_pending_domestic_buy_cost",
+            new=AsyncMock(
+                side_effect=PendingBuyCostUnavailableError(
+                    market="kr", reason="provider_unavailable"
+                )
+            ),
+        ),
+    ):
+        MockSettingsSvc.return_value.get_all = AsyncMock(return_value=[])
+
+        response = TestClient(base_app).get(
+            "/api/symbol-settings/symbols/domestic/estimated-cost"
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "pending_buy_cost_unavailable",
+        "market": "kr",
+        "reason": "provider_unavailable",
+    }

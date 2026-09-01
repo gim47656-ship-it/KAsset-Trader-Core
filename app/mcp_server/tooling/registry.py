@@ -1,40 +1,25 @@
 """Tool registration orchestration for MCP server.
 
-ROB-1239: for what a `route_request` `blocked_actions` verdict does and does
-not mean relative to what this file registers, see the canonical statement in
-`app/mcp_server/tooling/route_request_registration.py`'s `route_request` tool
-`description=` string. Concrete anchor, McpProfile.DEFAULT (below):
-`kis_mock_get_order_history` is route-BLOCK on every lane and registers
-unconditionally (`register_kis_mock_order_tools`); the other four route-BLOCK
-KR mock reads (`kiwoom_mock_get_order_history`, `kiwoom_mock_get_order_detail`,
-`kiwoom_mock_get_positions`, `kiwoom_mock_get_orderable_cash`) register only
-when `settings.kiwoom_mock_enabled` is true (`orders_kiwoom_variants.register`)
-— code default False (`app/core/config.py:250`, `env.example:39`).
 
 Profile → tool surface mapping
 ────────────────────────────────────────────────────────────────────────────
 "default" (McpProfile.DEFAULT):
   All side-effect-free research tools (crypto research included — ROB-503) +
   read-only portfolio tools +
-  legacy ambiguous order tools (place_order / cancel_order / modify_order /
-  get_order_history with account_mode switching) +
-  typed kis_live_* and kis_mock_* variants (additive). Typed kiwoom_mock_* is
-  additive only when the existing ROB-601 feature gate is enabled. Alpaca paper
-  read/preview/confirm-gated order/ledger tools are additive only when the
-  ROB-908 ``alpaca_paper_default_tools_enabled`` gate is on — and even then the
-  ROB-842 automated-submit tool is excluded (US_PAPER-only). DB paper tools are
-  omitted.
+  generic order tools (equities route through Toss; crypto through Upbit) +
+  the crypto/Upbit-pinned live reconcile tool + typed Toss live variants.
+  Typed kiwoom_mock_* is additive only when the
+  existing ROB-601 feature gate is enabled. Alpaca paper read/preview/
+  confirm-gated order/ledger tools are additive only when the ROB-908
+  ``alpaca_paper_default_tools_enabled`` gate is on — and even then the
+  ROB-842 automated-submit tool is excluded (US_PAPER-only). DB paper tools
+  are omitted.
 
-"hermes-paper-kis" (McpProfile.HERMES_PAPER_KIS):
-  All side-effect-free research tools + read-only portfolio tools +
-  typed kis_mock_* variants ONLY.
-  Explicitly omits: register_order_tools, register_kis_live_order_tools.
 
 "crypto" (McpProfile.CRYPTO):
   Default research/read-only surface (crypto research tools register on every
   profile since ROB-503), the generic account_mode order tools (crypto live
-  trading entry point), and live_reconcile_orders (US/crypto evidence-gated
-  settle).
+  trading entry point), and the crypto/Upbit-pinned live reconcile tool.
 
 "us-paper" (McpProfile.US_PAPER):
   Default research/read-only surface plus Alpaca paper and us_dual_paper tools.
@@ -83,8 +68,8 @@ Profile → tool surface mapping
 
 "tradingcodex_execution" (McpProfile.TRADINGCODEX_EXECUTION):
   TradingCodex broker execution allowlist only. Registers account reads,
-  policy/route advisory reads, account-routing suggestion, USD/KRW FX read,
-  watch read tools (active watches + delivered watch events), learning-loop
+  policy/route advisory reads, USD/KRW FX read, watch read tools (active
+  watches + delivered watch events), learning-loop
   reads/writes (forecasts + trade retrospectives with explicit created_by
   provenance), dry-run/preview, live place, cancel, ladder fill-preview, and the
   seven mock-pinned typed Kiwoom tools required by the reviewed BrokerAdapter.
@@ -110,9 +95,6 @@ from app.mcp_server.profiles import McpProfile
 from app.mcp_server.tooling import orders_kiwoom_variants
 from app.mcp_server.tooling.account_read_registration import (
     register_account_read_tools,
-)
-from app.mcp_server.tooling.account_routing_registration import (
-    register_account_routing_tools,
 )
 from app.mcp_server.tooling.alpaca_paper import register_alpaca_paper_tools
 from app.mcp_server.tooling.alpaca_paper_ledger_read import (
@@ -152,15 +134,15 @@ from app.mcp_server.tooling.investment_reports_handlers import (
 from app.mcp_server.tooling.investment_snapshots_registration import (
     register_investment_snapshots_tools,
 )
+from app.mcp_server.tooling.live_reconcile_registration import (
+    register_live_reconcile_tools,
+)
 from app.mcp_server.tooling.market_brief_registration import (
     register_market_brief_tools,
 )
 from app.mcp_server.tooling.market_data_registration import register_market_data_tools
 from app.mcp_server.tooling.market_quote_snapshot_tools import (
     register_market_quote_snapshot_tools,
-)
-from app.mcp_server.tooling.mirror_counterfactual_registration import (
-    register_mirror_counterfactual_tools,
 )
 from app.mcp_server.tooling.mock_loop_retro_registration import (
     register_mock_loop_retro_tools,
@@ -170,11 +152,6 @@ from app.mcp_server.tooling.operating_briefing_registration import (
     register_operating_briefing_tools,
 )
 from app.mcp_server.tooling.order_proposal_tools import register_order_proposal_tools
-from app.mcp_server.tooling.orders_kis_variants import (
-    register_kis_live_order_tools,
-    register_kis_mock_order_tools,
-    register_live_reconcile_tools,
-)
 from app.mcp_server.tooling.orders_registration import register_order_tools
 from app.mcp_server.tooling.orders_toss_variants import (
     register_toss_live_order_tools,
@@ -225,7 +202,6 @@ from app.mcp_server.tooling.trading_scoreboard_registration import (
 from app.mcp_server.tooling.tradingcodex_execution_registration import (
     register_tradingcodex_execution_tools,
 )
-from app.mcp_server.tooling.us_dual_paper import register_us_dual_paper_tools
 from app.mcp_server.tooling.user_settings_registration import (
     register_user_settings_tools,
 )
@@ -289,10 +265,10 @@ class _AccountPinnedMCP:
 def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -> None:
     """Register MCP tools according to the given profile.
 
-    Side-effect-free research and read-only tools are always registered.
-    Side-effect order tool registration depends on profile:
-      - DEFAULT: legacy ambiguous tools + typed kis_live_* + typed kis_mock_*
-      - HERMES_PAPER_KIS: typed kis_mock_* only (live surface absent)
+    Side-effect order tool registration depends on profile. DEFAULT exposes
+    generic Toss/Upbit routing, the Upbit-only accepted-order reconcile tool,
+    and typed Toss tools; provider-specific paper profiles keep their existing
+    isolated surfaces.
     """
     if profile is McpProfile.SHADOW_REPLAY:
         # ROB-697 M1 — frozen-context replay ONLY: read the bundle + policy +
@@ -405,9 +381,8 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
     register_news_tools(mcp)
     register_market_brief_tools(mcp)
 
-    # Always: live/mock account read-only tools and journals.
+    # Always: Toss/Upbit/manual account read-only tools and journals.
     register_portfolio_tools(mcp)
-    register_account_routing_tools(mcp)
     register_trade_journal_tools(mcp)
     # ROB-928 — downside watch auto-register sweep; read-only advisory
     # (notify-only watch registration only, no broker/order mutation).
@@ -421,11 +396,6 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
     )
     register_forecast_tools(mcp)
     register_trading_scoreboard_tools(mcp)
-    # ROB-1173: this is a direct KIS mock broker mutation despite its report
-    # name. The KR-only Kiwoom profile must not inherit it from the broad shared
-    # block; its only broker mutation surface is the typed Kiwoom KR namespace.
-    if profile is not McpProfile.KIWOOM_KR:
-        register_mirror_counterfactual_tools(mcp)
     # ROB-713 — setup-tagged trade-journal aggregates; read-only, registered
     # unconditionally like the forecast tools it parallels.
 
@@ -446,11 +416,8 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
     if profile is McpProfile.DEFAULT:
         # ROB-703: paper resting-limit sim tools (pure simulation, no live/Upbit mutation).
         register_paper_limit_order_tools(mcp)
-        # Preserve today's behavior: ambiguous account_mode tools for legacy callers.
-        # Typed kis_live_* and kis_mock_* are additive — new typed callers use them.
+        # Generic equity requests use Toss; crypto requests keep the Upbit path.
         register_order_tools(mcp)
-        register_kis_live_order_tools(mcp)
-        register_kis_mock_order_tools(mcp)
         register_live_reconcile_tools(mcp)
         register_toss_live_order_tools(mcp)
         # ROB-866: Toss manual-activity detection sweep (read-only; alert-only).
@@ -499,14 +466,9 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
         if settings.alpaca_paper_default_tools_enabled:
             register_alpaca_paper_tools(mcp)
             register_alpaca_paper_preview_tools(mcp)
-            register_us_dual_paper_tools(mcp)
             register_alpaca_paper_orders_tools(mcp)
             register_alpaca_paper_ledger_read_tools(mcp)
             register_market_quote_snapshot_tools(mcp)
-    elif profile is McpProfile.HERMES_PAPER_KIS:
-        # Paper-only: only mock-pinned order surface. Live surface is physically absent.
-        register_kis_mock_order_tools(mcp)
-        # Intentionally NOT: register_order_tools, register_kis_live_order_tools
     elif profile is McpProfile.US_PAPER:
         from app.mcp_server.tooling.alpaca_paper_automated_orders import (
             register_alpaca_paper_automated_orders_tools,
@@ -514,7 +476,6 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
 
         register_alpaca_paper_tools(mcp)
         register_alpaca_paper_preview_tools(mcp)
-        register_us_dual_paper_tools(mcp)
         register_alpaca_paper_orders_tools(mcp)
         register_alpaca_paper_automated_orders_tools(mcp)
         register_alpaca_paper_ledger_read_tools(mcp)
@@ -546,9 +507,8 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
         register_kiwoom_kr_tools(mcp)
     elif profile is McpProfile.CRYPTO:
         # Crypto live trading enters through the generic account_mode order
-        # tools (the only MCP entry point for Upbit orders, with ROB-407
-        # inline reconcile) and settles through live_reconcile_orders.
-        # Without these a crypto session could research but never trade.
+        # tools. Accepted limit orders settle only through the explicitly
+        # crypto/Upbit-pinned reconcile wrapper.
         register_order_tools(mcp)
         register_live_reconcile_tools(mcp)
 

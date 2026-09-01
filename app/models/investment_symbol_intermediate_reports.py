@@ -65,6 +65,7 @@ REPORT_KINDS: tuple[str, ...] = ("final_report_symbol",)
 ACCOUNT_SCOPES: tuple[str, ...] = (
     "kis_live",
     "kis_mock",
+    "toss_live",
     "alpaca_paper",
     "upbit_live",
 )

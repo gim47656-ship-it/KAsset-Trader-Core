@@ -149,8 +149,8 @@ def _portfolio_numeric_baseline(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 _MARKET_ACCOUNT_PAIRS: dict[str, str] = {
-    "kr": "kis_live",
-    "us": "kis_live",  # ROB-297 — KIS overseas (US) stock account.
+    "kr": "toss_live",
+    "us": "toss_live",
     "crypto": "upbit_live",
 }
 
@@ -500,6 +500,8 @@ class SnapshotBackedReportGenerator:
     # Internal helpers
     # ------------------------------------------------------------------
     def _validate_pair(self, request: ReportGenerationRequest) -> None:
+        if str(request.account_scope).startswith("kis"):
+            raise SnapshotBackedReportGeneratorError("provider kis is not operational")
         expected = _MARKET_ACCOUNT_PAIRS.get(request.market)
         if expected is None or request.account_scope != expected:
             raise SnapshotBackedReportGeneratorError(
@@ -563,16 +565,15 @@ class SnapshotBackedReportGenerator:
         bundle_uuid: UUID,
         request: ReportGenerationRequest,
     ) -> list[Any]:
-        """ROB-278 Phase 2 — deterministic, evidence-driven proposer.
+        """저장된 근거만으로 review 항목을 만드는 deterministic proposer.
 
-        Reads the persisted snapshot bundle (portfolio / symbol+quote /
-        candidate_universe / news / watch_context / journal) and emits
-        ``IngestReportItem``s with ``operation="review"`` +
-        ``apply_policy="requires_user_approval"``. The proposer is
-        fail-closed: no candidates are emitted unless the evidence
-        explicitly supports them (quote.status=='ok' with spread/depth for
-        buy; portfolio.primary_source=='kis' + sellable_quantity > 0 for
-        sell). Mutation paths are unreachable from this code path.
+        portfolio / symbol+quote / candidate_universe / news /
+        watch_context / journal snapshot을 읽고 항상
+        ``operation="review"``와 ``apply_policy="requires_user_approval"``를
+        유지한다. buy는 actionable quote가, sell 검토는 Toss-primary의
+        양수 보유 수량과 actionable quote가 있어야 한다. 실제 주문 가능
+        수량은 주문 경계의 Toss preflight가 확인하며 이 경로는 mutation을
+        호출하지 않는다.
         """
         from app.services.action_report.snapshot_backed.auto_emit import (
             EvidenceAutoEmitter,
@@ -695,10 +696,8 @@ class SnapshotBackedReportGenerator:
                 if isinstance(orders, list):
                     pending_orders.extend(orders)
             elif snapshot.snapshot_kind == "symbol":
-                # ROB-278 Phase 2 — per-symbol quote evidence (when the
-                # symbol collector enriched the snapshot via KIS read-only
-                # quote/orderbook). symbol may be set on the snapshot row
-                # itself (per-symbol kind), and is also echoed in payload.
+                # 종목 collector가 Toss quote를 보강한 경우의 종목별 근거다.
+                # symbol은 snapshot row 자체에도 있고 payload에도 반복될 수 있다.
                 symbol = getattr(snapshot, "symbol", None) or payload.get("symbol")
                 quote = payload.get("quote")
                 if isinstance(symbol, str) and isinstance(quote, dict):

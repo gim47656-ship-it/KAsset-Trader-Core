@@ -15,12 +15,9 @@ v1.8의 KR 전용 일괄 경계를 사용한다. 위험한 쪽은 기본값이 �
 
 ## 1. 왜 kiwoom 인가 (§39차)
 
-`kis_mock` 이 `40910000 모의투자 주문이 불가한 계좌입니다` 로 **계좌 단위 거절**
-중이라, B0-X KR venue 를 한시 대체한다. kiwoom mock 의 기술 이점은 **미체결
-조회와 취소가 실제로 지원된다**는 것이다 — kis_mock 의 구조적 약점이 없다.
-
-`scripts/b0x/kr/mock.py`(kis) 는 **무접촉**이다. kis_mock 계좌 참가가 복구되면
-그 레인은 이 PR 이전과 완전히 동일하게 동작해야 한다.
+KIS mock 레인은 운영 cutover로 제거되었다. 이 Kiwoom mock 레인은 KIS의
+임시 fallback이 아니라 독립적으로 승인된 KR mock 경계이며, KIS 복구를 이유로
+provider를 자동 전환하지 않는다.
 
 ## 2. 계좌맵 (operator `a43e36e`, PR #39; merge 대기)
 
@@ -34,7 +31,7 @@ v1.8의 KR 전용 일괄 경계를 사용한다. 위험한 쪽은 기본값이 �
 🔴 **B0-X 는 이 계좌의 단독 소유자가 아니라 공존 배정이다.**
 
 - KR-B1 주문 발행과 **동시 사용 금지**
-- KR-B1 재가동 시 재결정 · `kis_mock` 복구 시 복귀
+- KR-B1 재가동 시 별도 재결정이 필요하며 KIS 레인 복귀는 금지한다.
 - 배타성 확보 = **운영 조치**(KR-B1 비활성 확인). 코드가 제공하는 것은
   *탐지*뿐이다: 당일 자기 외 주문 흔적이 있으면 preflight 가 fail-closed
   (`CONTAMINATED_foreign_same_day_orders_kr_b1_active_suspect`).

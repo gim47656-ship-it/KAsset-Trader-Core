@@ -9,8 +9,8 @@ from pandas import DataFrame
 
 from app.core.async_rate_limiter import get_limiter
 from app.core.config import settings
-from app.services.brokers.kis.pre_send import PreSendHook
 from app.services.brokers.kis.send_outcome import OrderSendOutcomeTracker
+from app.services.brokers.pre_send import PreSendHook
 from app.services.redis_token_manager import get_kis_mock_token_manager
 
 from .account import AccountClient, extract_domestic_cash_summary_from_integrated_margin
@@ -38,7 +38,6 @@ __all__ = [
     "KOREA_ORDER_URL",
     "extract_domestic_cash_summary_from_integrated_margin",
     "get_limiter",
-    "kis",
     "settings",
 ]
 
@@ -671,6 +670,3 @@ class KISClient(BaseKISClient):
         return await self._overseas_orders.modify_overseas_order(
             order_number, symbol, exchange_code, quantity, new_price, is_mock
         )
-
-
-kis = KISClient()

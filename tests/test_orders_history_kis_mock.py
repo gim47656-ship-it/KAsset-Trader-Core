@@ -1,57 +1,29 @@
 import pytest
 
-PENDING_MOCK_UNSUPPORTED_BY_MARKET = {
-    "kr": (
-        "equity_kr",
-        "KIS domestic pending-orders inquiry (TTTC8036R) is not available in mock mode.",
-    ),
-    "us": (
-        "equity_us",
-        "KIS overseas pending-orders inquiry (TTTS3018R) is not available in mock mode.",
-    ),
-}
-
-
-class PendingMockUnsupportedKIS:
-    def __init__(self, *, is_mock: bool = False) -> None:
-        self.is_mock = is_mock
-
-    async def inquire_korea_orders(self, *, is_mock=False):
-        raise RuntimeError(PENDING_MOCK_UNSUPPORTED_BY_MARKET["kr"][1])
-
-    async def inquire_overseas_orders(self, exchange, *, is_mock=False):
-        raise RuntimeError(PENDING_MOCK_UNSUPPORTED_BY_MARKET["us"][1])
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("market", ["kr", "us"])
 async def test_get_order_history_pending_mock_surfaces_unsupported(
-    monkeypatch,
-    caplog,
     market: str,
 ):
-    """Mock pending history must surface a structured mock-unsupported error."""
+    """Removed KIS mock intents fail closed without restoring a KIS client seam."""
     from app.mcp_server.tooling import orders_history
-
-    expected_market, _ = PENDING_MOCK_UNSUPPORTED_BY_MARKET[market]
-    monkeypatch.setattr(orders_history, "KISClient", PendingMockUnsupportedKIS)
 
     result = await orders_history.get_order_history_impl(
         status="pending", market=market, is_mock=True
     )
 
-    if result["orders"]:
-        assert result["success"] is True
-        assert all(
-            o.get("source") == "kis_mock_ledger_shadow" for o in result["orders"]
-        )
-        assert any("shadow pending" in warning for warning in result["warnings"])
-        assert result["errors"] == []
-    else:
-        assert result["errors"] == [] or any(
-            e.get("market") == expected_market for e in result["errors"]
-        )
-        assert result["errors"] or any(
-            "using DB shadow pending ledger" in record.getMessage()
-            for record in caplog.records
-        )
+    assert result == {
+        "success": False,
+        "account_mode": "kis_mock",
+        "error": "provider kis is not operational",
+        "detail": "KIS mock order history is provider_unsupported",
+        "source": "unsupported",
+        "orders": [],
+        "errors": [
+            {
+                "market": market,
+                "error": "provider kis is not operational",
+            }
+        ],
+    }

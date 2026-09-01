@@ -209,10 +209,9 @@ def compact_cost_profile(
     }
 
 
-def _candidate_accounts(market: Market) -> tuple[str, str]:
-    if market == "kr":
-        return ("kis_domestic", "toss")
-    return ("kis_overseas", "toss")
+def _candidate_accounts(market: Market) -> tuple[str, ...]:
+    _ = market
+    return ("toss",)
 
 
 def cost_profile_account_id(
@@ -222,11 +221,10 @@ def cost_profile_account_id(
     broker: str | None = None,
     source: str | None = None,
 ) -> str:
-    """Map holdings account labels to routing/cost account ids.
+    """과거 보유 계정 label을 저장된 cost-profile ID로 정규화한다.
 
-    KIS holdings are grouped as ``account='kis'`` by portfolio_holdings, while
-    cash/cost profiles are split by market as ``kis_domestic`` and
-    ``kis_overseas``.
+    신규 추천 후보는 Toss로 제한되며, 이 매핑은 과거 KIS 보유 row의
+    읽기 호환성에만 사용된다.
     """
     normalized = str(account_id or "").strip().lower()
     normalized_broker = str(broker or "").strip().lower()
@@ -491,7 +489,7 @@ def _consolidation_note(decision: str) -> str:
         return "Position is already split across candidate accounts; cheapest eligible account wins."
     if decision == "no_eligible_account":
         return "No compared account has enough eligible buying power."
-    return "No existing KIS/Toss position; cheapest eligible account wins."
+    return "No existing Toss position; Toss is the only operational equity account."
 
 
 __all__ = [

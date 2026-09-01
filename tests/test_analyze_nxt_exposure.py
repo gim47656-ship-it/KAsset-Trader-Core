@@ -9,7 +9,7 @@ from app.mcp_server.tooling.analysis_tool_handlers import _summarize_analysis_re
 def test_summary_copies_nxt_fields_from_quote():
     analysis = {
         "market_type": "equity_kr",
-        "source": "kis",
+        "source": "toss",
         "quote": {
             "price": 70000,
             "nxt_tradable": True,
@@ -25,13 +25,10 @@ def test_summary_copies_nxt_fields_from_quote():
 
 
 @pytest.mark.unit
-def test_summary_copies_self_describing_premarket_fields_from_quote():
-    """ROB-888: the compact analyze_stock_batch summary must carry
-    krx_prev_close / change_pct / session_state so the operator can cross-check
-    the premarket gap from the MCP response alone (no CDP naver)."""
+def test_summary_drops_legacy_nxt_quote_provenance():
     analysis = {
         "market_type": "equity_kr",
-        "source": "kis",
+        "source": "toss",
         "quote": {
             "price": 2082500.0,
             "price_source": "nxt_mid",
@@ -39,21 +36,26 @@ def test_summary_copies_self_describing_premarket_fields_from_quote():
             "session_state": "premarket",
             "krx_prev_close": 1913000.0,
             "change_pct": 8.86,
+            "quote_asof": "2026-07-03T08:30:00+09:00",
         },
     }
+
     summary = _summarize_analysis_result("000660", analysis)
-    assert summary["current_price"] == 2082500.0
-    assert summary["price_source"] == "nxt_mid"
-    assert summary["session_state"] == "premarket"
-    assert summary["krx_prev_close"] == 1913000.0
-    assert summary["change_pct"] == 8.86
+
+    assert summary["current_price"] is None
+    assert "price_source" not in summary
+    assert "session" not in summary
+    assert "session_state" not in summary
+    assert "krx_prev_close" not in summary
+    assert "change_pct" not in summary
+    assert "quote_asof" not in summary
 
 
 @pytest.mark.unit
 def test_summary_us_has_no_nxt_fields():
     analysis = {
         "market_type": "equity_us",
-        "source": "yahoo",
+        "source": "toss",
         "quote": {"price": 100.0},
     }
     summary = _summarize_analysis_result("AAPL", analysis)

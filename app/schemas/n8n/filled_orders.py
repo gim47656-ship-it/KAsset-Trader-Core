@@ -24,9 +24,7 @@ class N8nFilledOrderItem(BaseModel):
     )
     fee: float = Field(0, description="Trading fee")
     currency: str = Field(..., description="KRW or USD")
-    account: str = Field(
-        ..., description="Account identifier: upbit, kis, kis_overseas"
-    )
+    account: str = Field(..., description="운영 계좌 식별자: toss 또는 upbit")
     order_id: str = Field(..., description="Unique order identifier from broker")
     filled_at: str = Field(..., description="Execution timestamp in KST ISO8601")
     current_price: float | None = Field(None, description="Current market price")

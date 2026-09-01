@@ -60,13 +60,13 @@ def test_layer_ii_and_iii_agree_on_optional_unavailable_does_not_block():
     constraints = derive_generator_constraints(
         bundle_status="partial",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     lint = lint_action_language(
         report_text="매수 추천",
         bundle_status="partial",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     assert constraints.allow_action_language is True
@@ -92,13 +92,13 @@ def test_layer_ii_and_iii_agree_on_each_critical_kind_degradation():
             constraints = derive_generator_constraints(
                 bundle_status="partial",
                 freshness_summary=freshness,
-                account_scope="kis_live",
+                account_scope="toss_live",
             )
             lint = lint_action_language(
                 report_text="매수 권고",
                 bundle_status="partial",
                 freshness_summary=freshness,
-                account_scope="kis_live",
+                account_scope="toss_live",
             )
 
             assert constraints.allow_action_language is False, (
@@ -121,13 +121,13 @@ def test_layer_ii_and_iii_agree_on_bundle_status_failed_blocks():
     constraints = derive_generator_constraints(
         bundle_status="failed",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     lint = lint_action_language(
         report_text="매수",
         bundle_status="failed",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert constraints.allow_action_language is False
     assert lint.ok is False
@@ -145,13 +145,13 @@ def test_layer_ii_and_iii_agree_on_bundle_status_stale_fallback_blocks():
     constraints = derive_generator_constraints(
         bundle_status="stale_fallback",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     lint = lint_action_language(
         report_text="매수",
         bundle_status="stale_fallback",
         freshness_summary=freshness,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert constraints.allow_action_language is False
     assert lint.ok is False
@@ -183,13 +183,13 @@ def test_layer_ii_and_iii_agree_on_legacy_bundle_status_none_bypass():
     constraints = derive_generator_constraints(
         bundle_status=None,
         freshness_summary=None,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     lint = lint_action_language(
         report_text="매수",
         bundle_status=None,
         freshness_summary=None,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert constraints.allow_action_language is True
     assert lint.ok is True

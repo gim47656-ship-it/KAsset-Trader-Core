@@ -75,9 +75,10 @@
 자격증명 전부가 들어 있어, 시세 읽기 하나를 위해 그것들을 프로세스에 올리는 것은 이
 설계와 정면으로 충돌한다. CLI 는 파일명에 `prod` 가 들어가면 거부한다.
 
-`Settings` 는 무관한 필수 필드(`KIS_APP_KEY`, `DATABASE_URL`, `SECRET_KEY` 등)를
-요구하므로, CLI 가 **명백히 동작하지 않는 placeholder** 를 채워 넣는다. DB 는 열지
-않으며 placeholder DSN 은 닫힌 포트를 가리킨다.
+CLI가 모델 생성에 필요한 DB/secret placeholder를 쓰더라도 KIS credential
+placeholder는 필요하지 않다. KIS app key/secret은 optional dormant 설정이며 이
+Kiwoom 전용 env에 추가하지 않는다. DB는 열지 않고 placeholder DSN은 닫힌 포트를
+가리킨다.
 
 ---
 

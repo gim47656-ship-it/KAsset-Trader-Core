@@ -35,7 +35,7 @@ from app.models.base import Base
 
 _ACCOUNT_SCOPE_CHECK = (
     "account_scope IS NULL OR account_scope IN "
-    "('kis_live','kis_mock','alpaca_paper','upbit_live')"
+    "('kis_live','kis_mock','toss_live','alpaca_paper','upbit_live')"
 )
 _MARKET_CHECK = "market IN ('kr','us','crypto')"
 

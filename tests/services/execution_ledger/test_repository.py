@@ -7,12 +7,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
-from sqlalchemy import delete
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import CheckConstraint, delete
 
 from app.models.execution_ledger import ExecutionLedger
 from app.models.trading import InstrumentType
-from app.schemas.execution_ledger import ExecutionLedgerUpsert, ReconcileRunRecord
+from app.schemas.execution_ledger import (
+    ExecutionLedgerUpsert,
+    ReconcileRunBroker,
+    ReconcileRunRecord,
+)
 from app.services.execution_ledger.repository import (
     ExecutionLedgerRepository,
     _values_differ,
@@ -48,15 +52,44 @@ def _row(fill: ExecutionLedgerUpsert) -> ExecutionLedger:
     return ExecutionLedger(**fill.model_dump())
 
 
-def test_reconcile_run_record_rejects_toss_broker() -> None:
+def test_operational_reconcile_broker_schema_rejects_kis() -> None:
+    adapter = TypeAdapter(ReconcileRunBroker)
+
+    assert adapter.validate_python("toss") == "toss"
+    assert adapter.validate_python("upbit") == "upbit"
     with pytest.raises(ValidationError):
-        ReconcileRunRecord(
-            run_id=uuid.uuid4(),
-            broker="toss",
-            window_start=datetime(2026, 7, 7, 0, 0, tzinfo=UTC),
-            window_end=datetime(2026, 7, 7, 1, 0, tzinfo=UTC),
-            dry_run=False,
-        )
+        adapter.validate_python("kis")
+
+
+def test_reconcile_run_record_deserializes_historical_kis() -> None:
+    record = ReconcileRunRecord(
+        run_id=uuid.uuid4(),
+        broker="kis",
+        window_start=datetime(2026, 7, 7, 0, 0, tzinfo=UTC),
+        window_end=datetime(2026, 7, 7, 1, 0, tzinfo=UTC),
+        dry_run=False,
+    )
+
+    assert record.broker == "kis"
+
+
+def test_execution_ledger_upsert_rejects_new_kis_write() -> None:
+    with pytest.raises(ValidationError):
+        _fill(broker="kis")
+
+
+def test_reconcile_run_model_constraint_is_additive_for_toss() -> None:
+    from app.models.execution_ledger import ExecutionLedgerReconcileRun
+
+    constraint = next(
+        item
+        for item in ExecutionLedgerReconcileRun.__table__.constraints
+        if isinstance(item, CheckConstraint)
+        and item.name
+        == "ck_execution_ledger_reconcile_runs_execution_ledger_runs_broker"
+    )
+
+    assert str(constraint.sqltext) == "broker IN ('kis','upbit','toss')"
 
 
 class _AggregateResult:

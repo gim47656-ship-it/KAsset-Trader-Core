@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,107 +11,125 @@ import pytest
 from app.core.timezone import now_kst
 
 
+def _toss_order(
+    *,
+    order_id: str,
+    symbol: str,
+    filled_quantity: str = "4",
+    average_price: str = "77.37",
+):
+    from app.services.brokers.toss.dto import TossOrder
+
+    return TossOrder(
+        order_id=order_id,
+        symbol=symbol,
+        side="SELL",
+        order_type="LIMIT",
+        time_in_force="DAY",
+        status="FILLED",
+        price=Decimal(average_price),
+        quantity=Decimal(filled_quantity),
+        order_amount=None,
+        currency="KRW" if symbol.isdigit() else "USD",
+        ordered_at=(now_kst() - timedelta(hours=1)).isoformat(),
+        canceled_at=None,
+        execution={
+            "filledQuantity": Decimal(filled_quantity),
+            "averageFilledPrice": Decimal(average_price),
+            "filledAmount": Decimal(filled_quantity) * Decimal(average_price),
+            "commission": Decimal("0.5"),
+            "tax": Decimal("0.2"),
+        },
+    )
+
+
 @pytest.mark.unit
-class TestKISOverseasFilledOrdersFetch:
+class TestTossFilledOrdersFetch:
     @pytest.mark.asyncio
-    async def test_uses_single_us_wide_history_query_and_dedupes(self, monkeypatch):
+    async def test_reads_closed_orders_and_filters_requested_market(self, monkeypatch):
         from app.services import filled_orders_service as svc
+        from app.services.brokers.toss.dto import TossOrdersPage
 
-        fake_kis = MagicMock()
-        fake_kis.inquire_daily_order_overseas = AsyncMock(
-            return_value=[
-                {
-                    "odno": "US-1",
-                    "pdno": "UBER",
-                    "sll_buy_dvsn_cd": "01",
-                    "ft_ccld_qty": "4",
-                    "ft_ccld_unpr3": "77.37",
-                    "ft_ccld_amt3": "309.48",
-                    "ord_dt": "20260506",
-                    "ord_tmd": "230005",
-                },
-                {
-                    "odno": "US-1",
-                    "pdno": "UBER",
-                    "sll_buy_dvsn_cd": "01",
-                    "ft_ccld_qty": "4",
-                    "ft_ccld_unpr3": "77.37",
-                    "ft_ccld_amt3": "309.48",
-                    "ord_dt": "20260506",
-                    "ord_tmd": "230005",
-                },
-            ]
+        client = MagicMock()
+        client.list_orders = AsyncMock(
+            return_value=TossOrdersPage(
+                orders=[
+                    _toss_order(order_id="KR-1", symbol="005930"),
+                    _toss_order(order_id="US-1", symbol="UBER"),
+                ],
+                next_cursor=None,
+                has_next=False,
+            )
         )
-        monkeypatch.setattr(svc, "KISClient", lambda: fake_kis)
+        client.aclose = AsyncMock()
+        monkeypatch.setattr(svc, "_default_toss_read_client", lambda: client)
 
-        orders, errors = await svc._fetch_kis_overseas_filled(days=7)
+        orders, errors = await svc._fetch_toss_filled(days=7, markets={"us"})
 
         assert errors == []
         assert [order["order_id"] for order in orders] == ["US-1"]
-        fake_kis.inquire_daily_order_overseas.assert_awaited_once()
-        assert (
-            fake_kis.inquire_daily_order_overseas.await_args.kwargs["exchange_code"]
-            == "NASD"
-        )
-        assert fake_kis.inquire_daily_order_overseas.await_args.kwargs["symbol"] == "%"
+        assert orders[0]["account"] == "toss"
+        assert orders[0]["instrument_type"] == "equity_us"
+        assert orders[0]["quantity"] == pytest.approx(4.0)
+        assert orders[0]["price"] == pytest.approx(77.37)
+        assert orders[0]["fee"] == pytest.approx(0.7)
+        assert client.list_orders.await_args.kwargs["status"] == "CLOSED"
+        client.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_multiple_fills_same_order_id_different_fill_seq_are_all_kept(
+    async def test_paginates_closed_orders_without_duplicate_provider_queries(
         self, monkeypatch
     ):
-        """Issue 3 regression: dedup must be by (order_id, fill_seq) not order_id alone."""
         from app.services import filled_orders_service as svc
+        from app.services.brokers.toss.dto import TossOrdersPage
 
-        # Two rows with same order_id but different execution times → different hash fill_seq
-        fake_kis = MagicMock()
-        fake_kis.inquire_daily_order_overseas = AsyncMock(
-            return_value=[
-                {
-                    "odno": "PARTIAL-ORDER",
-                    "pdno": "MSFT",
-                    "sll_buy_dvsn_cd": "02",
-                    "ft_ccld_qty": "5",
-                    "ft_ccld_unpr3": "420.00",
-                    "ft_ccld_amt3": "2100.00",
-                    "ord_dt": "20260513",
-                    "ord_tmd": "090000",  # different time → different hash
-                },
-                {
-                    "odno": "PARTIAL-ORDER",
-                    "pdno": "MSFT",
-                    "sll_buy_dvsn_cd": "02",
-                    "ft_ccld_qty": "3",
-                    "ft_ccld_unpr3": "421.00",
-                    "ft_ccld_amt3": "1263.00",
-                    "ord_dt": "20260513",
-                    "ord_tmd": "091500",  # different time → different hash
-                },
+        client = MagicMock()
+        client.list_orders = AsyncMock(
+            side_effect=[
+                TossOrdersPage(
+                    orders=[_toss_order(order_id="US-1", symbol="AAPL")],
+                    next_cursor="next",
+                    has_next=True,
+                ),
+                TossOrdersPage(
+                    orders=[_toss_order(order_id="US-2", symbol="MSFT")],
+                    next_cursor=None,
+                    has_next=False,
+                ),
             ]
         )
-        monkeypatch.setattr(svc, "KISClient", lambda: fake_kis)
+        client.aclose = AsyncMock()
+        monkeypatch.setattr(svc, "_default_toss_read_client", lambda: client)
 
-        orders, errors = await svc._fetch_kis_overseas_filled(days=7)
+        orders, errors = await svc._fetch_toss_filled(days=7, markets={"us"})
 
         assert errors == []
-        # Both fills must be kept because they have different fill_seq
-        assert len(orders) == 2
-        assert all(o["order_id"] == "PARTIAL-ORDER" for o in orders)
-        assert orders[0]["fill_seq"] != orders[1]["fill_seq"]
+        assert [order["order_id"] for order in orders] == ["US-1", "US-2"]
+        assert client.list_orders.await_count == 2
+        assert client.list_orders.await_args_list[1].kwargs["cursor"] == "next"
 
     @pytest.mark.asyncio
-    async def test_us_wide_history_failure_returns_error(self, monkeypatch):
+    async def test_provider_failure_returns_each_requested_market_error(
+        self, monkeypatch
+    ):
         from app.services import filled_orders_service as svc
 
-        fake_kis = MagicMock()
-        fake_kis.inquire_daily_order_overseas = AsyncMock(
-            side_effect=RuntimeError("history unavailable")
-        )
-        monkeypatch.setattr(svc, "KISClient", lambda: fake_kis)
+        client = MagicMock()
+        client.list_orders = AsyncMock(side_effect=RuntimeError("history unavailable"))
+        client.aclose = AsyncMock()
+        monkeypatch.setattr(svc, "_default_toss_read_client", lambda: client)
 
-        orders, errors = await svc._fetch_kis_overseas_filled(days=7)
+        orders, errors = await svc._fetch_toss_filled(
+            days=7,
+            markets={"kr", "us"},
+        )
 
         assert orders == []
-        assert errors == [{"market": "us", "error": "history unavailable"}]
+        assert errors == [
+            {"market": "kr", "error": "history unavailable"},
+            {"market": "us", "error": "history unavailable"},
+        ]
+        client.aclose.assert_awaited_once()
 
 
 @pytest.mark.unit

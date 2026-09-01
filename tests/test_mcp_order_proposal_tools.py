@@ -106,7 +106,7 @@ def _create_kwargs(**overrides):
     kwargs = {
         "symbol": "005930",
         "market": "equity_kr",
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "side": "buy",
         "order_type": "limit",
         "proposer": "operator:sess-dispatch",
@@ -178,7 +178,7 @@ async def test_create_surfaces_typed_approval_dispatch_block(monkeypatch):
             valid_until=deadline,
             policy_stamp="order-proposal-approval-window-v1:test",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             action="place",
             order_type="limit",
             detail="now_at_or_after_valid_until",
@@ -588,15 +588,14 @@ async def test_toss_create_reader_failure_is_non_blocking_unavailable_advisory(
 
 
 @pytest.mark.asyncio
-async def test_create_advisory_skips_kis_and_sell_proposals(monkeypatch):
+async def test_create_advisory_rejects_kis_and_skips_toss_sell(monkeypatch):
     async def forbidden_reader(**kwargs):
         pytest.fail(f"unsupported create advisory read: {kwargs}")
 
     monkeypatch.setattr(opt, "default_buying_power_reader", forbidden_reader)
-    kis = await opt.order_proposal_create(**_create_kwargs())
+    kis = await opt.order_proposal_create(**_create_kwargs(account_mode="kis_live"))
     toss_sell = await opt.order_proposal_create(
         **_create_kwargs(
-            account_mode="toss_live",
             side="sell",
             rungs=[
                 {
@@ -610,9 +609,14 @@ async def test_create_advisory_skips_kis_and_sell_proposals(monkeypatch):
         )
     )
 
-    assert kis["success"] is True
+    assert kis["success"] is False
+    assert kis["requested"] == {
+        "account_mode": "kis_live",
+        "market": "equity_kr",
+        "action": "place",
+    }
+    assert "proposal_id" not in kis
     assert toss_sell["success"] is True
-    assert "buying_power_advisory" not in kis
     assert "buying_power_advisory" not in toss_sell
 
 
@@ -652,7 +656,6 @@ async def test_create_rejects_unknown_market_with_allowed_contract_guidance():
     )
 
     assert result["success"] is False
-    assert "allowed: kis_live×equity_kr|equity_us" in result["error"]
     assert "toss_live×equity_kr|equity_us" in result["error"]
     assert "upbit×crypto" in result["error"]
     assert "market aliases kr→equity_kr, us→equity_us" in result["error"]
@@ -666,11 +669,12 @@ def test_create_docstring_documents_markets_aliases_and_account_modes():
         "crypto",
         "kr",
         "us",
-        "kis_live",
         "toss_live",
         "upbit",
     ):
         assert value in doc
+    assert "kis_live" not in doc
+    assert "kis_mock" not in doc
 
 
 @pytest.mark.asyncio
@@ -849,7 +853,7 @@ async def test_create_then_get_then_list():
     created = await opt.order_proposal_create(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="operator:sess-x",
@@ -883,7 +887,7 @@ async def test_get_and_list_project_safe_auto_approve_rejection_evidence():
     created = await opt.order_proposal_create(
         symbol="AUTO-REJECT-EVIDENCE",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="operator:sess-evidence",
@@ -974,7 +978,7 @@ async def test_get_and_list_project_auto_approved_cap_observations():
     created = await opt.order_proposal_create(
         symbol="QQQ",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="operator:cap-observation",
@@ -1228,7 +1232,7 @@ async def test_create_rejects_empty_rungs():
     res = await opt.order_proposal_create(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -1647,7 +1651,7 @@ async def test_list_expired_defensive_filters_by_market(monkeypatch):
         **_create_kwargs(
             symbol="MCPHANDOFF3",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="sell",
             exit_intent="loss_cut",
             exit_reason="stop_loss",

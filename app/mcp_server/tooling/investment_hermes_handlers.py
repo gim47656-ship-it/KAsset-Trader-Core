@@ -98,6 +98,24 @@ def _disabled_check() -> dict[str, Any] | None:
     return None
 
 
+_DEFAULT_OPERATIONAL_ACCOUNT_SCOPE: dict[str, str] = {
+    "kr": "toss_live",
+    "us": "toss_live",
+    "crypto": "upbit_live",
+}
+
+
+def _kis_scope_error(account_scope: Any) -> dict[str, Any] | None:
+    if not str(account_scope or "").startswith("kis"):
+        return None
+    return {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": account_scope,
+    }
+
+
 def _parse_bundle_uuid(raw: str) -> uuid.UUID | dict[str, Any]:
     try:
         return uuid.UUID(raw)
@@ -132,6 +150,10 @@ async def investment_report_prepare_bundle_impl(
     touched. The returned ``bundle_uuid`` is the handle Hermes passes
     to ``investment_report_get_hermes_context`` next.
     """
+    effective_scope = account_scope or _DEFAULT_OPERATIONAL_ACCOUNT_SCOPE.get(market)
+    if kis_error := _kis_scope_error(effective_scope):
+        return kis_error
+
     disabled = _disabled_check()
     if disabled is not None:
         return disabled
@@ -139,7 +161,7 @@ async def investment_report_prepare_bundle_impl(
     request = EnsureBundleRequest(
         purpose=purpose,
         market=market,  # type: ignore[arg-type]
-        account_scope=account_scope,  # type: ignore[arg-type]
+        account_scope=effective_scope,  # type: ignore[arg-type]
         policy_version=policy_version,
         mode=mode,  # type: ignore[arg-type]
         symbols=symbols,
@@ -294,6 +316,9 @@ async def investment_report_create_from_hermes_composition_impl(
     ``execution_mode`` + ``kst_date`` + ``generator_version``) is
     idempotent — the existing report row is returned untouched.
     """
+    if kis_error := _kis_scope_error(account_scope):
+        return kis_error
+
     disabled = _disabled_check()
     if disabled is not None:
         return disabled
@@ -378,6 +403,9 @@ async def investment_stage_artifacts_ingest_from_hermes_impl(
     Gated by ``settings.SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED``. When
     the flag is off, returns a structured ``success=False`` envelope.
     """
+    if kis_error := _kis_scope_error(run_envelope.get("account_scope")):
+        return kis_error
+
     disabled = _disabled_check()
     if disabled is not None:
         return disabled
@@ -456,9 +484,10 @@ def register_investment_hermes_tools(mcp: FastMCP) -> None:
             "Auto-finalises any matching Hermes stage run "
             "(metadata.investment_stage_run_uuid) from 'running' to "
             "'completed' (§D4). "
-            "Accepts any account_scope (kis_live | kis_mock | alpaca_paper | "
-            "upbit_live) — this is the path for alpaca_paper / paper:<name> "
-            "reports that investment_report_generate_from_bundle rejects. "
+            "New equity compositions accept toss_live; crypto accepts upbit_live, "
+            "and alpaca_paper remains available for PAPER reports. Explicit kis_* "
+            "scope is non-operational and rejected; persisted KIS bundles remain "
+            "readable through investment_report_get_hermes_context. "
             "Gated by SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED."
         ),
     )(investment_report_create_from_hermes_composition_impl)

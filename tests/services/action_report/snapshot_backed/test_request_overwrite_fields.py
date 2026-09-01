@@ -13,7 +13,7 @@ from app.services.action_report.snapshot_backed.request import (
 def _req(**overrides):
     base = {
         "market": "kr",
-        "account_scope": "kis_live",
+        "account_scope": "toss_live",
         "created_by_profile": "t",
         "title": "t",
         "summary": "s",

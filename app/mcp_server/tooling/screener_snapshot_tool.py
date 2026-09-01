@@ -18,8 +18,8 @@ were moved out to the explicit `screen_stocks_enrich` MCP tool
 (`app/mcp_server/tooling/screener_enrich_tool.py`) — see that module's
 docstring and the root `CLAUDE.md` "screen_stocks_snapshot / screen_stocks_enrich
 MCP 도구 분리 (ROB-1309)" section for the full before/after contract. The
-KIS-live holdings lookup used for `isHeld` marking
-(`_collect_holdings_for_market` / `_collect_kis_positions`) predates
+Toss holdings lookup used for `isHeld` marking
+(`_collect_holdings_for_market` / `_collect_toss_api_positions`) predates
 ROB-1309, but ROB-1309's "zero external HTTP for every option combination"
 requirement means `screen_stocks_snapshot_impl` never calls it — `isHeld`
 is always False and `exclude_held=True` is rejected fail-closed (same
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class _HeldResolver:
-    """Held-aware resolver for MCP rows backed by KIS live positions."""
+    """Held-aware resolver for MCP rows backed by Toss positions."""
 
     def __init__(self, held_symbols: set[tuple[str, str]]) -> None:
         self._h = held_symbols
@@ -210,19 +210,21 @@ _MAX_ANALYST_ENRICHMENT_ROWS = 200
 async def _collect_holdings_for_market(
     market: str,
 ) -> tuple[set[tuple[str, str]], dict[str, Any]]:
-    """The one bounded, live KIS broker call in this module: fetches current
-    positions for ``isHeld``/``exclude_held`` marking.
+    """Fetch current Toss positions for ``isHeld``/``exclude_held`` marking.
 
     ROB-1309 hard requirement: ``screen_stocks_snapshot`` (the DB-only tool)
     must make ZERO external HTTP calls for ANY option combination — so this
     is called ONLY from ``screen_stocks_enrich_impl`` now, never from
     ``screen_stocks_snapshot_impl``/``_build_snapshot_page``'s default path.
     """
-    from app.mcp_server.tooling.portfolio_holdings import _collect_kis_positions
+    from app.mcp_server.tooling.portfolio_holdings import (
+        TOSS_API_PROVENANCE,
+        _collect_toss_api_positions,
+    )
 
     held_symbols: set[tuple[str, str]] = set()
     holdings_meta: dict[str, Any] = {
-        "source": "kis_live",
+        "source": TOSS_API_PROVENANCE,
         "status": "ok",
         "held_count": 0,
     }
@@ -232,35 +234,39 @@ async def _collect_holdings_for_market(
         return held_symbols, holdings_meta
 
     try:
-        # MCP always runs live (is_mock=False)
-        pos, holdings_warnings = await _collect_kis_positions(
-            holdings_market_filter, is_mock=False
-        )
+        (
+            positions,
+            holdings_warnings,
+            toss_succeeded,
+        ) = await _collect_toss_api_positions(holdings_market_filter)
         if holdings_warnings:
-            holdings_meta["status"] = "error" if not pos else "partial"
+            holdings_meta["status"] = "error" if not positions else "partial"
             holdings_meta["warning_count"] = len(holdings_warnings)
             logger.warning(
-                "screener_snapshot: kis holdings returned warnings: %s",
+                "screener_snapshot: Toss holdings returned warnings: %s",
                 holdings_warnings,
             )
+        elif not toss_succeeded:
+            holdings_meta["status"] = "skipped"
+            holdings_meta["warning_count"] = 0
+            holdings_meta["reason"] = "toss_api_disabled"
         else:
             holdings_meta["warning_count"] = 0
 
         held_symbols = {
             (
-                str(p.get("market") or market).strip().lower(),
-                _normalize_symbol_key(p.get("symbol")),
+                str(position.get("market") or market).strip().lower(),
+                _normalize_symbol_key(position.get("symbol")),
             )
-            for p in pos
-            if p.get("symbol")
+            for position in positions
+            if position.get("symbol")
         }
         holdings_meta["held_count"] = len(held_symbols)
     except Exception as exc:  # noqa: BLE001
         holdings_meta["status"] = "error"
         holdings_meta["warning_count"] = 1
-        # surface as a non-fatal warning so results still return
-        # (build_screener_results takes resolver as non-optional, so fall back to noop)
-        logger.warning("screener_snapshot: kis holdings failed: %s", exc)
+        # Surface as a non-fatal warning so results still return.
+        logger.warning("screener_snapshot: Toss holdings failed: %s", exc)
     return held_symbols, holdings_meta
 
 
@@ -339,12 +345,12 @@ async def _build_snapshot_page(
         }
 
     # ROB-1309: held_symbols/holdings_meta are injected (see docstring) — this
-    # function never makes the live KIS call itself.
+    # function never makes the live Toss holdings call itself.
     if held_symbols is None:
         held_symbols = set()
     if holdings_meta is None:
         holdings_meta = {
-            "source": "kis_live",
+            "source": "toss_live",
             "status": "skipped",
             "held_count": 0,
             "reason": (
@@ -504,7 +510,7 @@ async def _build_snapshot_page(
     }
     if holdings_meta["status"] in ("error", "partial"):
         combined_warnings.append(
-            "KIS live 보유종목 확인 실패 — 보유 여부가 표시되지 않을 수 있습니다."
+            "Toss live 보유종목 확인 실패 — 보유 여부가 표시되지 않을 수 있습니다."
         )
 
     # ROB-465: cap + paginate at the tool boundary so large snapshots (e.g.
@@ -577,7 +583,7 @@ async def screen_stocks_snapshot_impl(
     (soft no-op: no watchlist context wired for MCP; warns rather than filters).
     exclude_held: NOT supported here (ROB-1309) — same fail-closed redirect as
     min_analyst_count/min_analyst_buy_count, because honoring it correctly
-    requires a live KIS holdings call, which this DB-only tool never makes.
+    requires a live Toss holdings call, which this DB-only tool never makes.
     exclude_symbols: explicit symbols to remove after dedupe.
     min_market_cap: raw numeric marketCapValue threshold (KRW for KR, USD for US).
     min/max_market_cap_eok: ROB-515 size filter — unit is 1억원 (KRW).
@@ -609,7 +615,7 @@ async def screen_stocks_snapshot_impl(
     if exclude_held:
         return {
             "error": (
-                "exclude_held requires a live KIS holdings lookup and is no "
+                "exclude_held requires a live Toss holdings lookup and is no "
                 "longer supported by screen_stocks_snapshot (ROB-1309: "
                 "DB-only, zero external HTTP for every option combination, "
                 "including this one). Call screen_stocks_enrich with the "

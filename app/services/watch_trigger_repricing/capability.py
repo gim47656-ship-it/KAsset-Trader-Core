@@ -78,7 +78,6 @@ PROPOSAL_ONLY_TOOLS: frozenset[str] = frozenset(
         "get_fx_rate",
         # -- policy / routing advisory -----------------------------------
         "get_trading_policy",
-        "suggest_order_account",
         "route_request",
         # -- the fire it was spawned for ---------------------------------
         "list_active_watches",

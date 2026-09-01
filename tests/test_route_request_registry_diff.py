@@ -49,7 +49,6 @@ from app.mcp_server.tooling.route_request_lanes import (
     STATUS_HELPER_TOOLS,
     ordered_lane_tool_names,
 )
-from app.mcp_server.tooling.us_dual_paper import US_DUAL_PAPER_TOOL_NAMES
 from tests._mcp_tooling_support import DummyMCP
 
 _PLAYBOOK_PATH = (
@@ -212,11 +211,10 @@ def test_read_only_bucket_has_no_phantom_tools():
         "analysis_bundle_get",
         # ROB-907: gated by settings.binance_demo_scalping_enabled (default off).
         "binance_demo_ledger_status",
-        # ROB-908: Alpaca paper read/preview/us_dual surface, gated by
+        # Alpaca paper read/preview surface, gated by
         # settings.alpaca_paper_default_tools_enabled (default off).
         *ALPACA_PAPER_READONLY_TOOL_NAMES,
         *ALPACA_PAPER_PREVIEW_TOOL_NAMES,
-        *US_DUAL_PAPER_TOOL_NAMES,
         *KIWOOM_MOCK_US_READ_TOOL_NAMES,
         *MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
         *ORDER_PROPOSAL_READ_TOOLS,

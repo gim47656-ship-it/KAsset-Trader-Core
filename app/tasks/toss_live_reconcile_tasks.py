@@ -21,9 +21,9 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.core.db import AsyncSessionLocal
 from app.core.taskiq_broker import broker
 from app.core.timezone import now_kst
-from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
 from app.mcp_server.tooling.market_session import (
     US_SESSION_AFTERHOURS,
     US_SESSION_PREMARKET,
@@ -105,7 +105,7 @@ async def toss_live_poll_fills_periodic() -> dict:
 
     client = TossReadClient.from_settings()
     try:
-        async with _order_session_factory()() as db:
+        async with AsyncSessionLocal() as db:
             discover = await TossFillPollerService(
                 db, client=client
             ).discover_external_orders(

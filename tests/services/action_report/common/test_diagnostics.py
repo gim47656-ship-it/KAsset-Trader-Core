@@ -75,7 +75,7 @@ def test_build_kind_diagnostic_includes_sanitized_reason() -> None:
         "unavailable",
         {
             "reason_code": "user_id_missing",
-            "reason": "kis_live portfolio requires explicit user_id; none supplied",
+            "reason": "toss_live portfolio requires explicit user_id; none supplied",
         },
     )
     assert diag["reason_code"] == "user_id_missing"

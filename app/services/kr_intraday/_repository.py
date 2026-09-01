@@ -18,7 +18,7 @@ from app.services.kr_intraday._types import (
     _UniverseRow,
 )
 from app.services.kr_intraday._utils import (
-    _convert_kis_datetime_to_utc,
+    _kst_datetime_to_utc_naive,
     _resolve_window_minute_time,
     _store_minute_row,
     _to_float,
@@ -362,7 +362,7 @@ def _schedule_background_minute_storage(
             symbol=symbol,
             minute_rows=[
                 {
-                    "time": _convert_kis_datetime_to_utc(row.minute_time),
+                    "time": _kst_datetime_to_utc_naive(row.minute_time),
                     "venue": row.venue,
                     "open": row.open,
                     "high": row.high,

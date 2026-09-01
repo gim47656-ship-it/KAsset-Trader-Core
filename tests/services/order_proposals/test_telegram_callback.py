@@ -15,6 +15,7 @@ from app.core.db import AsyncSessionLocal
 from app.mcp_server.caller_identity import caller_agent_id_var, get_caller_agent_id
 from app.services.order_proposals import OrderProposalsService
 from app.services.order_proposals import approval_message as approval_messages
+from app.services.order_proposals import auto_veto as auto_veto_module
 from app.services.order_proposals import revalidation as revalidation_module
 from app.services.order_proposals import telegram_callback as callback_module
 from app.services.order_proposals.approval_message import parse_callback_data
@@ -224,7 +225,7 @@ async def _seed_proposal(db_session, *, nonce="nonce-abc123", symbol="A", rungs=
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -254,7 +255,7 @@ async def _seed_auto_resting(
     db_session,
     *,
     nonce="veto-nonce",
-    account_mode="kis_live",
+    account_mode="toss_live",
     market="equity_kr",
 ):
     service = OrderProposalsService(db_session)
@@ -773,7 +774,14 @@ async def test_auto_veto_cancels_broker_and_rung_once(monkeypatch, db_session):
 
     async def cancel_fn(**kwargs):
         cancel_calls.append(kwargs)
-        return {"success": True}
+        return {
+            "success": True,
+            "mutation_sent": True,
+            "original_order_id": kwargs["order_id"],
+            "replacement_order_id": "cancel-request-1",
+            "ledger_id": 701,
+            "broker_status": "accepted",
+        }
 
     async def fetch_fn(**kwargs):
         return TargetOrderSnapshot(
@@ -786,6 +794,15 @@ async def test_auto_veto_cancels_broker_and_rung_once(monkeypatch, db_session):
             status="cancelled",
             observed_at=kwargs["now"].isoformat(),
         )
+
+    async def reconcile_fn(**kwargs):
+        assert kwargs == {
+            "order_id": "broker-auto-1",
+            "symbol": "005930",
+            "market": "equity_kr",
+            "account_mode": "toss_live",
+        }
+        return {"confirmed": True, "reconciled_order_count": 1}
 
     update = _make_update(
         data=_proposal_callback_data(group, action="vc", nonce="veto-nonce")
@@ -807,11 +824,18 @@ async def test_auto_veto_cancels_broker_and_rung_once(monkeypatch, db_session):
         notifier=notifier,
         veto_cancel_fn=cancel_fn,
         veto_fetch_fn=fetch_fn,
+        veto_toss_reconcile_fn=reconcile_fn,
     )
 
     assert result["reason"] == "auto_veto_cancelled"
     assert mutation_locks == ["broker-auto-1"]
     assert cancel_calls[0]["order_id"] == "broker-auto-1"
+    assert cancel_calls[0] == {
+        "order_id": "broker-auto-1",
+        "symbol": "005930",
+        "market": "equity_kr",
+        "account_mode": "toss_live",
+    }
     refreshed, rungs = await OrderProposalsService(db_session).get_proposal(
         group.proposal_id
     )
@@ -828,6 +852,7 @@ async def test_auto_veto_cancels_broker_and_rung_once(monkeypatch, db_session):
         notifier=notifier,
         veto_cancel_fn=cancel_fn,
         veto_fetch_fn=fetch_fn,
+        veto_toss_reconcile_fn=reconcile_fn,
     )
     assert replay["reason"] == "nonce_replay"
     assert len(cancel_calls) == 1
@@ -887,9 +912,17 @@ async def test_acceptance_a_toss_veto_needs_broker_terminal_and_ledger_reconcile
 
     async def cancel_fn(**kwargs):
         calls.append(f"cancel:{kwargs['order_id']}")
-        # Deliberately only an acknowledgement: the test requires the next two
-        # proof steps before the local rung can close.
-        return {"success": True, "replacement_order_id": "cancel-request-1"}
+        # Toss acknowledges a cancel by issuing a replacement order and
+        # durably recording that accepted mutation. Neither field is terminal
+        # proof for the original order; fetch + reconcile below remain required.
+        return {
+            "success": True,
+            "mutation_sent": True,
+            "original_order_id": kwargs["order_id"],
+            "replacement_order_id": "cancel-request-1",
+            "ledger_id": 702,
+            "broker_status": "accepted",
+        }
 
     async def fetch_fn(**kwargs):
         calls.append(f"terminal:{kwargs['order_id']}")
@@ -1125,7 +1158,7 @@ async def test_toss_veto_terminal_reconcile_requires_cancelled_status_and_termin
     monkeypatch, db_session
 ):
     """MUTANT-3b: original ID alone is not terminal cancellation proof."""
-    from app.mcp_server.tooling import kis_live_ledger, toss_live_ledger
+    from app.mcp_server.tooling import toss_live_ledger
 
     order_id = f"nonterminal-original-{uuid.uuid4()}"
 
@@ -1147,9 +1180,9 @@ async def test_toss_veto_terminal_reconcile_requires_cancelled_status_and_termin
 
     monkeypatch.setattr(toss_live_ledger, "toss_reconcile_orders_impl", fake_impl)
     monkeypatch.setattr(
-        kis_live_ledger,
-        "_order_session_factory",
-        lambda: _session_factory(db_session),
+        auto_veto_module,
+        "AsyncSessionLocal",
+        _session_factory(db_session),
     )
 
     result = await reconcile_toss_auto_veto_terminal(
@@ -1171,7 +1204,7 @@ async def test_toss_veto_accepts_an_already_reconciled_original_terminal_row(
     monkeypatch, db_session
 ):
     """A prior reconcile remains terminal proof; a cancel ACK alone does not."""
-    from app.mcp_server.tooling import kis_live_ledger, toss_live_ledger
+    from app.mcp_server.tooling import toss_live_ledger
     from app.services.toss_live_order_ledger_service import TossLiveOrderLedgerService
 
     order_id = f"already-reconciled-{uuid.uuid4()}"
@@ -1207,9 +1240,9 @@ async def test_toss_veto_accepts_an_already_reconciled_original_terminal_row(
 
     monkeypatch.setattr(toss_live_ledger, "toss_reconcile_orders_impl", no_open_rows)
     monkeypatch.setattr(
-        kis_live_ledger,
-        "_order_session_factory",
-        lambda: _session_factory(db_session),
+        auto_veto_module,
+        "AsyncSessionLocal",
+        _session_factory(db_session),
     )
 
     result = await reconcile_toss_auto_veto_terminal(
@@ -1496,7 +1529,14 @@ async def test_toss_live_cancel_approve_click_consumes_nonce_before_broker_cance
 
     async def fake_toss_cancel(**kwargs):
         cancel_calls.append(kwargs)
-        return {"success": True, "original_order_id": kwargs["order_id"]}
+        return {
+            "success": True,
+            "mutation_sent": True,
+            "original_order_id": kwargs["order_id"],
+            "replacement_order_id": "cancel-broker-1",
+            "ledger_id": 703,
+            "broker_status": "accepted",
+        }
 
     real_revalidate = functools.partial(
         revalidate_and_submit,
@@ -1531,6 +1571,12 @@ async def test_toss_live_cancel_approve_click_consumes_nonce_before_broker_cance
     # itself, not a pre-approval leak, is what triggered BROKER_CANCEL.
     assert len(cancel_calls) == 1
     assert cancel_calls[0]["order_id"] == "broker-1"
+    assert cancel_calls[0] == {
+        "order_id": "broker-1",
+        "dry_run": False,
+        "confirm": True,
+        "account_mode": "toss_live",
+    }
 
     refreshed, rungs = await service.get_proposal(group.proposal_id)
     assert refreshed.approval_nonce_used_at is not None
@@ -1669,7 +1715,7 @@ async def test_superseded_old_button_is_explicitly_blocked_and_replacement_appro
     replacement = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",

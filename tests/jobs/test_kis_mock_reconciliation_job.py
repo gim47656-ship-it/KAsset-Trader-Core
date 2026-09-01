@@ -763,10 +763,3 @@ async def test_buy_absent_symbol_not_misbooked_as_fill(monkeypatch):
     assert args["next_state"] == "pending"
     assert args["reason_code"] == "pending_unconfirmed"
     assert args["detail"]["attributed_fill_qty"] == "0"
-
-
-def test_reconcile_gate_flags_default_false():
-    from app.core.config import settings
-
-    assert settings.KIS_MOCK_RECONCILE_ON_EXECUTION_ENABLED is False
-    assert settings.KIS_MOCK_RECONCILE_PERIODIC_ENABLED is False

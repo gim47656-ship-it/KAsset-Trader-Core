@@ -4,7 +4,6 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.brokers.toss.dto import TossPrice
 from app.services.quote_parity_shadow import (
     CoverageReport,
     CurrencyReport,
@@ -269,111 +268,22 @@ class TestGoNoGo:
         assert any(b.name == "latency_wall" and b.status == "fail" for b in d.bars)
 
 
-class _FakeClock:
-    """Monotonic-ish clock: each call advances by a fixed step for deterministic ms."""
-
-    def __init__(self, start=1000.0, step=0.01):
-        self.t = start
-        self.step = step
-
-    def __call__(self) -> float:
-        v = self.t
-        self.t += self.step
-        return v
-
-
 @pytest.mark.asyncio
-async def test_orchestrator_blocked_until_rob708(monkeypatch):
-    async def toss_prices(batch):
-        return [
-            TossPrice(
-                symbol=s,
-                timestamp="2026-07-05T12:00:00Z",
-                last_price=Decimal("100.10") if s == "AAPL" else Decimal("30050"),
-                currency="USD" if s == "AAPL" else "KRW",
-            )
-            for s in batch
-        ]
-
-    async def kis_kr(symbols):
-        return {"005930": 30000.0}
-
-    async def kis_us(symbols):
-        return {"AAPL": 100.00}
-
+async def test_orchestrator_is_disabled_without_invoking_providers():
     report = await run_quote_parity_probe(
         kr_symbols=["005930"],
         us_symbols=["AAPL"],
-        toss_prices_fn=toss_prices,
-        kis_kr_fetch=kis_kr,
-        kis_us_fetch=kis_us,
-        clock=_FakeClock(),
-        us_kis_live_last=False,  # ROB-708 not landed
     )
+
+    assert report["status"] == "disabled"
+    assert report["rule"] == "historical_kis_toss_quote_parity"
+    assert report["universe"] == {"kr_count": 1, "us_count": 1}
     assert report["go_no_go"]["decision"] == "blocked"
-    assert report["coverage"]["combined"]["silent_drops"] == []
-    assert report["currency"]["miskey_count"] == 0
-    # US off-hours capture is recorded verbatim.
-    assert report["off_hours"]["us"]["AAPL"]["timestamp"] == "2026-07-05T12:00:00Z"
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_go_when_precondition_met_and_bars_pass():
-    async def toss_prices(batch):
-        return [
-            TossPrice(
-                symbol=s, timestamp="t", last_price=Decimal("100.05"), currency="USD"
-            )
-            for s in batch
-        ]
-
-    async def kis_kr(symbols):
-        return {}
-
-    async def kis_us(symbols):
-        return {"AAPL": 100.00}  # 5 bps < 10
-
-    report = await run_quote_parity_probe(
-        kr_symbols=[],
-        us_symbols=["AAPL"],
-        toss_prices_fn=toss_prices,
-        kis_kr_fetch=kis_kr,
-        kis_us_fetch=kis_us,
-        # Constant clock (step=0) => every measured duration is 0ms, so the
-        # latency wall-bar is a deterministic 0 <= 0 pass. A stepping clock would
-        # make Toss look slower purely because the probe calls clock() more times
-        # on the Toss side than the KIS side — an artifact of the fake, not real
-        # latency. Real timing comes from the monotonic clock in the live script.
-        clock=_FakeClock(step=0.0),
-        us_kis_live_last=True,
-    )
-    assert report["go_no_go"]["decision"] == "go"
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_counts_toss_batch_error_fail_open():
-    calls = {"n": 0}
-
-    async def toss_prices(batch):
-        calls["n"] += 1
-        raise RuntimeError("toss 500")
-
-    async def kis_us(symbols):
-        return {"AAPL": 100.0}
-
-    report = await run_quote_parity_probe(
-        kr_symbols=[],
-        us_symbols=["AAPL"],
-        toss_prices_fn=toss_prices,
-        kis_kr_fetch=lambda s: _empty(),
-        kis_us_fetch=kis_us,
-        clock=_FakeClock(),
-        us_kis_live_last=True,
-    )
-    assert report["latency"]["toss"]["error_count"] == 1
-    # A failed Toss batch => everything is a silent drop => no_go, never a crash.
-    assert report["go_no_go"]["decision"] == "no_go"
-
-
-async def _empty():
-    return {}
+    assert report["go_no_go"]["bars"] == [
+        {
+            "name": "historical_baseline",
+            "status": "not_evaluable",
+            "detail": report["reason"],
+        }
+    ]
+    assert "cannot be evaluated or weakened to Toss-only" in report["reason"]

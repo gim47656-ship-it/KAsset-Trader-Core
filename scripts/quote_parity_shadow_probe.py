@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""ROB-709 — read-only A/B parity shadow operator probe.
+"""비활성 KIS↔Toss 시세 비교 규칙을 확인하는 운영자 도구.
 
-Compares the Toss ``prices()`` batch against the raw KIS batch layer over the
-/invest KR+US universe and emits structured go/no-go JSON for the ROB-710
-decision to flip batch current-price reads to Toss-first.
-
-READ-ONLY: this script calls only price/quote GETs. It never calls
-place/modify/cancel order APIs and never mutates a broker/order/watch path.
-
-Dry-run-default: without --confirm-live, the script enumerates the universe
-and prints the planned batch counts but performs ZERO network calls.
-
-Example (dry-run, DB universe):
-    uv run python -m scripts.quote_parity_shadow_probe --user-id 1
-
-Example (live read-only, ROB-708 already landed on this branch):
-    uv run python -m scripts.quote_parity_shadow_probe \
-      --user-id 1 --us-kis-live-last --confirm-live
-
-Exit codes: go=0, no_go|blocked=2, crash=1.
+KIS가 운영 경로에서 제거되었으므로 이 도구는 어떤 공급자도 구성하거나
+호출하지 않는다. 대상 유니버스 크기와 ``disabled``/``blocked`` 상태만
+출력하며, Toss 단독 비교로 과거 승격 기준을 약화하지 않는다.
 """
 
 from __future__ import annotations
@@ -28,7 +13,6 @@ import asyncio
 import csv
 import json
 import logging
-import math
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,15 +25,8 @@ from app.services.quote_parity_shadow import run_quote_parity_probe
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.services.brokers.toss.client import TossReadClient
-    from app.services.invest_quote_service import InvestQuoteService
-
 logger = logging.getLogger(__name__)
 
-# Mirrors the secret-reject pattern in
-# scripts/diagnose_invest_screener_toss_parity.py:36-68 — a --symbols-file must
-# never carry cookies, auth headers, or tokens (it is an operator-supplied
-# canary list, not a credential channel).
 _SENSITIVE_HEADER_RE = re.compile(
     r"(cookie|authorization|x[-_]?csrf|token|secret|password|session)", re.I
 )
@@ -70,15 +47,10 @@ def _reject_if_sensitive(label: str, value: Any) -> None:
 
 
 def load_symbols_file(path: Path) -> tuple[list[str], list[str]]:
-    """Load a --symbols-file (CSV/JSON) of {market, symbol} rows.
+    """비밀값을 거부하고 KR/US 심볼을 중복 없이 읽는다."""
 
-    Secret-rejected. Returns (kr_symbols, us_symbols), de-duped and
-    to_db_symbol-normalized (e.g. BRK-B / BRK/B -> BRK.B) so dotted-symbol
-    coverage (BRK.B) can be forced onto the probe regardless of input format.
-    """
     raw_text = path.read_text(encoding="utf-8-sig")
     _reject_if_sensitive("file", raw_text)
-
     rows: list[dict[str, Any]]
     if path.suffix.lower() == ".json":
         parsed = json.loads(raw_text)
@@ -86,7 +58,7 @@ def load_symbols_file(path: Path) -> tuple[list[str], list[str]]:
             raise ValueError(
                 "--symbols-file JSON must be a list of {market, symbol} rows"
             )
-        rows = [r for r in parsed if isinstance(r, dict)]
+        rows = [row for row in parsed if isinstance(row, dict)]
     else:
         reader = csv.DictReader(raw_text.splitlines())
         for field in reader.fieldnames or []:
@@ -104,10 +76,10 @@ def load_symbols_file(path: Path) -> tuple[list[str], list[str]]:
         if not symbol_raw or market not in {"KR", "US"}:
             continue
         symbol = to_db_symbol(symbol_raw)
-        dedupe_key = (market, symbol)
-        if dedupe_key in seen:
+        key = (market, symbol)
+        if key in seen:
             continue
-        seen.add(dedupe_key)
+        seen.add(key)
         (kr if market == "KR" else us).append(symbol)
     return kr, us
 
@@ -115,18 +87,18 @@ def load_symbols_file(path: Path) -> tuple[list[str], list[str]]:
 async def enumerate_db_universe(
     session: AsyncSession, *, user_id: int, limit: int
 ) -> tuple[list[str], list[str]]:
-    """Default universe: distinct active Toss manual_holdings tickers, split
-    KR/US — the exact production /invest hot-path symbols."""
+    """소유자 범위 Toss 수동 보유 심볼을 시장별로 읽는다."""
+
     holdings = await ManualHoldingsService(session).get_holdings_by_user(
         user_id, broker_type="toss"
     )
-    kr = [to_db_symbol(h.ticker) for h in holdings if h.market_type == MarketType.KR][
-        :limit
+    kr = [
+        to_db_symbol(row.ticker) for row in holdings if row.market_type == MarketType.KR
     ]
-    us = [to_db_symbol(h.ticker) for h in holdings if h.market_type == MarketType.US][
-        :limit
+    us = [
+        to_db_symbol(row.ticker) for row in holdings if row.market_type == MarketType.US
     ]
-    return kr, us
+    return kr[:limit], us[:limit]
 
 
 def exit_code_for(decision: str) -> int:
@@ -135,67 +107,22 @@ def exit_code_for(decision: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "ROB-709 read-only A/B parity shadow: Toss prices() batch vs the "
-            "raw KIS batch layer, over the /invest KR+US universe."
-        )
+        description="비활성 KIS/Toss 시세 비교 규칙 상태를 출력합니다."
     )
     parser.add_argument(
         "--symbols-file",
         type=Path,
         default=None,
-        help="CSV/JSON of {market, symbol} rows; overrides --user-id enumeration.",
+        help="CSV/JSON {market, symbol} 목록. --user-id보다 우선합니다.",
     )
     parser.add_argument(
         "--user-id",
         type=int,
         default=None,
-        help="Enumerate the DB universe via ManualHoldingsService for this user.",
+        help="ManualHoldingsService에서 소유자 유니버스를 읽습니다.",
     )
-    parser.add_argument("--limit", type=int, default=200, help="Cap per market.")
-    parser.add_argument(
-        "--allowlist",
-        type=str,
-        default="",
-        help="Comma-separated symbols allowlisted as known coverage misses.",
-    )
-    parser.add_argument(
-        "--us-kis-live-last",
-        action="store_true",
-        default=False,
-        help=(
-            "Pass ONLY after ROB-708 has landed (KIS US layer reads live-last, "
-            "not daily close) — else US divergence is not a valid go-signal."
-        ),
-    )
-    parser.add_argument(
-        "--confirm-live",
-        action="store_true",
-        default=False,
-        help="Arm real Toss/KIS network reads. Without this flag: dry-run only.",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        default=False,
-        help="(reserved) force JSON output.",
-    )
+    parser.add_argument("--limit", type=int, default=200, help="시장별 최대 심볼 수")
     return parser.parse_args(argv)
-
-
-def _build_live_clients(
-    session: AsyncSession,
-) -> tuple[TossReadClient, InvestQuoteService]:
-    """Construct REAL read-only clients. Called ONLY on the --confirm-live
-    branch — never in dry-run (see test_dry_run_performs_no_network)."""
-    from app.services.brokers.toss.client import TossReadClient
-    from app.services.invest_home_readers import SafeKISClient
-    from app.services.invest_quote_service import InvestQuoteService
-
-    toss_client = TossReadClient.from_settings()
-    kis_client = SafeKISClient()
-    quote_service = InvestQuoteService(kis_client, session)
-    return toss_client, quote_service
 
 
 async def _resolve_universe(args: argparse.Namespace) -> tuple[list[str], list[str]]:
@@ -215,51 +142,15 @@ async def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         kr_symbols, us_symbols = await _resolve_universe(args)
-        allowlist = frozenset(s.strip() for s in args.allowlist.split(",") if s.strip())
-
-        if not args.confirm_live:
-            # Dry-run: enumerate + print the plan. ZERO network calls.
-            batches = 0
-            if kr_symbols:
-                batches += math.ceil(len(kr_symbols) / 200)
-            if us_symbols:
-                batches += math.ceil(len(us_symbols) / 200)
-            report: dict[str, Any] = {
-                "mode": "dry_run",
-                "universe": {
-                    "kr_count": len(kr_symbols),
-                    "us_count": len(us_symbols),
-                },
-                "planned_toss_batches": batches,
-            }
-            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
-
-        from app.core.cli import setup_logging_and_sentry
-        from app.core.db import AsyncSessionLocal
-
-        setup_logging_and_sentry(service_name="quote-parity-shadow-probe")
-
-        async with AsyncSessionLocal() as session:
-            toss_client, quote_service = _build_live_clients(session)
-            try:
-                report = await run_quote_parity_probe(
-                    kr_symbols=kr_symbols,
-                    us_symbols=us_symbols,
-                    toss_prices_fn=toss_client.prices,
-                    kis_kr_fetch=quote_service.kis_only_kr_prices,
-                    kis_us_fetch=quote_service.kis_only_us_prices,
-                    allowlist=allowlist,
-                    us_kis_live_last=args.us_kis_live_last,
-                )
-            finally:
-                await toss_client.aclose()
-
-        report["mode"] = "live"
+        report = await run_quote_parity_probe(
+            kr_symbols=kr_symbols,
+            us_symbols=us_symbols,
+        )
+        report["mode"] = "disabled"
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return exit_code_for(report["go_no_go"]["decision"])
-    except Exception as exc:  # noqa: BLE001 — crash must exit 1, never raise raw
-        logger.exception("quote_parity_shadow_probe crashed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("quote_parity_shadow_probe failed: %s", exc)
         return 1
 
 

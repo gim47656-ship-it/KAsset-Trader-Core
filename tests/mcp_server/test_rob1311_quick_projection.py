@@ -204,7 +204,7 @@ async def test_full_batch_still_calls_single_symbol_analyzer_and_preserves_paylo
     full_payload = {
         "symbol": "AAPL",
         "market_type": "equity_us",
-        "source": "yahoo",
+        "source": "toss",
         "quote": {"price": 185.5},
         "news": [{"title": "full payload"}],
         "profile": {"name": "Apple Inc."},

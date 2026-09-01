@@ -33,6 +33,27 @@ class FakeRepo:
         self.runs.append(run)
 
 
+def _toss_filled_order(**overrides: object) -> dict[str, object]:
+    order: dict[str, object] = {
+        "symbol": "214150",
+        "raw_symbol": "214150",
+        "instrument_type": "equity_kr",
+        "side": "sell",
+        "price": "100000",
+        "quantity": "2",
+        "total_amount": "200000",
+        "currency": "KRW",
+        "account": "toss",
+        "order_id": "toss-order-1",
+        "filled_at": "2026-05-13T10:00:00+09:00",
+        "fill_seq": 0,
+        "venue": "toss",
+        "raw_payload_json": {"safe": True},
+    }
+    order.update(overrides)
+    return order
+
+
 async def fake_fetcher(**_kwargs):  # noqa: ANN003
     await asyncio.sleep(0)
     return {
@@ -77,6 +98,26 @@ async def test_reconciler_dry_run_classifies_without_upsert(
     assert repo.upserts == []
     assert len(repo.runs) == 1
     assert repo.runs[0].dry_run is True
+
+
+@pytest.mark.asyncio
+async def test_reconciler_rejects_kis_before_fetch_or_run_record() -> None:
+    fetch_called = False
+
+    async def fetcher(**_kwargs):  # noqa: ANN003
+        nonlocal fetch_called
+        fetch_called = True
+        return {"orders": []}
+
+    repo = FakeRepo()
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        await ExecutionLedgerReconciler(repo, fetcher=fetcher).run(
+            "kis",  # type: ignore[arg-type]
+            dry_run=True,
+        )
+
+    assert fetch_called is False
+    assert repo.runs == []
 
 
 @pytest.mark.asyncio
@@ -132,18 +173,65 @@ async def test_reconciler_passes_explicit_window_to_fetcher(
     repo = FakeRepo(status="inserted")
 
     await ExecutionLedgerReconciler(repo, fetcher=fetcher).run(
-        "kis",
+        "toss",
         start_at=start_at,
         end_at=end_at,
         max_pages=25,
         dry_run=True,
     )
 
+    assert captured["markets"] == "kr,us"
     assert captured["start_at"] == start_at
     assert captured["end_at"] == end_at
     assert captured["max_pages"] == 25
+    assert repo.runs[0].broker == "toss"
     assert repo.runs[0].window_start == start_at
     assert repo.runs[0].window_end == end_at
+
+
+@pytest.mark.asyncio
+async def test_toss_closed_evidence_keeps_toss_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.execution_ledger.reconciler.settings",
+        SimpleNamespace(EXECUTION_LEDGER_COMMIT_ENABLED=False),
+    )
+
+    async def fetcher(**kwargs):  # noqa: ANN003
+        assert kwargs["markets"] == "kr,us"
+        return {"orders": [_toss_filled_order()]}
+
+    repo = FakeRepo(status="inserted")
+    diff = await ExecutionLedgerReconciler(repo, fetcher=fetcher).run(
+        "toss", dry_run=True
+    )
+
+    assert diff.would_insert == 1
+    assert diff.sample_inserts[0].broker == "toss"
+    assert repo.runs[0].broker == "toss"
+
+
+@pytest.mark.asyncio
+async def test_toss_reconciler_rejects_mismatched_row_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.execution_ledger.reconciler.settings",
+        SimpleNamespace(EXECUTION_LEDGER_COMMIT_ENABLED=False),
+    )
+
+    async def fetcher(**_kwargs):  # noqa: ANN003
+        return {"orders": [_toss_filled_order(account="upbit")]}
+
+    repo = FakeRepo(status="inserted")
+    with pytest.raises(ValueError, match="broker/account mismatch"):
+        await ExecutionLedgerReconciler(repo, fetcher=fetcher).run("toss", dry_run=True)
+
+    assert len(repo.runs) == 1
+    assert repo.runs[0].broker == "toss"
+    assert repo.runs[0].error_summary is not None
+    assert "broker/account mismatch" in repo.runs[0].error_summary
 
 
 @pytest.mark.asyncio
@@ -195,7 +283,7 @@ async def test_reconciler_skips_malformed_filled_at_with_one_run_warning(
                     "quantity": "2",
                     "total_amount": "200000",
                     "currency": "KRW",
-                    "account": "kis",
+                    "account": "toss",
                     "order_id": f"bad-filled-at-{index}",
                     "filled_at": "not-a-timestamp",
                 }
@@ -205,7 +293,7 @@ async def test_reconciler_skips_malformed_filled_at_with_one_run_warning(
 
     with caplog.at_level("WARNING"):
         diff = await ExecutionLedgerReconciler(FakeRepo(), fetcher=fetcher).run(
-            "kis", dry_run=True
+            "toss", dry_run=True
         )
 
     assert diff.would_insert == 0

@@ -1,6 +1,6 @@
 """ROB-123 — read-only `/invest/api`.
 
-이 라우터는 `InvestHomeService` 만 의존하고 broker / KIS / Upbit 클라이언트를 직접
+이 라우터는 `InvestHomeService`만 의존하며 broker 클라이언트를 직접
 import 하지 않는다. order / watch / scheduler / mutation 경로 import 금지.
 """
 
@@ -157,13 +157,9 @@ router = APIRouter(prefix="/invest/api", tags=["invest"])
 def get_invest_home_service(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvestHomeService:
-    from app.core.config import settings
     from app.services.invest_home_readers import (
         AlpacaPaperHomeReader,
-        KISHomeReader,
-        KISMockHomeReader,
         ManualHomeReader,
-        SafeKISClient,
         TossApiHomeReader,
         UpbitHomeReader,
     )
@@ -172,17 +168,13 @@ def get_invest_home_service(
         get_shared_portfolio_snapshot_cache,
     )
 
-    kis_client = SafeKISClient()
-    quote_service = InvestQuoteService(kis_client, db)
+    quote_service = InvestQuoteService(db)
 
     return InvestHomeService(
-        kis_reader=KISHomeReader(db),
         upbit_reader=UpbitHomeReader(db),
         manual_reader=ManualHomeReader(db, quote_service=quote_service),
-        toss_api_reader=TossApiHomeReader()
-        if bool(getattr(settings, "toss_api_enabled", False))
-        else None,
-        paper_readers=[KISMockHomeReader(), AlpacaPaperHomeReader()],
+        toss_api_reader=TossApiHomeReader(),
+        paper_readers=[AlpacaPaperHomeReader()],
         snapshot_cache=get_shared_portfolio_snapshot_cache(),
     )
 
@@ -190,9 +182,8 @@ def get_invest_home_service(
 def get_screener_service_dep():
     """Lazy DI for the existing read-only screening service.
 
-    The import is intentionally inside the function so that importing the
-    router module does not transitively load `app.services.screener_service`
-    and its `app.services.kis*` chain — see tests/test_invest_api_router_safety.py.
+    The import remains inside the function so importing the router module does
+    not load the full screening dependency graph before the endpoint is used.
     """
     from app.services.screener_service import ScreenerService
 

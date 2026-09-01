@@ -2,7 +2,7 @@
 
 **LLM 에이전트가 시장 분석부터 주문 실행, 체결 확정, 매매 회고까지 수행하는 AI 자동매매 시스템.**
 
-런타임은 결정론적인 데이터·주문·안전 레이어만 담당하고, 판단(LLM)은 MCP(Model Context Protocol)로 연결된 **프로세스 밖의 에이전트**가 수행합니다. 국내주식·미국주식·암호화폐를 실계좌로 운용 중이며, 같은 도구 표면 위에서 다수의 모의 환경(KIS 모의, 키움 모의, Alpaca Paper, Binance Demo, Upbit shadow-sim)을 함께 지원합니다.
+런타임은 결정론적인 데이터·주문·안전 레이어만 담당하고, 판단(LLM)은 MCP(Model Context Protocol)로 연결된 **프로세스 밖의 에이전트**가 수행합니다. 국내주식·미국주식은 Toss, 암호화폐는 Upbit 실계좌 경로로 운용하며, NH PLUG는 국내주식 모의계좌 조회 전용입니다. KIS 어댑터는 과거 레저 조회 호환성을 위해 비활성 상태로만 남습니다.
 
 이 저장소를 관통하는 질문은 하나입니다 — **"AI에게 계좌를 맡기려면 무엇이 필요한가?"** 아래 설계 원칙들은 그 답으로 하나씩 쌓아온 안전장치입니다.
 
@@ -27,8 +27,8 @@ flowchart LR
     end
 
     subgraph Brokers["브로커 / 거래소"]
-        B1["KIS · Toss · Upbit (live)"]
-        B2["Kiwoom 모의 · Alpaca Paper · Binance Demo"]
+        B1["Toss · Upbit (live)"]
+        B2["NH PLUG 조회 전용 · Kiwoom 모의 · Alpaca Paper · Binance Demo"]
     end
 
     A1 & A2 --> MCP
@@ -68,8 +68,8 @@ flowchart LR
 
 | 시장 | 데이터 | 실주문 | 모의 |
 |---|---|---|---|
-| 국내주식 (KRX/NXT) | KIS · Toss · Naver · KRX · NH PLUG Mock | KIS · Toss | KIS 모의 · Kiwoom 모의 · KAsset PAPER · NH PLUG Mock(Read-Only) |
-| 미국주식 | KIS · Toss · Yahoo · Finnhub · TradingView | KIS · Toss | Alpaca Paper |
+| 국내주식 (KRX/NXT) | Toss · Naver · KRX · NH PLUG Mock | Toss | Kiwoom 모의 · KAsset PAPER · NH PLUG Mock(Read-Only) |
+| 미국주식 | Toss · Yahoo · Finnhub · TradingView | Toss | Alpaca Paper |
 | 암호화폐 | Upbit (REST + WebSocket) | Upbit | Upbit shadow-sim · Binance Spot/Futures Demo |
 
 보조 데이터: DART 공시, Finnhub 실적 캘린더, 네이버/Finnhub 뉴스(관련성 판정 파이프라인), 투자자 수급(외인/기관), 증권사 리서치 리포트 인제스트, 환율.
@@ -120,7 +120,7 @@ docker compose up -d          # PostgreSQL / Redis / Adminer
 **주요 환경 변수** (전체는 `env.example` 참고):
 
 - `DATABASE_URL`, `REDIS_URL` — 필수 인프라
-- `KIS_APP_KEY/SECRET`, `UPBIT_ACCESS_KEY/SECRET_KEY` — 브로커 자격증명
+- `TOSS_API_CLIENT_ID/SECRET`, `UPBIT_ACCESS_KEY/SECRET_KEY` — 운영 브로커 자격증명
 - 실주문·모의주문 게이트(`TOSS_LIVE_ORDER_MUTATIONS_ENABLED`, `KIWOOM_MOCK_ENABLED`, `BINANCE_SPOT_DEMO_ENABLED` 등)는 **모두 기본 off**
 
 ## KAsset Android 호환 API

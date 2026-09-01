@@ -1016,7 +1016,7 @@ async def test_mutation_hook_runs_after_limiter_token_and_account_resolution(
     operation,
 ) -> None:
     """The final gate sees every pre-send await and blocks mutation HTTP=0."""
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
 
     paths: list[str] = []
     limiter_groups = []
@@ -1088,7 +1088,7 @@ async def test_mutation_retry_rechecks_hook_before_second_http(
     monkeypatch, operation
 ) -> None:
     """A 429-proven rejection may retry, but a closed window blocks re-send."""
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
 
     http_calls = 0
     hook_calls = 0

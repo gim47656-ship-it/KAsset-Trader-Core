@@ -12,18 +12,16 @@
 
 The evidence inventory in `sentry-pii-leak-evidence-rob1305.md` shows the
 Telegram bot token reached Sentry unredacted in span descriptions, error
-messages, and log entries before the ROB-1305 scrubber fix. KIS `appkey`/
-`appsecret` header-path exposure is unconfirmed but flagged suspect. This
-runbook exists so that **if the operator decides to rotate**, the steps are
-known in advance rather than improvised during an incident.
+messages, and log entries before the ROB-1305 scrubber fix. Historical KIS
+header-path exposure was also flagged, but KIS credentials are no longer part
+of deployed runtime configuration after the provider cutover. This runbook
+exists so operator-owned rotations are not improvised during an incident.
 
 ## 2. Candidate credentials and dependency map
 
 | Credential | Env var(s) | Used by | Blast radius if rotated without coordination |
 |---|---|---|---|
 | Telegram bot token | `TELEGRAM_TOKEN` | `app/monitoring/trade_notifier/transports.py` (all Telegram send/edit/callback calls); any deployed process that sends trade notifications | Old token stops working immediately at Telegram's API the moment it is revoked in BotFather — all in-flight and future notification sends fail until every deployed process picks up the new value |
-| KIS live app key/secret | `KIS_APP_KEY`, `KIS_APP_SECRET` | `app/services/brokers/kis/*` (live order placement, account reads, market data) | Regenerating invalidates the current OAuth token immediately; any in-flight KIS order/reconcile call using the old token fails until the process restarts with the new credential and re-authenticates |
-| KIS mock app key/secret | `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET` (naming per `settings.kis_mock_app_key`) | `app/services/brokers/kis/*` mock-mode paths | Same failure mode as live, scoped to `kis_mock` account-mode traffic only |
 
 Do not assume this table is exhaustive — before executing any rotation, the
 operator should re-derive the current credential surface from
@@ -37,12 +35,10 @@ dependency map above.
 
 1. **Freeze intake for the affected surface.** For Telegram: pause any
    scheduled job that sends Telegram notifications, or accept a short gap in
-   notifications during the rotation window. For KIS: avoid rotating during
-   an active order/reconcile window; prefer a quiet period (e.g. outside KRX
-   trading hours for KR live).
-2. **Generate the new credential** at the provider (BotFather for Telegram;
-   KIS developer portal for KIS app key/secret) **without revoking the old one
-   yet**, if the provider supports having two valid credentials briefly.
+   notifications during the rotation window. Retired KIS credentials may be
+   revoked separately; no deployed KIS process should require coordination.
+2. **Generate the new credential** at BotFather without revoking the old one
+   yet, if the provider supports having two valid credentials briefly.
 3. **Stage the new value** in the deployment's secret manager / env file
    (never committed to the repo — see `CLAUDE.md` env variable conventions).
    Do not print or log the new value; do not paste it into Linear, Slack, or
@@ -69,9 +65,6 @@ dependency map above.
   path returns a typed `TelegramMethodResult`; a non-`ok` result with
   `error_code=401` after rotation means a process is still holding the old
   token).
-- **KIS**: confirm a read-only KIS call (e.g. account balance / orderable
-  cash) succeeds with the new credential before allowing order-mutation
-  traffic to resume.
 - **Sentry**: confirm the ROB-1305 scrubber fix is deployed and active
   *before* generating any new credential, so the new credential's traffic
   does not repeat the same exposure. This is verifiable by the regression
@@ -94,8 +87,8 @@ increasing order of intrusiveness:
    scrubber fix is deployed so newly-ingested events are already clean.
 3. **Rotate the credential regardless of retention**, treating any residual
    Sentry-side copy as a reason to rotate rather than a reason to purge — this
-   is likely the higher-leverage action since Telegram/KIS access, not Sentry
-   read access, is the actual attack surface.
+   is likely the higher-leverage action since provider access, not Sentry read
+   access, is the actual attack surface.
 
 No Sentry deletion API call, secret-store call, or deploy tool call was made
 while producing this document or the evidence inventory it references.

@@ -48,7 +48,7 @@ def _body() -> dict:
             "snapshot_bundle_uuid": str(uuid.uuid4()),
             "market": "us",
             "market_session": "regular",
-            "account_scope": "kis_live",
+            "account_scope": "toss_live",
         },
         "dimension_reports": [
             {

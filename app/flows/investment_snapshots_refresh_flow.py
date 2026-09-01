@@ -71,11 +71,17 @@ def _response_to_dict(response: EnsureBundleResponse) -> dict[str, Any]:
     }
 
 
+def _reject_non_operational_account_scope(account_scope: str | None) -> None:
+    normalized = str(account_scope or "").strip().lower()
+    if normalized.startswith("kis_"):
+        raise ValueError("provider kis is not operational")
+
+
 async def run_snapshot_bundle_refresh(
     *,
     purpose: str = "kr_action_report",
     market: str = "kr",
-    account_scope: str | None = "kis_live",
+    account_scope: str | None = "toss_live",
     policy_version: str = "intraday_action_report_v1",
     symbols: list[str] | None = None,
     candidate_limit: int | None = None,
@@ -92,6 +98,8 @@ async def run_snapshot_bundle_refresh(
     Phase 5 will register real collectors so this transitions to
     ``complete`` / ``partial`` for live operational use.
     """
+    _reject_non_operational_account_scope(account_scope)
+
     request = EnsureBundleRequest(
         purpose=purpose,
         market=market,  # type: ignore[arg-type]
@@ -121,7 +129,7 @@ async def investment_snapshots_refresh_task(
     *,
     purpose: str = "kr_action_report",
     market: str = "kr",
-    account_scope: str | None = "kis_live",
+    account_scope: str | None = "toss_live",
     policy_version: str = "intraday_action_report_v1",
     symbols: list[str] | None = None,
     candidate_limit: int | None = None,
@@ -141,7 +149,7 @@ async def investment_snapshots_refresh_flow(
     *,
     purpose: str = "kr_action_report",
     market: str = "kr",
-    account_scope: str | None = "kis_live",
+    account_scope: str | None = "toss_live",
     policy_version: str = "intraday_action_report_v1",
     symbols: list[str] | None = None,
     candidate_limit: int | None = None,

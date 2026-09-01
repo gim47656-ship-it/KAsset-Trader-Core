@@ -130,14 +130,9 @@ async def test_toss_group_routable_consistent_on_api_failure(monkeypatch):
 
     monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty_upbit)
 
-    async def _empty_kis(*args, **kwargs):
-        return [], []
-
-    monkeypatch.setattr(portfolio_holdings, "_collect_kis_positions", _empty_kis)
-
     result = await portfolio_holdings._get_holdings_impl(
         include_current_price=False,
-        routing_account_mode="kis_live",
+        routing_account_mode="toss_live",
     )
 
     toss_accounts = [a for a in result["accounts"] if a["broker"] == "toss"]
@@ -188,14 +183,9 @@ async def test_samsung_manual_stays_non_routable(monkeypatch):
 
     monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty_upbit)
 
-    async def _empty_kis(*args, **kwargs):
-        return [], []
-
-    monkeypatch.setattr(portfolio_holdings, "_collect_kis_positions", _empty_kis)
-
     result = await portfolio_holdings._get_holdings_impl(
         include_current_price=False,
-        routing_account_mode="kis_live",
+        routing_account_mode="toss_live",
     )
 
     samsung_acc = next(a for a in result["accounts"] if a["broker"] == "samsung")

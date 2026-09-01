@@ -33,7 +33,7 @@ class N8nTradeReviewIndicators(BaseModel):
 
 class N8nTradeReviewItem(BaseModel):
     order_id: str = Field(..., description="Broker order ID (required, non-null)")
-    account: str = Field(..., description="Account: upbit, kis, kis_overseas")
+    account: str = Field(..., description="운영 계좌 식별자: toss 또는 upbit")
     symbol: str = Field(..., description="Normalized symbol")
     instrument_type: str = Field(..., description="crypto, equity_kr, equity_us")
     side: str = Field(..., description="buy or sell")

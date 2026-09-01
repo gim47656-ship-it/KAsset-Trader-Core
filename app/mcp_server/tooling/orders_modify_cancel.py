@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import app.services.brokers.upbit.client as upbit_service
-from app.core.symbol import to_db_symbol
-from app.mcp_server.tick_size import adjust_tick_size_kr
 from app.mcp_server.tooling.order_execution import (
     _normalize_market_type_to_external,
 )
 from app.mcp_server.tooling.order_validation import (
     _get_holdings_for_order,
 )
-from app.mcp_server.tooling.shared import logger
 from app.mcp_server.tooling.shared import (
     parse_holdings_market_filter as _parse_holdings_market_filter,
 )
@@ -23,20 +19,27 @@ from app.mcp_server.tooling.shared import (
     resolve_market_type as _resolve_market_type,
 )
 from app.mcp_server.tooling.shared import to_float as _to_float
-from app.services.brokers.kis.client import KISClient
-from app.services.brokers.kis.live_order_expiry import (
-    kr_day_order_expiry,
-    parse_kis_ordered_at,
-    row_has_cancel_evidence,
-)
-from app.services.brokers.kis.overseas_orders import _normalize_kis_exchange_code
-from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 
-def _create_kis_client(*, is_mock: bool) -> KISClient:
-    if is_mock:
-        return KISClient(is_mock=True)
-    return KISClient()
+def _kis_non_operational_result(
+    *,
+    order_id: str,
+    symbol: str | None = None,
+    dry_run: bool | None = None,
+) -> dict[str, Any]:
+    """등록 해제된 KIS 주문 mutation을 provider 접근 전에 거부한다."""
+    result: dict[str, Any] = {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "order_id": order_id,
+        "mutation_sent": False,
+    }
+    if symbol is not None:
+        result["symbol"] = symbol
+    if dry_run is not None:
+        result["dry_run"] = dry_run
+    return result
 
 
 def _map_upbit_state(state: str, filled: float, remaining: float) -> str:
@@ -77,371 +80,6 @@ def _normalize_upbit_order(order: dict[str, Any]) -> dict[str, Any]:
         "ordered_at": order.get("created_at", ""),
         "filled_at": order.get("done_at", ""),
         "currency": "KRW",
-    }
-
-
-def _get_kis_field(order: dict[str, Any], *keys: str, default: Any = "") -> Any:
-    for key in keys:
-        value = order.get(key)
-        if value:
-            return value
-    return default
-
-
-def _extract_kis_order_number(order: dict[str, Any]) -> str:
-    value = _get_kis_field(
-        order,
-        "odno",
-        "ODNO",
-        "ord_no",
-        "ORD_NO",
-        "orgn_odno",
-        "ORGN_ODNO",
-        default="",
-    )
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _build_temp_kr_order_id(
-    *,
-    symbol: str,
-    side: str,
-    ordered_price: int,
-    ordered_qty: int,
-    ordered_at: str,
-) -> str:
-    raw = "|".join(
-        [symbol, side, str(ordered_price), str(ordered_qty), ordered_at.strip()]
-    )
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
-    return f"TEMP_KR_{digest}"
-
-
-def _map_kis_status(
-    ordered: int,
-    filled: int,
-    remaining: int,
-    status_name: str | None,
-    *,
-    cancel_evidence: bool = False,
-) -> str:
-    normalized_name = str(status_name or "").strip()
-
-    # Explicit cancel evidence is authoritative at any point. ROB-665: the real
-    # broker signal is cancel_evidence (cncl_yn / '취소' side name); the legacy
-    # `prcs_stat_name == "주문취소"` key does not exist on live responses.
-    if cancel_evidence or normalized_name == "주문취소":
-        return "cancelled"
-    # ROB-657: nothing filled and nothing left to modify/cancel
-    # (정정취소가능수량 0) means the order is dead (EOD expiry / reject).
-    # KIS ledger truth is "alive iff rmn_qty > 0", so this wins over a
-    # stale '접수' status name that TTTC8036R may still carry.
-    if ordered > 0 and filled == 0 and remaining <= 0:
-        return "expired"
-    if normalized_name in ("접수", "주문접수"):
-        return "pending"
-    if normalized_name == "체결":
-        if filled > 0 and remaining > 0:
-            return "partial"
-        return "filled"
-    if normalized_name == "미체결":
-        return "pending"
-
-    if filled > 0 and remaining <= 0:
-        return "filled"
-    if filled > 0 and remaining > 0:
-        return "partial"
-    return "pending"
-
-
-_US_DAY_ORDER_REASON = "us_day_order"
-
-
-def _kr_history_expiry_reason(*, ordered_at: str, side: str) -> str | None:
-    """Categorical session×side expiry reason for a KR order-history row.
-
-    Read-path classification only (no 15:30 downgrade — that is a live send-path
-    decision). Returns None when ``ordered_at`` cannot be parsed.
-    """
-    accepted_at = parse_kis_ordered_at(ordered_at)
-    if accepted_at is None:
-        return None
-    return kr_day_order_expiry(accepted_at=accepted_at, side=side)[1]
-
-
-def _normalize_kis_domestic_order(order: dict[str, Any]) -> dict[str, Any]:
-    side_code = _get_kis_field(order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
-    side = "buy" if side_code == "02" else "sell"
-
-    ordered = int(float(_get_kis_field(order, "ord_qty", "ORD_QTY", default=0) or 0))
-    filled = int(
-        float(
-            _get_kis_field(
-                order,
-                "ccld_qty",
-                "CCLD_QTY",
-                "tot_ccld_qty",
-                "TOT_CCLD_QTY",
-                default=0,
-            )
-            or 0
-        )
-    )
-
-    remaining = int(
-        float(
-            _get_kis_field(order, "rmn_qty", "RMN_QTY", default=ordered - filled) or 0
-        )
-    )
-
-    ordered_price = int(
-        float(_get_kis_field(order, "ord_unpr", "ORD_UNPR", default=0) or 0)
-    )
-    filled_price = int(
-        float(
-            _get_kis_field(
-                order,
-                "ccld_unpr",
-                "CCLD_UNPR",
-                "avg_prvs",
-                "AVG_PRVS",
-                default=0,
-            )
-            or 0
-        )
-    )
-
-    status = _map_kis_status(
-        ordered,
-        filled,
-        remaining,
-        _get_kis_field(order, "prcs_stat_name", "PRCS_STAT_NAME"),
-        cancel_evidence=row_has_cancel_evidence(order),
-    )
-    symbol = str(_get_kis_field(order, "pdno", "PDNO"))
-    ordered_at = (
-        f"{_get_kis_field(order, 'ord_dt', 'ORD_DT')} "
-        f"{_get_kis_field(order, 'ord_tmd', 'ORD_TMD')}"
-    )
-    order_id = _extract_kis_order_number(order)
-    if not order_id:
-        order_id = _build_temp_kr_order_id(
-            symbol=symbol,
-            side=side,
-            ordered_price=ordered_price,
-            ordered_qty=ordered,
-            ordered_at=ordered_at,
-        )
-        logger.warning(
-            "Missing order_id for KR order (symbol=%s, side=%s, qty=%s, price=%s, ordered_at=%s), generated %s",
-            symbol,
-            side,
-            ordered,
-            ordered_price,
-            ordered_at,
-            order_id,
-        )
-
-    return {
-        "order_id": order_id,
-        "symbol": symbol,
-        "side": side,
-        "status": status,
-        "is_live": status in ("pending", "partial"),
-        "ordered_qty": ordered,
-        "filled_qty": filled,
-        "remaining_qty": remaining,
-        "ordered_price": ordered_price,
-        "filled_avg_price": filled_price,
-        "ordered_at": ordered_at,
-        "filled_at": "",
-        "expiry_reason": _kr_history_expiry_reason(ordered_at=ordered_at, side=side),
-        "currency": "KRW",
-    }
-
-
-_DEFAULT_US_CANCEL_EXCHANGES = ["NASD", "NYSE", "AMEX"]
-
-
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    """Remove duplicates while preserving order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
-
-
-async def _build_us_exchange_candidates(symbol: str | None) -> list[str]:
-    """Build a list of exchange candidates for US cancel lookups.
-
-    Prioritizes DB lookup result if symbol is provided, then adds
-    default exchanges as fallbacks. Results are deduplicated.
-    """
-    candidates: list[str] = []
-    if symbol:
-        try:
-            db_exchange = await get_us_exchange_by_symbol(symbol)
-            candidates.append(_normalize_kis_exchange_code(db_exchange))
-        except Exception as exc:
-            logger.warning(
-                "US exchange lookup failed for cancel: symbol=%s error=%s",
-                symbol,
-                exc,
-            )
-    candidates.extend(_DEFAULT_US_CANCEL_EXCHANGES)
-    return _dedupe_preserve_order(candidates)
-
-
-async def _find_us_open_order_by_id(
-    kis: KISClient,
-    order_id: str,
-    symbol: str | None,
-) -> tuple[dict[str, Any] | None, str | None, list[str]]:
-    """Find an open order by ID across candidate exchanges.
-
-    Returns:
-        Tuple of (order_dict, order_exchange, exchange_candidates).
-        order_exchange is extracted from the order payload (ovrs_excg_cd)
-        and normalized, falling back to the queried exchange if not present.
-    """
-    exchange_candidates = await _build_us_exchange_candidates(symbol)
-    for exchange in exchange_candidates:
-        try:
-            open_orders = await kis.inquire_overseas_orders(exchange)
-        except Exception as exc:
-            logger.warning(
-                "US open-order lookup failed: order_id=%s symbol=%s exchange=%s error=%s",
-                order_id,
-                symbol,
-                exchange,
-                exc,
-            )
-            continue
-
-        for order in open_orders:
-            if _extract_kis_order_number(order) == order_id:
-                # Prefer order payload's exchange over queried exchange
-                order_exchange = str(
-                    order.get("ovrs_excg_cd") or order.get("OVRS_EXCG_CD") or exchange
-                ).strip()
-                return order, order_exchange, exchange_candidates
-
-    return None, None, exchange_candidates
-
-
-async def _find_us_order_in_recent_history(
-    kis: KISClient,
-    order_id: str,
-    symbol: str,
-    exchange_candidates: list[str],
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Find an order in recent daily order history when not in open orders.
-
-    Searches a narrow recent window (last 7 days) across exchange candidates.
-    Post-filters by order_id and symbol since the KIS API's order_number
-    parameter is not supported for overseas orders.
-
-    Returns:
-        Tuple of (order_dict, order_exchange) or (None, None) if not found.
-    """
-    from datetime import datetime, timedelta
-
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
-
-    start_str = start_date.strftime("%Y%m%d")
-    end_str = end_date.strftime("%Y%m%d")
-
-    for exchange in exchange_candidates:
-        try:
-            history = await kis.inquire_daily_order_overseas(
-                start_date=start_str,
-                end_date=end_str,
-                symbol="%",  # Get all and filter client-side
-                exchange_code=exchange,
-            )
-        except Exception as exc:
-            logger.warning(
-                "US history lookup failed: order_id=%s symbol=%s exchange=%s error=%s",
-                order_id,
-                symbol,
-                exchange,
-                exc,
-            )
-            continue
-
-        for order in history:
-            if _extract_kis_order_number(order) == order_id:
-                # Verify symbol matches to avoid false positives
-                order_symbol = _get_kis_field(order, "pdno", "PDNO", default="")
-                if to_db_symbol(str(order_symbol)) != to_db_symbol(symbol):
-                    continue
-                # Prefer order payload's exchange
-                order_exchange = str(
-                    order.get("ovrs_excg_cd") or order.get("OVRS_EXCG_CD") or exchange
-                ).strip()
-                return order, order_exchange
-
-    return None, None
-
-
-def _normalize_kis_overseas_order(order: dict[str, Any]) -> dict[str, Any]:
-    side_code = _get_kis_field(order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
-    side = "buy" if side_code == "02" else "sell"
-
-    ordered = int(
-        float(_get_kis_field(order, "ft_ord_qty", "FT_ORD_QTY", default=0) or 0)
-    )
-    filled = int(
-        float(_get_kis_field(order, "ft_ccld_qty", "FT_CCLD_QTY", default=0) or 0)
-    )
-    # ROB-665 item 4: prefer the broker's 미체결수량 (nccs_qty) — a cancelled
-    # unfilled order reports nccs_qty=0, whereas synthesizing ordered-filled
-    # kept it pending+is_live. Fall back to ordered-filled when absent.
-    nccs_raw = _get_kis_field(order, "nccs_qty", "NCCS_QTY")
-    if nccs_raw is not None and str(nccs_raw).strip() != "":
-        remaining = int(float(nccs_raw))
-    else:
-        remaining = ordered - filled
-
-    ordered_price = float(
-        _get_kis_field(order, "ft_ord_unpr3", "FT_ORD_UNPR3", default=0) or 0
-    )
-    filled_price = float(
-        _get_kis_field(order, "ft_ccld_unpr3", "FT_CCLD_UNPR3", default=0) or 0
-    )
-
-    status = _map_kis_status(
-        ordered,
-        filled,
-        remaining,
-        _get_kis_field(order, "prcs_stat_name", "PRCS_STAT_NAME"),
-        cancel_evidence=row_has_cancel_evidence(order),
-    )
-
-    return {
-        "order_id": _extract_kis_order_number(order),
-        "symbol": _get_kis_field(order, "pdno", "PDNO"),
-        "side": side,
-        "status": status,
-        "is_live": status in ("pending", "partial"),
-        "ordered_qty": ordered,
-        "filled_qty": filled,
-        "remaining_qty": remaining,
-        "ordered_price": ordered_price,
-        "filled_avg_price": filled_price,
-        "ordered_at": (
-            f"{_get_kis_field(order, 'ord_dt', 'ORD_DT')} "
-            f"{_get_kis_field(order, 'ord_tmd', 'ORD_TMD')}"
-        ),
-        "filled_at": "",
-        "expiry_reason": _US_DAY_ORDER_REASON,
-        "currency": "USD",
     }
 
 
@@ -569,166 +207,7 @@ async def _cancel_kis_mock_domestic(
     order_id: str,
     symbol: str | None,
 ) -> dict[str, Any]:
-    """Cancel a KIS *mock* domestic order via the ledger (no TTTC8036R)."""
-    from decimal import Decimal as _Decimal
-
-    from app.mcp_server.tooling.kis_mock_ledger import (
-        mark_kis_mock_order_cancelled,
-        resolve_mock_order_for_cancel,
-    )
-    from app.services.kis_mock_runner.singleton import (
-        KISMockFollowupNotAuthorized,
-        KISMockOperation,
-        active_followup_capability,
-        verify_kis_mock_followup_capability,
-    )
-
-    market = _normalize_market_type_to_external("equity_kr")
-    resolved = await resolve_mock_order_for_cancel(order_id)
-    if resolved is None:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "error": "kis_mock: order not found in kis_mock_order_ledger",
-            "market": market,
-        }
-
-    resolved_symbol = symbol or resolved["symbol"]
-    orgno = resolved["krx_fwdg_ord_orgno"]
-    side = resolved["side"]
-    price = int(resolved["price"])
-
-    # ROB-1263 B-6: an unknown remainder is never replaced with a guess. The
-    # previous `int(...) or 1` turned "we do not know how much is resting" into
-    # a one-share cancel request, which is an invented broker instruction.
-    raw_quantity = resolved["quantity"]
-    known_remainder: _Decimal | None = None
-    if isinstance(raw_quantity, (int, float)) and int(raw_quantity) > 0:
-        known_remainder = _Decimal(str(int(raw_quantity)))
-
-    # ROB-1263 r3: J3B *verifies* an operation-scoped capability; it never issues
-    # one and never decides that a cancel is warranted. The lane lifecycle owner
-    # (J5 in the target split) takes a new short critical-section lease via
-    # ``issue_kis_mock_followup_capability`` and calls in holding the receipt.
-    # No receipt means no authority, which means zero broker calls.
-    try:
-        # r5 §2: the receipt is compared against the *target* — the native order
-        # id this call names, and the exact durable claim it belongs to — not
-        # merely checked for internal completeness.
-        verify_kis_mock_followup_capability(
-            active_followup_capability(),
-            operation=KISMockOperation.FOLLOWUP_CANCEL,
-            expected_broker_order_id=order_id,
-            expected_claim=_kis_mock_expected_claim(resolved),
-        )
-    except KISMockFollowupNotAuthorized as exc:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": resolved_symbol,
-            "broker_cancel_confirmed": False,
-            "reason_code": exc.reason_code,
-            "claim_released": False,
-            "detail": str(exc),
-            "error": (
-                "kis_mock cancel not authorized: no live FOLLOWUP_CANCEL "
-                "capability. A follow-up needs its own short critical-section "
-                "lease, the exact durable claim, and an attributed native order "
-                "id. The durable claim is retained."
-            ),
-            "market": market,
-        }
-
-    # Local ledger facts still have to line up with the receipt: a capability is
-    # authority to act on *one* order, not a licence for whatever the ledger row
-    # happens to say.
-    claim_scope, claim_key = _kis_mock_claim_identity(resolved)
-    if not orgno or known_remainder is None:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": resolved_symbol,
-            "broker_cancel_confirmed": False,
-            "reason_code": "claim_followup_not_authorized",
-            "claim_released": False,
-            "error": (
-                "kis_mock cancel not authorized: missing forwarding org number "
-                "or unknown broker remainder. The durable claim is retained."
-            ),
-            "market": market,
-        }
-
-    quantity = int(raw_quantity)
-
-    async def _soft_cancel(reason: str) -> dict[str, Any]:
-        await mark_kis_mock_order_cancelled(
-            ledger_id=resolved["ledger_id"],
-            broker_confirmed=False,
-            detail={"reason": reason, "order_no": order_id},
-        )
-        return {
-            "success": True,
-            "order_id": order_id,
-            "symbol": resolved_symbol,
-            "broker_cancel_confirmed": False,
-            "mock_unsupported": True,
-            "soft_cancelled": True,
-            # ROB-1263 B-6: a soft cancel is not terminal evidence, so it cannot
-            # release the durable send claim for this lineage.
-            "terminal_evidence": False,
-            "claim_released": False,
-            "warning": (
-                "kis_mock soft-cancel: ledger marked cancelled but the broker "
-                "resting order may still be live; a later fill is reconciled."
-            ),
-            "market": market,
-        }
-
-    try:
-        kis = _create_kis_client(is_mock=True)
-        result = await kis.cancel_korea_order(
-            order_number=order_id,
-            stock_code=resolved_symbol,
-            quantity=quantity,
-            price=price,
-            order_type=side,
-            krx_fwdg_ord_orgno=orgno,
-            is_mock=True,
-        )
-    except RuntimeError as exc:
-        if _is_kis_mock_unsupported(str(exc)):
-            return await _soft_cancel(f"broker_unsupported: {exc}")
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": resolved_symbol,
-            "broker_cancel_confirmed": False,
-            "error": str(exc),
-            "market": market,
-        }
-    except Exception as exc:  # noqa: BLE001 - surface unexpected broker errors
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": resolved_symbol,
-            "broker_cancel_confirmed": False,
-            "error": str(exc),
-            "market": market,
-        }
-
-    await mark_kis_mock_order_cancelled(
-        ledger_id=resolved["ledger_id"],
-        broker_confirmed=True,
-        detail={"order_no": order_id, "broker_response": result},
-    )
-    return {
-        "success": True,
-        "order_id": order_id,
-        "symbol": resolved_symbol,
-        "broker_cancel_confirmed": True,
-        "cancelled_at": result.get("ord_tmd", ""),
-        "market": market,
-    }
+    return _kis_non_operational_result(order_id=order_id, symbol=symbol)
 
 
 async def _cancel_kis_domestic(
@@ -738,128 +217,8 @@ async def _cancel_kis_domestic(
     is_mock: bool = False,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Cancel a KIS domestic (Korean equity) order."""
-    if is_mock:
-        return await _cancel_kis_mock_domestic(order_id, symbol)
-    if not symbol:
-        try:
-            kis = _create_kis_client(is_mock=is_mock)
-            open_orders = await kis.inquire_korea_orders(is_mock=is_mock)
-            for order in open_orders:
-                if (
-                    str(_get_kis_field(order, "odno", "ODNO", "ord_no", "ORD_NO"))
-                    == order_id
-                ):
-                    symbol = str(_get_kis_field(order, "pdno", "PDNO"))
-                    break
-        except Exception as exc:
-            if is_mock and "mock" in str(exc).lower():
-                return {
-                    "success": False,
-                    "order_id": order_id,
-                    "error": "kis_mock: domestic pending-orders inquiry "
-                    "(TTTC8036R) is not available in mock mode",
-                    "market": _normalize_market_type_to_external("equity_kr"),
-                    "mock_unsupported": True,
-                }
-            return {
-                "success": False,
-                "order_id": order_id,
-                "error": f"Failed to auto-retrieve order details: {exc}",
-            }
-
-    if not symbol:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "error": "symbol not found in order",
-        }
-
-    try:
-        kis = _create_kis_client(is_mock=is_mock)
-        side_code = "02"
-        price = 0
-        quantity = 1
-        krx_fwdg_ord_orgno = None
-
-        try:
-            open_orders = await kis.inquire_korea_orders(is_mock=is_mock)
-        except RuntimeError as exc:
-            if is_mock and "mock" in str(exc).lower():
-                return {
-                    "success": False,
-                    "order_id": order_id,
-                    "error": "kis_mock: domestic pending-orders inquiry "
-                    "(TTTC8036R) is not available in mock mode",
-                    "market": _normalize_market_type_to_external("equity_kr"),
-                    "mock_unsupported": True,
-                }
-            raise
-
-        for order in open_orders:
-            if (
-                str(_get_kis_field(order, "odno", "ODNO", "ord_no", "ORD_NO"))
-                == order_id
-            ):
-                side_code = _get_kis_field(
-                    order,
-                    "sll_buy_dvsn_cd",
-                    "SLL_BUY_DVSN_CD",
-                    default="02",
-                )
-                price = int(
-                    float(_get_kis_field(order, "ord_unpr", "ORD_UNPR", default=0) or 0)
-                )
-                remaining_raw = _get_kis_field(
-                    order, "rmn_qty", "RMN_QTY", default=None
-                )
-                if remaining_raw is None:
-                    ordered_quantity = float(
-                        _get_kis_field(order, "ord_qty", "ORD_QTY", default=0) or 0
-                    )
-                    filled_quantity = float(
-                        _get_kis_field(order, "tot_ccld_qty", "TOT_CCLD_QTY", default=0)
-                        or 0
-                    )
-                    remaining_raw = max(ordered_quantity - filled_quantity, 0)
-                quantity = int(float(remaining_raw or 0))
-                if quantity <= 0:
-                    raise RuntimeError("broker order has no remaining quantity")
-                orgno_value = _get_kis_field(
-                    order,
-                    "ord_gno_brno",
-                    "ORD_GNO_BRNO",
-                    default="",
-                )
-                if orgno_value:
-                    krx_fwdg_ord_orgno = str(orgno_value).strip()
-                break
-
-        order_type_str = "buy" if side_code == "02" else "sell"
-        hook_kw = {"pre_send_hook": pre_send_hook} if pre_send_hook is not None else {}
-        result = await kis.cancel_korea_order(
-            order_number=order_id,
-            stock_code=symbol,
-            quantity=quantity,
-            price=price,
-            order_type=order_type_str,
-            krx_fwdg_ord_orgno=krx_fwdg_ord_orgno,
-            is_mock=is_mock,
-            **hook_kw,
-        )
-        return {
-            "success": True,
-            "order_id": order_id,
-            "symbol": symbol,
-            "cancelled_at": result.get("ord_tmd", ""),
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": symbol,
-            "error": str(exc),
-        }
+    _ = (is_mock, pre_send_hook)
+    return _kis_non_operational_result(order_id=order_id, symbol=symbol)
 
 
 async def _cancel_kis_overseas(
@@ -869,140 +228,8 @@ async def _cancel_kis_overseas(
     is_mock: bool = False,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Cancel a KIS overseas (US equity) order."""
-    if is_mock:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "error": "kis_mock: overseas pending-orders inquiry (TTTS3018R) is "
-            "not available in mock mode",
-            "market": _normalize_market_type_to_external("equity_us"),
-            "mock_unsupported": True,
-        }
-
-    try:
-        kis = _create_kis_client(is_mock=is_mock)
-        (
-            target_order,
-            target_exchange,
-            exchange_candidates,
-        ) = await _find_us_open_order_by_id(kis, order_id, symbol)
-        logger.debug(
-            "US cancel lookup: order_id=%s symbol=%s checked_exchanges=%s",
-            order_id,
-            symbol,
-            ", ".join(exchange_candidates),
-        )
-
-        # If not in open orders, try recent history
-        if target_order is None and symbol:
-            (
-                target_order,
-                target_exchange,
-            ) = await _find_us_order_in_recent_history(
-                kis, order_id, symbol, exchange_candidates
-            )
-
-        if target_order is None:
-            return {
-                "success": False,
-                "order_id": order_id,
-                "error": (
-                    "Order not found in open orders or recent history "
-                    f"(checked exchanges: {','.join(exchange_candidates)})"
-                ),
-                "market": _normalize_market_type_to_external("equity_us"),
-            }
-
-        if not symbol:
-            symbol = str(_get_kis_field(target_order, "pdno", "PDNO")) or None
-
-        if not symbol:
-            return {
-                "success": False,
-                "order_id": order_id,
-                "error": "symbol not found in order",
-                "market": _normalize_market_type_to_external("equity_us"),
-            }
-
-        # Try to get remaining quantity from open order fields first
-        remaining_quantity = int(
-            float(_get_kis_field(target_order, "nccs_qty", "NCCS_QTY", default=0) or 0)
-        )
-
-        if remaining_quantity > 0:
-            quantity = remaining_quantity
-        else:
-            # Calculate remaining from ordered - filled
-            ordered = int(
-                float(
-                    _get_kis_field(target_order, "ft_ord_qty", "FT_ORD_QTY", default=0)
-                    or 0
-                )
-            )
-            filled = int(
-                float(
-                    _get_kis_field(
-                        target_order, "ft_ccld_qty", "FT_CCLD_QTY", default=0
-                    )
-                    or 0
-                )
-            )
-            quantity = max(ordered - filled, 0)
-
-            if quantity <= 0:
-                return {
-                    "success": False,
-                    "order_id": order_id,
-                    "symbol": symbol,
-                    "error": "Unable to resolve remaining quantity from open orders or recent history",
-                    "market": _normalize_market_type_to_external("equity_us"),
-                }
-
-        if quantity <= 0:
-            return {
-                "success": False,
-                "order_id": order_id,
-                "symbol": symbol,
-                "error": "Unable to resolve cancel quantity from open order",
-                "market": _normalize_market_type_to_external("equity_us"),
-            }
-
-        # Normalize exchange from order payload or fallback to candidate
-        exchange_code = _normalize_kis_exchange_code(
-            target_exchange or exchange_candidates[0]
-        )
-        logger.info(
-            "US cancel resolved: order_id=%s symbol=%s checked_exchanges=%s "
-            "selected_exchange=%s resolved_quantity=%s",
-            order_id,
-            symbol,
-            ", ".join(exchange_candidates),
-            exchange_code,
-            quantity,
-        )
-
-        hook_kw = {"pre_send_hook": pre_send_hook} if pre_send_hook is not None else {}
-        result = await kis.cancel_overseas_order(
-            order_number=order_id,
-            symbol=symbol,
-            exchange_code=exchange_code,
-            quantity=quantity,
-            **hook_kw,
-        )
-        return {
-            "success": True,
-            "order_id": order_id,
-            "symbol": symbol,
-            "cancelled_at": result.get("ord_tmd", ""),
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "order_id": order_id,
-            "symbol": symbol,
-            "error": str(exc),
-        }
+    _ = (is_mock, pre_send_hook)
+    return _kis_non_operational_result(order_id=order_id, symbol=symbol)
 
 
 async def cancel_order_impl(
@@ -1014,6 +241,15 @@ async def cancel_order_impl(
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     order_id, symbol, market_type = _validate_cancel_inputs(order_id, symbol, market)
+    # 레거시 구현은 Upbit 취소만 허용한다. 주식은 Toss 취소 도구를 거쳐야 한다.
+    if market_type != "crypto":
+        return {
+            "success": False,
+            "order_id": order_id,
+            "symbol": symbol,
+            "error": "provider kis is not operational",
+            "mutation_sent": False,
+        }
 
     try:
         if market_type == "crypto":
@@ -1260,128 +496,12 @@ async def _modify_kis_mock_domestic(
     new_quantity: float | None,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """Modify a KIS *mock* domestic order via the ledger (no TTTC8036R).
-
-    Fail-closed: if the broker rejects VTTC0013U as unsupported in mock, we do
-    NOT soft-modify (we cannot honestly claim a resting order was changed).
-    Use cancel + re-place instead.
-    """
-    from decimal import Decimal
-
-    from app.mcp_server.tooling.kis_mock_ledger import (
-        resolve_mock_order_for_cancel,
-        update_kis_mock_order_terms,
+    _ = (market_type, new_price, new_quantity)
+    return _kis_non_operational_result(
+        order_id=order_id,
+        symbol=normalized_symbol,
+        dry_run=dry_run,
     )
-
-    market = _normalize_market_type_to_external(market_type)
-    resolved = await resolve_mock_order_for_cancel(order_id)
-    if resolved is None:
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "error": "kis_mock: order not found in kis_mock_order_ledger",
-            "market": market,
-            "dry_run": dry_run,
-        }
-
-    orgno = resolved["krx_fwdg_ord_orgno"]
-    side = resolved["side"]
-    original_price = int(resolved["price"])
-    original_quantity = int(resolved["quantity"])
-    final_price = int(
-        adjust_tick_size_kr(
-            float(new_price) if new_price is not None else original_price, side
-        )
-    )
-    final_quantity = (
-        int(new_quantity) if new_quantity is not None else original_quantity
-    )
-
-    if not orgno:
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "mock_unsupported": True,
-            "error": "kis_mock: missing krx_fwdg_ord_orgno; use cancel + re-place",
-            "market": market,
-            "dry_run": dry_run,
-        }
-
-    try:
-        kis = _create_kis_client(is_mock=True)
-        result = await kis.modify_korea_order(
-            order_id,
-            normalized_symbol,
-            final_quantity,
-            final_price,
-            krx_fwdg_ord_orgno=orgno,
-            is_mock=True,
-        )
-    except RuntimeError as exc:
-        if _is_kis_mock_unsupported(str(exc)):
-            return {
-                "success": False,
-                "status": "failed",
-                "order_id": order_id,
-                "symbol": normalized_symbol,
-                "mock_unsupported": True,
-                "error": (
-                    "kis_mock modify unsupported by broker — use cancel + "
-                    f"re-place. ({exc})"
-                ),
-                "market": market,
-                "dry_run": dry_run,
-            }
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "error": str(exc),
-            "market": market,
-            "dry_run": dry_run,
-        }
-
-    if not result.get("odno"):
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "error": "kis_mock modify returned no order number",
-            "market": market,
-            "dry_run": dry_run,
-        }
-
-    await update_kis_mock_order_terms(
-        ledger_id=resolved["ledger_id"],
-        price=Decimal(str(final_price)),
-        quantity=Decimal(str(final_quantity)),
-        detail={"modified_to_order_no": result.get("odno")},
-    )
-    return {
-        "success": True,
-        "status": "modified",
-        "order_id": order_id,
-        "new_order_id": result["odno"],
-        "symbol": normalized_symbol,
-        "market": market,
-        "changes": {
-            "price": {"from": original_price, "to": final_price}
-            if final_price != original_price
-            else None,
-            "quantity": {"from": original_quantity, "to": final_quantity}
-            if final_quantity != original_quantity
-            else None,
-        },
-        "method": "api_modify",
-        "dry_run": dry_run,
-        "message": "KIS mock order modified via ledger-resolved orgno",
-    }
 
 
 async def _modify_kis_domestic(
@@ -1394,147 +514,12 @@ async def _modify_kis_domestic(
     *,
     is_mock: bool = False,
 ) -> dict[str, Any]:
-    """Modify a KIS domestic (Korean equity) order."""
-    if is_mock:
-        return await _modify_kis_mock_domestic(
-            order_id, normalized_symbol, market_type, new_price, new_quantity, dry_run
-        )
-    try:
-        kis = _create_kis_client(is_mock=is_mock)
-        try:
-            open_orders = await kis.inquire_korea_orders(is_mock=is_mock)
-        except RuntimeError as exc:
-            if is_mock and "mock" in str(exc).lower():
-                return {
-                    "success": False,
-                    "status": "failed",
-                    "order_id": order_id,
-                    "symbol": normalized_symbol,
-                    "error": "kis_mock: domestic pending-orders inquiry "
-                    "(TTTC8036R) is not available in mock mode",
-                    "market": _normalize_market_type_to_external(market_type),
-                    "mock_unsupported": True,
-                    "dry_run": dry_run,
-                }
-            raise
-        target_order = None
-        for order in open_orders:
-            if (
-                str(_get_kis_field(order, "odno", "ODNO", "ord_no", "ORD_NO"))
-                == order_id
-            ):
-                target_order = order
-                break
-
-        if not target_order:
-            return {
-                "success": False,
-                "status": "failed",
-                "order_id": order_id,
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "error": "Order not found in open orders",
-                "dry_run": dry_run,
-            }
-
-        original_price = int(
-            float(_get_kis_field(target_order, "ord_unpr", "ORD_UNPR", default=0) or 0)
-        )
-        original_quantity = int(
-            float(_get_kis_field(target_order, "ord_qty", "ORD_QTY", default=0) or 0)
-        )
-        side_code = _get_kis_field(target_order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
-        side = "buy" if side_code == "02" else "sell"
-
-        # ROB-518 — is_mock delegated above, so this is the live KR path.
-        floor_error = await _live_sell_reprice_floor_error(
-            normalized_symbol=normalized_symbol,
-            market_type=market_type,
-            side=side,
-            new_price=new_price,
-        )
-        if floor_error is not None:
-            return {
-                "success": False,
-                "status": "failed",
-                "order_id": order_id,
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "error": floor_error,
-                "method": "api_modify",
-                "dry_run": dry_run,
-            }
-
-        final_price_raw = int(new_price) if new_price is not None else original_price
-        final_price = int(adjust_tick_size_kr(float(final_price_raw), side))
-        final_quantity = (
-            int(new_quantity) if new_quantity is not None else original_quantity
-        )
-
-        krx_fwdg_ord_orgno = _get_kis_field(
-            target_order,
-            "ord_gno_brno",
-            "ORD_GNO_BRNO",
-            default="",
-        )
-        if krx_fwdg_ord_orgno:
-            krx_fwdg_ord_orgno = str(krx_fwdg_ord_orgno).strip()
-        else:
-            krx_fwdg_ord_orgno = None
-
-        result = await kis.modify_korea_order(
-            order_id,
-            normalized_symbol,
-            final_quantity,
-            final_price,
-            krx_fwdg_ord_orgno=krx_fwdg_ord_orgno,
-            is_mock=is_mock,
-        )
-        changes = {
-            "price": {"from": original_price, "to": final_price}
-            if final_price != original_price
-            else None,
-            "quantity": {"from": original_quantity, "to": final_quantity}
-            if final_quantity != original_quantity
-            else None,
-        }
-
-        if result.get("odno"):
-            return {
-                "success": True,
-                "status": "modified",
-                "order_id": order_id,
-                "new_order_id": result["odno"],
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "changes": changes,
-                "method": "api_modify",
-                "dry_run": dry_run,
-                "message": "Order modified via KIS API",
-            }
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "market": _normalize_market_type_to_external(market_type),
-            "error": result.get("msg", "Unknown error"),
-            "changes": changes,
-            "method": "api_modify",
-            "dry_run": dry_run,
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "market": _normalize_market_type_to_external(market_type),
-            "error": str(exc),
-            "changes": None,
-            "method": "api_modify",
-            "dry_run": dry_run,
-        }
+    _ = (market_type, new_price, new_quantity, is_mock)
+    return _kis_non_operational_result(
+        order_id=order_id,
+        symbol=normalized_symbol,
+        dry_run=dry_run,
+    )
 
 
 async def _modify_kis_overseas(
@@ -1547,144 +532,12 @@ async def _modify_kis_overseas(
     *,
     is_mock: bool = False,
 ) -> dict[str, Any]:
-    """Modify a KIS overseas (US equity) order."""
-    if is_mock:
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "market": _normalize_market_type_to_external("equity_us"),
-            "error": "kis_mock: overseas pending-orders inquiry (TTTS3018R) is "
-            "not available in mock mode",
-            "mock_unsupported": True,
-            "dry_run": dry_run,
-        }
-
-    try:
-        kis = _create_kis_client(is_mock=is_mock)
-        (
-            target_order,
-            target_exchange,
-            exchange_candidates,
-        ) = await _find_us_open_order_by_id(kis, order_id, normalized_symbol)
-        logger.debug(
-            "US modify lookup: order_id=%s symbol=%s checked_exchanges=%s",
-            order_id,
-            normalized_symbol,
-            ", ".join(exchange_candidates),
-        )
-
-        if not target_order:
-            return {
-                "success": False,
-                "status": "failed",
-                "order_id": order_id,
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "error": f"Order not found in open orders (checked: {','.join(exchange_candidates)})",
-                "dry_run": dry_run,
-            }
-
-        original_price = float(
-            _get_kis_field(target_order, "ft_ord_unpr3", "FT_ORD_UNPR3", default=0) or 0
-        )
-        original_quantity = int(
-            float(
-                _get_kis_field(target_order, "ft_ord_qty", "FT_ORD_QTY", default=0) or 0
-            )
-        )
-
-        # ROB-518 — mock returns unsupported above, so this is the live US path.
-        # Same sll_buy_dvsn_cd convention as _normalize_kis_overseas_order.
-        side_code = _get_kis_field(target_order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
-        side = "buy" if side_code == "02" else "sell"
-        floor_error = await _live_sell_reprice_floor_error(
-            normalized_symbol=normalized_symbol,
-            market_type=market_type,
-            side=side,
-            new_price=new_price,
-        )
-        if floor_error is not None:
-            return {
-                "success": False,
-                "status": "failed",
-                "order_id": order_id,
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "error": floor_error,
-                "method": "api_modify",
-                "dry_run": dry_run,
-            }
-
-        exchange_code = target_exchange or exchange_candidates[0]
-        logger.info(
-            "US modify resolved: order_id=%s symbol=%s "
-            "checked_exchanges=%s selected_exchange=%s",
-            order_id,
-            normalized_symbol,
-            ", ".join(exchange_candidates),
-            exchange_code,
-        )
-        final_price = float(new_price) if new_price is not None else original_price
-        final_quantity = (
-            int(new_quantity) if new_quantity is not None else original_quantity
-        )
-
-        result = await kis.modify_overseas_order(
-            order_id,
-            normalized_symbol,
-            exchange_code,
-            final_quantity,
-            final_price,
-        )
-        changes = {
-            "price": {"from": original_price, "to": final_price}
-            if final_price != original_price
-            else None,
-            "quantity": {"from": original_quantity, "to": final_quantity}
-            if final_quantity != original_quantity
-            else None,
-        }
-
-        if result.get("odno"):
-            return {
-                "success": True,
-                "status": "modified",
-                "order_id": order_id,
-                "new_order_id": result["odno"],
-                "symbol": normalized_symbol,
-                "market": _normalize_market_type_to_external(market_type),
-                "exchange": exchange_code,
-                "changes": changes,
-                "method": "api_modify",
-                "dry_run": dry_run,
-                "message": "Order modified via KIS API",
-            }
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "market": _normalize_market_type_to_external(market_type),
-            "exchange": exchange_code,
-            "error": result.get("msg", "Unknown error"),
-            "changes": changes,
-            "method": "api_modify",
-            "dry_run": dry_run,
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "status": "failed",
-            "order_id": order_id,
-            "symbol": normalized_symbol,
-            "market": _normalize_market_type_to_external(market_type),
-            "error": str(exc),
-            "changes": None,
-            "method": "api_modify",
-            "dry_run": dry_run,
-        }
+    _ = (market_type, new_price, new_quantity, is_mock)
+    return _kis_non_operational_result(
+        order_id=order_id,
+        symbol=normalized_symbol,
+        dry_run=dry_run,
+    )
 
 
 async def modify_order_impl(
@@ -1700,6 +553,18 @@ async def modify_order_impl(
     order_id, symbol, market_type, normalized_symbol = _validate_modify_inputs(
         order_id, symbol, market, new_price, new_quantity
     )
+    # 레거시 구현은 Upbit 정정만 허용한다. 주식은 Toss 정정 도구를 거쳐야 한다.
+    if market_type != "crypto":
+        return {
+            "success": False,
+            "status": "failed",
+            "order_id": order_id,
+            "symbol": normalized_symbol,
+            "market": _normalize_market_type_to_external(market_type),
+            "error": "provider kis is not operational",
+            "dry_run": dry_run,
+            "mutation_sent": False,
+        }
 
     if dry_run:
         return _build_modify_dry_run_response(
@@ -1769,9 +634,5 @@ async def modify_order_impl(
 __all__ = [
     "cancel_order_impl",
     "modify_order_impl",
-    "_extract_kis_order_number",
-    "_get_kis_field",
-    "_normalize_kis_domestic_order",
-    "_normalize_kis_overseas_order",
     "_normalize_upbit_order",
 ]

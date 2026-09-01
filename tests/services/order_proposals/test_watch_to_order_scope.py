@@ -20,7 +20,7 @@ def _scope(*, suffix: str | None = None) -> WatchToOrderScope:
     return WatchToOrderScope(
         symbol=f"SEAM-{unique}",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=f"account-{unique}",
         action="place",
     )
@@ -55,7 +55,9 @@ async def test_inspect_watch_to_order_scope_uses_every_scope_axis(db_session):
         **_create_kwargs(scope, broker_account_id=f"other-{uuid.uuid4().hex}")
     )
     await service.create_proposal(**_create_kwargs(scope, broker_account_id=None))
-    await service.create_proposal(**_create_kwargs(scope, account_mode="toss_live"))
+    await service.create_proposal(
+        **_create_kwargs(scope, account_mode="upbit", market="crypto")
+    )
     await service.create_proposal(**_create_kwargs(scope, market="equity_kr"))
 
     inspection = await service.inspect_watch_to_order_scope(

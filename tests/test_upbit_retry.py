@@ -217,7 +217,7 @@ async def test_order_mutation_hook_runs_after_limiter_before_http(
     monkeypatch, method, path
 ):
     """A window crossed during limiter wait blocks with mutation HTTP=0."""
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit import client
 
     admitted = False
@@ -264,7 +264,7 @@ async def test_order_mutation_hook_runs_after_limiter_before_http(
 @pytest.mark.asyncio
 async def test_retry_rechecks_hook_after_each_limiter_admission():
     """A retry gets a fresh boundary check and cannot issue a second send."""
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit.client import _retry_with_backoff
 
     limiter = _make_limiter()

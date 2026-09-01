@@ -5,7 +5,7 @@
     "snapshot_bundle_uuid": "{{snapshot_bundle_uuid}}",
     "market": "kr",
     "market_session": "regular",
-    "account_scope": "kis_live",
+    "account_scope": "toss_live",
     "policy_version": "intraday_action_report_v1",
     "generator_version": "hermes-stage-artifacts.v1",
     "hermes_run_id": "hermes-smoke-001"

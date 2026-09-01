@@ -69,6 +69,12 @@ def test_get_policy_for_filters_crypto_market_rules_by_lane():
 def test_single_share_exit_is_exposed_only_for_kr_sell():
     kr_sell = svc.get_policy_for("kr", "sell")["decision_rules"]
     assert "sell.single_share_exit" in kr_sell
+    assert kr_sell["sell.single_share_exit"]["scope"] == {
+        "markets": ["kr"],
+        "brokers": ["toss"],
+        "required_broker_inventory": ["toss"],
+        "order_routable_required": True,
+    }
     assert (
         "sell.single_share_exit"
         not in svc.get_policy_for("us", "sell")["decision_rules"]

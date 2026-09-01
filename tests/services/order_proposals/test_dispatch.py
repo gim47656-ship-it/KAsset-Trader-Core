@@ -52,6 +52,9 @@ def _known_market_session(monkeypatch):
     monkeypatch.setattr(
         revalidation_module, "evaluate_approval_window", allow_known_session
     )
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ORDER_PROPOSALS_TOSS_LIVE_VETO_ENABLED", True)
 
 
 @pytest.mark.asyncio
@@ -233,7 +236,7 @@ async def _seed_proposal(
     *,
     source_asof=None,
     market="equity_kr",
-    account_mode="kis_live",
+    account_mode="toss_live",
     action=None,
     target_broker_order_id=None,
     target_order_snapshot=None,
@@ -720,7 +723,7 @@ async def test_dispatch_auto_eligible_buy_or_sell_rests_without_approval(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side=side,
         order_type="limit",
         proposer="p",
@@ -831,7 +834,7 @@ async def test_dispatch_auto_eligible_qqq_records_cap_observation(
     group = await service.create_proposal(
         symbol="QQQ",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="cap-observation-fixture",
@@ -1226,7 +1229,6 @@ async def test_dispatch_records_toss_freeze_without_entering_revalidation(
     "account_mode,market",
     [
         ("toss_live", "equity_kr"),
-        ("kis_live", "equity_kr"),
         ("upbit", "crypto"),
     ],
 )
@@ -1391,7 +1393,7 @@ def _real_revalidate(**broker_fns):
 @pytest.mark.parametrize(
     "account_mode,market,symbol",
     [
-        ("kis_live", "equity_kr", "005930"),
+        ("toss_live", "equity_kr", "005930"),
         ("upbit", "crypto", "KRW-AVAX"),
     ],
 )
@@ -1527,7 +1529,7 @@ async def test_s156_marketable_take_profit_replace_cancels_then_places_the_new_r
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1542,6 +1544,7 @@ async def test_s156_marketable_take_profit_replace_cancels_then_places_the_new_r
 
     cancel_calls: list[dict] = []
     submits: list[dict] = []
+    opposite_pending_checks: list[dict] = []
     cancelled_snapshot = TargetOrderSnapshot(
         broker_order_id="broker-s141-replace",
         symbol="005930",
@@ -1552,6 +1555,11 @@ async def test_s156_marketable_take_profit_replace_cancels_then_places_the_new_r
         status="cancelled",
         observed_at=datetime.now(UTC).isoformat(),
     )
+
+    async def no_opposite_pending(**kwargs):
+        assert not cancel_calls, "the Toss pre-cancel guard must run before cancel"
+        opposite_pending_checks.append(kwargs)
+        return None
 
     async def fetch_fn(**kwargs):
         return cancelled_snapshot if cancel_calls else target_snapshot
@@ -1590,12 +1598,21 @@ async def test_s156_marketable_take_profit_replace_cancels_then_places_the_new_r
             fetch_target_fn=fetch_fn,
             cancel_target_fn=cancel_fn,
             place_order_fn=place_fn,
+            opposite_pending_check_fn=no_opposite_pending,
         ),
         cancel_target_fn=cancel_fn,
         fetch_target_fn=fetch_fn,
     )
 
     assert result.ok is True
+    assert opposite_pending_checks == [
+        {
+            "account_mode": "toss_live",
+            "market": "equity_kr",
+            "symbol": "005930",
+            "side": "sell",
+        }
+    ]
     assert len(cancel_calls) == 1
     assert len(submits) == 1
     refreshed, rungs = await OrderProposalsService(db_session).get_proposal(
@@ -1658,7 +1675,7 @@ async def test_s141_replace_failing_a_place_gate_never_touches_the_broker(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1752,7 +1769,7 @@ async def test_s141_cancel_of_an_order_this_account_cannot_read_is_not_auto_appr
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1824,7 +1841,7 @@ async def test_s141_auto_approved_cancel_consumes_no_daily_budget(
     cancel_group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1838,7 +1855,7 @@ async def test_s141_auto_approved_cancel_consumes_no_daily_budget(
     place_group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -1910,6 +1927,9 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
     monkeypatch, db_session, notify_failure
 ):
     from app.core.config import settings
+    from app.services.order_proposals.revalidation import (
+        _toss_proposal_client_order_id,
+    )
     from app.services.order_proposals.target_order import TargetOrderSnapshot
 
     monkeypatch.setattr(settings, "ORDER_PROPOSALS_AUTO_APPROVE", True)
@@ -1920,7 +1940,7 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=f"notify-failure-{uuid.uuid4()}",
         side="buy",
         order_type="limit",
@@ -1947,29 +1967,34 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
             0,
             broker_order_id="broker-notify-failure",
             correlation_id="corr",
-            idempotency_key="idem",
+            idempotency_key=_toss_proposal_client_order_id(proposal_id, 0),
             approval_hash_digest="digest",
             now=now,
         )
         return [RungOutcome(0, "submitted_resting", {})]
 
-    cancel_calls = []
+    compensation_calls: list[str] = []
 
     async def cancel_fn(**kwargs):
-        cancel_calls.append(kwargs)
-        return {"success": True}
+        compensation_calls.append(f"cancel:{kwargs['order_id']}")
+        return {"success": True, "replacement_order_id": "cancel-request-1"}
 
     async def fetch_fn(**kwargs):
+        compensation_calls.append(f"terminal:{kwargs['order_id']}")
         return TargetOrderSnapshot(
             broker_order_id="broker-notify-failure",
             symbol="005930",
             side="buy",
             order_type="limit",
             limit_price="97000",
-            remaining_quantity="1",
+            remaining_quantity="0",
             status="cancelled",
             observed_at=kwargs["now"].isoformat(),
         )
+
+    async def reconcile_fn(**kwargs):
+        compensation_calls.append(f"reconcile:{kwargs['order_id']}")
+        return {"confirmed": True, "reconciled_order_count": 1}
 
     notifier = (
         _FakeNotifier(message_id=None)
@@ -1984,10 +2009,15 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
         revalidate_fn=fake_revalidate,
         cancel_target_fn=cancel_fn,
         fetch_target_fn=fetch_fn,
+        toss_veto_reconcile_fn=reconcile_fn,
     )
 
     assert result.ok is False
-    assert cancel_calls[0]["order_id"] == "broker-notify-failure"
+    assert compensation_calls == [
+        "cancel:broker-notify-failure",
+        "terminal:broker-notify-failure",
+        "reconcile:broker-notify-failure",
+    ]
     refreshed, rungs = await service.get_proposal(group.proposal_id)
     assert rungs[0].state == "cancelled"
     assert (
@@ -1995,4 +2025,10 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
             "result"
         ]
         == "cancelled"
+    )
+    assert (
+        refreshed.source_asof["auto_approved"]["notification_failure"]["outcomes"][0][
+            "terminal_confirmation"
+        ]
+        == "broker_terminal_and_toss_ledger_reconciled"
     )

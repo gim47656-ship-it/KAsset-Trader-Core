@@ -61,18 +61,11 @@ async def _clean(db_session, toss_ledger_cleanup_lock):
 def _patch_session_factory(db_session):
     from app.mcp_server.tooling import toss_live_ledger
 
-    # Create a mock that when called twice returns db_session
-    # async with _order_session_factory()() as db:
     mock_cm = AsyncMock()
     mock_cm.__aenter__.return_value = db_session
     mock_cm.__aexit__.return_value = None
 
-    def factory_call():
-        return mock_cm
-
-    with patch.object(
-        toss_live_ledger, "_order_session_factory", return_value=factory_call
-    ):
+    with patch.object(toss_live_ledger, "AsyncSessionLocal", return_value=mock_cm):
         yield
 
 
@@ -364,12 +357,14 @@ async def test_toss_projection_never_matches_another_broker_by_order_id(db_sessi
     group = await service.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="collision-test",
         rungs=[RungInput(0, "buy", Decimal("2"), Decimal("190"), None)],
     )
+    # 운영 생성 경로를 우회해 전환 전의 KIS 역사 행을 재현한다.
+    group.account_mode = "kis_live"
     for state in ("revalidating", "approved", "submitting"):
         await service.transition_rung(group.proposal_id, 0, new_state=state)
     await service.record_resting(

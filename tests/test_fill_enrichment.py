@@ -1,10 +1,14 @@
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.services.fill_enrichment import fetch_fill_enrichment
 from app.services.fill_notification import FillOrder
 
 
-def _kr(side="ask"):
+def _kr(side: str = "ask") -> FillOrder:
     return FillOrder(
         symbol="005930",
         side=side,
@@ -12,65 +16,74 @@ def _kr(side="ask"):
         filled_qty=10.0,
         filled_amount=685000.0,
         filled_at="t",
-        account="kis",
+        account="toss",
         market_type="kr",
         currency="KRW",
     )
 
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_kr_sell_realized_pnl(monkeypatch):
-    async def fake_holding(client, ticker, market):
-        return {"quantity": 50, "avg_price": 68000.0, "current_price": 68500.0}
-
-    monkeypatch.setattr(
-        "app.services.fill_enrichment.get_kis_holding_for_ticker", fake_holding
+def _snapshot(*, qty: str = "50", avg: str = "68000") -> SimpleNamespace:
+    return SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                instrument_type="equity_kr",
+                symbol="005930",
+                quantity=Decimal(qty),
+                avg_buy_price=Decimal(avg),
+            )
+        ]
     )
-    monkeypatch.setattr("app.services.fill_enrichment.KISClient", lambda: object())
-    enr = await fetch_fill_enrichment(_kr(side="ask"))
-    assert enr is not None
-    # (68500-68000)*10 = 5000
-    assert enr.realized_pnl_amount == pytest.approx(5000.0)
-    assert enr.realized_pnl_rate == pytest.approx((68500 / 68000 - 1) * 100)
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_kr_buy_position(monkeypatch):
-    async def fake_holding(client, ticker, market):
-        return {"quantity": 30, "avg_price": 68100.0, "current_price": 68500.0}
-
+async def test_kr_sell_realized_pnl_uses_toss_position(monkeypatch):
+    fetcher = AsyncMock(return_value=_snapshot())
     monkeypatch.setattr(
-        "app.services.fill_enrichment.get_kis_holding_for_ticker", fake_holding
+        "app.services.fill_enrichment.fetch_toss_portfolio_snapshot", fetcher
     )
-    monkeypatch.setattr("app.services.fill_enrichment.KISClient", lambda: object())
-    enr = await fetch_fill_enrichment(_kr(side="bid"))
-    assert enr is not None
-    assert enr.position_qty == pytest.approx(30.0)
-    assert enr.position_avg_price == pytest.approx(68100.0)
-    assert enr.realized_pnl_amount is None
+
+    enrichment = await fetch_fill_enrichment(_kr(side="ask"))
+
+    assert enrichment is not None
+    assert enrichment.realized_pnl_amount == pytest.approx(5000.0)
+    assert enrichment.realized_pnl_rate == pytest.approx((68500 / 68000 - 1) * 100)
+    fetcher.assert_awaited_once_with(need_sellable=False, need_cash=False)
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_fail_open_returns_none(monkeypatch):
-    async def boom(client, ticker, market):
-        raise RuntimeError("broker down")
+async def test_kr_buy_position_uses_toss_position(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.fill_enrichment.fetch_toss_portfolio_snapshot",
+        AsyncMock(return_value=_snapshot(qty="30", avg="68100")),
+    )
 
-    monkeypatch.setattr("app.services.fill_enrichment.get_kis_holding_for_ticker", boom)
-    monkeypatch.setattr("app.services.fill_enrichment.KISClient", lambda: object())
+    enrichment = await fetch_fill_enrichment(_kr(side="bid"))
+
+    assert enrichment is not None
+    assert enrichment.position_qty == pytest.approx(30.0)
+    assert enrichment.position_avg_price == pytest.approx(68100.0)
+    assert enrichment.realized_pnl_amount is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_toss_failure_is_fail_open(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.fill_enrichment.fetch_toss_portfolio_snapshot",
+        AsyncMock(side_effect=RuntimeError("broker down")),
+    )
+
     assert await fetch_fill_enrichment(_kr()) is None
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_no_position_returns_none(monkeypatch):
-    async def empty(client, ticker, market):
-        return {"quantity": 0, "avg_price": 0.0, "current_price": 0.0}
-
+async def test_missing_toss_position_returns_none(monkeypatch):
     monkeypatch.setattr(
-        "app.services.fill_enrichment.get_kis_holding_for_ticker", empty
+        "app.services.fill_enrichment.fetch_toss_portfolio_snapshot",
+        AsyncMock(return_value=SimpleNamespace(positions=[])),
     )
-    monkeypatch.setattr("app.services.fill_enrichment.KISClient", lambda: object())
+
     assert await fetch_fill_enrichment(_kr()) is None

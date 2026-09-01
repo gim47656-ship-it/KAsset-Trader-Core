@@ -34,7 +34,7 @@ def _snaps(buying_power):
     return [
         _snap(
             "portfolio",
-            {"buying_power": buying_power, "primary_source": "kis", "holdings": []},
+            {"buying_power": buying_power, "primary_source": "toss", "holdings": []},
         ),
         _snap("candidate_universe", {"usefulness": "useful", "candidates": cands}),
         _snap("symbol", {"symbol": "GOOD", "quote": _q()}, symbol="GOOD"),
@@ -45,7 +45,7 @@ def _item(snaps, **budget):
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
         **budget,
     )

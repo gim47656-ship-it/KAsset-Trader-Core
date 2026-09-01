@@ -1,30 +1,25 @@
-"""DB-first read-through service for daily OHLCV (ROB-639).
+"""일봉 OHLCV의 DB-first read-through 서비스(ROB-639).
 
-Extracted from ``market_data_indicators._cache_first_*`` so that
-``get_ohlcv(period='day')`` can read KR/US daily candles from the DB before
-falling back to live upstream APIs.
+``get_ohlcv(period='day')``가 KR/US 일봉을 먼저 DB에서 읽고 Toss로
+내려갈 수 있도록 ``market_data_indicators._cache_first_*``에서 분리했다.
 
-Design:
+설계:
 
-* Public helpers (``cache_is_fresh_equity``, ``rows_to_frame``...) are shared
-  with ``market_data_indicators`` to avoid drift in freshness semantics.
-* ``cache_first_kr`` / ``cache_first_us`` perform the READ-ONLY DB-first
-  lookup and return ``None`` on miss/stale data so the caller can run its
-  own fallback (KIS, Yahoo, Toss...) and optional write-back.
-* Fail-open: ``cache_first_*`` return ``None`` (never raise) on ANY DB/
-  calendar failure — DB trouble must degrade to the live path, not hard-fail
-  ``get_ohlcv``. ``write_back_*`` are likewise best-effort and return 0.
+* ``cache_is_fresh_equity``와 ``rows_to_frame`` 같은 공개 helper를
+  ``market_data_indicators``와 공유해 신선도 의미가 어긋나지 않게 한다.
+* ``cache_first_kr`` / ``cache_first_us``는 DB를 읽기만 하며 누락되거나
+  오래된 경우 ``None``을 반환해 Toss 조회와 선택적 write-back을 허용한다.
+* DB/캘린더 오류는 fail-open으로 ``None``을 반환한다. ``get_ohlcv``를
+  실패시키지 않고 Toss 경로로 내리며 ``write_back_*``도 best-effort로 0을
+  반환한다.
 
-Freshness rule for equity caches (KR/US): the newest DB row must cover the
-most-recent closed exchange session (``XKRX`` for KR, ``XNYS`` for US).
+주식 캐시는 최신 DB 행이 가장 최근에 종료된 거래소 세션(KR ``XKRX``,
+US ``XNYS``)을 포함해야 신선하다.
 
-KR intraday rule (ROB-639 review): while the KRX daily bar for *today* may
-still be forming (session day, before the 15:35 KST cutoff shared with
-``kis_ohlcv_cache.KRX_DAILY_CACHE_CUTOFF``), ``cache_first_kr`` returns
-``None`` so the live KIS path serves — the old live path included today's
-forming bar and DB-first must not silently drop it. After the cutoff and on
-non-session days the DB-first path proceeds. The US path needs no such gate:
-the Yahoo daily path is already closed-bucket only.
+KR 장중에는 오늘 일봉이 아직 형성 중일 수 있으므로 세션 거래일의
+15:35 KST 이전에는 ``cache_first_kr``가 ``None``을 반환해 Toss 현재 봉을
+사용한다. 이후와 비거래일에는 DB-first 경로를 사용한다. US 공급자 경계는
+자체 완료 세션 필터를 적용한다.
 """
 
 from __future__ import annotations
@@ -244,34 +239,27 @@ async def cache_first_kr(
     *,
     now: datetime.datetime | None = None,
 ) -> pd.DataFrame | None:
-    """DB-first read for KR daily candles. Returns ``None`` on miss/stale/error.
+    """KR 일봉을 DB-first로 읽고 누락·오래됨·오류 시 ``None``을 반환한다.
 
-    Reads the latest ``count`` rows from ``kr_candles_1d`` (venue ``KRX``)
-    via ``DailyCandlesRepository.fetch_recent``. If the DB has at least
-    ``count`` rows AND the newest row covers the most-recent closed ``XKRX``
-    session, returns a sorted OHLCV DataFrame. Otherwise returns ``None``
-    so the caller can fall back to a live API (KIS).
+    ``DailyCandlesRepository.fetch_recent``로 ``kr_candles_1d``의 KRX 최신
+    ``count``행을 읽는다. 행 수가 충분하고 최신 행이 가장 최근 종료된 XKRX
+    세션을 포함할 때만 정렬된 OHLCV를 반환하며, 아니면 Toss로 내린다.
 
-    While today's KRX daily bar may still be forming (session day, before
-    the 15:35 KST cutoff) this always returns ``None`` — the live KIS path
-    includes today's forming bar, which the DB does not carry.
+    거래일 15:35 KST 이전에는 오늘 일봉이 형성 중일 수 있으므로 항상
+    ``None``을 반환한다. 이때 Toss 경로가 오래된 DB 꼬리 대신 현재 봉을
+    포함할 수 있다.
 
-    Fail-open: any DB/calendar exception is logged and swallowed, returning
-    ``None`` so the caller's live path serves.
-
-    ``end`` is currently a forward-compatibility placeholder: when non-None
-    (historical query), the cache is bypassed and ``None`` is returned, so
-    the caller's live path can apply the historical end-date filter.
-    ``now`` is injectable for tests; defaults to the real clock.
+    DB/캘린더 예외는 기록 후 삼키며 호출자의 Toss 경로를 살린다.
+    ``end``가 있으면 최신-N 캐시로 과거 질의를 처리할 수 없으므로 캐시를
+    우회한다. ``now``는 테스트에서 주입할 수 있고 기본값은 실제 시각이다.
     """
     if end is not None:
-        # Historical queries cannot be served by the latest-N cache.
+        # 최신-N 캐시는 과거 시점 질의를 처리할 수 없다.
         return None
 
     try:
         if kr_daily_bar_may_be_forming(now):
-            # ROB-639: intraday KRX — serve live so today's forming bar is
-            # included (parity with the pre-DB-first live path).
+            # 장중 KRX에서는 DB에 없는 오늘 형성 중 봉을 Toss에서 읽는다.
             return None
 
         from app.core.db import AsyncSessionLocal
@@ -310,18 +298,15 @@ async def cache_first_us(
     *,
     now: datetime.datetime | None = None,
 ) -> pd.DataFrame | None:
-    """DB-first read for US daily candles. Returns ``None`` on miss/stale/error.
+    """US 일봉을 DB-first로 읽고 누락·오래됨·오류 시 ``None``을 반환한다.
 
-    Resolves the symbol's exchange (``NASDAQ`` / ``NYSE`` / ``AMEX``) via
-    ``get_us_exchange_by_symbol`` and reads the latest ``count`` rows from
-    ``us_candles_1d``. Freshness uses the ``XNYS`` calendar (which covers
-    all US sessions including AMEX). Returns ``None`` when the DB is
-    insufficient or stale so the caller can fall back to a live API
-    (Yahoo → Toss).
+    ``get_us_exchange_by_symbol``로 거래소(``NASDAQ`` / ``NYSE`` /
+    ``AMEX``)를 확인한 뒤 ``us_candles_1d``의 최신 ``count``행을 읽는다.
+    AMEX를 포함한 미국 세션 신선도는 ``XNYS`` 캘린더로 판정한다. DB가
+    부족하거나 오래됐으면 Toss로 내린다.
 
-    Fail-open: any DB/calendar exception is logged and swallowed, returning
-    ``None`` so the caller's live path serves. ``now`` is injectable for
-    tests; defaults to the real clock.
+    DB/캘린더 예외는 기록 후 삼키며 호출자의 Toss 경로를 살린다.
+    ``now``는 테스트에서 주입할 수 있고 기본값은 실제 시각이다.
     """
     if end is not None:
         return None
@@ -374,18 +359,16 @@ async def write_back_kr(
     *,
     symbol: str,
     partition: str = "KRX",
-    source: str = "kis",
+    source: str = "toss",
     now: datetime.datetime | None = None,
 ) -> int:
-    """Write a freshly fetched KR daily frame back into ``kr_candles_1d``.
+    """새 KR 일봉 frame을 ``kr_candles_1d``에 write-back한다.
 
-    Rows whose session is not yet final (today's forming intraday bar) are
-    dropped before the upsert so a partial bar is never persisted as an
-    authoritative daily row.
+    아직 종료되지 않은 오늘 형성 중 봉은 upsert 전에 제거해 부분 봉이
+    확정 일봉으로 저장되지 않게 한다.
 
-    Best-effort: any error is swallowed and logged so that write-back
-    failures never propagate to the caller's read path. Returns the number
-    of rows upserted (0 on failure or empty frame).
+    best-effort 경계이므로 오류를 기록하고 삼키며 읽기 경로로 전파하지
+    않는다. 저장 행 수를 반환하고 실패하거나 비어 있으면 0을 반환한다.
     """
     if frame is None or frame.empty:
         return 0
@@ -420,24 +403,21 @@ async def write_back_us(
     *,
     symbol: str,
     partition: str | None = None,
-    source: str = "yahoo",
+    source: str = "toss",
     now: datetime.datetime | None = None,
 ) -> int:
-    """Write a freshly fetched US daily frame back into ``us_candles_1d``.
+    """새 US 일봉 frame을 ``us_candles_1d``에 write-back한다.
 
-    ``source`` defaults to ``'yahoo'`` because the most common write-back
-    caller in ``get_ohlcv`` is the US Yahoo path. Pass ``'toss'`` if the
-    frame came from the Toss fallback.
+    ``get_ohlcv``의 운영 주식 공급자는 Toss뿐이므로 ``source`` 기본값은
+    ``'toss'``다. ``partition``이 ``None``이면
+    ``get_us_exchange_by_symbol``로 거래소를 확인하고 실패 시 ``'NASD'``를
+    사용한다.
 
-    If ``partition`` is ``None`` the exchange is resolved via
-    ``get_us_exchange_by_symbol`` (defaulting to ``'NASD'`` on failure).
+    아직 종료되지 않은 형성 중 봉은 upsert 전에 제거한다. frame에
+    ``adj_close``가 없으면 기존 값을 건드리지 않아 Yahoo/Toss 일반 봉이
+    ``yahoo_fallback`` 조정종가를 지우지 않게 한다.
 
-    Rows whose session is not yet closed (a forming intraday bar) are
-    dropped before the upsert. When the frame lacks an ``adj_close`` column
-    the upsert leaves existing ``adj_close`` values untouched (so a plain
-    Yahoo/Toss frame does not null out ``yahoo_fallback`` adjusted closes).
-
-    Best-effort: any error is swallowed and logged; returns 0 on failure.
+    best-effort 경계이므로 오류를 기록하고 삼키며 실패 시 0을 반환한다.
     """
     if frame is None or frame.empty:
         return 0

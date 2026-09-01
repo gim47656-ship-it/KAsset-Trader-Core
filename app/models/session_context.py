@@ -37,7 +37,7 @@ class OperatorSessionContext(Base):
         ),
         CheckConstraint(
             "account_scope IS NULL OR account_scope IN "
-            "('kis_live','kis_mock','alpaca_paper','upbit_live')",
+            "('kis_live','kis_mock','toss_live','alpaca_paper','upbit_live')",
             name="account_scope",
         ),
         CheckConstraint(

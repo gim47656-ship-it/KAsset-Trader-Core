@@ -13,22 +13,21 @@ from app.schemas.investment_reports import IngestReportItem, MarketSessionLitera
 from app.schemas.investment_snapshots import SnapshotRequestedBy
 
 GeneratorMarketLiteral = Literal["kr", "us", "crypto"]
-GeneratorAccountScopeLiteral = Literal["kis_live", "upbit_live"]
+GeneratorAccountScopeLiteral = Literal["toss_live", "upbit_live"]
 GeneratorStatusLiteral = Literal["draft", "published"]
 
 
 class ReportGenerationRequest(BaseModel):
     """Request envelope for :class:`SnapshotBackedReportGenerator.generate`.
 
-    Supported canonical pairs (enforced by the generator at runtime):
+    지원되는 운영 pair(생성기에서 강제):
 
-    * ``kr / kis_live`` — KIS domestic stock account.
-    * ``us / kis_live`` — KIS overseas (US) stock account (ROB-297).
-    * ``crypto / upbit_live`` — Upbit spot.
+    * ``kr / toss_live`` — Toss 국내 주식 계정.
+    * ``us / toss_live`` — Toss 미국 주식 계정.
+    * ``crypto / upbit_live`` — Upbit 현물 계정.
 
-    ``account_scope`` stays a single canonical literal — KR vs US is
-    disambiguated by ``market`` per ROB-297 guardrail #2. No
-    ``kis_overseas_live`` alias is introduced.
+    과거 ``kis_*`` snapshot/report는 읽기 모델에서만 역직렬화하며 신규 생성
+    요청으로는 받지 않는다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -81,8 +80,8 @@ class ReportGenerationRequest(BaseModel):
     # re-enable an in-process LLM path.
     auto_compose: bool = False
 
-    # ROB-278 — operator user_id for live-account read paths (e.g. KIS
-    # holdings/cash). ``None`` keeps broker-backed collectors fail-closed.
+    # 운영 계정 read 경로에 전달할 사용자 식별자. ``None``이면 broker-backed
+    # collector가 fail-closed를 유지한다.
     user_id: int | None = None
 
     # ROB-352 — deterministic regeneration semantics. Default is REUSE: when a

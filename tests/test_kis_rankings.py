@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.brokers.kis import KISClient
+from app.services.brokers.kis.client import KISClient
 from app.services.brokers.kis.constants import (
     FLUCTUATION_RANK_TR,
     FLUCTUATION_RANK_URL,

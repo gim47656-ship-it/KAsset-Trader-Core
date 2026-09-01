@@ -36,7 +36,12 @@ from app.services.order_proposals.errors import (
     OrderProposalDispatchNoLongerAuthorized,
     OrderProposalError,
 )
-from app.services.order_proposals.revalidation import RungOutcome, revalidate_and_submit
+from app.services.order_proposals.revalidation import (
+    RungOutcome,
+    _adapt_toss_preview_response,
+    _adapt_toss_submit_response,
+    revalidate_and_submit,
+)
 from app.services.order_proposals.service import (
     OrderProposalsService,
     proposal_approval_block_reason,
@@ -53,7 +58,7 @@ from tests.services.order_proposals.window_fakes import allow_known_session
 def _group(
     *,
     market: str = "equity_us",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     symbol: str = "VOO",
     valid_until: object,
     exit_intent: str | None = None,
@@ -83,6 +88,42 @@ async def _allowed_session(group, *, now):
         allowed_until=now + timedelta(hours=8),
         next_allowed_at=now + timedelta(days=1),
     )
+
+
+def _toss_preview_response(kwargs, *, price, quantity, approval_hash="fresh"):
+    assert kwargs["dry_run"] is True
+    assert kwargs["account_mode"] == "toss_live"
+    return _adapt_toss_preview_response(
+        {
+            "success": True,
+            "source": "toss",
+            "account_mode": "toss_live",
+            "dry_run": True,
+            "mutation_sent": False,
+            "client_order_id": kwargs["proposal_client_order_id"],
+            "approval_hash": approval_hash,
+            "payload_preview": {
+                "clientOrderId": kwargs["proposal_client_order_id"],
+                "price": str(price),
+                "quantity": str(quantity),
+            },
+        }
+    )
+
+
+def _toss_submit_response(kwargs, response):
+    assert kwargs["dry_run"] is False
+    assert kwargs["account_mode"] == "toss_live"
+    assert kwargs["approval_hash"]
+    raw = {
+        "source": "toss",
+        "account_mode": "toss_live",
+        "dry_run": False,
+        "mutation_sent": response.get("success") is True,
+        **response,
+    }
+    raw.setdefault("client_order_id", kwargs["proposal_client_order_id"])
+    return _adapt_toss_submit_response(raw, order_type=kwargs["order_type"])
 
 
 @pytest.mark.asyncio
@@ -874,7 +915,7 @@ class _FakeRevalidationService:
             source_asof={},
             action=action,
             order_type="limit",
-            account_mode="kis_live",
+            account_mode="toss_live",
             market="equity_us",
             symbol="VOO",
             side="sell",
@@ -1224,12 +1265,11 @@ async def test_revalidation_toctou_after_preview_blocks_live_submit(
     async def place(**kwargs):
         if kwargs["dry_run"]:
             calls["preview"] += 1
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         calls["submit"] += 1
         raise AssertionError("TOCTOU window close must block live submit")
 
@@ -1304,12 +1344,11 @@ async def test_replace_rechecks_after_cancel_before_replacement_submit():
     async def place(**kwargs):
         if kwargs["dry_run"]:
             calls["preview"] += 1
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         calls["submit"] += 1
         raise AssertionError("closed-window replacement must not be submitted")
 
@@ -1524,21 +1563,21 @@ async def test_valid_us_regular_session_preserves_preview_and_submit_path():
     async def place(**kwargs):
         if kwargs["dry_run"]:
             calls["preview"] += 1
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         calls["submit"] += 1
-        return {
-            "success": True,
-            "status": "resting",
-            "broker_order_id": "broker-1",
-            "correlation_id": "corr-1",
-            "idempotency_key": "idem-1",
-            "approval_hash_digest": "digest-1",
-        }
+        return _toss_submit_response(
+            kwargs,
+            {
+                "success": True,
+                "order_id": "broker-1",
+                "correlation_id": "corr-1",
+                "approval_hash_digest": "digest-1",
+            },
+        )
 
     outcomes = await revalidate_and_submit(
         service=service,
@@ -2002,12 +2041,11 @@ async def test_transport_hook_rechecks_after_all_preview_work_before_http():
         nonlocal broker_http_calls, preview_calls
         if kwargs["dry_run"]:
             preview_calls += 1
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         await kwargs["pre_send_hook"]()
         broker_http_calls += 1
         raise AssertionError("transport hook must abort before HTTP")
@@ -2359,7 +2397,7 @@ async def test_expired_later_rung_preserves_prior_broker_backed_rung():
 
 @pytest.mark.asyncio
 async def test_upbit_place_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit import orders as upbit_orders
 
     wrapper_calls = 0
@@ -2397,7 +2435,7 @@ async def test_upbit_place_adapter_threads_transport_hook(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_upbit_cancel_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit import orders as upbit_orders
 
     wrapper_calls = 0
@@ -2436,7 +2474,7 @@ async def test_kis_cancel_adapter_threads_transport_hook(monkeypatch, market):
     from unittest.mock import AsyncMock
 
     from app.services.brokers.kis import domestic_orders, overseas_orders
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
 
     provider_calls = 0
 
@@ -2498,7 +2536,7 @@ async def test_kis_cancel_adapter_threads_transport_hook(monkeypatch, market):
 @pytest.mark.asyncio
 async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
     from app.mcp_server.tooling import orders_toss_variants as toss
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.order_proposals.revalidation import _default_place_order_fn
 
     transport_calls = 0
@@ -2535,16 +2573,14 @@ async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "account_mode,market", [("kis_live", "equity_us"), ("upbit", "crypto")]
-)
+@pytest.mark.parametrize("account_mode,market", [("upbit", "crypto")])
 async def test_default_execution_adapter_threads_transport_hook(
     monkeypatch,
     account_mode,
     market,
 ):
     from app.mcp_server.tooling import order_execution
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.order_proposals.revalidation import _default_place_order_fn
 
     transport_calls = 0
@@ -2602,12 +2638,11 @@ async def test_concurrent_void_between_preview_and_submit_aborts_the_send():
             # still in flight.
             service.group.lifecycle_state = "voided"
             service.group.no_resubmit = True
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         broker_http_calls += 1
         raise AssertionError("submit must not run after a concurrent void")
 
@@ -2644,21 +2679,21 @@ async def test_healthy_proposal_still_submits_through_the_lifecycle_gate():
     async def place(**kwargs):
         nonlocal submits
         if kwargs["dry_run"]:
-            return {
-                "success": True,
-                "approval_hash": "fresh",
-                "price": "100",
-                "quantity": "1",
-            }
+            return _toss_preview_response(
+                kwargs,
+                price="100",
+                quantity="1",
+            )
         submits += 1
-        return {
-            "success": True,
-            "status": "resting",
-            "broker_order_id": "broker-1",
-            "correlation_id": "corr-1",
-            "idempotency_key": "idem-1",
-            "approval_hash_digest": "digest-1",
-        }
+        return _toss_submit_response(
+            kwargs,
+            {
+                "success": True,
+                "order_id": "broker-1",
+                "correlation_id": "corr-1",
+                "approval_hash_digest": "digest-1",
+            },
+        )
 
     initial = await allow_known_session(service.group, now=now)
     service.group.source_asof = {"approval_window_policy_stamp": initial.policy_stamp}
@@ -2676,7 +2711,8 @@ async def test_healthy_proposal_still_submits_through_the_lifecycle_gate():
 
     assert submits == 1
     assert service.lifecycle_recheck_calls == 1
-    assert [outcome.result for outcome in outcomes] != ["guard_blocked"]
+    assert [outcome.result for outcome in outcomes] == ["submitted_resting"]
+    assert service.rung.state == "resting"
 
 
 @pytest.mark.asyncio

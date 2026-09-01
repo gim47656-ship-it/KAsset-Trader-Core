@@ -53,10 +53,10 @@ def _offline_pending_orders_snapshot(request, monkeypatch):
     """ROB-1296: resolve the ROB-274 pending-orders enrichment without a broker.
 
     ``investment_report_context_get_impl`` enriches every response by collecting
-    a live pending-orders snapshot, so each call reached
-    ``openapi.koreainvestment.com``. The helper is documented as failing open —
-    "any collector trouble surfaces as ``None``" — and ``None`` is exactly what
-    these tests already receive, having paid for a live round trip to get it.
+    a live pending-orders snapshot, so each call reaches the active broker.
+    The helper is documented as failing open — "any collector trouble surfaces
+    as ``None``" — and ``None`` is exactly what these tests already receive
+    after waiting for the broker round trip.
     This states that outcome deterministically. It fabricates no orders; the one
     test that asserts a populated snapshot patches the collector registry itself
     and still wins, because that patch is applied inside the test body.
@@ -108,8 +108,8 @@ def _create_kwargs(
         "report_type": "kr_morning",
         "market": market,
         "market_session": "regular",
-        "account_scope": "kis_mock",
-        "execution_mode": "mock_preview",
+        "account_scope": "upbit_live" if market == "crypto" else "toss_live",
+        "execution_mode": "mock_preview" if market == "crypto" else "advisory_only",
         "created_by_profile": "test",
         "title": f"t-{kst_date}",
         "summary": "s",
@@ -876,7 +876,7 @@ async def test_context_get_pending_orders_shape_unchanged_after_shared_helper(
     fake_result = SnapshotCollectResult(
         snapshot_kind="pending_orders",
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         source_kind="auto_trader_mcp",
         payload_json={"pending_orders": fake_orders, "count": 1},
         as_of=dt.datetime.now(tz=dt.UTC),
@@ -904,7 +904,7 @@ async def test_context_get_pending_orders_shape_unchanged_after_shared_helper(
 
     ctx = await investment_report_context_get_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     assert ctx["success"] is True
@@ -912,7 +912,7 @@ async def test_context_get_pending_orders_shape_unchanged_after_shared_helper(
 
 
 # ---------------------------------------------------------------------------
-# ROB-318 — generate_from_bundle must forward user_id so the kis_live
+# ROB-318 — generate_from_bundle must forward user_id so the toss_live
 # portfolio collector is invoked instead of staying fail-closed
 # ('unavailable'), which otherwise stale-gates the report to advisory_only
 # with the generic "포지션 데이터 확인 불가" reason.
@@ -965,7 +965,7 @@ async def test_generate_from_bundle_threads_user_id_to_request(
 
     result = await investment_report_generate_from_bundle_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         title="t",
         summary="s",
         kst_date="2026-05-26",
@@ -983,7 +983,7 @@ async def test_generate_from_bundle_user_id_defaults_to_mcp_user(
     monkeypatch: pytest.MonkeyPatch, session: AsyncSession
 ) -> None:
     """ROB-352 — omitting user_id now resolves the MCP default (like get_holdings)
-    so kis_live portfolios are readable, instead of staying fail-closed. The
+    so toss_live portfolios are readable, instead of staying fail-closed. The
     resolved id is surfaced in the response and reaches the request.
     """
     from app.core.config import settings
@@ -999,7 +999,7 @@ async def test_generate_from_bundle_user_id_defaults_to_mcp_user(
 
     result = await investment_report_generate_from_bundle_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         title="t",
         summary="s",
         kst_date="2026-05-26",

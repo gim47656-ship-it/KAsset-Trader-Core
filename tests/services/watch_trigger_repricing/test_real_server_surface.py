@@ -29,10 +29,12 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import NotFoundError
 
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.orders_kis_variants import (
     KIS_LIVE_ORDER_TOOL_NAMES,
     KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
 )
 from app.mcp_server.tooling.orders_kiwoom_us_variants import KIWOOM_MOCK_US_TOOL_NAMES
 from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES

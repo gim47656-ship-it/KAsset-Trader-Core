@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import math
 from dataclasses import dataclass
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -13,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
-from app.services.brokers.kis.client import KISClient
+from app.services.market_data.toss_ohlcv import fetch_us_intraday_toss_frame
 from app.services.us_symbol_universe_service import (
     USSymbolUniverseLookupError,
     get_us_exchange_by_symbol,
@@ -360,103 +359,66 @@ async def _fetch_candles_from_cagg(
     return _internal_frame_from_rows(rows, "bucket")
 
 
-async def _fetch_minutes_from_kis(
+async def _fetch_minutes_from_toss(
     *,
     symbol: str,
-    exchange: str,
     end_time_et: dt.datetime,
     required_buckets: set[dt.datetime],
     required_window_bucket_count: int,
     period: str,
 ) -> pd.DataFrame:
-    """Fetch minutes from KIS until all required buckets are covered.
-
-    Stops paging when aggregated minutes cover all required buckets,
-    or when a scaled safety cap is reached.
-    """
+    """요청 bucket을 복구할 만큼 Toss 1분봉을 가져온다."""
     if not required_buckets:
         return _empty_internal_frame()
 
-    kis = KISClient()
-    all_rows: list[dict[str, object]] = []
-
     bucket_minutes = _INTRADAY_PERIOD_CONFIGS[period].bucket_minutes
-    window_bucket_count = max(int(required_window_bucket_count), 1)
-    max_pages = max(1, math.ceil(window_bucket_count * bucket_minutes / 120) + 1)
-
-    current_keyb = end_time_et.strftime("%Y%m%d%H%M%S")
-    upper_bound_utc = _et_naive_to_utc(end_time_et)
-    page_calls = 0
-
-    while page_calls < max_pages:
-        page_calls += 1
-        page = await kis.inquire_overseas_minute_chart(
-            symbol=symbol,
-            exchange_code=exchange,
-            n=120,
-            keyb=current_keyb,
-        )
-        if page.frame.empty:
-            break
-        page_rows: list[dict[str, object]] = []
-        for item in page.frame.to_dict("records"):
-            raw_datetime = item.get("datetime")
-            if raw_datetime is None:
-                continue
-            timestamp = pd.Timestamp(raw_datetime)
-            if timestamp.tzinfo is None:
-                utc_datetime = _et_naive_to_utc(timestamp.to_pydatetime())
-            else:
-                utc_datetime = _ensure_utc(timestamp.to_pydatetime())
-            if utc_datetime > upper_bound_utc:
-                continue
-            session = _session_for_et_naive(_utc_to_et_naive(utc_datetime))
-            if session is None:
-                continue
-            open_value = _parse_float(item.get("open"))
-            high_value = _parse_float(item.get("high"))
-            low_value = _parse_float(item.get("low"))
-            close_value = _parse_float(item.get("close"))
-            volume_value = _parse_float(item.get("volume"))
-            value_value = _parse_float(item.get("value"))
-            if None in {open_value, high_value, low_value, close_value, volume_value}:
-                continue
-            page_rows.append(
-                {
-                    "datetime": utc_datetime,
-                    "open": float(cast(float, open_value)),
-                    "high": float(cast(float, high_value)),
-                    "low": float(cast(float, low_value)),
-                    "close": float(cast(float, close_value)),
-                    "volume": float(cast(float, volume_value)),
-                    "value": float(value_value) if value_value is not None else 0.0,
-                }
-            )
-        all_rows.extend(page_rows)
-
-        # Check if we have enough data to cover required buckets
-        if all_rows:
-            collected = _merge_internal_frames(
-                pd.DataFrame(all_rows, columns=_INTERNAL_FRAME_COLUMNS)
-            )
-            aggregated = _aggregate_minutes_to_period_utc(collected, period)
-            covered_buckets: set[dt.datetime] = set()
-            for raw_datetime in aggregated["datetime"].tolist():
-                if isinstance(raw_datetime, dt.datetime):
-                    covered_buckets.add(_ensure_utc(raw_datetime))
-            if required_buckets <= covered_buckets:
-                break
-
-        next_keyb = str(page.next_keyb or "").strip()
-        if not page.has_more or not next_keyb or next_keyb == current_keyb:
-            break
-        current_keyb = next_keyb
-
-    if not all_rows:
-        return _empty_internal_frame()
-    return _merge_internal_frames(
-        pd.DataFrame(all_rows, columns=_INTERNAL_FRAME_COLUMNS)
+    minute_count = max(int(required_window_bucket_count), 1) * bucket_minutes
+    frame = await fetch_us_intraday_toss_frame(
+        symbol=symbol,
+        period="1m",
+        count=minute_count,
+        end_date=end_time_et.replace(tzinfo=_ET),
     )
+    if frame.empty:
+        return _empty_internal_frame()
+
+    upper_bound_utc = _et_naive_to_utc(end_time_et)
+    rows: list[dict[str, object]] = []
+    for item in frame.to_dict("records"):
+        raw_datetime = item.get("datetime")
+        if raw_datetime is None:
+            continue
+        timestamp = pd.Timestamp(raw_datetime)
+        if timestamp.tzinfo is None:
+            utc_datetime = _et_naive_to_utc(timestamp.to_pydatetime())
+        else:
+            utc_datetime = _ensure_utc(timestamp.to_pydatetime())
+        if utc_datetime > upper_bound_utc:
+            continue
+        if _session_for_et_naive(_utc_to_et_naive(utc_datetime)) is None:
+            continue
+        open_value = _parse_float(item.get("open"))
+        high_value = _parse_float(item.get("high"))
+        low_value = _parse_float(item.get("low"))
+        close_value = _parse_float(item.get("close"))
+        volume_value = _parse_float(item.get("volume"))
+        value_value = _parse_float(item.get("value"))
+        if None in {open_value, high_value, low_value, close_value, volume_value}:
+            continue
+        rows.append(
+            {
+                "datetime": utc_datetime,
+                "open": float(cast(float, open_value)),
+                "high": float(cast(float, high_value)),
+                "low": float(cast(float, low_value)),
+                "close": float(cast(float, close_value)),
+                "volume": float(cast(float, volume_value)),
+                "value": float(value_value) if value_value is not None else 0.0,
+            }
+        )
+    if not rows:
+        return _empty_internal_frame()
+    return _merge_internal_frames(pd.DataFrame(rows, columns=_INTERNAL_FRAME_COLUMNS))
 
 
 async def _self_heal_1m_candles(
@@ -642,9 +604,8 @@ async def read_us_intraday_candles(
             end_time_utc,
         )
         if missing_buckets:
-            fallback_minutes = await _fetch_minutes_from_kis(
+            fallback_minutes = await _fetch_minutes_from_toss(
                 symbol=symbol,
-                exchange=exchange,
                 end_time_et=end_time_et,
                 required_buckets=missing_buckets,
                 required_window_bucket_count=len(repair_window),
@@ -679,9 +640,8 @@ async def read_us_intraday_candles(
             end_time_utc,
         )
         if missing_buckets:
-            fallback_minutes = await _fetch_minutes_from_kis(
+            fallback_minutes = await _fetch_minutes_from_toss(
                 symbol=symbol,
-                exchange=exchange,
                 end_time_et=end_time_et,
                 required_buckets=missing_buckets,
                 required_window_bucket_count=len(repair_window),
@@ -716,9 +676,8 @@ async def read_us_intraday_candles(
         end_time_utc,
     )
     if missing_buckets:
-        fallback_minutes = await _fetch_minutes_from_kis(
+        fallback_minutes = await _fetch_minutes_from_toss(
             symbol=symbol,
-            exchange=exchange,
             end_time_et=end_time_et,
             required_buckets=missing_buckets,
             required_window_bucket_count=len(repair_window),

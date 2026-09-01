@@ -118,9 +118,9 @@ lanes:
    `quick` value — `analyze_stock_batch` never attaches a `position` field;
    use `get_holdings` for per-account positions. Consensus/recommendation
    require `quick=False`.
-3. `get_intraday_investor_flow(symbol)` — the foreign-flow gate (today's slot +
-   the confirmed multi-day net-buy history / foreign-holding burn-down embedded
-   by ROB-626/640).
+3. `get_intraday_investor_flow` is physically unregistered because Toss/NH PLUG
+   has no equivalent evidence. Do not call it or synthesize a foreign-flow
+   replacement; a decision that requires this evidence must remain fail-closed.
 4. **Support selection:** prefer the **confluence** of BB-lower / fib-0 / value
    area low; place a deep limit `buy.deep_limit_pct_range` below the current
    price (pull-back catch, never chase). On crash days add a deeper rung (e.g.
@@ -231,8 +231,6 @@ lanes:
       - tool: get_fx_rate
       - tool: analyze_stock_batch
         args: {quick: true}
-      - tool: get_intraday_investor_flow
-        gate: recovery_gate
       - tool: order_proposal_create
         action: place
         approval: telegram_human_click_required

@@ -32,7 +32,7 @@ def _patch_briefing_sections(monkeypatch):
         as_of = "2026-08-20T09:00:00+09:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         return FakePendingSnapshot()

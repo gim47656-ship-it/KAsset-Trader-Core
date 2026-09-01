@@ -11,7 +11,6 @@ from typing import Any, Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.timezone import KST, now_kst
 from app.schemas.open_orders import (
     OpenOrderDataState,
     OpenOrderMarket,
@@ -20,7 +19,6 @@ from app.schemas.open_orders import (
     OpenOrdersQueryMarket,
     OpenOrdersResponse,
 )
-from app.services.brokers.kis.client import KISClient
 from app.services.brokers.toss.client import TossReadClient
 from app.services.brokers.toss.dto import TossOrder
 from app.services.brokers.upbit import orders as upbit_orders
@@ -29,9 +27,6 @@ from app.services.upbit_symbol_universe_service import get_upbit_market_display_
 from app.services.us_symbol_universe_service import get_us_names_by_symbols
 
 logger = logging.getLogger(__name__)
-
-_KIS_SIDE_BUY = {"02", "buy", "b", "매수"}
-_KIS_SIDE_SELL = {"01", "sell", "s", "매도"}
 
 
 def _first_str(row: dict[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -57,22 +52,6 @@ def _decimal(value: object) -> Decimal | None:
         return None
 
 
-def _parse_kis_ordered_at(row: dict[str, Any]) -> dt.datetime | None:
-    explicit = _parse_datetime(row.get("ordered_at") or row.get("placed_at"))
-    if explicit is not None:
-        return explicit
-    ord_tmd = str(row.get("ord_tmd") or "").strip()
-    if not ord_tmd:
-        return None
-    ord_dt = str(row.get("ord_dt") or "").strip() or now_kst().strftime("%Y%m%d")
-    try:
-        return dt.datetime.strptime(
-            f"{ord_dt}{ord_tmd.zfill(6)}", "%Y%m%d%H%M%S"
-        ).replace(tzinfo=KST)
-    except ValueError:
-        return None
-
-
 def _parse_datetime(value: object) -> dt.datetime | None:
     if value is None:
         return None
@@ -85,63 +64,6 @@ def _parse_datetime(value: object) -> dt.datetime | None:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
     return None
-
-
-def _kis_side(row: dict[str, Any]) -> Literal["buy", "sell", "unknown"]:
-    raw = (
-        str(
-            row.get("sll_buy_dvsn_cd")
-            or row.get("sll_buy_dvsn_cd_name")
-            or row.get("side")
-            or ""
-        )
-        .strip()
-        .lower()
-    )
-    if raw in _KIS_SIDE_BUY:
-        return "buy"
-    if raw in _KIS_SIDE_SELL:
-        return "sell"
-    return "unknown"
-
-
-def normalize_kis_order(
-    row: dict[str, Any],
-    *,
-    market: Literal["kr", "us"],
-    exchange: str,
-) -> OpenOrderRow:
-    order_no = _first_str(row, ("ord_no", "odno", "order_id")) or "unknown"
-    symbol = _first_str(row, ("pdno", "symbol", "ticker")) or "unknown"
-    quantity = _decimal(_first_str(row, ("ord_qty", "ft_ord_qty", "quantity", "qty")))
-    remaining = _decimal(
-        _first_str(row, ("nccs_qty", "rmn_qty", "remaining_qty", "remaining_quantity"))
-    )
-    if remaining is None:
-        remaining = quantity
-    status = _first_str(row, ("prcs_stat_name", "status", "raw_status")) or "pending"
-
-    return OpenOrderRow(
-        broker="kis",
-        market=market,
-        symbol=symbol.upper() if market == "us" else symbol,
-        symbol_name=_first_str(row, ("prdt_name", "symbol_name", "name")),
-        side=_kis_side(row),
-        order_type=_first_str(row, ("ord_dvsn_name", "ord_dvsn", "order_type")),
-        time_in_force=None,
-        price=_decimal(
-            _first_str(row, ("ord_unpr", "ft_ord_unpr3", "ord_unpr3", "price"))
-        ),
-        quantity=quantity,
-        remaining_qty=remaining,
-        filled_qty=_decimal(_first_str(row, ("ft_ccld_qty", "ccld_qty", "filled_qty"))),
-        status="pending",
-        raw_status=status,
-        ordered_at=_parse_kis_ordered_at(row),
-        order_no=order_no,
-        exchange=exchange,
-        currency="KRW" if market == "kr" else "USD",
-    )
 
 
 def normalize_upbit_order(row: dict[str, Any]) -> OpenOrderRow:
@@ -180,7 +102,7 @@ def _default_toss_client() -> Any:
     return TossReadClient.from_settings()
 
 
-def _toss_market(symbol: str) -> Literal["kr", "us"]:
+def toss_order_market(symbol: str) -> Literal["kr", "us"]:
     normalized = symbol.strip().upper()
     return "kr" if len(normalized) == 6 and normalized.isdigit() else "us"
 
@@ -196,7 +118,7 @@ def normalize_toss_order(order: TossOrder) -> OpenOrderRow:
         side = "sell"
     else:
         side = "unknown"
-    market = _toss_market(order.symbol)
+    market = toss_order_market(order.symbol)
     return OpenOrderRow(
         broker="toss",
         market=market,
@@ -218,20 +140,47 @@ def normalize_toss_order(order: TossOrder) -> OpenOrderRow:
     )
 
 
-_KIS_US_EXCHANGES: tuple[str, ...] = ("NASD", "NYSE", "AMEX")
 # Bound the Toss OPEN-order pagination: a single operator's open orders never
 # need many pages, so cap it to convert a stuck/echoing cursor (broker
 # misbehavior) into a bounded partial result instead of an infinite loop.
 _TOSS_MAX_PAGES = 50
 
 
-class _KISClientProtocol(Protocol):
-    async def inquire_korea_orders(
-        self, is_mock: bool = False
-    ) -> list[dict[str, Any]]: ...
-    async def inquire_overseas_orders(
-        self, exchange_code: str = "NASD", is_mock: bool = False
-    ) -> list[dict[str, Any]]: ...
+async def fetch_toss_open_orders(
+    *,
+    client_factory: Callable[[], Any] = _default_toss_client,
+) -> list[TossOrder]:
+    """Fetch every Toss OPEN order and close the request-scoped client."""
+
+    client: Any | None = None
+    try:
+        client = client_factory()
+        cursor: str | None = None
+        orders: list[TossOrder] = []
+        seen_cursors: set[str] = set()
+        for _ in range(_TOSS_MAX_PAGES):
+            page = await client.list_orders(status="OPEN", cursor=cursor)
+            orders.extend(page.orders)
+            if not page.has_next or not page.next_cursor:
+                break
+            if page.next_cursor in seen_cursors:
+                logger.warning("Toss pagination cursor did not advance; stopping")
+                break
+            seen_cursors.add(page.next_cursor)
+            cursor = page.next_cursor
+        else:
+            logger.warning(
+                "Toss pagination hit max page cap (%d); returning partial",
+                _TOSS_MAX_PAGES,
+            )
+        return orders
+    finally:
+        close = getattr(client, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 - close must never break the request
+                logger.warning("Toss client close failed", exc_info=True)
 
 
 class _UpbitClientProtocol(Protocol):
@@ -240,13 +189,9 @@ class _UpbitClientProtocol(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
-def _default_kis_client() -> _KISClientProtocol:
-    return KISClient()
-
-
 def _source(
     *,
-    broker: Literal["kis", "toss", "upbit"],
+    broker: Literal["toss", "upbit"],
     market: OpenOrderMarket,
     status: OpenOrderDataState,
     fetched_at: dt.datetime | None,
@@ -281,16 +226,11 @@ class CurrentOrdersService:
     def __init__(
         self,
         *,
-        kis_client_factory: Callable[[], _KISClientProtocol]
-        | None = _default_kis_client,
         upbit_client: _UpbitClientProtocol | None = upbit_orders,
         toss_client_factory: Callable[[], Any] | None = _default_toss_client,
         db: AsyncSession | None = None,
         clock: Callable[[], dt.datetime] | None = None,
     ) -> None:
-        self._kis_client_factory = kis_client_factory
-        self._kis_client_initialized = False
-        self._kis_client: _KISClientProtocol | None = None
         self._upbit_client = upbit_client
         self._toss_client_factory = toss_client_factory
         self._db = db
@@ -372,7 +312,7 @@ class CurrentOrdersService:
         market: OpenOrdersQueryMarket = "all",
     ) -> OpenOrdersResponse:
         def _fallback(
-            broker: Literal["kis", "toss", "upbit"],
+            broker: Literal["toss", "upbit"],
             markets: tuple[OpenOrderMarket, ...],
         ) -> list[OpenOrderSourceState]:
             return [
@@ -388,10 +328,6 @@ class CurrentOrdersService:
             ]
 
         specs: list[tuple[Any, list[OpenOrderSourceState]]] = []
-        if market in ("all", "kr"):
-            specs.append((self._collect_kis_kr(), _fallback("kis", ("kr",))))
-        if market in ("all", "us"):
-            specs.append((self._collect_kis_us(), _fallback("kis", ("us",))))
         if market in ("all", "crypto"):
             specs.append((self._collect_upbit(), _fallback("upbit", ("crypto",))))
         if market in ("all", "kr", "us"):
@@ -461,110 +397,6 @@ class CurrentOrdersService:
             empty_reason=empty_reason,
         )
 
-    def _kis(self) -> _KISClientProtocol | None:
-        if not self._kis_client_initialized:
-            self._kis_client_initialized = True
-            if self._kis_client_factory is not None:
-                self._kis_client = self._kis_client_factory()
-        return self._kis_client
-
-    async def _collect_kis_kr(self) -> tuple[list[OpenOrderRow], OpenOrderSourceState]:
-        now = self._clock()
-        kis = self._kis()
-        if kis is None:
-            return [], _source(
-                broker="kis",
-                market="kr",
-                status="unavailable",
-                fetched_at=None,
-                count=0,
-                message="kis_client_unavailable",
-            )
-        try:
-            raw = await kis.inquire_korea_orders(is_mock=False)
-        except Exception as exc:  # noqa: BLE001 - endpoint must fail open per broker
-            logger.warning("KIS KR open-order fetch failed", exc_info=True)
-            return [], _source(
-                broker="kis",
-                market="kr",
-                status="unavailable",
-                fetched_at=now,
-                count=0,
-                message=type(exc).__name__,
-            )
-        # KIS domestic pending-order inquiry (TTTC8036R) can surface the same
-        # order_no more than once — pagination is known to repeat rows and a
-        # NXT/SOR-routed order shows up under both KRX and NXT venues. Dedup by
-        # order_no the way the US path (_collect_kis_us) already does so the row
-        # list and header count reflect distinct orders. order_no is unique per
-        # order in this TR, so this never collapses legitimate partial-fill rows.
-        rows: list[OpenOrderRow] = []
-        seen: set[str] = set()
-        for row in raw or []:
-            if not isinstance(row, dict):
-                continue
-            order_no = _first_str(row, ("ord_no", "odno", "order_id"))
-            if order_no and order_no in seen:
-                continue
-            if order_no:
-                seen.add(order_no)
-            rows.append(normalize_kis_order(row, market="kr", exchange="KRX"))
-        return rows, _source(
-            broker="kis", market="kr", status="ok", fetched_at=now, count=len(rows)
-        )
-
-    async def _collect_kis_us(self) -> tuple[list[OpenOrderRow], OpenOrderSourceState]:
-        now = self._clock()
-        kis = self._kis()
-        if kis is None:
-            return [], _source(
-                broker="kis",
-                market="us",
-                status="unavailable",
-                fetched_at=None,
-                count=0,
-                message="kis_client_unavailable",
-            )
-        rows: list[OpenOrderRow] = []
-        seen: set[str] = set()
-        errors: dict[str, str] = {}
-        for exchange in _KIS_US_EXCHANGES:
-            try:
-                raw = await kis.inquire_overseas_orders(
-                    exchange_code=exchange, is_mock=False
-                )
-            except Exception as exc:  # noqa: BLE001
-                errors[exchange] = type(exc).__name__
-                continue
-            for row in raw or []:
-                if not isinstance(row, dict):
-                    continue
-                order_no = _first_str(row, ("ord_no", "odno", "order_id"))
-                if order_no and order_no in seen:
-                    continue
-                if order_no:
-                    seen.add(order_no)
-                rows.append(normalize_kis_order(row, market="us", exchange=exchange))
-        if errors and not rows:
-            return [], _source(
-                broker="kis",
-                market="us",
-                status="unavailable",
-                fetched_at=now,
-                count=0,
-                message="; ".join(f"{k}={v}" for k, v in errors.items()),
-            )
-        status: OpenOrderDataState = "degraded" if errors else "ok"
-        message = "; ".join(f"{k}={v}" for k, v in errors.items()) if errors else None
-        return rows, _source(
-            broker="kis",
-            market="us",
-            status=status,
-            fetched_at=now,
-            count=len(rows),
-            message=message,
-        )
-
     async def _collect_upbit(self) -> tuple[list[OpenOrderRow], OpenOrderSourceState]:
         now = self._clock()
         if self._upbit_client is None:
@@ -627,27 +459,11 @@ class CurrentOrdersService:
             ]
             return [], states
 
-        client: Any | None = None
         try:
-            client = self._toss_client_factory()
-            cursor: str | None = None
-            rows: list[OpenOrderRow] = []
-            seen_cursors: set[str] = set()
-            for _ in range(_TOSS_MAX_PAGES):
-                page = await client.list_orders(status="OPEN", cursor=cursor)
-                rows.extend(normalize_toss_order(order) for order in page.orders)
-                if not page.has_next or not page.next_cursor:
-                    break
-                if page.next_cursor in seen_cursors:
-                    logger.warning("Toss pagination cursor did not advance; stopping")
-                    break
-                seen_cursors.add(page.next_cursor)
-                cursor = page.next_cursor
-            else:
-                logger.warning(
-                    "Toss pagination hit max page cap (%d); returning partial",
-                    _TOSS_MAX_PAGES,
-                )
+            orders = await fetch_toss_open_orders(
+                client_factory=self._toss_client_factory
+            )
+            rows = [normalize_toss_order(order) for order in orders]
         except Exception as exc:  # noqa: BLE001
             logger.warning("Toss open-order fetch failed", exc_info=True)
             states = [
@@ -662,13 +478,6 @@ class CurrentOrdersService:
                 for market in markets
             ]
             return [], states
-        finally:
-            close = getattr(client, "aclose", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001 - close must never break the request
-                    logger.warning("Toss client close failed", exc_info=True)
 
         filtered = [row for row in rows if row.market in markets]
         states = [

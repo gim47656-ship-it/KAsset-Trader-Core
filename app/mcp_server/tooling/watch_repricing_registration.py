@@ -45,9 +45,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from app.mcp_server.tooling.account_routing_registration import (
-    register_account_routing_tools,
-)
 from app.mcp_server.tooling.analysis_registration import register_analysis_tools
 from app.mcp_server.tooling.fundamentals_registration import register_fundamentals_tools
 from app.mcp_server.tooling.investment_reports_handlers import (
@@ -117,7 +114,6 @@ def register_watch_repricing_tools(mcp: FastMCP) -> None:
     register_analysis_tools(filtered)
     register_fundamentals_tools(filtered)
     register_portfolio_tools(filtered)
-    register_account_routing_tools(filtered)
     register_route_request_tools(filtered)
     register_trading_policy_tools(filtered)
     register_operating_briefing_tools(filtered)

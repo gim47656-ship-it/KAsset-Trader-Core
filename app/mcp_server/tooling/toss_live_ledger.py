@@ -11,10 +11,10 @@ import sentry_sdk
 from sqlalchemy import func, select
 
 from app.core.config import settings
+from app.core.db import AsyncSessionLocal
 from app.core.portfolio_links import build_position_detail_url
 from app.core.timezone import now_kst
 from app.mcp_server.tooling.fx_pnl import capture_reconcile_spot_fx
-from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
 from app.mcp_server.tooling.order_journal import (
     _close_journals_on_sell,
     _create_trade_journal_for_buy,
@@ -115,7 +115,7 @@ async def record_toss_place_order(
         rung=rung,
     )
 
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         row = await TossLiveOrderLedgerService(db).record_send(
             operation_kind="place",
             market=market,
@@ -190,7 +190,7 @@ async def record_toss_replacement_order(
     replacement_order_id: str,
     raw_response: dict[str, Any],
 ) -> dict[str, Any]:
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         svc = TossLiveOrderLedgerService(db)
         row = await svc.record_send(
             operation_kind=operation_kind,
@@ -274,7 +274,7 @@ async def _converge_toss_proposal_rung(
         return None
 
     try:
-        async with _order_session_factory()() as db:
+        async with AsyncSessionLocal() as db:
             service = OrderProposalsService(db)
             market = _TOSS_MARKET_TO_INSTRUMENT.get(row.market, row.market)
             if ledger_status == "partial":
@@ -361,7 +361,7 @@ async def _repair_terminal_toss_proposal_projections(
     limit: int,
 ) -> dict[str, int]:
     """Idempotently repair terminal ledger rows skipped by the open-row scan."""
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         rows, anomalies = await TossLiveOrderLedgerService(
             db
         ).list_terminal_projection_candidates(
@@ -419,7 +419,7 @@ async def _reconcile_one_toss_row(
             evidence.local_status in {"cancel_rejected", "replace_rejected"}
             and not dry_run
         ):
-            async with _order_session_factory()() as db:
+            async with AsyncSessionLocal() as db:
                 svc = TossLiveOrderLedgerService(db)
                 await svc.update_reconcile_outcome(
                     ledger_id=row.id,
@@ -438,7 +438,7 @@ async def _reconcile_one_toss_row(
     if row.operation_kind == "cancel":
         base["action"] = "audit_only_cancel_row"
         if not dry_run:
-            async with _order_session_factory()() as db:
+            async with AsyncSessionLocal() as db:
                 await TossLiveOrderLedgerService(db).update_reconcile_outcome(
                     ledger_id=row.id,
                     status=evidence.local_status,
@@ -463,7 +463,7 @@ async def _reconcile_one_toss_row(
                 )
                 if converged is not None:
                     base["proposal_rung"] = converged
-            async with _order_session_factory()() as db:
+            async with AsyncSessionLocal() as db:
                 await TossLiveOrderLedgerService(db).update_reconcile_outcome(
                     ledger_id=row.id,
                     status=evidence.local_status,
@@ -498,7 +498,7 @@ async def _reconcile_one_toss_row(
     if delta <= 0:
         base["action"] = "noop_already_booked"
         if not dry_run:
-            async with _order_session_factory()() as db:
+            async with AsyncSessionLocal() as db:
                 await TossLiveOrderLedgerService(db).update_reconcile_outcome(
                     ledger_id=row.id,
                     status=evidence.local_status,
@@ -584,7 +584,7 @@ async def _reconcile_one_toss_row(
             fx_pnl_accuracy=fx_capture.fx_pnl_accuracy if fx_capture else None,
         )
 
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         svc = TossLiveOrderLedgerService(db)
         execution_status, execution_ledger_id = await upsert_toss_execution_fill(
             db,
@@ -730,7 +730,7 @@ async def _handle_reconcile_row_error(
             exc,
         )
         if not dry_run:
-            async with _order_session_factory()() as db:
+            async with AsyncSessionLocal() as db:
                 await TossLiveOrderLedgerService(db).record_transient_reconcile_error(
                     ledger_id=row.id, error=error_details
                 )
@@ -743,7 +743,7 @@ async def _handle_reconcile_row_error(
     )
     reason = _manual_review_reason(row, exc)
     if not dry_run:
-        async with _order_session_factory()() as db:
+        async with AsyncSessionLocal() as db:
             await TossLiveOrderLedgerService(db).mark_manual_review(
                 ledger_id=row.id, reason=reason, error=error_details
             )
@@ -788,7 +788,7 @@ async def toss_reconcile_orders_impl(
     # Self-healing reopen + list_open run in ONE session block so both the
     # recoverable-anomaly rows and the open rows are live-session ORM objects that
     # detach together at block exit (matching the existing detached-row loop).
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         service = TossLiveOrderLedgerService(db)
         reopen_report = await service.reopen_anomalies_for_reconcile(
             dry_run=dry_run, market=market, symbol=symbol, limit=limit

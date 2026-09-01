@@ -1,21 +1,21 @@
-"""ROB-402 — maybe_auto_execute service."""
+"""Owner-scoped PAPER watch auto-execution regression tests."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extensions.kasset.api.errors import MobileApiError
 from app.models.investment_reports import InvestmentWatchAlert
-from app.models.review import WatchOrderIntentLedger
 from app.services.investment_reports import watch_auto_execute
 
 
-def _alert(max_action: dict | None, action_mode="auto_execute_mock"):
+def _alert(max_action: dict[str, Any] | None, action_mode: str = "auto_execute_mock"):
     return InvestmentWatchAlert(
         alert_uuid=uuid.uuid4(),
         idempotency_key=f"k-{uuid.uuid4()}",
@@ -36,158 +36,222 @@ def _alert(max_action: dict | None, action_mode="auto_execute_mock"):
     )
 
 
-def _good_max_action():
+def _good_max_action() -> dict[str, Any]:
     return {
         "side": "buy",
         "quantity": "10",
         "limit_price": "55000",
-        "account_mode": "kis_mock",
+        "account_mode": "db_simulated",
+        "owner_user_id": 7,
     }
 
 
-async def _intent_for(db, correlation_id):
-    return (
-        await db.execute(
-            select(WatchOrderIntentLedger).where(
-                WatchOrderIntentLedger.correlation_id == correlation_id
-            )
-        )
-    ).scalar_one_or_none()
+def _paper_result(**overrides: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "success": True,
+        "source": "paper",
+        "account_mode": "db_simulated",
+        "broker": "PAPER",
+        "dry_run": False,
+        "order_no": "PAPER-ORDER-1",
+        "ledger_id": "paper-ledger-101",
+        "ledger_tracking_unavailable": False,
+        "order_status": "FILLED",
+        "idempotent_replay": False,
+    }
+    result.update(overrides)
+    return result
 
 
-def _make_place_spy():
-    calls = []
+def _make_place_spy(result: Any = None):
+    calls: list[dict[str, Any]] = []
 
-    async def _spy(**kwargs):
+    async def _spy(**kwargs: Any):
         calls.append(kwargs)
-        return {
-            "success": True,
-            "dry_run": False,
-            "order_no": "X1",
-            "ledger_id": 101,
-            "ledger_tracking_unavailable": False,
-        }
+        selected = _paper_result() if result is None else result
+        return dict(selected) if isinstance(selected, dict) else selected
 
     return _spy, calls
 
 
-class _FakeInsertResult:
-    def scalar_one_or_none(self):
-        return 101
+class _FakePaperFacade:
+    """Small PaperOrderFacade double with durable client-order idempotency."""
 
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, int, Any]] = []
+        self.ledger: dict[str, Any] = {}
 
-class _FakeDb:
-    """Capture SQL statements without opening a database connection."""
-
-    def __init__(self):
-        self.statements = []
-        self.commit_count = 0
-
-    async def execute(self, statement):
-        self.statements.append(statement)
-        return _FakeInsertResult()
-
-    async def commit(self):
-        self.commit_count += 1
-
-
-def _assert_failed_intent_update(
-    db: _FakeDb,
-    *,
-    correlation_id: str,
-    reason: str,
-    failure_detail: str | None,
-) -> None:
-    assert len(db.statements) == 2
-    update_params = db.statements[1].compile().params
-    assert update_params["lifecycle_state"] == "failed"
-    assert update_params["execution_allowed"] is False
-    assert update_params["blocked_by"] == reason
-    assert update_params["blocking_reasons"] == [reason]
-    assert update_params["preview_line"]["failure_detail"] == failure_detail
-    assert update_params["correlation_id_1"] == correlation_id
-    assert db.commit_count == 2
+    async def submit(self, db: Any, owner_user_id: int, request: Any):
+        self.calls.append((db, owner_user_id, request))
+        replayed = request.client_order_id in self.ledger
+        if replayed:
+            order = self.ledger[request.client_order_id]
+        else:
+            order = SimpleNamespace(
+                id=f"paper-ledger-{len(self.ledger) + 1}",
+                broker_order_id=f"PAPER-ORDER-{len(self.ledger) + 1}",
+                broker="PAPER",
+                status="FILLED",
+            )
+            self.ledger[request.client_order_id] = order
+        return (
+            SimpleNamespace(
+                order=order,
+                idempotent_replay=replayed,
+            ),
+            replayed,
+        )
 
 
 @pytest.mark.asyncio
-async def test_global_flag_off_blocks(db_session: AsyncSession, monkeypatch):
+async def test_global_flag_off_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", False
     )
     spy, calls = _make_place_spy()
-    alert = _alert(_good_max_action())
-    cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
-        correlation_id=cid,
+        object(),
+        alert=_alert(_good_max_action()),
+        correlation_id=f"corr-{uuid.uuid4().hex}",
         kst_date="2026-06-01",
         place_order_fn=spy,
     )
+
     assert outcome["executed"] is False
     assert "auto_execute_globally_disabled" in outcome["blocking_reasons"]
     assert calls == []
-    row = await _intent_for(db_session, cid)
-    assert row.lifecycle_state == "failed"
 
 
 @pytest.mark.asyncio
-async def test_happy_path_places_order(db_session: AsyncSession, monkeypatch):
+async def test_db_simulated_requires_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
+    max_action = _good_max_action()
+    max_action.pop("owner_user_id")
     spy, calls = _make_place_spy()
-    alert = _alert(_good_max_action())
-    cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
-        correlation_id=cid,
+        object(),
+        alert=_alert(max_action),
+        correlation_id=f"corr-{uuid.uuid4().hex}",
         kst_date="2026-06-01",
         place_order_fn=spy,
     )
-    assert outcome["executed"] is True
-    assert len(calls) == 1
-    assert calls[0]["is_mock"] is True
-    assert calls[0]["dry_run"] is False
-    assert calls[0]["correlation_id"] == cid
-    assert calls[0]["symbol"] == "005930"
-    assert calls[0]["side"] == "buy"
-    row = await _intent_for(db_session, cid)
-    assert row.lifecycle_state == "previewed"
-    assert row.execution_allowed is True
+
+    assert outcome == {
+        "executed": False,
+        "blocking_reasons": ["missing_owner_user_id"],
+    }
+    assert calls == []
 
 
+@pytest.mark.parametrize("account_mode", ["kis_mock", "kis_live"])
 @pytest.mark.asyncio
-async def test_broker_order_without_ledger_row_fails_intent(monkeypatch):
-    """ROB-1140/ROB-843 P1: an accepted broker order with zero native ledger
-    rows keeps the write-ahead reservation unresolved and must not be executed."""
+async def test_kis_intent_fails_closed_without_paper_reroute(
+    monkeypatch: pytest.MonkeyPatch,
+    account_mode: str,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    calls = []
-    detail = "KIS mock order accepted but ledger insert returned no id"
+    max_action = {**_good_max_action(), "account_mode": account_mode}
+    spy, calls = _make_place_spy()
 
-    async def _accepted_but_untracked(**kwargs):
-        calls.append(kwargs)
-        return {
-            "success": True,
-            "dry_run": False,
-            "order_no": "0001234567",
-            "ledger_id": None,
-            "ledger_tracking_unavailable": True,
-            "message": detail,
-        }
+    outcome = await watch_auto_execute.maybe_auto_execute(
+        object(),
+        alert=_alert(max_action),
+        correlation_id=f"corr-{uuid.uuid4().hex}",
+        kst_date="2026-06-01",
+        place_order_fn=spy,
+    )
 
-    db = _FakeDb()
-    alert = _alert(_good_max_action())
+    assert outcome == {"executed": False, "blocked_by": "unsupported_account"}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_toss_live_is_never_promoted_from_mock_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
+    )
+    max_action = {**_good_max_action(), "account_mode": "toss_live"}
+    spy, calls = _make_place_spy()
+
+    outcome = await watch_auto_execute.maybe_auto_execute(
+        object(),
+        alert=_alert(max_action),
+        correlation_id=f"corr-{uuid.uuid4().hex}",
+        kst_date="2026-06-01",
+        place_order_fn=spy,
+    )
+
+    assert outcome == {"executed": False, "blocked_by": "live_account"}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_happy_path_delegates_to_owner_scoped_paper_facade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.extensions.kasset.api.paper_orders as paper_orders_module
+
+    monkeypatch.setattr(
+        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
+    )
+    facade = _FakePaperFacade()
+    monkeypatch.setattr(paper_orders_module, "paper_orders", facade)
+    db = object()
     cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
         db,
-        alert=alert,
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=_accepted_but_untracked,
+    )
+
+    assert outcome == {"executed": True, "correlation_id": cid}
+    assert len(facade.calls) == 1
+    called_db, owner_user_id, request = facade.calls[0]
+    assert called_db is db
+    assert owner_user_id == 7
+    assert request.broker == "PAPER"
+    assert request.market == "KR"
+    assert request.symbol == "005930"
+    assert request.side == "BUY"
+    assert request.order_type == "LIMIT"
+    assert request.quantity == Decimal("10")
+    assert request.limit_price == Decimal("55000")
+    assert request.client_order_id == f"watch:{cid}"
+
+
+@pytest.mark.asyncio
+async def test_broker_order_without_ledger_row_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
+    )
+    detail = "PAPER order accepted but ledger insert returned no id"
+    spy, calls = _make_place_spy(
+        _paper_result(
+            ledger_id=None,
+            ledger_tracking_unavailable=True,
+            message=detail,
+        )
+    )
+    cid = f"corr-{uuid.uuid4().hex}"
+
+    outcome = await watch_auto_execute.maybe_auto_execute(
+        object(),
+        alert=_alert(_good_max_action()),
+        correlation_id=cid,
+        kst_date="2026-06-01",
+        place_order_fn=spy,
     )
 
     assert outcome == {
@@ -197,44 +261,32 @@ async def test_broker_order_without_ledger_row_fails_intent(monkeypatch):
         "correlation_id": cid,
     }
     assert len(calls) == 1
-    assert calls[0]["dry_run"] is False
-    _assert_failed_intent_update(
-        db,
-        correlation_id=cid,
-        reason="ledger_tracking_unavailable",
-        failure_detail=detail,
-    )
 
 
 @pytest.mark.asyncio
-async def test_dry_run_preview_fails_intent_instead_of_executing(monkeypatch):
-    """ROB-1140: success-shaped preview evidence is never an execution."""
+async def test_dry_run_preview_never_counts_as_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    calls = []
-    detail = "Order preview (dry_run=True)"
-
-    async def _preview(**kwargs):
-        calls.append(kwargs)
-        return {
-            "success": True,
-            "dry_run": True,
-            "order_no": None,
-            "ledger_id": None,
-            "ledger_tracking_unavailable": False,
-            "message": detail,
-        }
-
-    db = _FakeDb()
-    alert = _alert(_good_max_action())
+    detail = "PAPER order preview"
+    spy, calls = _make_place_spy(
+        _paper_result(
+            dry_run=True,
+            order_no="",
+            ledger_id=None,
+            message=detail,
+        )
+    )
     cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=_preview,
+        place_order_fn=spy,
     )
 
     assert outcome == {
@@ -244,245 +296,238 @@ async def test_dry_run_preview_fails_intent_instead_of_executing(monkeypatch):
         "correlation_id": cid,
     }
     assert len(calls) == 1
-    _assert_failed_intent_update(
-        db,
-        correlation_id=cid,
-        reason="dry_run_result",
-        failure_detail=detail,
-    )
 
 
+@pytest.mark.parametrize("ledger_value", [None, "missing"])
 @pytest.mark.asyncio
-async def test_missing_ledger_id_key_fails_intent_instead_of_benign_null(monkeypatch):
-    """ROB-1140 R1: a missing key is malformed, unlike explicit null from the
-    ROB-843 benign-conflict path."""
+async def test_missing_ledger_id_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_value: object,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    place_result = {
-        "success": True,
-        "dry_run": False,
-        "order_no": "0001234567",
-        "ledger_tracking_unavailable": False,
-    }
-
-    async def _missing_ledger_id(**_kwargs):
-        return place_result
-
-    db = _FakeDb()
-    alert = _alert(_good_max_action())
+    place_result = _paper_result()
+    if ledger_value == "missing":
+        place_result.pop("ledger_id")
+    else:
+        place_result["ledger_id"] = None
+    spy, _calls = _make_place_spy(place_result)
     cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=_missing_ledger_id,
+        place_order_fn=spy,
     )
 
-    assert "ledger_id" not in place_result
     assert outcome == {
         "executed": False,
         "reason": "missing_ledger_id",
         "detail": None,
         "correlation_id": cid,
     }
-    _assert_failed_intent_update(
-        db,
-        correlation_id=cid,
-        reason="missing_ledger_id",
-        failure_detail=None,
-    )
 
 
-def test_rob843_explicit_null_ledger_id_conflict_stays_durable():
-    """ROB-843 P1 benign conflicts already proved a native row exists."""
-    outcome = watch_auto_execute._normalize_place_result(
-        {
-            "success": True,
-            "dry_run": False,
-            "order_no": "0001234567",
-            "ledger_id": None,
-            "ledger_tracking_unavailable": False,
-        }
-    )
-    assert outcome.executed is True
+def test_invalid_non_null_ledger_id_is_rejected_separately() -> None:
+    outcome = watch_auto_execute._normalize_place_result(_paper_result(ledger_id=0))
 
-
-def test_invalid_non_null_ledger_id_is_rejected_separately():
-    """Invalid non-null ids are neither missing nor benign explicit null."""
-    outcome = watch_auto_execute._normalize_place_result(
-        {
-            "success": True,
-            "dry_run": False,
-            "order_no": "0001234567",
-            "ledger_id": 0,
-            "ledger_tracking_unavailable": False,
-        }
-    )
     assert outcome.executed is False
     assert outcome.reason == "invalid_ledger_id"
 
 
 @pytest.mark.asyncio
-async def test_idempotent_on_duplicate_correlation_id(db_session, monkeypatch):
+async def test_idempotent_on_duplicate_correlation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.extensions.kasset.api.paper_orders as paper_orders_module
+
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    spy, calls = _make_place_spy()
+    facade = _FakePaperFacade()
+    monkeypatch.setattr(paper_orders_module, "paper_orders", facade)
+    db = object()
     alert = _alert(_good_max_action())
     cid = f"corr-{uuid.uuid4().hex}"
-    await watch_auto_execute.maybe_auto_execute(
-        db_session,
+
+    first = await watch_auto_execute.maybe_auto_execute(
+        db,
         alert=alert,
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=spy,
     )
     second = await watch_auto_execute.maybe_auto_execute(
-        db_session,
+        db,
         alert=alert,
+        correlation_id=cid,
+        kst_date="2026-06-01",
+    )
+
+    assert first == {"executed": True, "correlation_id": cid}
+    assert second == {
+        "executed": False,
+        "skipped": "duplicate",
+        "correlation_id": cid,
+    }
+    assert len(facade.ledger) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_broker_result_stays_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
+    )
+    spy, calls = _make_place_spy(
+        {
+            "success": False,
+            "reason": "broker_rejected",
+            "detail": "거부",
+        }
+    )
+    cid = f"corr-{uuid.uuid4().hex}"
+
+    outcome = await watch_auto_execute.maybe_auto_execute(
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
         place_order_fn=spy,
     )
-    assert second["executed"] is False
-    assert second.get("skipped") == "duplicate"
+
+    assert outcome == {
+        "executed": False,
+        "reason": "broker_rejected",
+        "detail": "거부",
+        "correlation_id": cid,
+    }
     assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_live_account_blocked_no_order(db_session, monkeypatch):
+async def test_kill_switch_error_stays_distinct_and_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    spy, calls = _make_place_spy()
-    alert = _alert({**_good_max_action(), "account_mode": "kis_live"})
+
+    async def _kill_switch(**_kwargs: Any):
+        raise MobileApiError(403, "KILL_SWITCH_ON", "거래 중지 상태입니다.")
+
     cid = f"corr-{uuid.uuid4().hex}"
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=spy,
+        place_order_fn=_kill_switch,
     )
-    assert outcome["executed"] is False
-    assert outcome["blocked_by"] == "live_account"
-    assert calls == []
-    # no kis_mock intent row written for a live attempt
-    assert await _intent_for(db_session, cid) is None
+
+    assert outcome == {
+        "executed": False,
+        "reason": "kill_switch_on",
+        "detail": "거래 중지 상태입니다.",
+        "correlation_id": cid,
+    }
 
 
 @pytest.mark.asyncio
-async def test_failed_broker_result_persists_failed_outcome(db_session, monkeypatch):
-    """ROB-843: a failed broker result must not be recorded as executed=True.
-    The intent row flips to 'failed' with the reason/detail preserved."""
-    monkeypatch.setattr(
-        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
-    )
-    calls = []
-
-    async def _reject(**kwargs):
-        calls.append(kwargs)
-        return {
-            "success": False,
-            "status": "rejected",
-            "reason": "broker_rejected",
-            "detail": "거부",
-            "response_message": "거부",
-        }
-
-    alert = _alert(_good_max_action())
-    cid = f"corr-{uuid.uuid4().hex}"
-    outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
-        correlation_id=cid,
-        kst_date="2026-06-01",
-        place_order_fn=_reject,
-    )
-    assert outcome["executed"] is False
-    assert outcome["reason"] == "broker_rejected"
-    assert outcome["detail"] == "거부"
-    assert len(calls) == 1  # order WAS attempted
-    row = await _intent_for(db_session, cid)
-    assert row.lifecycle_state == "failed"
-    assert row.execution_allowed is False
-    assert row.blocked_by == "broker_rejected"
-    assert "broker_rejected" in (row.blocking_reasons or [])
-
-
-@pytest.mark.asyncio
-async def test_place_order_exception_persists_failed(db_session, monkeypatch):
-    """ROB-843 Blocker 4: a raised exception is a failure too — the intent must
-    become 'failed' (not left 'previewed') with reason/detail preserved."""
+async def test_place_order_exception_stays_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
 
-    async def _raise(**kwargs):
-        raise RuntimeError("broker POST blew up")
+    async def _raise(**_kwargs: Any):
+        raise RuntimeError("PAPER submit blew up")
 
-    alert = _alert(_good_max_action())
     cid = f"corr-{uuid.uuid4().hex}"
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
         place_order_fn=_raise,
     )
+
     assert outcome["executed"] is False
     assert outcome["reason"] == "order_exception"
-    assert "broker POST blew up" in (outcome["detail"] or "")
-    row = await _intent_for(db_session, cid)
-    assert row.lifecycle_state == "failed"
-    assert row.blocked_by == "order_exception"
+    assert "PAPER submit blew up" in (outcome["detail"] or "")
 
 
 @pytest.mark.asyncio
-async def test_malformed_broker_result_persists_failed(db_session, monkeypatch):
-    """ROB-843: a non-dict broker result is a failure, never executed=True."""
+async def test_malformed_broker_result_stays_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
 
-    async def _weird(**kwargs):
+    async def _malformed(**_kwargs: Any):
         return None
 
-    alert = _alert(_good_max_action())
     cid = f"corr-{uuid.uuid4().hex}"
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
-        place_order_fn=_weird,
+        place_order_fn=_malformed,
     )
-    assert outcome["executed"] is False
-    assert outcome["reason"] == "malformed_result"
-    row = await _intent_for(db_session, cid)
-    assert row.lifecycle_state == "failed"
+
+    assert outcome == {
+        "executed": False,
+        "reason": "malformed_result",
+        "detail": "None",
+        "correlation_id": cid,
+    }
 
 
 @pytest.mark.asyncio
-async def test_missing_limit_price_blocks(db_session, monkeypatch):
+async def test_unaccepted_order_status_never_counts_as_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
     )
-    spy, calls = _make_place_spy()
-    ma = _good_max_action()
-    ma.pop("limit_price")
-    alert = _alert(ma)
+    spy, _calls = _make_place_spy(_paper_result(order_status="REJECTED"))
     cid = f"corr-{uuid.uuid4().hex}"
+
     outcome = await watch_auto_execute.maybe_auto_execute(
-        db_session,
-        alert=alert,
+        object(),
+        alert=_alert(_good_max_action()),
         correlation_id=cid,
         kst_date="2026-06-01",
         place_order_fn=spy,
     )
+
+    assert outcome["executed"] is False
+    assert outcome["reason"] == "order_not_accepted"
+
+
+@pytest.mark.asyncio
+async def test_missing_limit_price_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        watch_auto_execute.settings, "WATCH_AUTO_EXECUTE_MOCK_ENABLED", True
+    )
+    max_action = _good_max_action()
+    max_action.pop("limit_price")
+    spy, calls = _make_place_spy()
+
+    outcome = await watch_auto_execute.maybe_auto_execute(
+        object(),
+        alert=_alert(max_action),
+        correlation_id=f"corr-{uuid.uuid4().hex}",
+        kst_date="2026-06-01",
+        place_order_fn=spy,
+    )
+
     assert outcome["executed"] is False
     assert "missing_limit_price" in outcome["blocking_reasons"]
     assert calls == []
-    assert (await _intent_for(db_session, cid)).lifecycle_state == "failed"

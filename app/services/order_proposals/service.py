@@ -272,15 +272,9 @@ class ExpiredDefensiveProposal:
     needs_reassessment: bool = True
 
 
-# (account_mode, market) combinations the submit path
-# (revalidation.py's `_default_place_order_fn`) actually routes correctly.
-# Toss has a dedicated adapter; `_place_order_impl` remains the KIS/Upbit-only
-# fallback and has no `account_mode` parameter. Reject any other combination at
-# create time rather than let a mock/paper/wrong-broker proposal reach submit.
+# 제안 생성 단계에서 실제 제출 어댑터가 있는 조합만 허용한다.
 _SUBMITTABLE_ACCOUNT_MODE_MARKETS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("kis_live", "equity_kr"),
-        ("kis_live", "equity_us"),
         ("toss_live", "equity_kr"),
         ("toss_live", "equity_us"),
         ("upbit", "crypto"),
@@ -293,11 +287,8 @@ _ACTION_CAPABILITIES = {
     "cancel": SUPPORTED_TARGET_ACTIONS,
 }
 
-# Display order only -- purely cosmetic grouping for the human-facing
-# "allowed: ..." message and the supported_matrix response field. Any
-# account_mode/market absent from these tuples still sorts, just after the
-# named ones.
-_ACCOUNT_MODE_DISPLAY_ORDER = ("kis_live", "toss_live", "upbit")
+# 사용자 오류 메시지와 supported_matrix의 표시 순서다.
+_ACCOUNT_MODE_DISPLAY_ORDER = ("toss_live", "upbit")
 _MARKET_DISPLAY_ORDER = ("equity_kr", "equity_us", "crypto")
 
 
@@ -965,8 +956,6 @@ class OrderProposalsService:
         if not isinstance(approval_issue_id, str) or not approval_issue_id.strip():
             errors.append("loss_cut requires approval_issue_id")
         if (account_mode, market) not in {
-            ("kis_live", "equity_kr"),
-            ("kis_live", "equity_us"),
             ("toss_live", "equity_kr"),
             ("toss_live", "equity_us"),
             ("upbit", "crypto"),

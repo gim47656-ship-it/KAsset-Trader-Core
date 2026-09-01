@@ -12,7 +12,7 @@ from app.services.investment_snapshots.collectors import CollectorRequest
 
 
 def _journal(
-    symbol, instrument_type, *, account="kis", account_type="live", status="active"
+    symbol, instrument_type, *, account="toss", account_type="live", status="active"
 ):
     return TradeJournal(
         symbol=symbol,
@@ -29,7 +29,7 @@ def _journal(
 
 def _req(market):
     return CollectorRequest(
-        market=market, account_scope="kis_live", symbols=None, policy_snapshot={}
+        market=market, account_scope="toss_live", symbols=None, policy_snapshot={}
     )
 
 
@@ -60,7 +60,7 @@ async def test_us_scope_excludes_kr_live_journals(db_session):
     payload = results[0].payload_json
     active_syms = {e["symbol"] for e in payload["active"]}
     assert active_syms == {"AAPL"}
-    assert payload["active"][0]["account"] == "kis"  # provenance emitted
+    assert payload["active"][0]["account"] == "toss"
     assert payload["collector_status"] == "ok"
 
 
@@ -80,13 +80,13 @@ async def test_kr_scope_excludes_us_live_journals(db_session):
 
 
 @pytest.mark.asyncio
-async def test_us_scope_includes_legacy_null_account_kis_us(db_session):
+async def test_us_scope_excludes_historical_null_account_journal(db_session):
     db_session.add(_journal("MSFT", InstrumentType.equity_us, account=None))
     await db_session.flush()
     collector = JournalSnapshotCollector(db_session)
     results = await collector.collect(_req("us"))
     active_syms = {e["symbol"] for e in results[0].payload_json["active"]}
-    assert "MSFT" in active_syms
+    assert "MSFT" not in active_syms
 
 
 @pytest.mark.asyncio

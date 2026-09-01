@@ -1,6 +1,6 @@
 """ROB-123 — read-only InvestHomeService.
 
-이 모듈은 KIS / Upbit / manual(toss) holdings 를 read-only 로 합성한다.
+이 모듈은 Toss / Upbit / manual holdings 를 read-only 로 합성한다.
 mutation 경로(submit/cancel/modify/place_order/watch/order-intent/scheduler/worker)
 모듈 import / 호출 금지. DB write/backfill/update/delete 금지.
 """
@@ -29,9 +29,7 @@ from app.schemas.invest_home import (
 
 logger = logging.getLogger(__name__)
 
-HOME_INCLUDED_SOURCES: frozenset[str] = frozenset(
-    {"kis", "upbit", "toss_manual", "toss_api"}
-)
+HOME_INCLUDED_SOURCES: frozenset[str] = frozenset({"upbit", "toss_manual", "toss_api"})
 
 _PAPER: frozenset[str] = frozenset(
     {"kis_mock", "kiwoom_mock", "alpaca_paper", "db_simulated"}
@@ -62,7 +60,7 @@ def classify_account_kind(source: str) -> AccountKindLiteral:
         return "paper"
     if source in _MANUAL:
         return "manual"
-    return "live"  # kis, upbit
+    return "live"  # toss_api, upbit
 
 
 def _normalize_symbol(s: str) -> str:
@@ -485,14 +483,12 @@ class InvestHomeService:
     def __init__(
         self,
         *,
-        kis_reader,
         upbit_reader,
         manual_reader,
         toss_api_reader=None,
         paper_readers: Sequence[object] | None = None,
         snapshot_cache=None,
     ) -> None:
-        self._kis = kis_reader
         self._upbit = upbit_reader
         self._manual = manual_reader
         self._toss_api = toss_api_reader
@@ -706,16 +702,8 @@ class InvestHomeService:
         hidden_holdings: list[Holding] = []
         hidden_counts = InvestHomeHiddenCounts()
 
-        live_sources = ["kis", "upbit"]
+        live_sources = ["upbit"]
         live_tasks = [
-            _fetch_reader_result(
-                self._kis.fetch,
-                span_name="invest.home.kis",
-                source="kis",
-                user_id=user_id,
-                include_paper=include_paper,
-                paper_sources=paper_sources,
-            ),
             _fetch_reader_result(
                 self._upbit.fetch,
                 span_name="invest.home.upbit",
@@ -781,7 +769,7 @@ class InvestHomeService:
 
         if include_paper:
             for reader in self._paper_readers:
-                reader_source: str = getattr(reader, "source", None) or "kis_mock"
+                reader_source: str = getattr(reader, "source", None) or "alpaca_paper"
                 if paper_sources is not None and reader_source not in paper_sources:
                     continue
                 with sentry_sdk.start_span(
@@ -863,16 +851,8 @@ class InvestHomeService:
             accounts: list[Account] = []
             holdings: list[Holding] = []
 
-            live_sources = ["kis", "upbit"]
+            live_sources = ["upbit"]
             live_tasks = [
-                _fetch_reader_result(
-                    self._kis.fetch,
-                    span_name="invest.home.kis",
-                    source="kis",
-                    user_id=user_id,
-                    include_paper=include_paper,
-                    paper_sources=paper_sources,
-                ),
                 _fetch_reader_result(
                     self._upbit.fetch,
                     span_name="invest.home.upbit",
@@ -935,7 +915,9 @@ class InvestHomeService:
 
             if include_paper:
                 for reader in self._paper_readers:
-                    reader_source: str = getattr(reader, "source", None) or "kis_mock"
+                    reader_source: str = (
+                        getattr(reader, "source", None) or "alpaca_paper"
+                    )
                     if paper_sources is not None and reader_source not in paper_sources:
                         continue
                     with sentry_sdk.start_span(

@@ -200,7 +200,7 @@ async def test_service_records_group_without_changing_rejection_state_or_time(
     group = await service.create_proposal(
         symbol="S257E2-THROTTLE",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="test",
@@ -237,7 +237,7 @@ async def test_aug_20_three_failures_separate_throttle_and_duplicate_groups(
         group = await service.create_proposal(
             symbol=f"S257E2-{index}",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="sell",
             order_type="limit",
             proposer="test",

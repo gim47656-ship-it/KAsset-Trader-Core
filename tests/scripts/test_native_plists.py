@@ -20,11 +20,9 @@ PLISTS = [
     "com.robinco.auto-trader.mcp-analysis-readonly.plist",
     "com.robinco.auto-trader.mcp-account-read.plist",
     "com.robinco.auto-trader.mcp-tradingcodex-execution.plist",
-    "com.robinco.auto-trader.mcp-paper_001.plist",
     "com.robinco.auto-trader.worker.plist",
     "com.robinco.auto-trader.worker-log-rotation.plist",
     "com.robinco.auto-trader.scheduler.plist",
-    "com.robinco.auto-trader.kis-websocket.plist",
     "com.robinco.auto-trader.upbit-websocket.plist",
 ]
 
@@ -126,10 +124,9 @@ def test_mcp_tradingcodex_execution_plist_profile_port_and_token_env() -> None:
     assert "current</string>" in body
 
 
-def test_mcp_paper_001_plist_profile_port_and_wrapper() -> None:
-    body = (PLIST_DIR / "com.robinco.auto-trader.mcp-paper_001.plist").read_text()
-    assert "scripts/run-mcp-paper_001.sh" in body
-    assert "<string>hermes-paper-kis</string>" in body
-    assert "<string>8771</string>" in body
-    assert "current</string>" in body
-    assert "<key>KeepAlive</key>\n  <true/>" in body
+def test_removed_kis_launchd_services_are_not_shipped() -> None:
+    retired = {
+        "com.robinco.auto-trader.kis-websocket.plist",
+        "com.robinco.auto-trader.mcp-paper_001.plist",
+    }
+    assert all(not (PLIST_DIR / name).exists() for name in retired)

@@ -20,6 +20,7 @@ from app.extensions.kasset.api.paper_schemas import (
     SymbolItem,
     SymbolsResponse,
 )
+from app.extensions.kasset.api.toss_market_data import toss_market_data
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.paper_trading import PaperAccount, PaperTrade
 from app.models.trading import Instrument, InstrumentType
@@ -27,7 +28,9 @@ from app.services.exchange_rate_service import (
     UsdKrwExchangeRateQuote,
     get_usd_krw_rate_details,
 )
+from app.services.market_data.toss_ohlcv import fetch_daily_toss_frame
 from app.services.paper_trading_service import PaperTradingService
+from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 _DEFAULT_ACCOUNT_NAME_PREFIX = "KAsset Android PAPER"
 _FX_QUOTE_UNAVAILABLE = "FX_QUOTE_UNAVAILABLE"
@@ -436,7 +439,7 @@ class PaperAccountAdapter:
         db: AsyncSession,
         symbol: str,
     ) -> dict[str, object]:
-        """KIS 실시세가 막힌 서버에서 Toss 수집 일봉 종가로 시세를 만든다."""
+        """저장된 KR 일봉 종가로 PAPER 시세 snapshot을 만든다."""
         from sqlalchemy import text as sql_text
 
         rows = (
@@ -460,23 +463,73 @@ class PaperAccountAdapter:
             "source": "CANDLES",
         }
 
+    async def _quote_us_toss_or_candles(
+        self,
+        db: AsyncSession,
+        symbol: str,
+    ) -> dict[str, object]:
+        """활성 US 종목을 Toss로 읽고, 미가용 시 저장 일봉으로 내린다."""
+        from sqlalchemy import text as sql_text
+
+        exchange = await get_us_exchange_by_symbol(symbol, db=db)
+        try:
+            points = await toss_market_data.prices([symbol])
+        except Exception:
+            points = {}
+        point = points.get(symbol)
+        try:
+            frame = await fetch_daily_toss_frame(symbol=symbol, count=2)
+        except Exception:
+            frame = None
+        if point is not None or (frame is not None and not frame.empty):
+            latest = frame.iloc[-1] if frame is not None and not frame.empty else None
+            previous_close = (
+                frame.iloc[-2].get("close")
+                if frame is not None and len(frame) >= 2
+                else None
+            )
+            price = point.price if point is not None else latest.get("close")
+            price_as_of = (
+                point.as_of
+                if point is not None
+                else latest.get("datetime", latest.get("date"))
+            )
+            return {
+                "price": price,
+                "previous_close": previous_close,
+                "price_as_of": price_as_of,
+                "source": "TOSS",
+            }
+
+        rows = (
+            await db.execute(
+                sql_text(
+                    "SELECT time, close FROM us_candles_1d "
+                    "WHERE symbol = :symbol AND exchange = :exchange "
+                    "ORDER BY time DESC LIMIT 2"
+                ),
+                {"symbol": symbol, "exchange": exchange},
+            )
+        ).all()
+        if not rows:
+            raise ValueError(f"no Toss or stored candles for {symbol}")
+        return {
+            "price": rows[0][1],
+            "previous_close": rows[1][1] if len(rows) > 1 else None,
+            "price_as_of": rows[0][0],
+            "source": "CANDLES",
+        }
+
     async def quote(self, db: AsyncSession, *, market: str, symbol: str) -> Quote:
         normalized_market = market.strip().upper()
         normalized_symbol = symbol.strip().upper()
         try:
             if normalized_market in {"KRX", "KR"}:
-                # KIS는 미연결 브로커라 토큰 시도 자체가 수 초를 태운다.
-                # KRX PAPER 시세는 곧장 저장 캔들 종가로 만든다(상위에서 NH 공용
-                # 채널이 먼저 시도된 뒤에만 이 경로에 온다).
                 raw = await self._quote_from_candles(db, normalized_symbol)
                 market_name = "KRX"
                 currency = "KRW"
             elif normalized_market in {"US", "NYSE", "NASDAQ"}:
-                from app.mcp_server.tooling.market_data_quotes import (
-                    _fetch_quote_equity_us,
-                )
-
-                raw = await _fetch_quote_equity_us(normalized_symbol)
+                raw = await self._quote_us_toss_or_candles(db, normalized_symbol)
                 market_name = "US"
                 currency = "USD"
             else:
@@ -505,8 +558,17 @@ class PaperAccountAdapter:
         name = (await self._instrument_names(db, [normalized_symbol])).get(
             normalized_symbol
         )
-        as_of_raw = raw.get("price_as_of") or raw.get("quote_asof")
-        as_of = iso_z(as_of_raw) if isinstance(as_of_raw, datetime) else iso_z()
+        as_of_raw = raw.get("price_as_of")
+        if isinstance(as_of_raw, datetime):
+            as_of = iso_z(as_of_raw)
+        elif isinstance(as_of_raw, str) and as_of_raw.strip():
+            as_of = iso_z(datetime.fromisoformat(as_of_raw.replace("Z", "+00:00")))
+        else:
+            raise MobileApiError(
+                502,
+                "BROKER_ERROR",
+                "PAPER 시세의 공급자 시각을 확인하지 못했습니다.",
+            )
         return Quote(
             broker="PAPER",
             market=market_name,

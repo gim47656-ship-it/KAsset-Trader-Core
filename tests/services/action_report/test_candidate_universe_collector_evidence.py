@@ -18,7 +18,7 @@ class _EquityRow:
     symbol: str
     change_rate: Decimal
     latest_close: Decimal = Decimal("1000")
-    source: str = "kis"
+    source: str = "toss"
     daily_volume: int = 100_000
     consecutive_up_days: int | None = None
     week_change_rate: Decimal | None = None  # ROB-346 US quality input
@@ -316,7 +316,7 @@ async def test_kr_collector_sources_consecutive_gainers_preset(db_session):
             week_change_rate=Decimal("8.0"),
             consecutive_up_days=6,
             closes_window=[1, 2, 3, 4, 5],
-            source="kis",
+            source="toss",
         )
     )
     await db_session.commit()
@@ -389,7 +389,7 @@ async def test_kr_preset_pool_wider_than_limit_is_capped(db_session, monkeypatch
             {
                 "symbol": sym,
                 "name": sym,
-                "source": "kis",
+                "source": "toss",
                 "change_rate": rate,
                 "close": 1000,
                 "consecutive_up_days": 6,
@@ -435,7 +435,7 @@ async def test_kr_collector_merges_duplicate_symbol_across_presets(
             {
                 "symbol": "005930",
                 "name": "삼성전자",
-                "source": "kis",
+                "source": "toss",
                 "change_rate": 2.0,
                 "close": 70000,
                 "consecutive_up_days": 6,
@@ -452,7 +452,7 @@ async def test_kr_collector_merges_duplicate_symbol_across_presets(
             {
                 "symbol": "005930",
                 "name": "삼성전자",
-                "source": "kis",
+                "source": "toss",
                 "change_rate": 2.0,
                 "latest_close": 70000,
                 "roe": 20.0,
@@ -501,7 +501,7 @@ async def test_kr_priority_full_fresh_outranks_partial_and_stale(db_session):
             price=None,
             volume_value=None,
             reasons=[],
-            source="kis",
+            source="toss",
             risk_flags=[],
             source_preset=preset,
         )
@@ -535,7 +535,7 @@ async def test_kr_stale_only_preset_not_overstated(db_session, monkeypatch):
             {
                 "symbol": "005930",
                 "name": "삼성전자",
-                "source": "kis",
+                "source": "toss",
                 "change_rate": 2.0,
                 "close": 70000,
                 "consecutive_up_days": 6,
@@ -657,7 +657,7 @@ async def test_stale_equity_payload_exposes_days_stale(db_session, monkeypatch):
                     snapshot_date=dt.date(2026, 5, 13),
                     latest_close=Decimal("1000"),
                     change_rate=Decimal("1.0"),
-                    source="kis",
+                    source="toss",
                 )
             ]
 

@@ -20,7 +20,7 @@ Cost gate
 Reading history per row is not free: ``_fetch_ohlcv_for_indicators`` is
 cache-first, but during a live KRX session the daily cache is deliberately
 bypassed (today's bar is still forming), so a naive check on a 100-row screen
-would fire 100 live KIS candle fetches at exactly the hour an operating session
+would fire 100 live Toss candle fetches at exactly the hour an operating session
 runs. So the history read is gated on the row's own latest-bar volume: a
 detection requires the frozen run to end at the newest bar, and a newest bar
 that traded is not zero-volume-frozen. In practice that leaves a handful of

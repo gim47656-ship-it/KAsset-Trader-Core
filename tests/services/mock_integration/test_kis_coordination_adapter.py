@@ -22,14 +22,13 @@ import pytest_asyncio
 from sqlalchemy import delete
 
 import app.mcp_server.tooling.order_execution as oe
-import app.mcp_server.tooling.orders_modify_cancel as omc
 import app.services.kis_mock_runner.singleton as singleton
 from app.models.review import OrderSendIntent
 from app.services.brokers.client_order_ids import BrokerClientIdTarget
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
 from app.services.brokers.kis.send_outcome import (
     OrderSendOutcomeTracker,
 )
+from app.services.brokers.pre_send import PreSendFreshnessError
 from app.services.kis_mock_attribution import InvalidStrategy, MissingAttribution
 from app.services.mock_integration.coordination import (
     CoordinationError,
@@ -1313,89 +1312,6 @@ async def test_a_complete_followup_is_a_capability_and_still_never_releases_a_cl
         decision.releases_durable_claim = True  # type: ignore[misc]
 
 
-@pytest.mark.asyncio
-async def test_unknown_remainder_is_never_replaced_with_quantity_one(monkeypatch):
-    """The exact `int(...) or 1` defect: a guess sent to the broker as truth."""
-
-    calls: list[dict[str, Any]] = []
-
-    async def _resolve(order_no: str):
-        return {
-            "ledger_id": 1,
-            "symbol": "005930",
-            "side": "buy",
-            "quantity": 0.0,  # remainder unknown
-            "price": 70000.0,
-            "krx_fwdg_ord_orgno": "00950",
-            "instrument_type": "equity_kr",
-            "lifecycle_state": "accepted",
-        }
-
-    async def _mark(**kwargs: Any) -> None:
-        calls.append({"mark": kwargs})
-
-    broker_clients: list[dict[str, Any]] = []
-
-    def _client(**kwargs: Any):
-        # Counted rather than raised: the caller wraps broker errors in a
-        # `success: False` dict, so an exception here would look like a pass.
-        broker_clients.append(kwargs)
-        raise AssertionError("an unauthorized follow-up must make zero broker calls")
-
-    import app.mcp_server.tooling.kis_mock_ledger as ledger
-
-    monkeypatch.setattr(ledger, "resolve_mock_order_for_cancel", _resolve)
-    monkeypatch.setattr(ledger, "mark_kis_mock_order_cancelled", _mark)
-    monkeypatch.setattr(omc, "_create_kis_client", _client)
-
-    result = await omc._cancel_kis_mock_domestic("0000117058", "005930")
-
-    assert broker_clients == []  # zero transport, not merely a swallowed error
-    assert result["success"] is False
-    assert result.get("reason_code") == "claim_followup_not_authorized"
-    assert result.get("claim_released") is False
-    assert calls == []  # the ledger was not marked cancelled either
-
-
-@pytest.mark.asyncio
-async def test_a_missing_orgno_neither_calls_the_broker_nor_releases_the_claim(
-    monkeypatch,
-):
-    calls: list[str] = []
-
-    async def _resolve(order_no: str):
-        return {
-            "ledger_id": 1,
-            "symbol": "005930",
-            "side": "buy",
-            "quantity": 2.0,
-            "price": 70000.0,
-            "krx_fwdg_ord_orgno": None,  # no native cancel capability
-            "instrument_type": "equity_kr",
-            "lifecycle_state": "accepted",
-        }
-
-    async def _mark(**kwargs: Any) -> None:
-        calls.append("marked")
-
-    import app.mcp_server.tooling.kis_mock_ledger as ledger
-
-    monkeypatch.setattr(ledger, "resolve_mock_order_for_cancel", _resolve)
-    monkeypatch.setattr(ledger, "mark_kis_mock_order_cancelled", _mark)
-    monkeypatch.setattr(
-        omc,
-        "_create_kis_client",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("zero broker calls")),
-    )
-
-    result = await omc._cancel_kis_mock_domestic("0000117058", "005930")
-
-    assert result["success"] is False
-    assert result["reason_code"] == "claim_followup_not_authorized"
-    assert result["claim_released"] is False
-    assert calls == []
-
-
 # ===========================================================================
 # §83 — lane-native recovery ownership (an activation precondition)
 # ===========================================================================
@@ -2351,83 +2267,6 @@ def test_a_capability_for_a_different_operation_or_lane_is_refused():
     )
 
 
-@pytest.mark.asyncio
-async def test_a_cancel_without_a_capability_makes_zero_broker_calls(monkeypatch):
-    created: list[dict[str, Any]] = []
-
-    async def _resolve(order_no: str):
-        return {
-            "ledger_id": 1,
-            "symbol": "005930",
-            "side": "buy",
-            "quantity": 2.0,
-            "price": 70000.0,
-            "krx_fwdg_ord_orgno": "00950",
-            "instrument_type": "equity_kr",
-            "lifecycle_state": "accepted",
-        }
-
-    import app.mcp_server.tooling.kis_mock_ledger as ledger
-
-    monkeypatch.setattr(ledger, "resolve_mock_order_for_cancel", _resolve)
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda **kw: created.append(kw) or object()
-    )
-
-    assert singleton.active_followup_capability() is None
-    result = await omc._cancel_kis_mock_domestic("0000117058", "005930")
-
-    assert created == []
-    assert result["success"] is False
-    assert result["reason_code"] == "claim_followup_not_authorized"
-    assert result["claim_released"] is False
-
-
-@pytest.mark.asyncio
-async def test_a_cancel_holding_a_valid_capability_reaches_the_broker(monkeypatch):
-    """The positive control: verification permits, it does not merely block."""
-
-    async def _resolve(order_no: str):
-        return {
-            "ledger_id": 1,
-            "symbol": "005930",
-            "side": "buy",
-            "quantity": 2.0,
-            "price": 70000.0,
-            "krx_fwdg_ord_orgno": "00950",
-            "instrument_type": "equity_kr",
-            "lifecycle_state": "accepted",
-        }
-
-    marked: list[dict[str, Any]] = []
-
-    async def _mark(**kwargs: Any) -> None:
-        marked.append(kwargs)
-
-    class _FakeKis:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        async def cancel_korea_order(self, **kwargs: Any) -> dict[str, Any]:
-            self.calls.append(kwargs)
-            return {"odno": "REV-1", "ord_tmd": "0901"}
-
-    fake = _FakeKis()
-    import app.mcp_server.tooling.kis_mock_ledger as ledger
-
-    monkeypatch.setattr(ledger, "resolve_mock_order_for_cancel", _resolve)
-    monkeypatch.setattr(ledger, "mark_kis_mock_order_cancelled", _mark)
-    monkeypatch.setattr(omc, "_create_kis_client", lambda **kw: fake)
-
-    async with await _issue():
-        result = await omc._cancel_kis_mock_domestic("0000117058", "005930")
-
-    assert fake.calls, "a valid capability must permit the transport cancel"
-    assert result["success"] is True
-    assert result["broker_cancel_confirmed"] is True
-    assert marked and marked[0]["broker_confirmed"] is True
-
-
 def test_j3b_verifies_capabilities_and_never_issues_or_decides_one():
     """The decision belongs to J5 / the lane lifecycle owner, not the adapter."""
 
@@ -2580,45 +2419,6 @@ def test_no_lane_code_is_reachable_from_the_live_branch_of_the_guard():
         assert not isinstance(child, (ast.Import, ast.ImportFrom))
         if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
             assert "kis_mock" not in child.func.id
-
-
-@pytest.mark.asyncio
-async def test_a_receipt_for_one_order_cannot_cancel_a_different_order(monkeypatch):
-    """r4 §2 — a receipt is authority for its own ODNO, not for whatever is asked.
-
-    Without this vector the ODNO binding is unreachable by the suite: every other
-    cancel test happens to pass the same order id the receipt was issued for.
-    """
-
-    created: list[dict[str, Any]] = []
-
-    async def _resolve(order_no: str):
-        return {
-            "ledger_id": 1,
-            "symbol": "005930",
-            "side": "buy",
-            "quantity": 2.0,
-            "price": 70000.0,
-            "krx_fwdg_ord_orgno": "00950",
-            "instrument_type": "equity_kr",
-            "lifecycle_state": "accepted",
-        }
-
-    import app.mcp_server.tooling.kis_mock_ledger as ledger
-
-    monkeypatch.setattr(ledger, "resolve_mock_order_for_cancel", _resolve)
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda **kw: created.append(kw) or object()
-    )
-
-    # The receipt names 0000117058; the cancel asks for a different order.
-    async with await _issue():
-        result = await omc._cancel_kis_mock_domestic("9999999999", "005930")
-
-    assert created == [], "a foreign-order receipt reached the broker"
-    assert result["success"] is False
-    assert result["reason_code"] == "claim_followup_not_authorized"
-    assert "different native broker order id" in result["detail"]
 
 
 @pytest.mark.asyncio

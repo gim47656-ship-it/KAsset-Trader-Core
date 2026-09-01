@@ -1,4 +1,4 @@
-"""ROB-402 — live auto-execute is permanently blocked."""
+"""투자 리포트 자동 실행 계정 가드 테스트."""
 
 import pytest
 
@@ -9,22 +9,17 @@ from app.services.investment_reports.auto_execute_guard import (
 )
 
 
-def test_live_account_blocked():
+@pytest.mark.parametrize("account_mode", ["toss_live", "upbit", "upbit_live"])
+def test_active_live_accounts_are_permanently_blocked(account_mode: str):
     with pytest.raises(AutoExecuteLiveBlocked):
-        assert_auto_execute_account_allowed("auto_execute_mock", "kis_live")
-    with pytest.raises(AutoExecuteLiveBlocked):
-        assert_auto_execute_account_allowed("auto_execute_mock", "upbit_live")
+        assert_auto_execute_account_allowed("auto_execute_mock", account_mode)
 
 
-def test_kiwoom_mock_unsupported():
+@pytest.mark.parametrize("account_mode", ["kis_live", "kis_mock", "kiwoom_mock"])
+def test_kis_and_unwired_mock_accounts_are_unsupported(account_mode: str):
     with pytest.raises(AutoExecuteUnsupported):
-        assert_auto_execute_account_allowed("auto_execute_mock", "kiwoom_mock")
+        assert_auto_execute_account_allowed("auto_execute_mock", account_mode)
 
 
-def test_kis_mock_allowed():
-    assert_auto_execute_account_allowed("auto_execute_mock", "kis_mock")  # no raise
-
-
-def test_non_auto_mode_is_noop():
-    # any account is fine when not auto-executing
-    assert_auto_execute_account_allowed("notify_only", "kis_live")  # no raise
+def test_non_auto_mode_keeps_historical_kis_read_flow():
+    assert_auto_execute_account_allowed("notify_only", "kis_live")

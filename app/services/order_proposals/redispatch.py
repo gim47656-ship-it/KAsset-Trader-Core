@@ -78,6 +78,17 @@ async def validate_proposal_redispatch(
     holdings/price guards and must preserve the exact normalized price and
     quantity stored on every rung.
     """
+    if group.account_mode in {"kis_live", "kis_mock"}:
+        return _blocked(
+            "redispatch_provider_not_operational",
+            account_mode=group.account_mode,
+            error="provider kis is not operational",
+        )
+    if group.account_mode not in {"toss_live", "upbit"}:
+        return _blocked(
+            "redispatch_account_mode_not_supported",
+            account_mode=group.account_mode,
+        )
     if group.lifecycle_state != "proposed":
         return _blocked(
             "redispatch_proposal_not_active",

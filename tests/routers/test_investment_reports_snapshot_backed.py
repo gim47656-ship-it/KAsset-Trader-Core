@@ -45,7 +45,7 @@ def _build_app() -> FastAPI:
 
 _REQUEST_PAYLOAD: dict = {
     "market": "kr",
-    "account_scope": "kis_live",
+    "account_scope": "toss_live",
     "status": "published",
     "created_by_profile": "test-runner",
     "title": "Snapshot-backed KR advisory",

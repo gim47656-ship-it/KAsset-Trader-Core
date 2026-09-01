@@ -20,7 +20,7 @@ async def test_briefing_includes_policy_version(monkeypatch):
         as_of = "2026-07-02T16:30:00+09:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         return FakePendingSnapshot()

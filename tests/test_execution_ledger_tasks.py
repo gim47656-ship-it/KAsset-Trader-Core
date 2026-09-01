@@ -73,15 +73,56 @@ def test_reconciliation_task_defaults_to_dry_run_when_commit_gate_disabled(
     monkeypatch.setattr(mod, "ExecutionLedgerRepository", FakeRepository)
 
     result = asyncio.run(
-        mod.reconcile_execution_ledger_smoke(broker="kis", window_hours=6)
+        mod.reconcile_execution_ledger_smoke(broker="toss", window_hours=6)
     )
 
     assert result == {"ok": True}
-    assert captured["broker"] == "kis"
+    assert captured["broker"] == "toss"
     assert captured["window_hours"] == 6
     assert captured["dry_run"] is True
     assert captured["committed"] is True
     assert captured["mode"] == "json"
+
+
+@pytest.mark.unit
+def test_reconciliation_task_rejects_kis_before_opening_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import execution_ledger as mod
+
+    def forbidden_session() -> None:
+        raise AssertionError("KIS rejection must happen before opening a DB session")
+
+    monkeypatch.setattr(mod, "AsyncSessionLocal", forbidden_session)
+
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        asyncio.run(mod.reconcile_execution_ledger_smoke(broker="kis", window_hours=6))
+
+
+@pytest.mark.unit
+def test_recurring_reconciliation_uses_toss_and_upbit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import execution_ledger as mod
+
+    calls: list[tuple[str, int]] = []
+
+    async def fake_run(broker: str, window_hours: int) -> dict[str, str]:
+        calls.append((broker, window_hours))
+        return {"broker": broker}
+
+    monkeypatch.setattr(
+        mod.settings, "execution_ledger_reconcile_scheduler_window_hours", 12
+    )
+    monkeypatch.setattr(mod, "_run_reconciliation", fake_run)
+
+    result = asyncio.run(mod.reconcile_execution_ledger_recurring())
+
+    assert result == {
+        "toss": {"broker": "toss"},
+        "upbit": {"broker": "upbit"},
+    }
+    assert calls == [("toss", 12), ("upbit", 12)]
 
 
 @pytest.mark.unit

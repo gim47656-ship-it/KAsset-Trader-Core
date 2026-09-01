@@ -55,7 +55,7 @@ async def _create(
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side=side,
         order_type="limit",
         proposer="session",
@@ -156,7 +156,7 @@ async def test_caller_supplied_creator_id_cannot_forge_ownership(db_session):
     group = await service.create_proposal(
         symbol="BSX",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="session",

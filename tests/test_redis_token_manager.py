@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -715,7 +716,7 @@ class TestKISTokenPathIntegration:
 
 
 @pytest.mark.asyncio
-async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypatch):
+async def test_get_holdings_toss_kr_price_fanout_limits_token_redis_get(monkeypatch):
     from app.mcp_server.tooling import portfolio_holdings
     from app.services.redis_token_manager import RedisTokenManager
 
@@ -723,7 +724,7 @@ async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypa
     mock_redis = AsyncMock()
     mock_redis.get.return_value = json.dumps(
         {
-            "access_token": "kis_holdings_token",
+            "access_token": "portfolio_price_token",
             "expires_at": time.time() + 7200,
             "created_at": time.time(),
         }
@@ -731,10 +732,10 @@ async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypa
 
     positions = [
         {
-            "account": "kis",
+            "account": "toss",
             "account_name": "기본 계좌",
-            "broker": "kis",
-            "source": "kis_api",
+            "broker": "toss",
+            "source": "toss_api",
             "instrument_type": "equity_kr",
             "market": "kr",
             "symbol": f"0000{i}",
@@ -749,13 +750,13 @@ async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypa
         for i in range(20)
     ]
 
-    async def fake_collect_kis_positions(market_filter):
+    async def fake_collect_toss_positions(
+        market_filter, *, need_sellable=False, fresh_sellable=False
+    ):
         assert market_filter == "equity_kr"
-        return positions, []
-
-    async def fake_collect_upbit_positions(market_filter):
-        assert market_filter == "equity_kr"
-        return [], []
+        assert need_sellable is False
+        assert fresh_sellable is False
+        return positions, [], True
 
     async def fake_collect_manual_positions(*, user_id, market_filter):
         assert user_id == 1
@@ -767,16 +768,24 @@ async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypa
         await manager.get_token()
         return {"price": 1000.0}
 
+    monkeypatch.setattr(portfolio_holdings.settings, "toss_api_enabled", True)
     monkeypatch.setattr(
-        portfolio_holdings, "_collect_kis_positions", fake_collect_kis_positions
+        portfolio_holdings,
+        "get_shared_portfolio_snapshot_cache",
+        lambda: SimpleNamespace(usable=False),
     )
     monkeypatch.setattr(
-        portfolio_holdings, "_collect_upbit_positions", fake_collect_upbit_positions
+        portfolio_holdings,
+        "_collect_toss_api_positions",
+        fake_collect_toss_positions,
     )
     monkeypatch.setattr(
         portfolio_holdings,
         "_collect_manual_positions",
         fake_collect_manual_positions,
+    )
+    monkeypatch.setattr(
+        portfolio_holdings, "cache_first_kr", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(
         portfolio_holdings, "_fetch_quote_equity_kr", fake_fetch_quote_equity_kr
@@ -789,7 +798,7 @@ async def test_get_holdings_path_kr_price_fanout_limits_token_redis_get(monkeypa
             _,
             _,
         ) = await portfolio_holdings._collect_portfolio_positions(
-            account="kis",
+            account="toss",
             market="kr",
             include_current_price=True,
         )

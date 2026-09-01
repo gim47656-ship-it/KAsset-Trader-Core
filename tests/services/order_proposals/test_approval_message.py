@@ -155,7 +155,7 @@ def test_batch_summary_lists_notional_and_account_subtotals():
                 symbol="AAPL",
                 market="equity_us",
                 side="buy",
-                account_mode="kis_live",
+                account_mode="toss_live",
                 broker_account_id="account-1234",
             ),
             [_rung(quantity=Decimal("1"), limit_price=Decimal("100"))],
@@ -179,7 +179,7 @@ def test_batch_summary_lists_notional_and_account_subtotals():
     )
 
     assert "AAPL" in text and "MSFT" in text
-    assert r"kis\_live ···1234" in text and r"toss\_live" in text
+    assert r"toss\_live ···1234" in text and r"toss\_live" in text
     assert "합계: $200" in text
     assert keyboard["inline_keyboard"][0][0]["text"] == "전체 승인"
 
@@ -195,7 +195,7 @@ def test_batch_summary_omits_market_order_notional_from_totals():
             _group(
                 symbol="AAPL",
                 market="equity_us",
-                account_mode="kis_live",
+                account_mode="toss_live",
                 order_type="market",
             ),
             [
@@ -207,7 +207,7 @@ def test_batch_summary_omits_market_order_notional_from_totals():
             ],
         ),
         (
-            _group(symbol="MSFT", market="equity_us", account_mode="kis_live"),
+            _group(symbol="MSFT", market="equity_us", account_mode="toss_live"),
             [_rung(quantity=Decimal("1"), limit_price=Decimal("100"))],
         ),
     ]
@@ -323,17 +323,17 @@ def test_compact_approval_card_has_required_contract_fields_individually():
     assert "#1: 3주" in text
     assert "× ₩99" in text
     assert "투자 논지: 익절 조건과 지지선 이탈 위험을 함께 반영한 사유" in text
-    assert "핵심 수치: 총수량 3주 / 주문금액 ₩297" in text
+    assert "핵심 수치: 총수량 3 / 주문금액 297" in text
     assert "유효기간: ~10:30 KST (2026-07-14)" in text
 
 
 @pytest.mark.unit
-def test_kis_live_card_shows_resolved_name_and_existing_invest_detail_link():
-    """ROB-1299: a real KIS-live-shaped card stays compact but identifiable."""
+def test_toss_live_card_shows_resolved_name_and_existing_invest_detail_link():
+    """ROB-1299: a real Toss-live-shaped card stays compact but identifiable."""
     group = _group(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         thesis="실적 회복과 현금흐름 개선을 확인한 매수 근거",
         valid_until=datetime(2026, 8, 20, 7, 30, tzinfo=UTC),

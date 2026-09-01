@@ -39,7 +39,7 @@ async def get_support_resistance_impl(
         raise ValueError("symbol is required")
 
     market_type, normalized_symbol = _resolve_market_type(symbol, market)
-    source_map = {"crypto": "upbit", "equity_kr": "kis", "equity_us": "yahoo"}
+    source_map = {"crypto": "upbit", "equity_kr": "toss", "equity_us": "toss"}
     source = source_map[market_type]
 
     try:
@@ -64,7 +64,7 @@ async def get_support_resistance_impl(
             live = await fetch_us_live_last_price(normalized_symbol)
             if live is not None:
                 current_price = round(live, 2)
-                current_price_source = "yahoo_live"
+                current_price_source = "toss_live"
         fib_result = _calculate_fibonacci(df, current_price)
         fib_result["symbol"] = normalized_symbol
 
@@ -139,7 +139,7 @@ async def get_support_resistance_impl(
         }
         if market_type == "equity_us":
             result["current_price_source"] = current_price_source
-            result["current_price_stale"] = current_price_source != "yahoo_live"
+            result["current_price_stale"] = current_price_source != "toss_live"
         return result
     except Exception as exc:
         return _error_payload(

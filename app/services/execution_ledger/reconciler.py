@@ -6,7 +6,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, cast
 
 from app.core.config import settings
 from app.schemas.execution_ledger import (
@@ -14,6 +14,7 @@ from app.schemas.execution_ledger import (
     ExecutionLedgerRead,
     ExecutionLedgerUpsert,
     ReconcileDiff,
+    ReconcileRunBroker,
     ReconcileRunRecord,
 )
 from app.services.execution_ledger.normalizers import to_execution_ledger_upsert
@@ -22,7 +23,6 @@ from app.services.filled_orders_service import fetch_filled_orders
 
 logger = logging.getLogger(__name__)
 
-Broker = Literal["kis", "upbit"]
 FilledOrdersFetcher = Callable[..., Awaitable[dict[str, Any]]]
 
 
@@ -36,6 +36,14 @@ def _format_fetch_errors(errors: list[Any]) -> str:
         else:
             parts.append(str(error))
     return "; ".join(parts)
+
+
+def _require_operational_broker(broker: str) -> ReconcileRunBroker:
+    if broker == "kis":
+        raise ValueError("provider kis is not operational")
+    if broker not in {"toss", "upbit"}:
+        raise ValueError("broker must be toss or upbit")
+    return cast(ReconcileRunBroker, broker)
 
 
 def _resolve_run_window(
@@ -63,7 +71,7 @@ class ExecutionLedgerReconciler:
 
     async def run(  # NOSONAR
         self,
-        broker: Broker,
+        broker: ReconcileRunBroker,
         *,
         window_hours: int = 24,
         start_at: datetime | None = None,
@@ -71,6 +79,7 @@ class ExecutionLedgerReconciler:
         max_pages: int = 100,
         dry_run: bool = True,
     ) -> ReconcileDiff:
+        broker = _require_operational_broker(broker)
         if not dry_run and not settings.EXECUTION_LEDGER_COMMIT_ENABLED:
             raise ExecutionLedgerCommitDisabledError(
                 "EXECUTION_LEDGER_COMMIT_ENABLED is false; commit mode is disabled"
@@ -136,7 +145,7 @@ class ExecutionLedgerReconciler:
 
     async def _fetch_normalized(
         self,
-        broker: Broker,
+        broker: ReconcileRunBroker,
         *,
         window_hours: int,
         start_at: datetime,
@@ -145,7 +154,7 @@ class ExecutionLedgerReconciler:
         source_run_id: uuid.UUID,
     ) -> list[ExecutionLedgerUpsert]:
         days = max(1, int(((end_at - start_at).total_seconds() + 86399) / 86400))
-        markets = "crypto" if broker == "upbit" else "kr,us"
+        markets = {"toss": "kr,us", "upbit": "crypto"}[broker]
         result = await self.fetcher(
             days=days,
             markets=markets,

@@ -92,4 +92,4 @@ async def test_generator_guard_still_rejects_kis_mock(monkeypatch) -> None:
         created_by_profile="schedule",
     )
     assert result["success"] is False
-    assert result["error"] == "unsupported_account_scope"
+    assert result["error"] == "provider kis is not operational"

@@ -18,7 +18,7 @@ async def test_snapshot_job_dry_run_does_not_commit(monkeypatch):
         closes_window=[78500, 78000, 77000, 76000, 75000],
         consecutive_up_days=3,
         week_change_rate=Decimal("4.66"),
-        source="kis",
+        source="toss",
     )
     monkeypatch.setattr(
         snapshot_job,

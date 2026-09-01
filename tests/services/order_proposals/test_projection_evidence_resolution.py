@@ -13,7 +13,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 @pytest.fixture(
-    params=[("toss_live", "equity_us", "AAPL"), ("kis_live", "equity_kr", "005930")]
+    params=[("toss_live", "equity_us", "AAPL"), ("toss_live", "equity_kr", "005930")]
 )
 def broker_scope(request):
     return request.param

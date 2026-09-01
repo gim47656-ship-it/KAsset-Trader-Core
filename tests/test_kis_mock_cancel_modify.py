@@ -1,4 +1,4 @@
-"""ROB-406 — kis_mock cancel/modify via ledger (no TTTC8036R inquiry)."""
+"""과거 KIS mock ledger read 모델과 비운영 주문 mutation 경계를 검증한다."""
 
 from __future__ import annotations
 
@@ -69,140 +69,27 @@ async def test_mark_cancelled_sets_state_and_flag(db_session: AsyncSession):
     assert row.last_reconcile_detail["broker_cancel_confirmed"] is False
 
 
-def _cancel_receipt(order_id: str):
-    """The FOLLOWUP receipt ROB-1263 requires of any kis_mock cancel caller."""
-
-    from tests.services.mock_integration.test_kis_coordination_adapter import (
-        issued_followup_receipt,
-    )
-
-    return issued_followup_receipt("followup_cancel", order_id=str(order_id))
-
-
-class _FakeKisCancelOK:
-    async def cancel_korea_order(self, **kwargs):
-        self.kwargs = kwargs
-        return {"odno": "REV-1", "ord_tmd": "0901", "msg": "ok"}
-
-    async def inquire_korea_orders(self, *a, **k):  # must NOT be called
-        raise AssertionError("inquire_korea_orders called in mock cancel path")
-
-
-class _FakeKisCancelUnsupported:
-    async def cancel_korea_order(self, **kwargs):
-        raise RuntimeError("APBK0918 not available in mock mode")
-
-    async def inquire_korea_orders(self, *a, **k):
-        raise AssertionError("inquire_korea_orders called in mock cancel path")
-
-
-class _FakeKisCancelError:
-    async def cancel_korea_order(self, **kwargs):
-        raise RuntimeError("APBK1234 already filled order")
-
-    async def inquire_korea_orders(self, *a, **k):
-        raise AssertionError("inquire_korea_orders called in mock cancel path")
-
-
 @pytest.mark.asyncio
-async def test_mock_cancel_success_confirms_and_cancels(
-    db_session: AsyncSession, monkeypatch
+async def test_mock_cancel_is_non_operational_and_leaves_ledger_unchanged(
+    db_session: AsyncSession,
 ):
-    """ROB-1263 r3/r5: a cancel caller now supplies a FOLLOWUP receipt.
-
-    The receipt names the exact native order and the durable claim it belongs
-    to. Everything this test asserted before — broker confirmation, the
-    forwarding org number reaching the client, the ledger transition — is
-    unchanged; only the caller's own precondition is now met explicitly.
-    (orch approved this file's fence entry in r6.)
-    """
-    row = await _seed(db_session, orgno="00950")
-    fake = _FakeKisCancelOK()
-    monkeypatch.setattr(omc, "_create_kis_client", lambda *, is_mock: fake)
-
-    async with _cancel_receipt(row.order_no):
-        result = await omc._cancel_kis_domestic(row.order_no, None, is_mock=True)
-
-    assert result["success"] is True
-    assert result["broker_cancel_confirmed"] is True
-    assert fake.kwargs["krx_fwdg_ord_orgno"] == "00950"
-    assert fake.kwargs["is_mock"] is True
-    await db_session.refresh(row)
-    assert row.lifecycle_state == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_mock_cancel_unsupported_soft_cancels(
-    db_session: AsyncSession, monkeypatch
-):
-    row = await _seed(db_session, orgno="00950")
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda *, is_mock: _FakeKisCancelUnsupported()
-    )
-
-    async with _cancel_receipt(row.order_no):
-        result = await omc._cancel_kis_domestic(row.order_no, None, is_mock=True)
-
-    assert result["success"] is True
-    assert result["broker_cancel_confirmed"] is False
-    assert result["mock_unsupported"] is True
-    assert "warning" in result
-    await db_session.refresh(row)
-    assert row.lifecycle_state == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_mock_cancel_other_error_surfaces_no_soft_cancel(
-    db_session: AsyncSession, monkeypatch
-):
-    row = await _seed(db_session, orgno="00950")
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda *, is_mock: _FakeKisCancelError()
-    )
+    row = await _seed(db_session)
 
     result = await omc._cancel_kis_domestic(row.order_no, None, is_mock=True)
 
     assert result["success"] is False
-    assert result.get("broker_cancel_confirmed") is False
+    assert result["error"] == "provider kis is not operational"
+    assert result["provider_unsupported"] is True
+    assert result["mutation_sent"] is False
     await db_session.refresh(row)
-    assert row.lifecycle_state == "accepted"  # unchanged
+    assert row.lifecycle_state == "accepted"
 
 
 @pytest.mark.asyncio
-async def test_mock_cancel_unknown_order_fails(db_session: AsyncSession, monkeypatch):
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda *, is_mock: _FakeKisCancelOK()
-    )
-    result = await omc._cancel_kis_domestic("NO-SUCH", None, is_mock=True)
-    assert result["success"] is False
-    assert "ledger" in result["error"]
-
-
-class _FakeKisModifyOK:
-    async def modify_korea_order(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-        return {"odno": "REV-2"}
-
-    async def inquire_korea_orders(self, *a, **k):
-        raise AssertionError("inquire_korea_orders called in mock modify path")
-
-
-class _FakeKisModifyUnsupported:
-    async def modify_korea_order(self, *args, **kwargs):
-        raise RuntimeError("APBK0918 not available in mock mode")
-
-    async def inquire_korea_orders(self, *a, **k):
-        raise AssertionError("inquire_korea_orders called in mock modify path")
-
-
-@pytest.mark.asyncio
-async def test_mock_modify_success_updates_ledger(
-    db_session: AsyncSession, monkeypatch
+async def test_mock_modify_is_non_operational_and_leaves_ledger_unchanged(
+    db_session: AsyncSession,
 ):
-    row = await _seed(db_session, orgno="00950", price="70000", quantity="10")
-    fake = _FakeKisModifyOK()
-    monkeypatch.setattr(omc, "_create_kis_client", lambda *, is_mock: fake)
+    row = await _seed(db_session, price="70000", quantity="10")
 
     result = await omc._modify_kis_domestic(
         row.order_no,
@@ -214,53 +101,11 @@ async def test_mock_modify_success_updates_ledger(
         is_mock=True,
     )
 
-    assert result["success"] is True
-    assert result["status"] == "modified"
-    await db_session.refresh(row)
-    assert row.price == Decimal("71000")
-    assert row.quantity == Decimal("8")
-
-
-@pytest.mark.asyncio
-async def test_mock_modify_unsupported_fails_closed(
-    db_session: AsyncSession, monkeypatch
-):
-    row = await _seed(db_session, orgno="00950")
-    monkeypatch.setattr(
-        omc, "_create_kis_client", lambda *, is_mock: _FakeKisModifyUnsupported()
-    )
-
-    result = await omc._modify_kis_domestic(
-        row.order_no,
-        "005930",
-        "equity_kr",
-        new_price=71000.0,
-        new_quantity=None,
-        dry_run=False,
-        is_mock=True,
-    )
-
     assert result["success"] is False
-    assert result["mock_unsupported"] is True
+    assert result["error"] == "provider kis is not operational"
+    assert result["provider_unsupported"] is True
+    assert result["mutation_sent"] is False
     await db_session.refresh(row)
-    assert row.lifecycle_state == "accepted"  # unchanged, not soft-modified
-    assert row.price == Decimal("70000")  # unchanged
-
-
-@pytest.mark.asyncio
-async def test_live_cancel_still_uses_inquire(monkeypatch):
-    """is_mock=False must keep using inquire_korea_orders (unchanged path)."""
-    called = {"inquire": False}
-
-    class _FakeLive:
-        async def inquire_korea_orders(self, *a, **k):
-            called["inquire"] = True
-            return []
-
-        async def cancel_korea_order(self, **kwargs):
-            return {"odno": "L-1", "ord_tmd": "0900"}
-
-    monkeypatch.setattr(omc, "_create_kis_client", lambda *, is_mock: _FakeLive())
-    # symbol 미제공 → live 경로는 inquire로 심볼 조회 시도
-    await omc._cancel_kis_domestic("LIVE-1", None, is_mock=False)
-    assert called["inquire"] is True
+    assert row.lifecycle_state == "accepted"
+    assert row.price == Decimal("70000")
+    assert row.quantity == Decimal("10")

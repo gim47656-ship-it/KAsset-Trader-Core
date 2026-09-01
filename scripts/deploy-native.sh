@@ -51,17 +51,21 @@ export AUTO_TRADER_PLIST_DIR="$PLIST_DIR"
 SINGLE_ACTIVE_LABELS=(
   "com.robinco.auto-trader.worker"
   "com.robinco.auto-trader.scheduler"
-  "com.robinco.auto-trader.kis-websocket"
   "com.robinco.auto-trader.upbit-websocket"
   # ROB-760: fixed-profile readonly MCP services outside the blue/green pair.
   "com.robinco.auto-trader.mcp-analysis-readonly"
   "com.robinco.auto-trader.mcp-account-read"
   # ROB-762: TradingCodex execution MCP service outside the blue/green pair.
   "com.robinco.auto-trader.mcp-tradingcodex-execution"
-  # ROB-1258: resident hermes-paper-kis MCP service outside the blue/green pair.
-  "com.robinco.auto-trader.mcp-paper_001"
   # ROB-469 PR3: single non-color-specific watchdog that restarts a wedged MCP color.
   "com.robinco.auto-trader.mcp-watchdog"
+)
+
+# Removed KIS deployment surfaces are retired before registry preflight so an
+# already-installed launchd job cannot survive the clean cutover.
+RETIRED_SINGLE_ACTIVE_LABELS=(
+  "com.robinco.auto-trader.kis-websocket"
+  "com.robinco.auto-trader.mcp-paper_001"
 )
 
 # ROB-831: fixed-profile MCP services (label:port) whose *process release path*
@@ -78,7 +82,6 @@ MCP_PROFILE_PORTS=(
   "com.robinco.auto-trader.mcp-analysis-readonly:8768"
   "com.robinco.auto-trader.mcp-account-read:8769"
   "com.robinco.auto-trader.mcp-tradingcodex-execution:8770"
-  "com.robinco.auto-trader.mcp-paper_001:8771"
 )
 
 NEW_RELEASE="$RELEASES/$SHA"
@@ -174,6 +177,25 @@ build_frontend_workspace() {
 build_frontend() {
   build_frontend_workspace "invest" "frontend/invest"
 }
+
+retire_removed_single_active_services() {
+  local uid_num label target
+  uid_num="$(id -u)"
+
+  for label in "${RETIRED_SINGLE_ACTIVE_LABELS[@]}"; do
+    target="$HOME/Library/LaunchAgents/$label.plist"
+    launchctl bootout "gui/$uid_num/$label" 2>/dev/null || true
+    launchctl bootout "gui/$uid_num" "$target" 2>/dev/null || true
+    rm -f "$target" "$PLIST_DIR/$label.plist"
+  done
+
+  # ops/native/scripts is copied without --delete; remove stale entrypoints that
+  # could otherwise remain directly executable after their source files vanish.
+  rm -f \
+    "$BASE/scripts/run-websocket-kis.sh" \
+    "$BASE/scripts/run-mcp-paper_001.sh"
+}
+
 
 restart_single_active_services() {
   local uid_num label plist target attempt
@@ -273,13 +295,10 @@ verify_mcp_profile_release_paths() {
 
 run_healthcheck_once() {
   if [[ -x "$SERVER_HEALTHCHECK" ]]; then
-    # ROB-698: WS connectivity (KIS/Upbit real-time) must NOT be a fatal deploy
-    # gate. The blue-green cutover checks already run with
-    # AUTO_TRADER_HEALTHCHECK_SKIP_WS=1 (native_deploy_lib.sh); make this final
-    # post-cutover retry check consistent so a broker's scheduled maintenance
-    # (e.g. KIS) cannot fail+rollback an otherwise-healthy deploy. api/mcp
-    # /healthz stay hard gates; WS is monitored separately (watchdog/Sentry).
-    # An operator can still force WS-gating with AUTO_TRADER_HEALTHCHECK_SKIP_WS=0.
+    # WS connectivity must not be a fatal deploy gate. The blue-green cutover
+    # checks already run with AUTO_TRADER_HEALTHCHECK_SKIP_WS=1; keep the final
+    # post-cutover retry consistent so an Upbit outage cannot roll back healthy
+    # API/MCP services. Operators may still set the flag to 0 explicitly.
     AUTO_TRADER_HEALTHCHECK_SKIP_WS="${AUTO_TRADER_HEALTHCHECK_SKIP_WS:-1}" "$SERVER_HEALTHCHECK"
     return $?
   fi
@@ -299,16 +318,9 @@ run_healthcheck_once() {
   fi
 
   if [[ -f "$CURRENT/scripts/websocket_healthcheck.py" ]]; then
-    # ROB-698: WS heartbeat is advisory (logged, non-fatal) here too — a broker
-    # WS outage (e.g. KIS scheduled maintenance) must not roll back an
-    # otherwise-healthy deploy (consistent with the primary path above and the
-    # blue-green cutover checks, which skip WS).
-    WS_MONITOR_HEARTBEAT_PATH="$BASE/state/heartbeat/kis.json" \
-      WS_MONITOR_EXPECT_MODE=kis \
-      uv run python scripts/websocket_healthcheck.py \
-      || echo "WS(kis) heartbeat not connected (advisory, non-fatal)" >&2
+    # The Upbit heartbeat is advisory and cannot roll back healthy API/MCP
+    # services.
     WS_MONITOR_HEARTBEAT_PATH="$BASE/state/heartbeat/upbit.json" \
-      WS_MONITOR_EXPECT_MODE=upbit \
       uv run python scripts/websocket_healthcheck.py \
       || echo "WS(upbit) heartbeat not connected (advisory, non-fatal)" >&2
   else
@@ -439,6 +451,9 @@ if ! git cat-file -e "$SHA^{commit}" 2>/dev/null; then
 fi
 git cat-file -e "$SHA^{commit}"
 git checkout --detach "$SHA"
+
+log "Retiring removed KIS launchd/runtime entrypoints"
+retire_removed_single_active_services
 
 log "Preflight: verifying fixed-profile MCP registry completeness"
 verify_mcp_profile_registry

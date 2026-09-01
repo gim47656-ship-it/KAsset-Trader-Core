@@ -1,19 +1,15 @@
-"""ROB-269 Phase 2 — SnapshotBundleEnsureService.
+"""ROB-269 — ``SnapshotBundleEnsureService``.
 
-The core service that turns an ``EnsureBundleRequest`` into a persisted
-bundle. Reuses a fresh bundle if one exists for the identity tuple;
-otherwise creates a new run, collects per-kind data (manual snapshots
-or via the collector registry), and assembles a bundle whose status
-reflects required-vs-optional outcomes.
+``EnsureBundleRequest``를 영속 snapshot bundle로 만든다. 동일 identity의
+fresh bundle이 있으면 재사용하고, 없으면 run을 생성해 collector registry
+또는 수동 snapshot으로 데이터를 모은 뒤 required/optional 결과에 따라
+bundle 상태를 결정한다.
 
-Phase 2 invariants:
-* Only writes to ``review.investment_snapshot_*`` tables.
-* No external HTTP. Collectors are an injectable seam; the production
-  registry is empty in Phase 2 (Phase 3 wires KIS / journal / market /
-  news collectors). Tests register fakes.
-* Run.status stays at the default ``'running'`` — append-only repository
-  contract from Phase 1 means no UPDATE path. Bundle.status is the
-  authoritative outcome record.
+불변식:
+* ``review.investment_snapshot_*`` 테이블에만 쓴다.
+* provider 접근은 등록된 읽기 전용 collector 경계를 통해서만 이뤄진다.
+* ``Run.status``는 append-only 계약에 따라 기본 ``'running'``을 유지하고,
+  ``Bundle.status``가 최종 결과를 나타낸다.
 """
 
 from __future__ import annotations

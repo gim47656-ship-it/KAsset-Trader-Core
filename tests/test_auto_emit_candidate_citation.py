@@ -105,7 +105,22 @@ def test_buy_candidates_follow_candidate_rank_and_limit():
 def test_held_symbol_in_screener_surfaces_watch():
     snaps = [
         _Snap(
-            "portfolio", {"primary_source": "kis", "holdings": [{"ticker": "005930"}]}
+            "portfolio",
+            {
+                "primary_source": "toss",
+                "holdings": [
+                    {
+                        "ticker": "005930",
+                        "quantity": 1.0,
+                        "sellable_quantity": None,
+                        "source": "toss_api",
+                        "market": "KR",
+                    }
+                ],
+                "reference_holdings": [],
+                "count": 1,
+                "market": "kr",
+            },
         ),
         _Snap(
             "candidate_universe",
@@ -116,14 +131,14 @@ def test_held_symbol_in_screener_surfaces_watch():
                         "symbol": "005930",
                         "score": 8.0,
                         "reasons": ["단기 상승 모멘텀 후보"],
-                        "source": "kis",
+                        "source": "toss",
                     },
                 ],
             },
         ),
     ]
     items = EvidenceAutoEmitter().propose(
-        snapshots=snaps, request_market="kr", account_scope="kis_live"
+        snapshots=snaps, request_market="kr", account_scope="toss_live"
     )
     holds = [
         i
@@ -256,8 +271,19 @@ def test_held_candidate_not_double_emitted():
         _Snap(
             "portfolio",
             {
-                "primary_source": "kis",
-                "holdings": [{"ticker": "000660", "sellable_quantity": 0}],
+                "primary_source": "toss",
+                "holdings": [
+                    {
+                        "ticker": "000660",
+                        "quantity": 1.0,
+                        "sellable_quantity": None,
+                        "source": "toss_api",
+                        "market": "KR",
+                    }
+                ],
+                "reference_holdings": [],
+                "count": 1,
+                "market": "kr",
             },
         ),
         _Snap("symbol", {"symbol": "000660", "quote": _OK_QUOTE}, symbol="000660"),
@@ -270,10 +296,10 @@ def test_held_candidate_not_double_emitted():
         ),
     ]
     items = EvidenceAutoEmitter().propose(
-        snapshots=snaps, request_market="kr", account_scope=None
+        snapshots=snaps, request_market="kr", account_scope="toss_live"
     )
     keys = [i.client_item_key for i in items if i.symbol == "000660"]
-    # Held name routes through held_and_trending only — no candidate buy/watch row.
+    # Held names are excluded from the candidate buy/watch path.
     assert all(not k.startswith("auto-cand-") for k in keys)
     assert all(not k.startswith("auto-buy-") for k in keys)
 

@@ -1,7 +1,7 @@
 # tests/mcp_server/tooling/test_orders_history_expiry_reason.py
 import pytest
 
-from app.mcp_server.tooling.orders_modify_cancel import (
+from app.mcp_server.tooling.orders_kis_variants import (
     _normalize_kis_domestic_order,
     _normalize_kis_overseas_order,
 )

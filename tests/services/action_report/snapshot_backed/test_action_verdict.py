@@ -25,7 +25,7 @@ def test_every_verdict_maps_to_a_locked_decision_bucket() -> None:
 
 
 def test_held_unactionable_quote_is_data_gap() -> None:
-    holding = {"ticker": "005930", "sellable_quantity": 10}
+    holding = {"ticker": "005930", "quantity": 10, "sellable_quantity": None}
     quote = {"status": "unavailable"}
     assert (
         classify_held_symbol(holding, quote, in_candidate_universe=False) == "data_gap"
@@ -33,14 +33,14 @@ def test_held_unactionable_quote_is_data_gap() -> None:
 
 
 def test_held_missing_quote_is_data_gap() -> None:
-    holding = {"ticker": "005930", "sellable_quantity": 10}
+    holding = {"ticker": "005930", "quantity": 10, "sellable_quantity": None}
     assert (
         classify_held_symbol(holding, None, in_candidate_universe=False) == "data_gap"
     )
 
 
-def test_held_sellable_with_actionable_quote_is_sell_review() -> None:
-    holding = {"ticker": "005930", "sellable_quantity": 10}
+def test_held_quantity_with_actionable_quote_is_sell_review() -> None:
+    holding = {"ticker": "005930", "quantity": 10, "sellable_quantity": None}
     quote = {"status": "ok", "best_bid": 1.0, "best_ask": 2.0, "bid_depth": 5.0}
     assert (
         classify_held_symbol(holding, quote, in_candidate_universe=False)
@@ -48,14 +48,14 @@ def test_held_sellable_with_actionable_quote_is_sell_review() -> None:
     )
 
 
-def test_held_not_sellable_but_trending_is_no_add() -> None:
-    holding = {"ticker": "005930", "sellable_quantity": 0}
+def test_zero_quantity_but_trending_is_no_add() -> None:
+    holding = {"ticker": "005930", "quantity": 0, "sellable_quantity": None}
     quote = {"status": "ok", "best_bid": 1.0, "best_ask": 2.0, "ask_depth": 5.0}
     assert classify_held_symbol(holding, quote, in_candidate_universe=True) == "no_add"
 
 
-def test_held_not_sellable_not_trending_is_keep() -> None:
-    holding = {"ticker": "005930", "sellable_quantity": 0}
+def test_zero_quantity_not_trending_is_keep() -> None:
+    holding = {"ticker": "005930", "quantity": 0, "sellable_quantity": None}
     quote = {"status": "ok", "best_bid": 1.0, "best_ask": 2.0, "ask_depth": 5.0}
     assert classify_held_symbol(holding, quote, in_candidate_universe=False) == "keep"
 

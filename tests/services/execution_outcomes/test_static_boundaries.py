@@ -8,20 +8,13 @@ APP_ROOT = REPO_ROOT / "app"
 PACKAGE_ROOT = APP_ROOT / "services" / "execution_outcomes"
 PACKAGE_IMPORT = "app.services.execution_outcomes"
 
-# Compact AST snapshots preserve every parameter, order, and default without
-# importing any runtime tool module.  In particular, OD-3 keeps today's generic
-# and KIS cancel/modify signatures unchanged while double-gated surfaces retain
-# dry_run=True / confirm=False.
+# Compact AST snapshots preserve every active mutation parameter, order, and
+# default without importing any runtime tool module. Generic Toss/Upbit routing
+# and provider-specific mutation surfaces retain their dry_run/confirm gates.
 EXPECTED_SIGNATURES = {
-    "app/mcp_server/tooling/orders_registration.py::place_order": "symbol,side,order_type='limit',quantity=None,price=None,amount=None,dry_run=True,reason='',exit_reason=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,defensive_trim=False,approval_issue_id=None,exit_intent=None,retrospective_id=None,account_mode=None,account_type=None,paper_account=None,report_item_uuid=None,approval_hash=None,rung=None",
-    "app/mcp_server/tooling/orders_registration.py::cancel_order": "order_id,symbol=None,market=None,account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_registration.py::modify_order": "order_id,symbol,market=None,new_price=None,new_quantity=None,dry_run=True,reason='',account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_live_place_order": "symbol,side,order_type='limit',quantity=None,price=None,amount=None,dry_run=True,reason='',exit_reason=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,defensive_trim=False,approval_issue_id=None,exit_intent=None,retrospective_id=None,venue=None,order_validity=None,reserved_time=None,account_mode=None,account_type=None,report_item_uuid=None,approval_hash=None,rung=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_live_cancel_order": "order_id,symbol=None,market=None,account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_live_modify_order": "order_id,symbol,market=None,new_price=None,new_quantity=None,dry_run=True,reason='',account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_mock_place_order": "symbol,side,order_type='limit',quantity=None,price=None,amount=None,dry_run=True,reason='',exit_reason=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,defensive_trim=False,approval_issue_id=None,account_mode=None,account_type=None,report_item_uuid=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_mock_cancel_order": "order_id,symbol=None,market=None,account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_kis_variants.py::kis_mock_modify_order": "order_id,symbol,market=None,new_price=None,new_quantity=None,dry_run=True,reason='',account_mode=None,account_type=None",
+    "app/mcp_server/tooling/orders_registration.py::place_order": "symbol,side,order_type='limit',quantity=None,price=None,amount=None,dry_run=True,confirm=False,confirm_high_value_order=False,reason='',exit_reason=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,defensive_trim=False,approval_issue_id=None,exit_intent=None,retrospective_id=None,account_mode=None,account_type=None,paper_account=None,report_item_uuid=None,approval_hash=None,rung=None",
+    "app/mcp_server/tooling/orders_registration.py::cancel_order": "order_id,symbol=None,market=None,dry_run=True,confirm=False,account_mode=None,account_type=None",
+    "app/mcp_server/tooling/orders_registration.py::modify_order": "order_id,symbol,market=None,new_price=None,new_quantity=None,dry_run=True,confirm=False,confirm_high_value_order=False,reason='',account_mode=None,account_type=None",
     "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_place_order": "symbol,side,quantity,price,market='kr',exchange='KRX',dry_run=True,confirm=False",
     "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_cancel_order": "order_id,symbol=None,cancel_quantity=None,dry_run=True,confirm=False",
     "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_modify_order": "order_id,symbol,new_price=None,new_quantity=None,dry_run=True,confirm=False",
@@ -50,14 +43,6 @@ EXPECTED_MUTATION_TOOL_NAMES = {
         "place_order",
         "cancel_order",
         "modify_order",
-    },
-    "app/mcp_server/tooling/orders_kis_variants.py": {
-        "kis_live_place_order",
-        "kis_live_cancel_order",
-        "kis_live_modify_order",
-        "kis_mock_place_order",
-        "kis_mock_cancel_order",
-        "kis_mock_modify_order",
     },
     "app/mcp_server/tooling/orders_kiwoom_variants.py": {
         "kiwoom_mock_place_order",

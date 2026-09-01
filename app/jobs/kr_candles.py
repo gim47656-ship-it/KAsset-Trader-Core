@@ -12,7 +12,7 @@ async def run_kr_candles_sync(
     mode: str,
     sessions: int = 10,
     user_id: int = 1,
-    source: str = "kis",
+    source: str = "toss",
 ) -> dict[str, object]:
     try:
         result = await sync_kr_candles(

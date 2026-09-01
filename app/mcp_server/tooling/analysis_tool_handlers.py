@@ -18,7 +18,6 @@ import yfinance as yf
 from app.mcp_server.tooling import (
     analysis_quick,
     analysis_screening,
-    foreigners_liquidity,
 )
 from app.mcp_server.tooling.analysis_screen_core import normalize_screen_request
 from app.mcp_server.tooling.earnings_context import (
@@ -29,10 +28,6 @@ from app.mcp_server.tooling.earnings_context import (
 from app.mcp_server.tooling.market_data_indicators import (
     _fetch_ohlcv_for_indicators,
 )
-from app.mcp_server.tooling.market_session import (
-    DATA_STATE_FRESH,
-    kr_market_data_state,
-)
 from app.mcp_server.tooling.shared import (
     is_crypto_market as _is_crypto_market,
 )
@@ -40,18 +35,10 @@ from app.mcp_server.tooling.shared import (
     is_korean_equity_code as _is_korean_equity_code,
 )
 from app.monitoring import yfinance_tracing_session
-from app.services.brokers.kis.client import KISClient
 from app.services.decision_history import build_decision_context
-from app.services.market_valuation_snapshots.normalized_market_cap import (
-    fetch_normalized_kr_market_caps,
-)
 
 logger = logging.getLogger(__name__)
 
-# ROB-629: the legacy "foreigners" ranking is split into directional foreign
-# net-flow rankings. "foreigners" is kept as a back-compat alias for
-# "foreign_net_buy".
-_FOREIGN_RANKING_TYPES = frozenset({"foreign_net_buy", "foreign_net_sell"})
 
 _CORRELATION_COMPANY_NAME_ERROR = (
     "get_correlation does not support company-name inputs because it has no "
@@ -106,15 +93,7 @@ async def get_top_stocks_impl(
     market = (market or "").strip().lower()
     ranking_type = (ranking_type or "").strip().lower()
     limit_clamped = max(1, min(limit, 50))
-
-    # ROB-629: "foreigners" is the back-compat alias for the net-buy ranking.
-    # Resolve the alias for dispatch + guard logic, but echo the caller's
-    # ORIGINAL ranking_type in the response so existing callers keep seeing
-    # "foreigners".
-    resolved_ranking_type = (
-        "foreign_net_buy" if ranking_type == "foreigners" else ranking_type
-    )
-
+    _ = (include_illiquid, min_market_cap, min_turnover)
     supported_combinations = {
         ("kr", "volume"),
         ("kr", "market_cap"),
@@ -132,290 +111,42 @@ async def get_top_stocks_impl(
         ("crypto", "losers"),
         ("crypto", "relative_strength"),
     }
-
-    key = (market, ranking_type)
-    if key not in supported_combinations:
+    if (market, ranking_type) not in supported_combinations:
         return analysis_screening._error_payload(
             source="validation",
-            message=f"Unsupported combination: market={market}, ranking_type={ranking_type}",
+            message=(
+                f"Unsupported combination: market={market}, ranking_type={ranking_type}"
+            ),
             query=f"market={market}, ranking_type={ranking_type}",
         )
-
-    # ROB-976: over-fetch when a quality filter will drop rows post-hoc, so the
-    # caller still gets up to limit_clamped quality rows (KR ranking endpoints
-    # already fetch their full page in one call — see fluctuation_rank/
-    # volume_rank/market_cap_rank — so a larger client-side slice is free).
-    _quality_filter_requested = min_market_cap is not None or min_turnover is not None
-    fetch_limit = (
-        min(limit_clamped * 4, 100) if _quality_filter_requested else limit_clamped
-    )
-    excluded_by_market_cap = 0
-    excluded_by_turnover = 0
-    source = {"kr": "kis", "us": "yfinance", "crypto": "upbit"}.get(
-        market,
-        "",
-    )
+    if market == "kr":
+        return {
+            "success": False,
+            "error": "provider_unsupported",
+            "detail": "KR rankings are unavailable from Toss/NH PLUG",
+            "source": "unsupported",
+            "query": f"market={market}, ranking_type={ranking_type}",
+        }
 
     try:
-        if market == "kr":
-            kis = KISClient()
-
-            if ranking_type == "volume":
-                data = await kis.volume_rank(market="J", limit=fetch_limit)
-                source = "kis"
-            elif ranking_type == "market_cap":
-                data = await kis.market_cap_rank(market="J", limit=fetch_limit)
-                source = "kis"
-            elif ranking_type in ("gainers", "losers"):
-                direction = "up" if ranking_type == "gainers" else "down"
-                data = await kis.fluctuation_rank(
-                    market="J", direction=direction, limit=fetch_limit
-                )
-                source = "kis"
-            elif resolved_ranking_type in _FOREIGN_RANKING_TYPES:
-                rank_sort = "1" if resolved_ranking_type == "foreign_net_sell" else "0"
-                data = await kis.foreign_buying_rank(
-                    market="J", limit=fetch_limit, rank_sort=rank_sort
-                )
-                source = "kis"
-            else:
-                data = []
-
-            mapped_rows: list[dict[str, Any]] = []
-            for row in data[:fetch_limit]:
-                if ranking_type == "losers":
-                    change_rate = analysis_screening._to_float(row.get("prdy_ctrt"))
-                    if change_rate is None or change_rate >= 0:
-                        continue
-
-                if resolved_ranking_type in _FOREIGN_RANKING_TYPES:
-                    mapped = analysis_screening._map_kr_foreign_row(
-                        row, len(mapped_rows) + 1
-                    )
-                else:
-                    mapped = analysis_screening._map_kr_row(row, len(mapped_rows) + 1)
-                mapped_rows.append(mapped)
-
-            # ROB-976 R3: a hard KRW market-cap threshold may only use the
-            # normalized Naver-backed market_valuation_snapshots value.  The
-            # foreigners helper's TradingView fundamentals value has a different
-            # unit and caused real blue chips to be rejected as sub-3천억.
-            if min_market_cap is not None:
-                normalized_caps = await fetch_normalized_kr_market_caps(
-                    row["symbol"] for row in mapped_rows
-                )
-                for mapped in mapped_rows:
-                    cap = normalized_caps.get(mapped["symbol"])
-                    mapped["market_cap"] = float(cap.value) if cap is not None else None
-                    mapped["market_cap_source"] = (
-                        f"market_valuation_snapshots:{cap.source}"
-                        if cap is not None
-                        else None
-                    )
-                    mapped["market_cap_snapshot_date"] = (
-                        cap.snapshot_date.isoformat() if cap is not None else None
-                    )
-
-            rankings = []
-            for mapped in mapped_rows:
-                if min_market_cap is not None:
-                    mc = mapped.get("market_cap")
-                    # A requested quality floor is fail-closed: unknown normalized
-                    # cap coverage cannot establish that the row passes.
-                    if mc is None or mc < min_market_cap:
-                        excluded_by_market_cap += 1
-                        continue
-                if min_turnover is not None:
-                    turnover = mapped.get("trade_amount")
-                    if turnover is None:
-                        price = mapped.get("price")
-                        volume = mapped.get("volume")
-                        if price is not None and volume is not None:
-                            turnover = price * volume
-                            mapped["trade_amount"] = turnover
-                    if turnover is None or turnover < min_turnover:
-                        excluded_by_turnover += 1
-                        continue
-                rankings.append(mapped)
-                if len(rankings) >= limit_clamped:
-                    break
-            for new_rank, row in enumerate(rankings, start=1):
-                row["rank"] = new_rank
-
-        elif market == "us":
+        if market == "us":
             rankings, source = await analysis_screening._get_us_rankings(
-                ranking_type, limit_clamped
+                ranking_type,
+                limit_clamped,
             )
-
-        elif market == "crypto":
-            rankings, source = await analysis_screening._get_crypto_rankings(
-                ranking_type, limit_clamped
-            )
-
         else:
-            return analysis_screening._error_payload(
-                source="validation",
-                message=f"Unsupported market: {market}",
-                query=f"market={market}",
+            rankings, source = await analysis_screening._get_crypto_rankings(
+                ranking_type,
+                limit_clamped,
             )
-
     except Exception as exc:
         return analysis_screening._error_payload(
-            source=source,
+            source="yfinance" if market == "us" else "upbit",
             message=str(exc),
         )
 
     kst_tz = datetime.timezone(datetime.timedelta(hours=9))
-
-    # ROB-464 / ROB-629: outside the KRX regular session the directional KR
-    # rankings come back as fake-0 가집계 garbage — gainers/losers with every
-    # change rate at 0, and the foreign net-flow ranking with no real net flow.
-    # Suppress that and tag the session instead of presenting it as live data.
-    data_state: str | None = None
-    if market == "kr":
-        data_state = kr_market_data_state()
-        if ranking_type in ("gainers", "losers"):
-            has_real_move = any(r.get("change_rate") for r in rankings)
-            if data_state != DATA_STATE_FRESH and not has_real_move:
-                return {
-                    "rankings": [],
-                    "total_count": 0,
-                    "market": market,
-                    "ranking_type": ranking_type,
-                    "timestamp": datetime.datetime.now(kst_tz).isoformat(),
-                    "source": source,
-                    "data_state": data_state,
-                    "note": (
-                        "KRX is not in regular session; gainers/losers come back "
-                        "with all change rates at 0 (not a real ranking). Returning "
-                        "no rows instead of fake-0 entries — retry during market "
-                        "hours (09:00–15:30 KST)."
-                    ),
-                }
-        elif resolved_ranking_type in _FOREIGN_RANKING_TYPES:
-            has_real_flow = any(
-                r.get("foreign_net_qty") or r.get("foreign_net_amount")
-                for r in rankings
-            )
-            if data_state != DATA_STATE_FRESH and not has_real_flow:
-                return {
-                    "rankings": [],
-                    "total_count": 0,
-                    "market": market,
-                    "ranking_type": ranking_type,
-                    "timestamp": datetime.datetime.now(kst_tz).isoformat(),
-                    "source": source,
-                    "data_state": data_state,
-                    "note": (
-                        "KRX is not in regular session; the foreign net-trade "
-                        "ranking comes back with no real net flow (가집계 fake-0). "
-                        "Returning no rows instead of fake-0 entries — retry "
-                        "during market hours (09:00–15:30 KST)."
-                    ),
-                }
-
-    # ROB-629 B2: foreigners liquidity backfill + default-ON liquidity filter.
-    liquidity_filter_meta: dict[str, Any] | None = None
-    if market == "kr" and foreigners_liquidity.is_foreigners_ranking(ranking_type):
-        await foreigners_liquidity.backfill_foreigners_market_cap(rankings)
-        kept, excluded = foreigners_liquidity.filter_illiquid_foreigners(
-            rankings, include_illiquid=include_illiquid
-        )
-        liquidity_filter_meta = {
-            "include_illiquid": include_illiquid,
-            "min_foreign_net_amount_krw": (
-                foreigners_liquidity.MIN_FOREIGN_NET_AMOUNT_KRW
-            ),
-            "min_market_cap_krw": foreigners_liquidity.MIN_MARKET_CAP_KRW,
-            "excluded_count": excluded,
-        }
-        if not include_illiquid and rankings and not kept:
-            # Filter emptied a non-empty list (e.g. off-hours / all-junk).
-            # Honest degraded signal — never fabricate rows.
-            return {
-                "rankings": [],
-                "total_count": 0,
-                "market": market,
-                "ranking_type": ranking_type,
-                "timestamp": datetime.datetime.now(kst_tz).isoformat(),
-                "source": source,
-                **({"data_state": data_state} if data_state is not None else {}),
-                "status": "degraded",
-                "degraded_reason": (
-                    f"all {excluded} foreign-flow row(s) fell below the liquidity "
-                    f"threshold (foreign_net_amount >= "
-                    f"{foreigners_liquidity.MIN_FOREIGN_NET_AMOUNT_KRW:.0f} KRW); "
-                    "pass include_illiquid=true to bypass, or retry during market "
-                    "hours when foreign net flow is non-trivial"
-                ),
-                "liquidity_filter": liquidity_filter_meta,
-            }
-        rankings = kept
-        for new_rank, row in enumerate(rankings, start=1):
-            row["rank"] = new_rank
-
-    # ROB-976 verify R1: don't let the quality filter's honest 0-rows collapse
-    # into the misleading "market may be entirely bullish" message below — that
-    # message means "KIS returned no losers at all", not "the quality filter
-    # removed everyone". Surface the real reason instead (never fabricate rows).
-    if (
-        len(rankings) == 0
-        and market == "kr"
-        and (excluded_by_market_cap or excluded_by_turnover)
-    ):
-        return {
-            "rankings": [],
-            "total_count": 0,
-            "market": market,
-            "ranking_type": ranking_type,
-            "timestamp": datetime.datetime.now(kst_tz).isoformat(),
-            "source": source,
-            **({"data_state": data_state} if data_state is not None else {}),
-            "status": "degraded",
-            "degraded_reason": (
-                f"all {excluded_by_market_cap + excluded_by_turnover} matching "
-                f"row(s) fell below the requested quality floor or lacked "
-                f"trusted normalized coverage "
-                f"(min_market_cap={min_market_cap}, min_turnover={min_turnover}); "
-                "refresh normalized valuation snapshots or retry with a lower floor"
-            ),
-            **(
-                {
-                    "market_cap_filter": {
-                        "min_market_cap": min_market_cap,
-                        "excluded_count": excluded_by_market_cap,
-                    }
-                }
-                if min_market_cap is not None
-                else {}
-            ),
-            **(
-                {
-                    "turnover_filter": {
-                        "min_turnover": min_turnover,
-                        "excluded_count": excluded_by_turnover,
-                    }
-                }
-                if min_turnover is not None
-                else {}
-            ),
-        }
-
-    if len(rankings) == 0 and market == "kr" and ranking_type == "losers":
-        return analysis_screening._error_payload(
-            source="kis",
-            message=(
-                "No losing stocks found. "
-                "Market may be entirely bullish or KIS API limitation."
-            ),
-            query="market=kr, ranking_type=losers",
-            suggestion=(
-                "This could indicate no stocks are declining, "
-                "or the KIS API may have limited data for this ranking type."
-            ),
-        )
-
-    response: dict[str, Any] = {
+    return {
         "rankings": rankings,
         "total_count": len(rankings),
         "market": market,
@@ -423,21 +154,6 @@ async def get_top_stocks_impl(
         "timestamp": datetime.datetime.now(kst_tz).isoformat(),
         "source": source,
     }
-    if data_state is not None:
-        response["data_state"] = data_state
-    if liquidity_filter_meta is not None:
-        response["liquidity_filter"] = liquidity_filter_meta
-    if min_market_cap is not None:
-        response["market_cap_filter"] = {
-            "min_market_cap": min_market_cap,
-            "excluded_count": excluded_by_market_cap,
-        }
-    if min_turnover is not None:
-        response["turnover_filter"] = {
-            "min_turnover": min_turnover,
-            "excluded_count": excluded_by_turnover,
-        }
-    return response
 
 
 async def get_crypto_top_movers_impl(
@@ -508,7 +224,7 @@ async def get_correlation_impl(
     if period > 365:
         raise ValueError("period must be between 30 and 365 days")
 
-    source_map = {"crypto": "upbit", "equity_kr": "kis", "equity_us": "yahoo"}
+    source_map = {"crypto": "upbit", "equity_kr": "toss", "equity_us": "toss"}
     errors: list[str] = []
     company_name_validation_errors: list[str] = []
     price_data: dict[str, list[float]] = {}
@@ -844,7 +560,7 @@ async def _build_batch_position_index(
             "account_mode": _provenance_account_mode(
                 broker=position.get("broker"),
                 source=source,
-                routing_mode="kis_live",
+                routing_mode="toss_live",
             ),
             "qty": position.get("quantity"),
             "avg_buy_price": position.get("avg_buy_price"),
@@ -927,6 +643,14 @@ def _summarize_analysis_result(
         return analysis
 
     quote = analysis.get("quote") or {}
+    price_source = quote.get("price_source")
+    quote_is_operational = price_source is None or str(price_source) in {
+        "toss_price",
+        "toss_daily_close",
+    }
+    current_price = quote.get("price") or quote.get("current_price")
+    if not quote_is_operational:
+        current_price = None
     # ROB-451: production stores a FLAT indicator map ({"rsi": {"14": ...}}) — the unwrap
     # already happens in analysis_analyze.py. The old `.get("indicators", {})` assumed the
     # pre-unwrap provider shape, so it found nothing → rsi_14 was ALWAYS null (all markets).
@@ -941,7 +665,7 @@ def _summarize_analysis_result(
         "symbol": symbol,
         "market_type": analysis.get("market_type"),
         "source": analysis.get("source"),
-        "current_price": quote.get("price") or quote.get("current_price"),
+        "current_price": current_price,
         "rsi_14": rsi,
         "consensus": ((analysis.get("opinions") or {}).get("consensus")),
         "recommendation": analysis.get("recommendation"),
@@ -958,25 +682,18 @@ def _summarize_analysis_result(
         if _nxt_key in quote:
             summary[_nxt_key] = quote[_nxt_key]
 
-    # ROB-725: surface NXT price provenance so the agent knows current_price is
-    # an NXT-derived quote (not the stale KRX regular-session close).
-    # ROB-888: also carry the self-describing premarket fields (session_state /
-    # krx_prev_close / change_pct) so consumers judge the real gap from the MCP
-    # summary alone instead of scraping CDP naver's two-block premarket dump.
-    for _px_key in (
-        "price_source",
-        "session",
-        "session_state",
-        "krx_prev_close",
-        "change_pct",
-        "data_state",
-        "data_state_reason",
-        "venue",
-        "quote_asof",
-        "delayed",
-    ):
-        if _px_key in quote:
-            summary[_px_key] = quote[_px_key]
+    # 운영 중인 Toss 근거만 전달한다. 캐시에 남은 과거 KIS/NXT 시세 필드와
+    # 가격은 역사 데이터일 뿐이므로 현재 운용 시세 근거로 다시 노출하지 않는다.
+    if quote_is_operational:
+        for _px_key in ("price_as_of", "data_state", "data_state_reason"):
+            if _px_key in quote:
+                summary[_px_key] = quote[_px_key]
+        if price_source in {"toss_price", "toss_daily_close"}:
+            summary["price_source"] = price_source
+        if analysis.get("market_type") == "equity_us":
+            for _us_key in ("session", "venue", "delayed"):
+                if _us_key in quote:
+                    summary[_us_key] = quote[_us_key]
 
     # ROB-1236: an inert daily series (consecutive zero-volume / zero-variation
     # sessions) makes every bar-derived number above meaningless, so the

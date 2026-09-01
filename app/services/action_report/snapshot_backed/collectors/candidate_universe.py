@@ -132,7 +132,7 @@ def _preset_row_to_input(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "symbol": row.get("symbol"),
         "name": row.get("name") or row.get("symbol"),
-        "source": row.get("source") or "kis",
+        "source": row.get("source") or "toss",
         "change_rate": row.get("change_rate"),
         "close": row.get("close") or row.get("latest_close"),
         "latest_close": row.get("latest_close") or row.get("close"),

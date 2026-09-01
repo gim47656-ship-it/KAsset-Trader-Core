@@ -6,7 +6,6 @@ from aggregation / price-fill logic.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from decimal import Decimal
 from typing import Any
@@ -16,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.services.brokers.upbit.client as upbit_service
 from app.core.normalizers import to_float as _to_float
 from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.manual_holdings_service import ManualHoldingsService
+from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 from app.services.upbit_symbol_universe_service import get_active_upbit_markets
 
 # Market-type constants (kept in sync with portfolio_overview_service.py)
@@ -26,15 +25,6 @@ _MARKET_US = "US"
 _MARKET_CRYPTO = "CRYPTO"
 
 logger = logging.getLogger(__name__)
-
-
-def _kis_percent_to_decimal(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value) / 100.0
-    except (TypeError, ValueError):
-        return None
 
 
 def _normalize_market_type(value: Any) -> str | None:
@@ -75,129 +65,68 @@ class PortfolioDataCollector:
     """Responsible for fetching raw holding data from each broker."""
 
     def __init__(self, db: AsyncSession) -> None:
-        self.db = db
         self.manual_holdings_service = ManualHoldingsService(db)
 
-    # ------------------------------------------------------------------
-    # Public entry-point (KIS KR + US gathered in parallel)
-    # ------------------------------------------------------------------
-
-    async def _collect_kis_components(
+    async def _collect_toss_components(
         self,
-        kis_client: KISClient,
         warnings: list[str],
     ) -> list[dict[str, Any]]:
-        collection_results = await asyncio.gather(
-            self._collect_kis_kr_components(kis_client, warnings),
-            self._collect_kis_us_components(kis_client, warnings),
-        )
-
-        components: list[dict[str, Any]] = []
-        for result_components, result_warnings in collection_results:
-            components.extend(result_components)
-            warnings.extend(result_warnings)
-
-        return [item for item in components if item["symbol"]]
-
-    # ------------------------------------------------------------------
-    # KIS KR
-    # ------------------------------------------------------------------
-
-    async def _collect_kis_kr_components(
-        self,
-        kis_client: KISClient,
-        warnings: list[str],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        components: list[dict[str, Any]] = []
-        local_warnings: list[str] = []
         try:
-            kr_stocks = await kis_client.fetch_my_stocks()
-            for stock in kr_stocks:
-                quantity = _to_float(stock.get("hldg_qty"))
-                if quantity <= 0:
-                    continue
-
-                avg_price = _to_float(stock.get("pchs_avg_pric"))
-                current_price = _to_float(stock.get("prpr"), default=0.0) or None
-                evaluation = _to_float(stock.get("evlu_amt"), default=0.0) or None
-                profit_loss = _to_float(stock.get("evlu_pfls_amt"), default=0.0)
-                profit_rate = _kis_percent_to_decimal(stock.get("evlu_pfls_rt"))
-
-                components.append(
-                    {
-                        "market_type": _MARKET_KR,
-                        "symbol": _normalize_symbol(
-                            str(stock.get("pdno", "")), _MARKET_KR
-                        ),
-                        "name": str(
-                            stock.get("prdt_name") or stock.get("pdno") or ""
-                        ).strip(),
-                        "account_key": "live:kis",
-                        "broker": "kis",
-                        "account_name": "KIS 실계좌",
-                        "source": "live",
-                        "quantity": quantity,
-                        "avg_price": avg_price,
-                        "current_price": current_price,
-                        "evaluation": evaluation,
-                        "profit_loss": profit_loss,
-                        "profit_rate": profit_rate,
-                    }
-                )
+            snapshot = await fetch_toss_portfolio_snapshot(
+                need_sellable=False,
+                need_cash=False,
+            )
         except Exception as exc:
-            _log_broker_failure("KIS KR", exc, local_warnings)
-        return components, local_warnings
+            _log_broker_failure("Toss", exc, warnings)
+            return []
 
-    # ------------------------------------------------------------------
-    # KIS US
-    # ------------------------------------------------------------------
-
-    async def _collect_kis_us_components(
-        self,
-        kis_client: KISClient,
-        warnings: list[str],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
         components: list[dict[str, Any]] = []
-        local_warnings: list[str] = []
-        try:
-            us_stocks = await kis_client.fetch_my_us_stocks()
-            for stock in us_stocks:
-                quantity = _to_float(stock.get("ovrs_cblc_qty"))
-                if quantity <= 0:
-                    continue
+        for position in snapshot.positions:
+            if position.instrument_type == "equity_kr":
+                market_type = _MARKET_KR
+            elif position.instrument_type == "equity_us":
+                market_type = _MARKET_US
+            else:
+                continue
 
-                avg_price = _to_float(stock.get("pchs_avg_pric"))
-                current_price = _to_float(stock.get("now_pric2"), default=0.0) or None
-                evaluation = (
-                    _to_float(stock.get("ovrs_stck_evlu_amt"), default=0.0) or None
-                )
-                profit_loss = _to_float(stock.get("frcr_evlu_pfls_amt"), default=0.0)
-                profit_rate = _kis_percent_to_decimal(stock.get("evlu_pfls_rt"))
+            symbol = _normalize_symbol(position.symbol, market_type)
+            quantity = _to_float(position.quantity)
+            if not symbol or quantity <= 0:
+                continue
+            components.append(
+                {
+                    "market_type": market_type,
+                    "symbol": symbol,
+                    "name": position.name or symbol,
+                    "account_key": "live:toss",
+                    "broker": "toss",
+                    "account_name": position.account_name or "Toss 실계좌",
+                    "source": "live",
+                    "quantity": quantity,
+                    "avg_price": _to_float(position.avg_buy_price),
+                    "current_price": (
+                        _to_float(position.current_price, default=0.0) or None
+                    ),
+                    "evaluation": (
+                        _to_float(position.evaluation_amount, default=0.0) or None
+                    ),
+                    "profit_loss": (
+                        _to_float(position.profit_loss, default=0.0)
+                        if position.profit_loss is not None
+                        else None
+                    ),
+                    "profit_rate": (
+                        _to_float(position.profit_rate, default=0.0)
+                        if position.profit_rate is not None
+                        else None
+                    ),
+                }
+            )
 
-                components.append(
-                    {
-                        "market_type": _MARKET_US,
-                        "symbol": _normalize_symbol(
-                            str(stock.get("ovrs_pdno", "")), _MARKET_US
-                        ),
-                        "name": str(
-                            stock.get("ovrs_item_name") or stock.get("ovrs_pdno") or ""
-                        ).strip(),
-                        "account_key": "live:kis",
-                        "broker": "kis",
-                        "account_name": "KIS 실계좌",
-                        "source": "live",
-                        "quantity": quantity,
-                        "avg_price": avg_price,
-                        "current_price": current_price,
-                        "evaluation": evaluation,
-                        "profit_loss": profit_loss,
-                        "profit_rate": profit_rate,
-                    }
-                )
-        except Exception as exc:
-            _log_broker_failure("KIS US", exc, local_warnings)
-        return components, local_warnings
+        for error in snapshot.errors:
+            code = error.get("code") if isinstance(error, dict) else None
+            warnings.append(f"Toss holdings partial: {code or 'unknown'}")
+        return components
 
     # ------------------------------------------------------------------
     # Upbit

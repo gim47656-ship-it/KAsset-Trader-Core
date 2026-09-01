@@ -15,8 +15,6 @@ from app.services.order_proposals.target_order import TargetOrderSnapshot
 
 SUPPORTED_TARGET_ACTIONS = frozenset(
     {
-        ("kis_live", "equity_kr"),
-        ("kis_live", "equity_us"),
         ("toss_live", "equity_kr"),
         ("toss_live", "equity_us"),
         ("upbit", "crypto"),
@@ -301,88 +299,6 @@ async def fetch_operator_void_evidence(
     An incomplete scan or any broker exception is ``unknown`` so callers fail
     closed instead of treating missing evidence as cancellation evidence.
     """
-    if account_mode == "kis_live" and market in {"equity_kr", "equity_us"}:
-        if history_fn is None:
-            from app.mcp_server.tooling.orders_history import get_order_history_impl
-
-            history_fn = get_order_history_impl
-        lookup_days = max(
-            1,
-            (now.date() - min(rung.created_at for rung in rungs).date()).days + 1,
-        )
-        scope = f"kis order history status=all days={lookup_days}"
-        try:
-            history = await _maybe_await(
-                history_fn(
-                    symbol=symbol,
-                    status="all",
-                    market=market,
-                    days=lookup_days,
-                    limit=-1,
-                    is_mock=False,
-                )
-            )
-            if history.get("truncated"):
-                reason = "broker history lookup truncated"
-                return {
-                    rung.rung_index: OperatorVoidEvidence(
-                        "unknown", scope, reason=reason
-                    )
-                    for rung in rungs
-                }
-            if history.get("errors"):
-                reason = f"broker history errors: {history['errors']}"
-                return {
-                    rung.rung_index: OperatorVoidEvidence(
-                        "unknown", scope, reason=reason
-                    )
-                    for rung in rungs
-                }
-            orders = history.get("orders", [])
-            result = {}
-            for rung in rungs:
-                order_id = str(rung.broker_order_id or "").strip()
-                match = next(
-                    (
-                        order
-                        for order in orders
-                        if str(order.get("order_id") or "").strip() == order_id
-                    ),
-                    None,
-                )
-                if match is not None:
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "found",
-                        scope,
-                        broker_order_id=order_id,
-                        broker_state=str(match.get("status") or "unknown"),
-                    )
-                elif order_id and market == "equity_kr":
-                    result[rung.rung_index] = OperatorVoidEvidence("absent", scope)
-                elif order_id:
-                    # The shared KIS US history adapter can return partial
-                    # results when an exchange's open-order inquiry fails.
-                    # A match is still positive evidence, but an empty result
-                    # is not complete enough to prove absence.
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "unknown",
-                        scope,
-                        reason="KIS US history absence cannot be proven complete",
-                    )
-                else:
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "unknown",
-                        scope,
-                        reason="KIS rung has no broker_order_id",
-                    )
-            return result
-        except Exception as exc:
-            return {
-                rung.rung_index: OperatorVoidEvidence(
-                    "unknown", scope, reason=describe_exception(exc)
-                )
-                for rung in rungs
-            }
 
     if account_mode == "upbit" and market == "crypto":
         if upbit_identifier_lookup_fn is None or upbit_order_lookup_fn is None:

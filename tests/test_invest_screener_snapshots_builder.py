@@ -84,7 +84,7 @@ async def test_build_snapshot_for_symbol_kr(monkeypatch):
     assert payload.snapshot_date == dt.date(2026, 5, 8)  # latest row in df
     assert payload.consecutive_up_days == 9
     assert payload.daily_volume == 1_000_000
-    assert payload.source == "kis"
+    assert payload.source == "toss"
     fetcher.assert_awaited_once_with("005930", "equity_kr", count=30)
 
 

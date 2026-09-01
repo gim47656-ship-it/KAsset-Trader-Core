@@ -32,10 +32,9 @@ from app.core.symbol import to_db_symbol
 from app.mcp_server.tooling.kis_mock_ledger import _save_kis_mock_order_ledger
 from app.mcp_server.tooling.order_execution import (
     OrderSendOutcomeUnknown,
-    _create_kis_client,
     _place_order_impl,
 )
-from app.services.brokers.kis import KISClient
+from app.services.brokers.kis.client import KISClient
 from app.services.brokers.kis.mock_scalping.contract import (
     LedgerSnapshot,
     MarketConditions,
@@ -68,11 +67,11 @@ from app.services.brokers.kis.mock_scalping_exec.reservation import (
 )
 from app.services.brokers.kis.mock_scalping_ws.quote_parsers import OrderBookSnapshot
 from app.services.brokers.kis.mock_scalping_ws.state import MarketState
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
 from app.services.brokers.kis.send_outcome import (
     OrderSendDisposition,
     OrderSendOutcomeTracker,
 )
+from app.services.brokers.pre_send import PreSendFreshnessError
 from app.services.order_send_intent_service import DuplicateOrderIntent
 
 logger = logging.getLogger("rob321.kis_mock_scalping_exec")
@@ -89,7 +88,7 @@ async def _default_mock_holdings_snapshot() -> Mapping[str, Any]:
     ``holdings`` is pre-filtered to ``hldg_qty > 0`` by the account reader, so
     every entry is an actual position.
     """
-    client = _create_kis_client(is_mock=True)
+    client = KISClient(is_mock=True)
     return await client.fetch_domestic_balance_snapshot(is_mock=True)
 
 
@@ -391,7 +390,7 @@ class KisMockBroker:
         # Mock-host client (live singleton would 401/EGW02005); cached so the
         # executor's bounded _await_fill loop does not re-construct per poll.
         if self._mock_client is None:
-            self._mock_client = _create_kis_client(is_mock=True)
+            self._mock_client = KISClient(is_mock=True)
         return self._mock_client
 
     async def _read_snapshot(self, symbol: str) -> tuple[Decimal, Decimal | None]:

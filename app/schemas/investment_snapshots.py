@@ -13,7 +13,10 @@ SnapshotPurpose = Literal[
     "report_generation", "scheduled_refresh", "manual_refresh", "reviewer_requested"
 ]
 SnapshotMarket = Literal["kr", "us", "crypto"]
-SnapshotAccountScope = Literal["kis_live", "kis_mock", "alpaca_paper", "upbit_live"]
+# kis_* 값은 과거 snapshot row 역직렬화 전용이며 collector에서 신규 요청을 거부한다.
+SnapshotAccountScope = Literal[
+    "toss_live", "upbit_live", "alpaca_paper", "kis_live", "kis_mock"
+]
 SnapshotRunStatus = Literal["running", "completed", "partial", "failed"]
 SnapshotRequestedBy = Literal["hermes", "user", "scheduler", "claude_code", "reviewer"]
 SnapshotKind = Literal[

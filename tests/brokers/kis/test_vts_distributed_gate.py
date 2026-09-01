@@ -1305,7 +1305,7 @@ async def test_half_open_probe_released_on_pre_send_freshness(
 ):
     """P1: a PreSendFreshnessError (ROB-843) during a HALF_OPEN probe releases the
     lease without moving the breaker (pre-existing ROB-843 path, now hardened)."""
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
 
     cb, _clock = _breaker_open_past_cooldown()
     monkeypatch.setattr(

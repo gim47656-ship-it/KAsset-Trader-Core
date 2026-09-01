@@ -58,7 +58,7 @@ class SingleShareExitEvaluation:
     reason: str
     snapshot_id: str
     symbol: str
-    broker: Literal["kis", "toss"]
+    broker: Literal["toss"]
     broker_account_id: str
     lot_id: str
     activation_state: Literal["shadow"] = "shadow"
@@ -246,8 +246,8 @@ def _single_share_policy_contract_is_safe(
         and rule.activation_state == "shadow"
         and rule.proposal_enabled is False
         and scope.markets == ["kr"]
-        and scope.brokers == ["kis", "toss"]
-        and scope.required_broker_inventory == ["kis", "toss"]
+        and scope.brokers == ["toss"]
+        and scope.required_broker_inventory == ["toss"]
         and scope.order_routable_required is True
         and conditions.symbol_routable_sellable_quantity_eq == 1
         and conditions.resistance_reference_required is True
@@ -358,7 +358,7 @@ def _invalid_context_result(reason: str) -> SingleShareExitEvaluation:
         reason=reason,
         snapshot_id="<invalid>",
         symbol="<invalid>",
-        broker="kis",
+        broker="toss",
         broker_account_id="<invalid>",
         lot_id="<invalid>",
     )
@@ -490,7 +490,7 @@ def _evaluate_single_share_exit(
         return _single_share_result(
             context,
             outcome="INELIGIBLE",
-            reason="incomplete_kis_toss_routable_roster",
+            reason="incomplete_toss_routable_roster",
             rule=rule,
         )
     if context.resistance is None:

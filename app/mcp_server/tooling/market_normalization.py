@@ -16,9 +16,7 @@ from app.mcp_server.tooling.shared import (
     resolve_market_type,
 )
 
-_KR_ALIASES = frozenset(
-    {"kr", "krx", "korea", "kospi", "kosdaq", "kis", "equity_kr", "naver"}
-)
+_KR_ALIASES = frozenset({"kr", "krx", "korea", "kospi", "kosdaq", "equity_kr", "naver"})
 _US_ALIASES = frozenset({"us", "usa", "nyse", "nasdaq", "yahoo", "equity_us"})
 _CRYPTO_ALIASES = frozenset({"crypto", "upbit", "krw", "usdt"})
 

@@ -54,7 +54,7 @@ cp env.prod.example .env.prod
 - `GITHUB_REPOSITORY`
 - `DATABASE_URL`
 - `REDIS_URL`
-- API 키(KIS/Upbit/Google/OpenDART)
+- API 키(Toss/Upbit/Google/OpenDART)
 - `DOCS_ENABLED=false`
 
 Sentry:
@@ -98,8 +98,24 @@ curl http://localhost:8000/healthz
 - `worker`
 - `mcp`
 - `upbit_websocket`
-- `kis_websocket`
 
+
+### 주식 운영 경계와 체결 증거
+
+- KR/US 운영 계좌와 주문은 Toss만 사용합니다. KIS 자격증명, 서비스, WebSocket,
+  MCP 도구는 배포하지 않습니다. 남은 KIS 어댑터와 레저 모델은 과거 행 조회
+  호환성을 위한 비활성 코드입니다.
+- NH PLUG는 국내주식 모의계좌의 계좌·잔고·보유·현재가 조회만 지원합니다.
+  주문·정정·취소와 미국주식 지원을 가정하지 마세요.
+- Toss는 이 경로에서 체결 WebSocket을 사용하지 않습니다. 실주문을 허용하는
+  프로덕션은 `TOSS_FILL_POLL_ENABLED=true`와
+  `TOSS_FILL_POLL_CRON=*/2 * * * *`를 설정해
+  `toss_live.poll_fills_periodic`을 최대 2분 간격으로 실행해야 합니다.
+  작업은 Toss 주문 증거를 읽어 accepted-only 레저를 멱등 reconcile합니다.
+- worker 재기동 뒤 로그에서 `toss_live.poll_fills_periodic` 실행을 확인합니다.
+  poller를 운영할 수 없는 예외 상황에서는 accepted 주문마다 즉시
+  `toss_reconcile_orders(order_id=<broker-order-id>, dry_run=False)`를 실행해야
+  하며, 둘 다 없으면 주식 실주문을 활성화하지 않습니다.
 ## 4. 로그 확인
 
 ```bash
@@ -107,7 +123,6 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f api
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f worker
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f mcp
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f upbit_websocket
-docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f kis_websocket
 ```
 
 ## 5. Sentry 확인
@@ -117,7 +132,6 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f kis_webso
   - `auto-trader-worker`
   - `auto-trader-mcp`
   - `auto-trader-upbit-ws`
-  - `auto-trader-kis-ws`
 - 에러/트랜잭션/프로파일 유입 확인
 
 ## 6. 업데이트 절차

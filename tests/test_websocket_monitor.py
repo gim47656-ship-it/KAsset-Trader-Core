@@ -15,7 +15,6 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "AGENT_GATEWAY_ENABLED", True)
     monkeypatch.setattr(settings, "AGENT_GATEWAY_URL", "http://agent/hooks/agent")
     monkeypatch.setattr(settings, "AGENT_GATEWAY_TOKEN", "test-token")
-    monkeypatch.setattr(settings, "kis_ws_is_mock", True)
 
 
 class TestUnifiedWebSocketMonitor:
@@ -67,77 +66,6 @@ class TestUnifiedWebSocketMonitor:
         send_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_on_kis_execution_sends_notification(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor()
-        send_mock = AsyncMock()
-        monitor._send_fill_notification = send_mock
-
-        await monitor._on_kis_execution(
-            {
-                "symbol": "005930",
-                "side": "sell",
-                "fill_yn": "2",
-                "filled_price": 70_000,
-                "filled_qty": 10,
-                "market": "kr",
-                "correlation_id": "corr-kis-1",
-            }
-        )
-
-        send_mock.assert_awaited_once()
-        fill_order = send_mock.call_args.args[0]
-        assert isinstance(fill_order, FillOrder)
-        assert fill_order.symbol == "005930"
-        assert fill_order.side == "ask"
-        assert send_mock.await_args is not None
-        assert send_mock.await_args.kwargs["correlation_id"] == "corr-kis-1"
-
-    @pytest.mark.asyncio
-    async def test_on_kis_execution_records_ledger_before_notification(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        call_order: list[str] = []
-        monitor = UnifiedWebSocketMonitor()
-
-        async def record_side_effect(*args, **kwargs):
-            call_order.append("ledger")
-
-        async def send_side_effect(*args, **kwargs):
-            call_order.append("notify")
-
-        record_mock = AsyncMock(side_effect=record_side_effect)
-        send_mock = AsyncMock(side_effect=send_side_effect)
-        monitor._record_execution_ledger_fill = record_mock
-        monitor._send_fill_notification = send_mock
-
-        event = {
-            "symbol": "005930",
-            "side": "sell",
-            "fill_yn": "2",
-            "filled_price": 70_000,
-            "filled_qty": 10,
-            "market": "kr",
-            "correlation_id": "corr-kis-ledger-1",
-            "order_id": "kis-order-1",
-        }
-        await monitor._on_kis_execution(event)
-
-        record_mock.assert_awaited_once()
-        send_mock.assert_awaited_once()
-        ledger_args = record_mock.await_args.args
-        ledger_kwargs = record_mock.await_args.kwargs
-        assert ledger_args[0] is event
-        assert isinstance(ledger_args[1], FillOrder)
-        assert ledger_kwargs == {"broker": "kis", "correlation_id": "corr-kis-ledger-1"}
-        assert call_order == ["ledger", "notify"]
-
-    @pytest.mark.asyncio
     async def test_on_upbit_trade_records_ledger_before_notification(
         self, mock_settings: None
     ) -> None:
@@ -174,7 +102,7 @@ class TestUnifiedWebSocketMonitor:
         ledger_kwargs = record_mock.await_args.kwargs
         assert ledger_args[0] is event
         assert isinstance(ledger_args[1], FillOrder)
-        assert ledger_kwargs == {"broker": "upbit", "correlation_id": "upbit-order-1"}
+        assert ledger_kwargs == {"correlation_id": "upbit-order-1"}
         assert call_order == ["ledger", "notify"]
 
     @pytest.mark.asyncio
@@ -378,33 +306,6 @@ class TestUnifiedWebSocketMonitor:
         assert notification_attempts == [False]
 
     @pytest.mark.asyncio
-    async def test_on_kis_execution_skips_notification_for_unchanged_ledger_row(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor()
-        record_mock = AsyncMock(return_value="unchanged")
-        send_mock = AsyncMock()
-        monitor._record_execution_ledger_fill = record_mock
-        monitor._send_fill_notification = send_mock
-
-        event = {
-            "symbol": "005930",
-            "side": "sell",
-            "fill_yn": "2",
-            "filled_price": 70_000,
-            "filled_qty": 10,
-            "market": "kr",
-            "correlation_id": "corr-kis-duplicate",
-            "order_id": "kis-order-duplicate",
-        }
-        await monitor._on_kis_execution(event)
-
-        record_mock.assert_awaited_once()
-        send_mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_on_upbit_trade_skips_notification_for_unchanged_ledger_row(
         self, mock_settings: None
     ) -> None:
@@ -453,20 +354,19 @@ class TestUnifiedWebSocketMonitor:
         monitor = UnifiedWebSocketMonitor()
 
         status = await monitor._record_execution_ledger_fill(
-            {"order_id": "kis-order-disabled"},
+            {"uuid": "upbit-order-disabled"},
             FillOrder(
-                symbol="005930",
-                side="ask",
+                symbol="KRW-BTC",
+                side="bid",
                 filled_price=70_000,
                 filled_qty=1,
                 filled_amount=70_000,
                 filled_at="2026-05-12T00:01:09Z",
-                account="mock",
-                order_id="kis-order-disabled",
-                market_type="kr",
+                account="upbit",
+                order_id="upbit-order-disabled",
+                market_type="crypto",
                 currency="KRW",
             ),
-            broker="kis",
             correlation_id="corr-disabled",
         )
 
@@ -480,7 +380,6 @@ class TestUnifiedWebSocketMonitor:
         from websocket_monitor import UnifiedWebSocketMonitor
 
         monkeypatch.setattr(settings, "EXECUTION_LEDGER_COMMIT_ENABLED", True)
-        monkeypatch.setattr(settings, "kis_ws_is_mock", False)
         captured: dict[str, object] = {}
 
         class FakeSession:
@@ -507,40 +406,48 @@ class TestUnifiedWebSocketMonitor:
         monkeypatch.setattr(mod, "ExecutionLedgerRepository", FakeRepository)
         monitor = UnifiedWebSocketMonitor()
 
+        event = {
+            "uuid": "upbit-order-1",
+            "trade_uuid": "upbit-trade-1",
+            "trade_timestamp": 1_747_008_069_000,
+            "token": "secret",
+        }
+        order = FillOrder(
+            symbol="KRW-BTC",
+            side="bid",
+            filled_price=1_959_000,
+            filled_qty=1,
+            filled_amount=1_959_000,
+            filled_at="2026-05-12T00:01:09Z",
+            account="upbit",
+            order_id="upbit-order-1",
+            market_type="crypto",
+            currency="KRW",
+        )
         status = await monitor._record_execution_ledger_fill(
-            {"order_id": "0006421200", "fill_seq": "7", "token": "secret"},
-            FillOrder(
-                symbol="000660",
-                side="ask",
-                filled_price=1_959_000,
-                filled_qty=1,
-                filled_amount=1_959_000,
-                filled_at="2026-05-12T00:01:09Z",
-                account="live",
-                order_id="0006421200",
-                market_type="kr",
-                currency="KRW",
-            ),
-            broker="kis",
-            correlation_id="corr-kis-upsert",
+            event,
+            order,
+            correlation_id=event["uuid"],
         )
 
         fill = captured["fill"]
         assert status == "inserted"
         assert captured["committed"] is True
-        assert fill.broker == "kis"
+        assert fill.broker == "upbit"
         assert fill.account_mode == "live"
-        assert fill.venue == "krx"
-        assert fill.instrument_type == "equity_kr"
-        assert fill.symbol == "000660"
-        assert fill.side == "sell"
-        assert fill.broker_order_id == "0006421200"
-        assert fill.fill_seq == 7
+        assert fill.venue == "upbit_krw"
+        assert fill.instrument_type == "crypto"
+        assert fill.symbol == "BTC"
+        assert fill.side == "buy"
+        assert fill.broker_order_id == "upbit-order-1"
+        assert fill.fill_seq == monitor._ledger_fill_seq(event, order)
         assert str(fill.filled_qty) == "1"
         assert str(fill.filled_price) == "1959000"
         assert fill.currency == "KRW"
-        assert fill.correlation_id == "corr-kis-upsert"
+        assert fill.correlation_id == "upbit-order-1"
         assert fill.source == "websocket"
+        assert fill.raw_payload_json["uuid"] == "upbit-order-1"
+        assert fill.raw_payload_json["trade_uuid"] == "upbit-trade-1"
         assert fill.raw_payload_json["token"] == "[REDACTED]"
 
     @pytest.mark.asyncio
@@ -767,144 +674,20 @@ class TestUnifiedWebSocketMonitor:
         assert "proposal db unavailable" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_on_kis_execution_forwards_us_currency_for_overseas_fill(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor()
-        send_mock = AsyncMock()
-        monitor._send_fill_notification = send_mock
-
-        await monitor._on_kis_execution(
-            {
-                "symbol": "BAC",
-                "side": "buy",
-                "execution_status": "filled",
-                "filled_price": 47.9,
-                "filled_qty": 23,
-                "filled_amount": 1101.7,
-                "market": "us",
-                "currency": "USD",
-                "correlation_id": "corr-kis-us-1",
-            }
-        )
-
-        send_mock.assert_awaited_once()
-        fill_order = send_mock.call_args.args[0]
-        assert isinstance(fill_order, FillOrder)
-        assert fill_order.symbol == "BAC"
-        assert fill_order.market_type == "us"
-        assert fill_order.currency == "USD"
-        assert send_mock.await_args is not None
-        assert send_mock.await_args.kwargs["correlation_id"] == "corr-kis-us-1"
-
-    @pytest.mark.asyncio
-    async def test_on_kis_execution_skips_domestic_without_fill_yn(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor()
-        send_mock = AsyncMock()
-        monitor._send_fill_notification = send_mock
-
-        await monitor._on_kis_execution(
-            {
-                "symbol": "035420",
-                "side": "bid",
-                "filled_price": 2,
-                "filled_qty": 1,
-                "market": "kr",
-            }
-        )
-
-        send_mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_on_kis_execution_skips_domestic_non_fill_event(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor()
-        send_mock = AsyncMock()
-        monitor._send_fill_notification = send_mock
-
-        await monitor._on_kis_execution(
-            {
-                "symbol": "035420",
-                "side": "bid",
-                "fill_yn": "1",
-                "filled_price": 1_135_000,
-                "filled_qty": 2,
-                "market": "kr",
-            }
-        )
-
-        send_mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_start_stops_when_child_task_fails(self, mock_settings: None) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
-        monitor = UnifiedWebSocketMonitor(mode="both")
-
-        async def slow_upbit() -> None:
-            await asyncio.sleep(60)
-
-        async def fail_kis() -> None:
-            raise RuntimeError("boom")
-
-        monitor._start_upbit = slow_upbit  # type: ignore[method-assign]
-        monitor._start_kis = fail_kis  # type: ignore[method-assign]
-
-        with pytest.raises(RuntimeError, match="kis task failed"):
-            await monitor.start()
-
-        assert monitor.is_running is False
-
-    @pytest.mark.asyncio
-    async def test_start_mode_upbit_does_not_start_kis(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor(mode="upbit")
+        monitor = UnifiedWebSocketMonitor()
 
         async def fail_upbit() -> None:
-            raise RuntimeError("upbit boom")
-
-        never_called_kis = AsyncMock()
+            raise RuntimeError("boom")
 
         monitor._start_upbit = fail_upbit  # type: ignore[method-assign]
-        monitor._start_kis = never_called_kis  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="upbit task failed"):
             await monitor.start()
 
-        never_called_kis.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_start_mode_kis_does_not_start_upbit(
-        self, mock_settings: None
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor(mode="kis")
-
-        async def fail_kis() -> None:
-            raise RuntimeError("kis boom")
-
-        never_called_upbit = AsyncMock()
-
-        monitor._start_kis = fail_kis  # type: ignore[method-assign]
-        monitor._start_upbit = never_called_upbit  # type: ignore[method-assign]
-
-        with pytest.raises(RuntimeError, match="kis task failed"):
-            await monitor.start()
-
-        never_called_upbit.assert_not_awaited()
+        assert monitor.is_running is False
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -929,11 +712,14 @@ class TestUnifiedWebSocketMonitor:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    def test_invalid_mode_raises_value_error(self, mock_settings: None) -> None:
+    @pytest.mark.parametrize("mode", ["kis", "both", "invalid"])
+    def test_removed_or_invalid_mode_raises_value_error(
+        self, mock_settings: None, mode: str
+    ) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
         with pytest.raises(ValueError, match="Invalid mode"):
-            UnifiedWebSocketMonitor(mode="invalid")
+            UnifiedWebSocketMonitor(mode=mode)
 
     @pytest.mark.asyncio
     async def test_stop_cleans_up_resources(self, mock_settings: None) -> None:
@@ -941,18 +727,13 @@ class TestUnifiedWebSocketMonitor:
 
         monitor = UnifiedWebSocketMonitor()
         upbit_disconnect = AsyncMock()
-        kis_stop = AsyncMock()
 
         monitor.upbit_ws = MagicMock()
         monitor.upbit_ws.disconnect = upbit_disconnect
 
-        monitor.kis_ws = MagicMock()
-        monitor.kis_ws.stop = kis_stop
-
         await monitor.stop()
 
         upbit_disconnect.assert_awaited_once()
-        kis_stop.assert_awaited_once()
         assert monitor.is_running is False
 
     @pytest.mark.asyncio
@@ -961,7 +742,7 @@ class TestUnifiedWebSocketMonitor:
     ) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
-        monitor = UnifiedWebSocketMonitor(mode="kis")
+        monitor = UnifiedWebSocketMonitor()
         fake_notifier = AsyncMock()
         fake_notifier.notify_fill = AsyncMock(return_value=True)
         monkeypatch.setattr(
@@ -973,14 +754,14 @@ class TestUnifiedWebSocketMonitor:
 
         await monitor._send_fill_notification(
             FillOrder(
-                symbol="005930",
+                symbol="KRW-BTC",
                 side="bid",
-                filled_price=68500.0,
-                filled_qty=10.0,
-                filled_amount=685000.0,
+                filled_price=92_800_000.0,
+                filled_qty=0.001,
+                filled_amount=92_800.0,
                 filled_at="2026-06-14T09:31:02",
-                account="kis",
-                market_type="kr",
+                account="upbit",
+                market_type="crypto",
                 currency="KRW",
             )
         )
@@ -992,7 +773,7 @@ class TestUnifiedWebSocketMonitor:
     ) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
-        monitor = UnifiedWebSocketMonitor(mode="kis")
+        monitor = UnifiedWebSocketMonitor()
         fake_notifier = AsyncMock()
         fake_notifier.notify_fill = AsyncMock(return_value=True)
         monkeypatch.setattr(
@@ -1004,14 +785,14 @@ class TestUnifiedWebSocketMonitor:
 
         await monitor._send_fill_notification(
             FillOrder(
-                symbol="005930",
+                symbol="KRW-BTC",
                 side="bid",
-                filled_price=68500.0,
-                filled_qty=0.1,
+                filled_price=68_500_000.0,
+                filled_qty=0.0001,
                 filled_amount=6850.0,  # below 50,000 KRW
                 filled_at="2026-06-14T09:31:02",
-                account="kis",
-                market_type="kr",
+                account="upbit",
+                market_type="crypto",
                 currency="KRW",
             )
         )
@@ -1058,7 +839,7 @@ class TestUnifiedWebSocketMonitor:
     ) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
-        monitor = UnifiedWebSocketMonitor(mode="kis")
+        monitor = UnifiedWebSocketMonitor()
         fake_notifier = AsyncMock()
         fake_notifier.notify_fill = AsyncMock(return_value=True)
         monkeypatch.setattr(
@@ -1071,55 +852,18 @@ class TestUnifiedWebSocketMonitor:
 
         await monitor._send_fill_notification(
             FillOrder(
-                symbol="005930",
+                symbol="KRW-BTC",
                 side="bid",
                 filled_price=68500.0,
                 filled_qty=10.0,
                 filled_amount=685000.0,
                 filled_at="2026-06-14T09:31:02",
-                account="kis",
-                market_type="kr",
+                account="upbit",
+                market_type="crypto",
                 currency="KRW",
             )
         )
         fake_notifier.notify_fill.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_log_health_status_uses_kis_state_fields(
-        self,
-        mock_settings: None,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monkeypatch.setenv("WS_MONITOR_HEALTH_LOG_INTERVAL_SECONDS", "123")
-        monitor = UnifiedWebSocketMonitor(mode="kis")
-        monitor.is_running = True
-        monitor._started_at_monotonic = asyncio.get_running_loop().time() - 42
-        monitor.fills_forwarded = 3
-        monitor.last_agent_success_at = "2026-03-09T14:00:00+00:00"
-        monitor.kis_ws = MagicMock(
-            is_connected=True,
-            messages_received=11,
-            execution_events_received=4,
-            last_message_at="2026-03-09T14:01:00+00:00",
-            last_execution_at="2026-03-09T14:01:05+00:00",
-            last_pingpong_at="2026-03-09T14:01:10+00:00",
-        )
-
-        assert monitor._health_log_interval_seconds == pytest.approx(123.0)
-
-        caplog.set_level("INFO")
-        monitor._log_health_status(force=True)
-
-        assert "Unified WebSocket health" in caplog.text
-        assert "connected=True" in caplog.text
-        assert "messages_received=11" in caplog.text
-        assert "execution_events_received=4" in caplog.text
-        assert "fills_forwarded=3" in caplog.text
-        assert "last_pingpong_at=2026-03-09T14:01:10+00:00" in caplog.text
-        assert "last_agent_success_at=2026-03-09T14:00:00+00:00" in caplog.text
 
     @pytest.mark.asyncio
     async def test_upbit_consumer_updates_health_counters(
@@ -1174,91 +918,18 @@ class TestUnifiedWebSocketMonitor:
         assert "last_execution_at=2026-07-13T12:39:56+00:00" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_log_health_status_reports_mixed_backend_states_in_both_mode(
-        self, mock_settings: None, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor(mode="both")
-        monitor.is_running = True
-        monitor._started_at_monotonic = asyncio.get_running_loop().time() - 10
-        monitor.upbit_ws = MagicMock(is_connected=True)
-        monitor.kis_ws = MagicMock(
-            is_connected=False,
-            messages_received=5,
-            execution_events_received=2,
-            last_message_at="2026-03-09T14:02:00+00:00",
-            last_execution_at="2026-03-09T14:02:05+00:00",
-            last_pingpong_at="2026-03-09T14:02:06+00:00",
-        )
-
-        caplog.set_level("INFO")
-        monitor._log_health_status(force=True)
-
-        assert "mode=both" in caplog.text
-        assert "connected=False" in caplog.text
-        assert "upbit_connected=True" in caplog.text
-        assert "kis_connected=False" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_log_health_status_accumulates_closed_kis_sessions(
-        self, mock_settings: None, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor(mode="kis")
-        monitor.is_running = True
-        monitor._started_at_monotonic = asyncio.get_running_loop().time() - 20
-
-        closed_socket = MagicMock(
-            is_connected=False,
-            get_runtime_snapshot=MagicMock(
-                return_value={
-                    "messages_received": 7,
-                    "execution_events_received": 3,
-                    "last_message_at": "2026-03-09T14:03:00+00:00",
-                    "last_execution_at": "2026-03-09T14:03:05+00:00",
-                    "last_pingpong_at": "2026-03-09T14:03:06+00:00",
-                }
-            ),
-        )
-        monitor._fold_kis_socket_stats(closed_socket)
-
-        monitor.kis_ws = MagicMock(
-            is_connected=True,
-            get_runtime_snapshot=MagicMock(
-                return_value={
-                    "messages_received": 5,
-                    "execution_events_received": 2,
-                    "last_message_at": "2026-03-09T14:04:00+00:00",
-                    "last_execution_at": "2026-03-09T14:04:05+00:00",
-                    "last_pingpong_at": "2026-03-09T14:04:06+00:00",
-                }
-            ),
-        )
-
-        caplog.set_level("INFO")
-        monitor._log_health_status(force=True)
-
-        assert "messages_received=12" in caplog.text
-        assert "execution_events_received=5" in caplog.text
-        assert "last_message_at=2026-03-09T14:04:00+00:00" in caplog.text
-        assert "last_execution_at=2026-03-09T14:04:05+00:00" in caplog.text
-        assert "last_pingpong_at=2026-03-09T14:04:06+00:00" in caplog.text
-
-    @pytest.mark.asyncio
     async def test_log_health_status_throttles_when_not_forced(
         self, mock_settings: None, caplog: pytest.LogCaptureFixture
     ) -> None:
         from websocket_monitor import UnifiedWebSocketMonitor
 
-        monitor = UnifiedWebSocketMonitor(mode="kis")
+        monitor = UnifiedWebSocketMonitor()
         monitor._next_health_log_at = asyncio.get_running_loop().time() + 60
 
         caplog.set_level("INFO")
         monitor._log_health_status(force=False)
 
-        assert "Unified WebSocket health" not in caplog.text
+        assert "Upbit WebSocket health" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_main_configures_and_shuts_down_trade_notifier(
@@ -1285,7 +956,7 @@ class TestUnifiedWebSocketMonitor:
         monkeypatch.setattr(
             websocket_monitor,
             "UnifiedWebSocketMonitor",
-            lambda mode="both": monitor,
+            lambda mode="upbit": monitor,
         )
         monkeypatch.setattr(
             websocket_monitor,
@@ -1294,7 +965,7 @@ class TestUnifiedWebSocketMonitor:
             raising=False,
         )
 
-        await websocket_monitor.main(mode="both")
+        await websocket_monitor.main(mode="upbit")
 
         notifier.configure.assert_called_once_with(
             bot_token="telegram-token",
@@ -1332,7 +1003,7 @@ class TestHeartbeat:
         from websocket_monitor import UnifiedWebSocketMonitor
 
         heartbeat_file = tmp_path / "heartbeat.json"
-        monitor = UnifiedWebSocketMonitor(mode="both")
+        monitor = UnifiedWebSocketMonitor()
         monitor._heartbeat_path = str(heartbeat_file)
         monitor._write_heartbeat()
 
@@ -1340,10 +1011,10 @@ class TestHeartbeat:
             data = json.load(f)
 
         assert "updated_at_unix" in data
-        assert data["mode"] == "both"
+        assert data["mode"] == "upbit"
         assert data["is_running"] is False  # Default
         assert data["upbit_connected"] is False
-        assert data["kis_connected"] is False
+        assert "kis_connected" not in data
         # Verify timestamp is recent
         assert time.time() - data["updated_at_unix"] < 2
 
@@ -1379,7 +1050,7 @@ class TestHeartbeat:
 
         assert data["mode"] == "upbit"
         assert data["upbit_connected"] is False
-        assert data["kis_connected"] == "n/a"
+        assert "kis_connected" not in data
 
     def test_write_heartbeat_creates_parent_dir(
         self, mock_settings: None, tmp_path
@@ -1490,53 +1161,3 @@ class TestAutoReconnect:
         fake_ws.connect_and_subscribe.assert_awaited_once()
         assert "Upbit WebSocket connected" not in caplog.text
         assert "Reconnecting Upbit" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_kis_supervisor_backs_off_on_appkey_in_use_without_churn(
-        self,
-        mock_settings: None,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        import websocket_monitor
-        from app.services.kis_websocket import KISAppKeyInUseError
-        from websocket_monitor import UnifiedWebSocketMonitor
-
-        monitor = UnifiedWebSocketMonitor(mode="kis")
-        monitor.is_running = True
-        monitor._kis_appkey_in_use_backoff_seconds = 123.0
-
-        class FakeKisWs:
-            is_connected = False
-            messages_received = 0
-            execution_events_received = 0
-            last_message_at = None
-            last_execution_at = None
-            last_pingpong_at = None
-
-            def __init__(self, *args, **kwargs):
-                self.is_running = False
-                self.connect_and_subscribe = AsyncMock(
-                    side_effect=KISAppKeyInUseError("already in use")
-                )
-                self.listen = AsyncMock()
-
-        fake_ws = FakeKisWs()
-
-        def fake_factory(*args, **kwargs):
-            return fake_ws
-
-        async def stop_after_backoff(seconds: float) -> None:
-            assert seconds == pytest.approx(123.0)
-            monitor.is_running = False
-
-        monkeypatch.setattr(websocket_monitor, "KISExecutionWebSocket", fake_factory)
-        monkeypatch.setattr(websocket_monitor.asyncio, "sleep", stop_after_backoff)
-        caplog.set_level("ERROR")
-
-        await monitor._start_kis_supervisor()
-
-        fake_ws.connect_and_subscribe.assert_awaited_once()
-        fake_ws.listen.assert_not_awaited()
-        assert monitor.kis_ws is None
-        assert "pausing reconnects" in caplog.text

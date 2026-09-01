@@ -9,7 +9,6 @@
 - `get_cash_balance`
 - `toss_get_orderable_cash`
 - `get_order_history`
-- `kis_live_get_order_history`
 - `toss_get_order_history`
 
 It does not register order placement, cancel, modify, preview, reconcile, persistence, settings, watch, report-writing, admin, or manual holdings mutation tools.
@@ -68,7 +67,7 @@ envsubst '$MCP_ENDPOINT $MCP_AUTH_TOKEN $MCP_SESSION_ID $PAPERCLIP_AGENT_ID' \
   < scripts/templates/mcp_call.sh.tmpl > /tmp/mcp_call_account_read.sh
 chmod 700 /tmp/mcp_call_account_read.sh
 
-/tmp/mcp_call_account_read.sh get_holdings '{"account":"kis"}'
+/tmp/mcp_call_account_read.sh get_holdings '{}'
 ```
 
 Expected: a tool payload, not 401/403.

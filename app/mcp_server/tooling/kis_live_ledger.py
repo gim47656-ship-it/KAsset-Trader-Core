@@ -375,7 +375,7 @@ async def _record_kis_live_order(
 
 
 def _create_live_kis_client() -> Any:
-    from app.services.brokers.kis import KISClient
+    from app.services.brokers.kis.client import KISClient
 
     return KISClient()
 

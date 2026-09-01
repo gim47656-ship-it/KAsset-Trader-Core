@@ -41,7 +41,7 @@ async def get_cost_basis_distribution_impl(
         raise ValueError("symbol is required")
 
     market_type, normalized_symbol = _resolve_market_type(symbol, market)
-    source_map = {"crypto": "upbit", "equity_kr": "kis", "equity_us": "yahoo"}
+    source_map = {"crypto": "upbit", "equity_kr": "toss", "equity_us": "toss"}
     source = source_map[market_type]
     bucket_count = max(2, min(int(buckets), 100))
 
@@ -65,7 +65,7 @@ async def get_cost_basis_distribution_impl(
             live = await fetch_us_live_last_price(normalized_symbol)
             if live is not None:
                 current_price = round(live, 6)
-                current_price_source = "yahoo_live"
+                current_price_source = "toss_live"
                 current_price_stale = False
 
         vp = _calculate_volume_profile(df, bins=bucket_count)

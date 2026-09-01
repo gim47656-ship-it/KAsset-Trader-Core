@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_PENDING_ORDERS_ACCOUNT_SCOPE: dict[str, str] = {
-    "kr": "kis_live",
-    "us": "kis_live",
+    "kr": "toss_live",
+    "us": "toss_live",
     "crypto": "upbit_live",
 }
 

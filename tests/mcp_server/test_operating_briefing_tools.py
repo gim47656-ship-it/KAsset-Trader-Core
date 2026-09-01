@@ -64,6 +64,23 @@ def test_operating_briefing_tool_names_register() -> None:
 
 
 @pytest.mark.asyncio
+async def test_operating_briefing_rejects_explicit_kis_before_reads() -> None:
+    from app.mcp_server.tooling import operating_briefing as ob
+
+    result = await ob.get_operating_briefing_impl(
+        market="kr",
+        account_scope="kis_live",
+    )
+
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": "kis_live",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("investment_reports_cleanup_lock")
 async def test_list_active_watches_impl_returns_rationale_and_filters(
     db_session: AsyncSession,
@@ -121,7 +138,7 @@ async def test_get_operating_briefing_composes_all_sections(
             "summary": {"total_value": 1234567},
             "accounts": [
                 {
-                    "account": "kis",
+                    "account": "toss",
                     "positions": [
                         {
                             "symbol": "005930",
@@ -146,11 +163,11 @@ async def test_get_operating_briefing_composes_all_sections(
         as_of = "2026-06-11T01:00:00+00:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         assert market == "kr"
-        assert account_scope == "kis_live"
+        assert account_scope == "toss_live"
         return FakePendingSnapshot()
 
     async def fake_active_watches(**kwargs):
@@ -203,12 +220,12 @@ async def test_get_operating_briefing_composes_all_sections(
 
     result = await ob.get_operating_briefing_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     assert result["success"] is True
     assert result["market"] == "kr"
-    assert result["account_scope"] == "kis_live"
+    assert result["account_scope"] == "toss_live"
     assert result["holdings"]["summary"]["total_value"] == 1234567
     assert result["holdings"]["top_movers"][0]["symbol"] == "005930"
     assert result["pending_orders"]["orders"][0]["expected_expiry"].endswith("+09:00")
@@ -225,9 +242,7 @@ async def test_get_operating_briefing_composes_all_sections(
 async def test_get_operating_briefing_surfaces_per_account_routability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ROB-541: briefing surfaces per-account order_routable + account_mode so a
-    toss-held (reference-only) symbol is distinguishable from a kis_live-sellable
-    one."""
+    """Toss API 계정과 수동 참고 계정의 주문 가능 여부를 함께 노출한다."""
     from datetime import UTC, datetime
 
     from app.mcp_server.tooling import operating_briefing as ob
@@ -238,16 +253,16 @@ async def test_get_operating_briefing_surfaces_per_account_routability(
             "summary": {"total_value": 100},
             "accounts": [
                 {
-                    "account": "kis",
-                    "account_name": "KIS 주계좌",
-                    "account_mode": "kis_live",
+                    "account": "toss",
+                    "account_name": "토스",
+                    "account_mode": "toss_live",
                     "order_routable": True,
                     "positions": [{"symbol": "005930"}],
                 },
                 {
-                    "account": "toss",
-                    "account_name": "토스",
-                    "account_mode": "toss_api",
+                    "account": "samsung",
+                    "account_name": "삼성 수동 계정",
+                    "account_mode": "toss_live",
                     "order_routable": False,
                     "positions": [{"symbol": "펩트론"}],
                 },
@@ -260,7 +275,7 @@ async def test_get_operating_briefing_surfaces_per_account_routability(
         as_of = "2026-06-11T01:00:00+00:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         return FakePendingSnapshot()
@@ -288,16 +303,16 @@ async def test_get_operating_briefing_surfaces_per_account_routability(
 
     result = await ob.get_operating_briefing_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     accounts = result["holdings"]["accounts"]
     by_account = {entry["account"]: entry for entry in accounts}
-    assert by_account["kis"]["order_routable"] is True
-    assert by_account["kis"]["account_mode"] == "kis_live"
-    assert by_account["toss"]["order_routable"] is False
-    assert by_account["toss"]["account_mode"] == "toss_api"
-    assert by_account["toss"]["position_count"] == 1
+    assert by_account["toss"]["order_routable"] is True
+    assert by_account["toss"]["account_mode"] == "toss_live"
+    assert by_account["samsung"]["order_routable"] is False
+    assert by_account["samsung"]["account_mode"] == "toss_live"
+    assert by_account["samsung"]["position_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -332,7 +347,7 @@ async def test_get_operating_briefing_fail_opens_optional_sections(
         as_of = "2026-06-11T01:00:00+00:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         return EmptyPendingSnapshot()
@@ -374,7 +389,7 @@ async def test_get_operating_briefing_fail_opens_optional_sections(
 
     result = await ob.get_operating_briefing_impl(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     assert result["success"] is True
@@ -543,7 +558,7 @@ async def test_get_operating_briefing_reads_active_watch_and_session_context(
         as_of = "2026-06-11T01:00:00+00:00"
         freshness_status = "fresh"
         unavailable_reason = None
-        account_scope = "kis_live"
+        account_scope = "toss_live"
 
     async def fake_pending(db, *, market, account_scope):
         return EmptyPendingSnapshot()
@@ -578,7 +593,7 @@ async def test_get_operating_briefing_reads_active_watch_and_session_context(
             {
                 "kst_date": "2026-06-11",
                 "market": "us",
-                "account_scope": "kis_live",
+                "account_scope": "toss_live",
                 "entry_type": "next_action",
                 "title": "재평가",
                 "body": "내일 20:00 만료 주문 재평가",
@@ -588,7 +603,7 @@ async def test_get_operating_briefing_reads_active_watch_and_session_context(
 
     result = await ob.get_operating_briefing_impl(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     assert result["success"] is True
@@ -618,10 +633,10 @@ async def test_get_operating_briefing_accounts_include_cost_profile(monkeypatch)
             "summary": {},
             "accounts": [
                 {
-                    "account": "kis",
-                    "broker": "kis",
-                    "account_name": "기본 계좌",
-                    "account_mode": "kis_live",
+                    "account": "toss",
+                    "broker": "toss",
+                    "account_name": "토스",
+                    "account_mode": "toss_live",
                     "order_routable": True,
                     "positions": [{"symbol": "005930"}],
                 }
@@ -642,8 +657,8 @@ async def test_get_operating_briefing_accounts_include_cost_profile(monkeypatch)
             "version": 1,
             "routing": {"position_consolidation_threshold_bps": {"kr": 25, "us": 40}},
             "accounts": {
-                "kis_domestic": {
-                    "broker": "kis",
+                "toss": {
+                    "broker": "toss",
                     "markets": {"kr": {"commission_bps": 1.4, "fx_spread_bps": 0}},
                 }
             },
@@ -665,10 +680,12 @@ async def test_get_operating_briefing_accounts_include_cost_profile(monkeypatch)
     monkeypatch.setattr(ob, "_recent_session_context", fake_session_context)
     monkeypatch.setattr(ob, "get_account_costs_setting", fake_account_costs)
 
-    result = await ob.get_operating_briefing_impl(market="kr", account_scope="kis_live")
+    result = await ob.get_operating_briefing_impl(
+        market="kr", account_scope="toss_live"
+    )
 
     account = result["holdings"]["accounts"][0]
-    assert account["account"] == "kis"
+    assert account["account"] == "toss"
     assert account["cost_profile"]["commission_bps"] == pytest.approx(1.4)
     assert account["cost_profile"]["source"] == "user_setting"
 
@@ -687,10 +704,10 @@ async def test_get_operating_briefing_degrades_when_cost_profile_setting_fails(
             "summary": {},
             "accounts": [
                 {
-                    "account": "kis",
-                    "broker": "kis",
-                    "account_name": "기본 계좌",
-                    "account_mode": "kis_live",
+                    "account": "toss",
+                    "broker": "toss",
+                    "account_name": "토스",
+                    "account_mode": "toss_live",
                     "order_routable": True,
                     "positions": [{"symbol": "005930"}],
                 }
@@ -725,11 +742,13 @@ async def test_get_operating_briefing_degrades_when_cost_profile_setting_fails(
     monkeypatch.setattr(ob, "_recent_session_context", fake_session_context)
     monkeypatch.setattr(ob, "get_account_costs_setting", fake_account_costs)
 
-    result = await ob.get_operating_briefing_impl(market="kr", account_scope="kis_live")
+    result = await ob.get_operating_briefing_impl(
+        market="kr", account_scope="toss_live"
+    )
 
     account = result["holdings"]["accounts"][0]
     assert account["cost_profile"] == {
-        "commission_bps": 14.7,
+        "commission_bps": 0.0,
         "fx_spread_bps": 0.0,
         "source": "default_seed",
         "review_required": True,

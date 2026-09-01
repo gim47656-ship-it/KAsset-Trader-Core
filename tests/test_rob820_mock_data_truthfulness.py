@@ -1,134 +1,95 @@
-"""ROB-820 regression coverage for the KIS mock read data plane."""
+"""ROB-820 mock 및 시장 데이터 truthfulness 회귀 테스트."""
 
 from __future__ import annotations
 
 import datetime as dt
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
 
 from app.mcp_server.tooling import analysis_analyze, portfolio_cash, portfolio_holdings
 from app.mcp_server.tooling.fundamentals import _financials
-from app.services.brokers.kis.circuit_breaker import KISCircuitOpen
 from app.services.nxt_preflight import NxtTradability
 
 
-def _kis_position() -> dict[str, object]:
-    return {
-        "account": "kis",
-        "account_name": "기본 계좌",
-        "broker": "kis",
-        "source": "kis_api",
-        "instrument_type": "equity_kr",
-        "market": "kr",
-        "symbol": "005930",
-        "name": "삼성전자",
-        "quantity": 2.0,
-        "avg_buy_price": 70_000.0,
-        "current_price": 71_000.0,
-        "evaluation_amount": 142_000.0,
-        "profit_loss": 2_000.0,
-        "profit_rate": 1.43,
-    }
-
-
 @pytest.mark.asyncio
-async def test_kis_mock_cash_does_not_query_live_account_sources(monkeypatch):
-    fake_kis = MagicMock()
-    fake_kis.inquire_domestic_cash_balance = AsyncMock(
-        return_value={
-            "dnca_tot_amt": "1000000",
-            "stck_cash_ord_psbl_amt": "900000",
-        }
-    )
-    monkeypatch.setattr(
-        portfolio_cash, "_create_kis_client", lambda *, is_mock: fake_kis
-    )
-
+async def test_kis_mock_cash_fails_closed_without_querying_live_sources(
+    monkeypatch,
+):
     upbit_read = AsyncMock(side_effect=AssertionError("upbit_live must be isolated"))
     toss_read = AsyncMock(side_effect=AssertionError("toss_api must be isolated"))
     monkeypatch.setattr(
         portfolio_cash.upbit_service, "fetch_krw_cash_summary", upbit_read
     )
     monkeypatch.setattr(portfolio_cash, "fetch_toss_cash_snapshot", toss_read)
-    monkeypatch.setattr(portfolio_cash.settings, "toss_api_enabled", True)
 
     result = await portfolio_cash.get_cash_balance_impl(is_mock=True)
 
     upbit_read.assert_not_awaited()
     toss_read.assert_not_awaited()
-    assert {row["account"] for row in result["accounts"]} == {"kis_domestic"}
-    assert all(row["broker"] == "kis" for row in result["accounts"])
-    assert all(row["account_mode"] == "kis_mock" for row in result["accounts"])
-    assert all(error["source"] == "kis" for error in result["errors"])
-    assert all(error["account_mode"] == "kis_mock" for error in result["errors"])
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "accounts": [],
+        "summary": {
+            "total_krw": 0.0,
+            "total_usd": 0.0,
+            "unavailable_sources": {},
+        },
+        "errors": [],
+    }
 
 
 @pytest.mark.asyncio
-async def test_kis_mock_available_capital_does_not_query_manual_cash(monkeypatch):
-    monkeypatch.setattr(
-        portfolio_cash,
-        "get_cash_balance_impl",
-        AsyncMock(
-            return_value={
-                "accounts": [
-                    {
-                        "account": "kis_domestic",
-                        "broker": "kis",
-                        "currency": "KRW",
-                        "balance": 1_000_000.0,
-                        "orderable": 900_000.0,
-                        "account_mode": "kis_mock",
-                    }
-                ],
-                "summary": {"unavailable_sources": {}},
-                "errors": [],
-            }
-        ),
-    )
-    manual_read = AsyncMock(
-        side_effect=AssertionError("manual cash must be isolated from kis_mock")
-    )
+async def test_kis_mock_available_capital_fails_before_cash_sources(monkeypatch):
+    cash_read = AsyncMock(side_effect=AssertionError("cash sources must be isolated"))
+    manual_read = AsyncMock(side_effect=AssertionError("manual cash must be isolated"))
+    costs_read = AsyncMock(side_effect=AssertionError("cost settings must be isolated"))
+    monkeypatch.setattr(portfolio_cash, "get_cash_balance_impl", cash_read)
     monkeypatch.setattr(portfolio_cash, "get_manual_cash_setting", manual_read)
-    monkeypatch.setattr(
-        portfolio_cash, "get_account_costs_setting", AsyncMock(return_value=None)
-    )
+    monkeypatch.setattr(portfolio_cash, "get_account_costs_setting", costs_read)
 
     result = await portfolio_cash.get_available_capital_impl(is_mock=True)
 
+    cash_read.assert_not_awaited()
     manual_read.assert_not_awaited()
-    assert result["manual_cash"] is None
-    assert result["summary"]["total_orderable_krw"] == pytest.approx(900_000.0)
+    costs_read.assert_not_awaited()
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "accounts": [],
+        "manual_cash": None,
+        "summary": {
+            "total_orderable_krw": 0.0,
+            "manual_cash_excluded_krw": 0.0,
+            "exchange_rate_usd_krw": None,
+            "unavailable_sources": {},
+        },
+        "errors": [],
+    }
 
 
 @pytest.mark.asyncio
-async def test_kis_mock_holdings_do_not_query_live_or_manual_sources(monkeypatch):
-    kis_read = AsyncMock(return_value=([_kis_position()], []))
-    upbit_read = AsyncMock(return_value=([], []))
-    manual_read = AsyncMock(return_value=([], []))
-    toss_read = AsyncMock(return_value=([], [], True))
-    monkeypatch.setattr(portfolio_holdings, "_collect_kis_positions", kis_read)
+async def test_kis_mock_holdings_fail_before_live_or_manual_sources(monkeypatch):
+    upbit_read = AsyncMock(side_effect=AssertionError("upbit_live must be isolated"))
+    manual_read = AsyncMock(side_effect=AssertionError("manual must be isolated"))
+    toss_read = AsyncMock(side_effect=AssertionError("toss_api must be isolated"))
     monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", upbit_read)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", manual_read)
     monkeypatch.setattr(portfolio_holdings, "_collect_toss_api_positions", toss_read)
-    monkeypatch.setattr(portfolio_holdings.settings, "toss_api_enabled", True)
 
-    positions, errors, _, _ = await portfolio_holdings._collect_portfolio_positions(
-        account=None,
-        market=None,
-        include_current_price=False,
-        is_mock=True,
-    )
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        await portfolio_holdings._collect_portfolio_positions(
+            account=None,
+            market=None,
+            include_current_price=False,
+            is_mock=True,
+        )
 
-    kis_read.assert_awaited_once_with(None, is_mock=True)
     upbit_read.assert_not_awaited()
     manual_read.assert_not_awaited()
     toss_read.assert_not_awaited()
-    assert len(positions) == 1
-    assert positions[0]["source"] == "kis_api"
-    assert positions[0]["current_price"] is None
-    assert errors == []
 
 
 @pytest.mark.asyncio
@@ -143,22 +104,8 @@ async def test_kis_mock_holdings_do_not_query_live_or_manual_sources(monkeypatch
         (None, "crypto"),
     ],
 )
-async def test_kis_mock_incompatible_portfolio_selector_fails_closed(
-    monkeypatch, account, market
-):
-    monkeypatch.setattr(
-        portfolio_holdings, "_collect_kis_positions", AsyncMock(return_value=([], []))
-    )
-    monkeypatch.setattr(
-        portfolio_holdings, "_collect_upbit_positions", AsyncMock(return_value=([], []))
-    )
-    monkeypatch.setattr(
-        portfolio_holdings,
-        "_collect_manual_positions",
-        AsyncMock(return_value=([], [])),
-    )
-
-    with pytest.raises(ValueError, match="kis_mock"):
+async def test_kis_mock_incompatible_portfolio_selector_fails_closed(account, market):
+    with pytest.raises(ValueError, match="provider kis is not operational"):
         await portfolio_holdings._collect_portfolio_positions(
             account=account,
             market=market,
@@ -172,34 +119,17 @@ async def test_kis_mock_incompatible_portfolio_selector_fails_closed(
     "account", ["upbit", "toss", "samsung_pension", "isa", "paper"]
 )
 async def test_kis_mock_incompatible_cash_selector_fails_closed(account):
-    with pytest.raises(ValueError, match="kis_mock"):
-        await portfolio_cash.get_cash_balance_impl(account=account, is_mock=True)
+    result = await portfolio_cash.get_cash_balance_impl(account=account, is_mock=True)
+
+    assert result["success"] is False
+    assert result["error"] == "provider kis is not operational"
+    assert result["accounts"] == []
 
 
-@pytest.mark.asyncio
-async def test_kis_mock_holdings_circuit_open_keeps_reason_and_evidence(monkeypatch):
-    class CircuitOpenKIS:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            assert is_mock is True
-
-        async def fetch_my_stocks(self, *, is_mock: bool = False):
-            assert is_mock is True
-            raise KISCircuitOpen(45.0)
-
-    monkeypatch.setattr(portfolio_holdings, "KISClient", CircuitOpenKIS)
-
-    positions, errors = await portfolio_holdings._collect_kis_positions(
-        "equity_kr", is_mock=True
-    )
-
-    assert positions == []
-    assert errors == [
-        {
-            "source": "kis",
-            "market": "kr",
-            "error": "KIS circuit open — failing fast (retry in ~45.0s)",
-        }
-    ]
+def test_kis_portfolio_runtime_factories_are_physically_absent() -> None:
+    assert not hasattr(portfolio_cash, "_create_kis_client")
+    assert not hasattr(portfolio_holdings, "_collect_kis_positions")
+    assert not hasattr(portfolio_holdings, "KISClient")
 
 
 def _ohlcv_frame(*, date_value: object = None, include_date: bool = False):
@@ -231,9 +161,6 @@ async def test_kr_quote_missing_or_epoch_asof_is_unavailable(monkeypatch, frame)
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
     )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
-    )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", frame)
 
@@ -253,9 +180,6 @@ async def test_kr_quote_old_asof_is_stale_and_not_usable(monkeypatch):
     )
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
-    )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
     )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", frame)
@@ -279,15 +203,13 @@ async def test_kr_live_quote_missing_asof_is_unavailable(monkeypatch):
                 "instrument_type": "equity_kr",
                 "price": 71_000.0,
                 "price_as_of": None,
-                "source": "kis",
+                "source": "toss",
+                "price_source": "toss_price",
             }
         ),
     )
     monkeypatch.setattr(
         analysis_analyze, "get_kr_nxt_tradability", AsyncMock(return_value={})
-    )
-    monkeypatch.setattr(
-        analysis_analyze, "_apply_nxt_quote_overlay", AsyncMock(return_value=False)
     )
 
     quote = await analysis_analyze._resolve_kr_quote("005930", pd.DataFrame())

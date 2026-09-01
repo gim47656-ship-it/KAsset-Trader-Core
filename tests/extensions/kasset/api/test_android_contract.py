@@ -345,7 +345,7 @@ def test_nh_quote_uses_previous_close_when_mock_sign_field_is_blank(
 def test_paper_kr_quote_falls_back_to_stored_candles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """KIS 자격이 없거나 무효여도 저장 캔들 종가로 시세를 내려준다."""
+    """저장된 KR 캔들 종가를 PAPER 시세로 내려준다."""
     from datetime import UTC, datetime
     from decimal import Decimal
 
@@ -370,17 +370,129 @@ def test_paper_kr_quote_falls_back_to_stored_candles(
         ),
     )
 
-    async def _boom(symbol: str) -> dict[str, object]:
-        raise RuntimeError("KIS token refresh failed")
-
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.market_data_quotes._fetch_quote_equity_kr",
-        _boom,
-    )
-
     quote = asyncio.run(adapter.quote(object(), market="KRX", symbol="005930"))
 
     assert quote.price == "71500"
     assert quote.previous_close == "71000"
     assert quote.change_amount == "500"
     assert quote.source == "PAPER_CANDLES"
+
+
+def test_paper_us_quote_uses_active_symbol_toss_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    import pandas as pd
+
+    from app.extensions.kasset.api import paper as paper_module
+
+    lookup = AsyncMock(return_value="NASD")
+    prices = AsyncMock(
+        return_value={
+            "AAPL": SimpleNamespace(
+                price=Decimal("201.5"),
+                as_of=datetime(2026, 8, 28, 14, 30, tzinfo=UTC),
+            )
+        }
+    )
+    daily = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "datetime": [
+                    datetime(2026, 8, 27, 20, 0, tzinfo=UTC),
+                    datetime(2026, 8, 28, 20, 0, tzinfo=UTC),
+                ],
+                "close": [Decimal("199"), Decimal("201")],
+            }
+        )
+    )
+    monkeypatch.setattr(paper_module, "get_us_exchange_by_symbol", lookup)
+    monkeypatch.setattr(paper_module.toss_market_data, "prices", prices)
+    monkeypatch.setattr(paper_module, "fetch_daily_toss_frame", daily)
+    db = SimpleNamespace(
+        execute=AsyncMock(side_effect=AssertionError("DB fallback must not run"))
+    )
+
+    raw = asyncio.run(
+        paper_module.PaperAccountAdapter()._quote_us_toss_or_candles(
+            db,
+            "AAPL",  # type: ignore[arg-type]
+        )
+    )
+
+    assert raw["price"] == Decimal("201.5")
+    assert raw["previous_close"] == Decimal("199")
+    assert raw["source"] == "TOSS"
+    lookup.assert_awaited_once_with("AAPL", db=db)
+
+
+def test_paper_us_quote_falls_back_to_stored_snapshot_when_toss_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from app.extensions.kasset.api import paper as paper_module
+
+    class _Rows:
+        def all(self):
+            return [
+                (datetime(2026, 8, 28, 20, 0, tzinfo=UTC), Decimal("201")),
+                (datetime(2026, 8, 27, 20, 0, tzinfo=UTC), Decimal("199")),
+            ]
+
+    monkeypatch.setattr(
+        paper_module, "get_us_exchange_by_symbol", AsyncMock(return_value="NASD")
+    )
+    monkeypatch.setattr(
+        paper_module.toss_market_data,
+        "prices",
+        AsyncMock(side_effect=RuntimeError("toss prices unavailable")),
+    )
+    monkeypatch.setattr(
+        paper_module,
+        "fetch_daily_toss_frame",
+        AsyncMock(side_effect=RuntimeError("toss candles unavailable")),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=_Rows()))
+
+    raw = asyncio.run(
+        paper_module.PaperAccountAdapter()._quote_us_toss_or_candles(
+            db,
+            "AAPL",  # type: ignore[arg-type]
+        )
+    )
+
+    assert raw == {
+        "price": Decimal("201"),
+        "previous_close": Decimal("199"),
+        "price_as_of": datetime(2026, 8, 28, 20, 0, tzinfo=UTC),
+        "source": "CANDLES",
+    }
+
+
+def test_paper_us_quote_rejects_inactive_before_toss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.extensions.kasset.api import paper as paper_module
+    from app.services.us_symbol_universe_service import USSymbolInactiveError
+
+    lookup = AsyncMock(side_effect=USSymbolInactiveError("AAPL"))
+    prices = AsyncMock()
+    daily = AsyncMock()
+    monkeypatch.setattr(paper_module, "get_us_exchange_by_symbol", lookup)
+    monkeypatch.setattr(paper_module.toss_market_data, "prices", prices)
+    monkeypatch.setattr(paper_module, "fetch_daily_toss_frame", daily)
+
+    with pytest.raises(USSymbolInactiveError):
+        asyncio.run(
+            paper_module.PaperAccountAdapter()._quote_us_toss_or_candles(
+                object(),
+                "AAPL",  # type: ignore[arg-type]
+            )
+        )
+
+    prices.assert_not_awaited()
+    daily.assert_not_awaited()

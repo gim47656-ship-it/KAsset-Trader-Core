@@ -1,41 +1,14 @@
 """Symbol snapshot collector (read-only, optional).
 
-Resolves per-symbol metadata for the symbols the caller asked about and,
-where a venue is wired, enriches each resolved symbol with read-only
-quote/orderbook evidence (best bid/ask, spread, depth, venue):
+The collector resolves requested symbol metadata from the local symbol
+universes. Equity quote enrichment is available only for ``toss_live`` and
+uses the shared Toss → historical snapshot resolver. It exposes last-price
+evidence only; KIS/NXT orderbook evidence is explicitly unsupported. Crypto
+keeps its public Upbit top-of-book enrichment.
 
-* KR equities: metadata from ``stock_info``; quote enrichment for
-  ``(market=kr, account_scope=kis_live)`` with an explicit ``user_id``
-  via the KIS domestic quote/orderbook adapter.
-* US equities: metadata from ``stock_info`` or ``us_symbol_universe``;
-  quote enrichment for ``(market=us, account_scope=kis_live)`` with an
-  explicit ``user_id`` via the KIS overseas current-price adapter.
-* Crypto (ROB-369 2c): metadata from ``upbit_symbol_universe`` (crypto is
-  not in ``stock_info``); quote enrichment for
-  ``(market=crypto, account_scope=upbit_live)`` via the Upbit orderbook
-  adapter. Upbit market-data is public, so NO ``user_id`` is required and
-  ``last_price`` is left ``None`` (the orderbook carries no last trade —
-  spread/depth is the liquidity signal).
-
-Lockdown invariants (ROB-278):
-
-* No new KIS HTTP surface. Quote enrichment uses an injected client that
-  the production registry wires to a thin read-only adapter around the
-  existing ``inquire_price`` / ``inquire_orderbook`` methods.
-* No broker order-mutation surfaces are reachable. The mutation import
-  guard test asserts the symbol module does not pull in any verb tagged
-  as forbidden (placement / cancellation / submission / modification).
-* user_id missing on ``kis_live`` → quote enrichment is fail-closed
-  (``status="unavailable"`` per symbol). The default has not been invented.
-* Per-symbol failures fail-open: one symbol's KIS error never crashes the
-  others, and the symbol kind stays optional in the policy.
-* Quote enrichment is bounded by ``quote_enrichment_limit`` (default 25) to
-  cap KIS call volume per report; the overflow carries
-  ``status="skipped"`` with a ``"cap"`` reason.
-
-If ``request.symbols`` is empty/None we have no scope to read against, so
-the collector returns ``unavailable`` and the optional bucket records it
-in ``unavailable_sources``.
+No broker order-mutation surface is imported or reachable. Per-symbol quote
+failures remain optional and isolated, and enrichment is capped by
+``quote_enrichment_limit``.
 """
 
 from __future__ import annotations
@@ -53,6 +26,7 @@ from app.services.action_report.snapshot_backed.collectors._base import (
     unavailable_result,
     utcnow,
 )
+from app.services.invest_quote_service import InvestQuoteService
 from app.services.investment_snapshots.collectors import (
     CollectorRequest,
     SnapshotCollectResult,
@@ -68,16 +42,39 @@ _US_REASON_UNIVERSE_LOOKUP_ERROR = "universe_lookup_error"
 
 
 class _QuoteOrderbookClient(Protocol):
-    """Read-only adapter contract for per-symbol quote/orderbook reads.
-
-    Implemented per venue (KIS domestic for KR equities, Upbit for crypto) and
-    wired in the collector registry; tests inject fakes. Implementations MUST
-    not call any broker order-mutation path.
-    """
+    """Read-only per-symbol quote contract used by equity and crypto adapters."""
 
     async def fetch_quote_orderbook(
         self, symbol: str, venue: str = "krx"
     ) -> dict[str, Any]: ...
+
+
+class _TossSnapshotQuoteClient:
+    """Expose Toss → snapshot last prices through the quote enrichment contract."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._quotes = InvestQuoteService(session)
+
+    async def fetch_quote_orderbook(
+        self, symbol: str, venue: str = "krx"
+    ) -> dict[str, Any]:
+        market = "us" if venue == "us" else "kr"
+        prices = (
+            await self._quotes.fetch_us_prices([symbol])
+            if market == "us"
+            else await self._quotes.fetch_kr_prices([symbol])
+        )
+        return {
+            "last_price": prices.get(symbol),
+            "best_bid": None,
+            "best_ask": None,
+            "bid_depth": None,
+            "ask_depth": None,
+            "venue": "toss",
+            "session": "snapshot",
+            "as_of": None,
+            "nxt_eligible": False,
+        }
 
 
 def _is_empty_book(quote: dict[str, Any]) -> bool:
@@ -102,12 +99,7 @@ def _derive_spread(quote: dict[str, Any]) -> tuple[float | None, float | None]:
 
 
 class SymbolSnapshotCollector:
-    """Optional ``symbol`` collector backed by ``stock_info`` (KR/US) or
-    ``upbit_symbol_universe`` (crypto).
-
-    The collector also performs read-only per-venue quote/orderbook enrichment
-    on the resolved symbols: KIS for KR live trading, Upbit for crypto.
-    """
+    """Optional per-symbol metadata with Toss/snapshot or Upbit enrichment."""
 
     snapshot_kind: str = "symbol"
 
@@ -115,30 +107,27 @@ class SymbolSnapshotCollector:
         self,
         session: AsyncSession,
         *,
-        kis_quote_client: _QuoteOrderbookClient | None = None,
         upbit_quote_client: _QuoteOrderbookClient | None = None,
         quote_enrichment_limit: int = _DEFAULT_QUOTE_ENRICHMENT_LIMIT,
     ) -> None:
         self._session = session
-        self._kis_quote_client = kis_quote_client
+        self._equity_quote_client = _TossSnapshotQuoteClient(session)
         self._upbit_quote_client = upbit_quote_client
         self._quote_enrichment_limit = quote_enrichment_limit
 
     def _quote_enrichment_plan(
         self, request: CollectorRequest
     ) -> tuple[_QuoteOrderbookClient | None, bool, str, str] | None:
-        """Per-venue enrichment plan, or ``None`` when no enrichment applies.
-
-        Returns ``(client, requires_user_id, default_venue, scope_label)``:
-        * KR + ``kis_live`` → KIS client, ``user_id`` required (broker auth).
-        * US + ``kis_live`` → KIS overseas current-price client, ``user_id`` required.
-        * crypto + ``upbit_live`` → Upbit client, NO ``user_id`` (public data).
-        """
-        if request.market == "kr" and request.account_scope == "kis_live":
-            venue = "nxt" if request.market_session == "nxt" else "krx"
-            return (self._kis_quote_client, True, venue, "kis_live")
-        if request.market == "us" and request.account_scope == "kis_live":
-            return (self._kis_quote_client, True, "us", "kis_live")
+        """Return the active read-only quote plan for the requested scope."""
+        if request.market == "kr" and request.account_scope == "toss_live":
+            return (self._equity_quote_client, False, "krx", "toss_live")
+        if request.market == "us" and request.account_scope == "toss_live":
+            return (self._equity_quote_client, False, "us", "toss_live")
+        if request.account_scope is not None and request.account_scope.startswith(
+            "kis"
+        ):
+            venue = "us" if request.market == "us" else "krx"
+            return (None, False, venue, "provider_unsupported: KIS is non-operational")
         if request.market == "crypto" and request.account_scope == "upbit_live":
             return (self._upbit_quote_client, False, "upbit", "upbit_live")
         return None
@@ -275,19 +264,8 @@ class SymbolSnapshotCollector:
                 )
             ]
 
-        # Per-venue quote enrichment plan (KIS for KR live, Upbit for crypto).
         plan = self._quote_enrichment_plan(request)
         quote_status_default: dict[str, Any] | None = None
-        if plan is not None:
-            _client, requires_user_id, _venue, scope_label = plan
-            if requires_user_id and request.user_id is None:
-                # Fail-closed: never invent a default user_id for broker calls.
-                quote_status_default = {
-                    "status": "unavailable",
-                    "unavailable_reason": (
-                        f"{scope_label} quote enrichment requires explicit user_id"
-                    ),
-                }
 
         results: list[SnapshotCollectResult] = []
         seen_symbols: set[str] = set()
@@ -394,9 +372,14 @@ class SymbolSnapshotCollector:
                 ),
             }
         if client is None:
+            reason = (
+                scope_label
+                if scope_label.startswith("provider_unsupported:")
+                else f"no quote client configured ({default_venue})"
+            )
             return {
                 "status": "unavailable",
-                "unavailable_reason": f"no quote client configured ({default_venue})",
+                "unavailable_reason": reason,
             }
         if enriched_count >= self._quote_enrichment_limit:
             return {
@@ -410,7 +393,7 @@ class SymbolSnapshotCollector:
         except Exception as exc:  # noqa: BLE001 — optional, per-symbol fail-open
             return {
                 "status": "unavailable",
-                # Venue-tagged so ops can distinguish KIS vs Upbit fetch failures.
+                # provider 오류를 구분할 수 있도록 scope를 포함한다.
                 "unavailable_reason": (
                     f"{scope_label}_error: {type(exc).__name__}: {exc}"
                 ),

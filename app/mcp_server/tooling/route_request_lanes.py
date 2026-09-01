@@ -18,16 +18,11 @@ from app.mcp_server.tooling.alpaca_paper_automated_orders import (
 )
 from app.mcp_server.tooling.alpaca_paper_orders import ALPACA_PAPER_MUTATING_TOOL_NAMES
 from app.mcp_server.tooling.alpaca_paper_preview import ALPACA_PAPER_PREVIEW_TOOL_NAMES
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.market_quote_snapshot_tools import (
     MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
-)
-from app.mcp_server.tooling.mirror_counterfactual_registration import (
-    MIRROR_COUNTERFACTUAL_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
 )
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_MUTATION_TOOL_NAMES,
@@ -36,7 +31,6 @@ from app.mcp_server.tooling.orders_kiwoom_us_variants import (
 from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import TOSS_LIVE_ORDER_TOOL_NAMES
-from app.mcp_server.tooling.us_dual_paper import US_DUAL_PAPER_TOOL_NAMES
 
 # intent enum (the only free LLM choice) -> playbook lane
 INTENT_TO_LANE: dict[str, str] = {
@@ -92,10 +86,6 @@ LANE_SEQUENCES: dict[str, list[dict[str, Any]]] = {
             "not live — call get_quote for a live price. quick no longer returns "
             "analyst/holdings fields; use quick=False for those, get_holdings for "
             "position.",
-        },
-        {
-            "tool": "get_intraday_investor_flow",
-            "purpose": "foreign-flow gate (recovery_gate)",
         },
         {
             "tool": "order_proposal_create",
@@ -184,7 +174,7 @@ HARD_CONSTRAINTS: dict[str, list[str]] = {
     "bootstrap": [
         "context-load only; no order mutation in this lane",
         "recovery gate frame: recovery_gate.min_conditions_met of 4",
-        "account routing: buys prefer Toss (fee-free); KIS deposit spent down in-account",
+        "account routing: equity orders use Toss; crypto orders use Upbit",
     ],
 }
 
@@ -244,13 +234,6 @@ DIRECT_BROKER_MUTATION_TOOLS: frozenset[str] = frozenset(
         "alpaca_paper_automated_submit_order",
         "alpaca_paper_submit_order",
         "cancel_order",
-        "kis_live_cancel_order",
-        "kis_live_modify_order",
-        "kis_live_place_order",
-        "kis_mock_cancel_order",
-        "kis_mock_mirror_execute_report",
-        "kis_mock_modify_order",
-        "kis_mock_place_order",
         "kiwoom_mock_cancel_order",
         "kiwoom_mock_modify_order",
         "kiwoom_mock_place_order",
@@ -296,11 +279,9 @@ PREVIEW_REVALIDATION_TOOLS: frozenset[str] = frozenset(
 )
 
 RECONCILE_TOOLS: frozenset[str] = frozenset(
-    {
+    LIVE_RECONCILE_TOOL_NAMES
+    | {
         "alpaca_paper_reconcile_orders",
-        "kis_live_reconcile_orders",
-        "kis_mock_reconciliation_run",
-        "live_reconcile_orders",
         "paper_reconcile_orders",
         "toss_reconcile_orders",
     }
@@ -311,8 +292,6 @@ RECONCILE_TOOLS: frozenset[str] = frozenset(
 STATUS_HELPER_TOOLS: frozenset[str] = frozenset(
     {
         "get_order_history",
-        "kis_live_get_order_history",
-        "kis_mock_get_order_history",
         "kiwoom_mock_get_order_history",
         # ROB-1155: kt00007 read-only order-detail lookup. Lands in the legacy
         # MUTATION_TOOLS bucket only because KIWOOM_MOCK_TOOL_NAMES is unioned in
@@ -333,14 +312,11 @@ STATUS_HELPER_TOOLS: frozenset[str] = frozenset(
 
 _LEGACY_MUTATION_TOOLS: frozenset[str] = frozenset(
     ORDER_TOOL_NAMES
-    | ALPACA_PAPER_AUTOMATED_TOOL_NAMES
-    | KIS_LIVE_ORDER_TOOL_NAMES
-    | KIS_MOCK_ORDER_TOOL_NAMES
     | LIVE_RECONCILE_TOOL_NAMES
+    | ALPACA_PAPER_AUTOMATED_TOOL_NAMES
     | TOSS_LIVE_ORDER_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES
     | KIWOOM_MOCK_US_MUTATION_TOOL_NAMES
-    | MIRROR_COUNTERFACTUAL_TOOL_NAMES
     # ROB-908/ROB-953: Alpaca paper confirm-gated mutations — submit/cancel plus
     # alpaca_paper_reconcile_orders, which reads the broker read-only but WRITES
     # lifecycle state to review.alpaca_paper_order_ledger. Flag-
@@ -382,10 +358,8 @@ MARKET_EXECUTION_TOOLS: dict[str, frozenset[str]] = {
     "crypto": frozenset({"place_order"}),
 }
 
-# Direct placement tools used only to preserve discovery's ROB-658 fallback.
-_PLACE_ORDER_TOOLS: frozenset[str] = frozenset(
-    {"place_order", "toss_place_order", "kis_live_place_order"}
-)
+# Discovery의 직접 주문 도구 집합이다.
+_PLACE_ORDER_TOOLS: frozenset[str] = frozenset({"place_order", "toss_place_order"})
 
 # Discovery keeps its direct Toss preview precursor. Proposal-led buy/sell do
 # not expose broker previews: fresh preview/revalidation is owned internally by
@@ -393,21 +367,11 @@ _PLACE_ORDER_TOOLS: frozenset[str] = frozenset(
 # pre-proposal fill-safety step because it is explicitly sequenced in sell.
 PREVIEW_TOOLS: frozenset[str] = frozenset({"toss_preview_order"})
 
-# ROB-660 / ROB-666: per-lane allowed-only helper tools. The order-status tools
-# (kis_live_get_order_history / toss_get_order_history) are read-only in reality
-# but bucketed in MUTATION_TOOLS for registry partitioning, so build_route_plan
-# would otherwise block them even in the lane that needs them. The sell lane needs
-# them to confirm a cancel took effect and to check sell-order fill status
-# (ROB-660); the buy lane needs them to confirm a buy fill and to check KIS
-# regular-session survival after the 15:30 expiry (ROB-657 rule) so it can
-# re-place (ROB-666). They are un-blocked here (allowed) WITHOUT entering the
-# ordered sequence (confirmation helpers, not workflow steps) or the playbook YAML.
-# Parallels MARKET_EXECUTION_TOOLS (ROB-658) as an allowed supplement. A minimal
-# per-lane allowance (not a MUTATION_TOOLS -> READ_ONLY reclassification) keeps
-# discovery/bootstrap unchanged.
+# 주문 이력은 실제로 read-only지만 legacy MUTATION_TOOLS 집합에도 포함되므로
+# 제안 lane에서 조건부 조회를 허용한다.
 LANE_EXTRA_ALLOWED: dict[str, frozenset[str]] = {
-    "buy": frozenset({"kis_live_get_order_history", "toss_get_order_history"}),
-    "sell": frozenset({"kis_live_get_order_history", "toss_get_order_history"}),
+    "buy": frozenset({"toss_get_order_history"}),
+    "sell": frozenset({"toss_get_order_history"}),
 }
 
 # Registered reconcile helpers are conditional allowed helpers for proposal-led
@@ -457,18 +421,11 @@ _MARKET_EXEC_PURPOSE: dict[str, str] = {
 READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
     {
         *KIWOOM_MOCK_US_READ_TOOL_NAMES,
-        # ROB-908: Alpaca paper read surface, flag-gated in DEFAULT
-        # (settings.alpaca_paper_default_tools_enabled, default off). Covers the
-        # account/positions/orders/assets/fills + ledger reads
-        # (ALPACA_PAPER_READONLY_TOOL_NAMES), the pure-validator preview
-        # (ALPACA_PAPER_PREVIEW_TOOL_NAMES — no side effects, does not submit),
-        # and the read-only us_dual capability/state/preview trio
-        # (US_DUAL_PAPER_TOOL_NAMES, submit_enabled always False). The
-        # confirm-gated submit/cancel mutations and the DB-writing
-        # alpaca_paper_reconcile_orders live in MUTATION_TOOLS.
+        # DEFAULT에서 flag로 여는 Alpaca paper 읽기/preview surface다.
+        # confirm-gated submit/cancel mutation과 DB write reconcile은
+        # ``MUTATION_TOOLS``에서 별도로 분류한다.
         *ALPACA_PAPER_READONLY_TOOL_NAMES,
         *ALPACA_PAPER_PREVIEW_TOOL_NAMES,
-        *US_DUAL_PAPER_TOOL_NAMES,
         *MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
         *ORDER_PROPOSAL_READ_TOOLS,
         "route_request",
@@ -516,7 +473,6 @@ READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
         "get_disclosures",
         "get_dividends",
         "get_earnings_calendar",
-        "get_execution_strength",
         "get_financials",
         "get_forecast_calibration",
         "get_forecasts",
@@ -525,7 +481,6 @@ READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
         "get_holdings_news",
         "get_indicators",
         "get_insider_transactions",
-        "get_intraday_investor_flow",
         "get_investment_opinions",
         "get_investor_trends",
         "get_kimchi_premium",
@@ -592,7 +547,6 @@ READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
         "session_context_get_recent",
         "set_user_setting",
         "stage_analysis_get",
-        "suggest_order_account",
         # ROB-866: detection sweep (no broker order mutation; alert-only side effect
         # like session_context_append, which is likewise advisory-classified).
         "toss_detect_manual_activity",

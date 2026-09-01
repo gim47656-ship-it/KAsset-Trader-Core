@@ -3,9 +3,120 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+
+class PendingBuyCostUnavailableError(RuntimeError):
+    """Toss 미체결 매수 비용을 증거 기반으로 계산할 수 없는 상태."""
+
+    error_code = "pending_buy_cost_unavailable"
+
+    def __init__(self, *, market: Literal["kr", "us"], reason: str) -> None:
+        self.market = market
+        self.reason = reason
+        super().__init__(f"{self.error_code}:{market}:{reason}")
+
+
+def _evidence_decimal(
+    value: object,
+    *,
+    market: Literal["kr", "us"],
+    missing_reason: str,
+    invalid_reason: str,
+) -> Decimal:
+    if value is None:
+        raise PendingBuyCostUnavailableError(market=market, reason=missing_reason)
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PendingBuyCostUnavailableError(
+            market=market, reason=invalid_reason
+        ) from exc
+    if not parsed.is_finite():
+        raise PendingBuyCostUnavailableError(market=market, reason=invalid_reason)
+    return parsed
+
+
+def calculate_pending_toss_buy_cost(
+    orders: list[Any],
+    *,
+    market: Literal["kr", "us"],
+) -> float:
+    """합산 가능한 Toss 지정가 매수만 잔량 × 지정가로 계산한다."""
+
+    from app.services.current_orders_service import toss_order_market
+
+    total = Decimal("0")
+    for order in orders:
+        if toss_order_market(str(order.symbol)) != market:
+            continue
+        if str(order.side).strip().lower() not in {"buy", "bid", "매수"}:
+            continue
+        if str(order.order_type).strip().lower() != "limit":
+            raise PendingBuyCostUnavailableError(
+                market=market, reason="open_buy_order_is_not_limit"
+            )
+
+        execution = order.execution
+        if not isinstance(execution, dict) or "filledQuantity" not in execution:
+            raise PendingBuyCostUnavailableError(
+                market=market, reason="missing_filled_quantity"
+            )
+        quantity = _evidence_decimal(
+            order.quantity,
+            market=market,
+            missing_reason="missing_order_quantity",
+            invalid_reason="invalid_order_quantity",
+        )
+        filled = _evidence_decimal(
+            execution.get("filledQuantity"),
+            market=market,
+            missing_reason="missing_filled_quantity",
+            invalid_reason="invalid_filled_quantity",
+        )
+        limit_price = _evidence_decimal(
+            order.price,
+            market=market,
+            missing_reason="missing_limit_price",
+            invalid_reason="invalid_limit_price",
+        )
+        if quantity < 0 or filled < 0 or filled > quantity:
+            raise PendingBuyCostUnavailableError(
+                market=market, reason="inconsistent_order_quantities"
+            )
+        if limit_price <= 0:
+            raise PendingBuyCostUnavailableError(
+                market=market, reason="invalid_limit_price"
+            )
+        total += (quantity - filled) * limit_price
+    return float(total)
+
+
+async def _fetch_pending_equity_buy_cost(
+    *,
+    market: Literal["kr", "us"],
+    toss_client_factory: Callable[[], Any] | None = None,
+) -> float:
+    from app.services.current_orders_service import fetch_toss_open_orders
+
+    try:
+        if toss_client_factory is None:
+            orders = await fetch_toss_open_orders()
+        else:
+            orders = await fetch_toss_open_orders(client_factory=toss_client_factory)
+    except Exception as exc:
+        logger.warning(
+            "Toss 미체결 주문 조회 실패 (%s)", type(exc).__name__, exc_info=True
+        )
+        raise PendingBuyCostUnavailableError(
+            market=market, reason="provider_unavailable"
+        ) from exc
+    return calculate_pending_toss_buy_cost(orders, market=market)
+
 
 _BUY_PRICE_FIELDS = [
     "appropriate_buy_min",
@@ -103,50 +214,26 @@ def calculate_estimated_order_cost(
     }
 
 
-async def fetch_pending_domestic_buy_cost() -> float:
-    """미체결 국내 매수 주문 총액 조회
+async def fetch_pending_domestic_buy_cost(
+    *,
+    toss_client_factory: Callable[[], Any] | None = None,
+) -> float:
+    """Toss 국내 미체결 지정가 매수 주문의 증거 기반 잔여 금액."""
 
-    KIS API를 호출하여 국내 미체결 매수 주문의 총 금액을 반환.
-    실패 시 0.0 반환 (warning 로그).
-    """
-    from app.services.brokers.kis.client import KISClient
-
-    try:
-        kis = KISClient()
-        pending_orders = await kis.inquire_korea_orders()
-        cost = 0.0
-        for order in pending_orders:
-            if order.get("sll_buy_dvsn_cd") == "02":
-                qty = int(order.get("ord_qty", 0))
-                price = int(order.get("ord_unpr", 0))
-                cost += qty * price
-        return cost
-    except Exception as e:
-        logger.warning(f"미체결 주문 조회 실패 (계속 진행): {e}")
-        return 0.0
+    return await _fetch_pending_equity_buy_cost(
+        market="kr", toss_client_factory=toss_client_factory
+    )
 
 
-async def fetch_pending_overseas_buy_cost() -> float:
-    """미체결 해외 매수 주문 총액 조회
+async def fetch_pending_overseas_buy_cost(
+    *,
+    toss_client_factory: Callable[[], Any] | None = None,
+) -> float:
+    """Toss 해외 미체결 지정가 매수 주문의 증거 기반 잔여 금액."""
 
-    KIS API를 호출하여 해외(NASD) 미체결 매수 주문의 총 금액을 반환.
-    실패 시 0.0 반환 (warning 로그).
-    """
-    from app.services.brokers.kis.client import KISClient
-
-    try:
-        kis = KISClient()
-        pending_orders = await kis.inquire_overseas_orders(exchange_code="NASD")
-        cost = 0.0
-        for order in pending_orders:
-            if order.get("sll_buy_dvsn_cd") == "02":
-                qty = float(order.get("ft_ord_qty", 0))
-                price = float(order.get("ft_ord_unpr3", 0))
-                cost += qty * price
-        return cost
-    except Exception as e:
-        logger.warning(f"해외 미체결 주문 조회 실패 (계속 진행): {e}")
-        return 0.0
+    return await _fetch_pending_equity_buy_cost(
+        market="us", toss_client_factory=toss_client_factory
+    )
 
 
 async def fetch_pending_crypto_buy_cost() -> float:

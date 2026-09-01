@@ -202,10 +202,11 @@ class DailyCandlesRepository:
         return len(payload) if rowcount < 0 else rowcount
 
     async def upsert_us_adjusted_close(self, *, rows: list[DailyCandleRow]) -> int:
-        """Insert Yahoo rows or update only ``adj_close`` on existing US rows.
+        """Yahoo 행을 넣거나 기존 US 행의 ``adj_close``만 갱신한다.
 
-        The conflict path deliberately preserves KIS OHLCV, value, and source.
-        Yahoo OHLCV is used only when the candle does not exist yet.
+        충돌 시 기존 기본 공급자의 OHLCV·거래대금·source를 보존한다.
+        과거 KIS 행도 재해석하지 않는다. Yahoo OHLCV는 해당 캔들이 아직
+        없을 때만 사용한다.
         """
         if not rows:
             return 0
@@ -463,7 +464,7 @@ class DailyCandlesRepository:
             ON CONFLICT (time, symbol, {cfg.partition_col}) DO UPDATE
             SET {update_clause}, ingested_at = now()
             WHERE public.{cfg.table_name}.source = 'yahoo_fallback'
-               OR EXCLUDED.source = 'kis'
+               OR EXCLUDED.source IN ('toss', 'toss_index')
                OR EXCLUDED.source = public.{cfg.table_name}.source
             """
         )

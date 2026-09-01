@@ -1,16 +1,8 @@
-"""ROB-698: the final post-cutover healthcheck must NOT hard-fail on a broker WS
-outage (e.g. KIS scheduled maintenance).
+"""The final post-cutover healthcheck must not hard-fail on Upbit WS outage.
 
-`run_healthcheck_once` in scripts/deploy-native.sh runs the server healthcheck
-with AUTO_TRADER_HEALTHCHECK_SKIP_WS (default 1) — consistent with the blue-green
-cutover checks (native_deploy_lib.sh), which already skip WS — so a disconnected
-broker websocket cannot fail+rollback an otherwise-healthy deploy. The built-in
-fallback treats WS heartbeats as advisory (logged, non-fatal). api/mcp /healthz
-remain hard gates.
-
-deploy-native.sh is a top-level script (no main-guard, not sourceable in
-isolation), so this is a source-text assertion mirroring
-tests/scripts/test_native_deploy_preflight.py.
+`run_healthcheck_once` sets AUTO_TRADER_HEALTHCHECK_SKIP_WS by default, matching
+the blue-green checks. The fallback keeps the sole Upbit heartbeat advisory;
+API/MCP health remains a hard gate.
 """
 
 from __future__ import annotations
@@ -35,8 +27,8 @@ def _run_healthcheck_once_body() -> str:
 
 def test_server_healthcheck_invoked_with_skip_ws() -> None:
     body = _run_healthcheck_once_body()
-    # Primary path: $SERVER_HEALTHCHECK must run with SKIP_WS set (default 1),
-    # never as a bare invocation (which would enforce the KIS WS deploy gate).
+    # Primary path: the server healthcheck runs with SKIP_WS set by default,
+    # never as a bare invocation that makes broker connectivity a deploy gate.
     assert re.search(
         r'AUTO_TRADER_HEALTHCHECK_SKIP_WS=\S+\s+"\$SERVER_HEALTHCHECK"',
         body,
@@ -46,7 +38,7 @@ def test_server_healthcheck_invoked_with_skip_ws() -> None:
         "cannot fail+rollback an otherwise-healthy deploy"
     )
     assert not re.search(r'^\s*"\$SERVER_HEALTHCHECK"\s*$', body, re.MULTILINE), (
-        'a bare "$SERVER_HEALTHCHECK" invocation re-introduces the KIS WS deploy gate'
+        'a bare "$SERVER_HEALTHCHECK" invocation re-introduces a WS deploy gate'
     )
 
 
@@ -72,3 +64,5 @@ def test_fallback_ws_heartbeat_is_advisory_not_fatal() -> None:
         "fallback websocket_healthcheck.py must be advisory (|| echo ... >&2), not fatal (|| rc=1)"
     )
     assert not fatal, f"fallback WS heartbeat must be advisory, found fatal: {fatal}"
+    assert "heartbeat/kis" not in body
+    assert "WS(kis)" not in body

@@ -94,11 +94,10 @@ def test_run_wrapper_is_executable(wrapper: Path) -> None:
 
 
 def test_required_single_active_wrappers_present() -> None:
-    """The 4 single-active wrappers (worker/scheduler/websockets) must be in the bundle."""
+    """The remaining worker/scheduler/Upbit wrappers must be in the bundle."""
     required = {
         "run-worker.sh",
         "run-scheduler.sh",
-        "run-websocket-kis.sh",
         "run-websocket-upbit.sh",
     }
     present = {p.name for p in SCRIPTS_DIR.glob("run-*.sh")}

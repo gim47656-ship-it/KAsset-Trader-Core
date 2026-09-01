@@ -15,9 +15,9 @@ async def test_get_portfolio_allocation_handler_rolls_up_positions_cash_and_erro
         return (
             [
                 {
-                    "account": "kis",
-                    "account_name": "기본 계좌",
-                    "broker": "kis",
+                    "account": "toss",
+                    "account_name": "Toss",
+                    "broker": "toss",
                     "instrument_type": "equity_us",
                     "market": "us",
                     "symbol": "AAPL",
@@ -87,11 +87,11 @@ async def test_get_portfolio_allocation_tool_is_registered(monkeypatch) -> None:
 
     result = await mcp.tools["get_portfolio_allocation"]()
 
-    assert result == {"ok": True, "account_mode": "kis_live"}
+    assert result == {"ok": True, "account_mode": "toss_live"}
 
 
 @pytest.mark.asyncio
-async def test_get_portfolio_allocation_tool_passes_kis_mock(monkeypatch) -> None:
+async def test_get_portfolio_allocation_tool_rejects_kis_mock(monkeypatch) -> None:
     calls = []
 
     async def fake_impl(**kwargs):
@@ -101,14 +101,15 @@ async def test_get_portfolio_allocation_tool_passes_kis_mock(monkeypatch) -> Non
     monkeypatch.setattr(
         portfolio_allocation, "get_portfolio_allocation_impl", fake_impl
     )
-    monkeypatch.setattr(portfolio_allocation, "validate_kis_mock_config", lambda: [])
     mcp = DummyMCP()
     portfolio_allocation.register_portfolio_allocation_tool(mcp)
 
     result = await mcp.tools["get_portfolio_allocation"](account_mode="kis_mock")
 
+    assert result["success"] is False
+    assert result["error"] == "provider kis is not operational"
     assert result["account_mode"] == "kis_mock"
-    assert calls[0]["is_mock"] is True
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -148,9 +149,9 @@ async def test_get_portfolio_allocation_krx_etf_failure_is_degraded(
         return (
             [
                 {
-                    "account": "kis",
-                    "account_name": "기본 계좌",
-                    "broker": "kis",
+                    "account": "toss",
+                    "account_name": "Toss",
+                    "broker": "toss",
                     "instrument_type": "equity_kr",
                     "market": "kr",
                     "symbol": "360750",

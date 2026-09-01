@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-WebSocket Monitor Healthcheck Script.
+Upbit WebSocket monitor healthcheck.
 
-Checks heartbeat file for websocket monitor health status.
-Used by Docker healthcheck to determine container health.
+Checks the heartbeat file emitted by the production Upbit execution monitor.
 
 Exit codes:
   0: Healthy (heartbeat fresh, running, connected)
@@ -12,8 +11,7 @@ Exit codes:
 Environment variables:
   WS_MONITOR_HEARTBEAT_PATH: Path to heartbeat JSON file
     (default: /tmp/websocket_monitor_heartbeat.json)
-  WS_MONITOR_EXPECT_MODE: Expected mode ("upbit", "kis", or "both")
-    (default: both)
+  The production contract is fixed to mode "upbit".
   WS_MONITOR_HEARTBEAT_STALE_SECONDS: Seconds before heartbeat considered stale
     (default: 90)
 """
@@ -32,14 +30,13 @@ DEFAULT_STALE_SECONDS = 90.0
 FUTURE_SKEW_TOLERANCE_SECONDS = 1.0
 
 
-def get_config() -> tuple[str, str, float]:
+def get_config() -> tuple[str, float]:
     """Get configuration from environment variables."""
     heartbeat_path = os.environ.get("WS_MONITOR_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_PATH)
-    expect_mode = os.environ.get("WS_MONITOR_EXPECT_MODE", "both")
     stale_seconds = float(
         os.environ.get("WS_MONITOR_HEARTBEAT_STALE_SECONDS", str(DEFAULT_STALE_SECONDS))
     )
-    return heartbeat_path, expect_mode, stale_seconds
+    return heartbeat_path, stale_seconds
 
 
 def check_health() -> tuple[bool, str]:
@@ -49,7 +46,7 @@ def check_health() -> tuple[bool, str]:
     Returns:
         Tuple of (is_healthy, error_message)
     """
-    heartbeat_path, expect_mode, stale_seconds = get_config()
+    heartbeat_path, stale_seconds = get_config()
     path = Path(heartbeat_path)
 
     # Check file exists
@@ -85,21 +82,14 @@ def check_health() -> tuple[bool, str]:
     if not data["is_running"]:
         return False, "Monitor is not running (is_running=false)"
 
-    # Check mode match
+    # The deployed execution websocket contract is Upbit-only.
     actual_mode = data["mode"]
-    if expect_mode != "both" and actual_mode != expect_mode:
-        return False, f"Mode mismatch: expected={expect_mode}, actual={actual_mode}"
+    if actual_mode != "upbit":
+        return False, f"Mode mismatch: expected=upbit, actual={actual_mode}"
 
-    # Check connection status based on expected mode
-    if expect_mode in ("kis", "both"):
-        kis_connected = data.get("kis_connected", "n/a")
-        if kis_connected is not True:
-            return False, f"KIS not connected: {kis_connected}"
-
-    if expect_mode in ("upbit", "both"):
-        upbit_connected = data.get("upbit_connected", "n/a")
-        if upbit_connected is not True:
-            return False, f"Upbit not connected: {upbit_connected}"
+    upbit_connected = data.get("upbit_connected", "n/a")
+    if upbit_connected is not True:
+        return False, f"Upbit not connected: {upbit_connected}"
 
     return True, f"Healthy (mode={actual_mode}, age={age_seconds:.1f}s)"
 

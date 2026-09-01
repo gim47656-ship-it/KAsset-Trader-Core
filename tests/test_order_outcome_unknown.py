@@ -13,20 +13,20 @@ import pytest
 
 @pytest.mark.unit
 class TestReconcileToolFor:
-    def test_kr_live(self):
+    def test_kr_live_points_to_toss(self):
         from app.mcp_server.tooling.order_execution import _reconcile_tool_for
 
         assert (
             _reconcile_tool_for(market_type="equity_kr", is_mock=False)
-            == "kis_live_reconcile_orders"
+            == "toss_reconcile_orders"
         )
 
-    def test_us_live(self):
+    def test_us_live_points_to_toss(self):
         from app.mcp_server.tooling.order_execution import _reconcile_tool_for
 
         assert (
             _reconcile_tool_for(market_type="equity_us", is_mock=False)
-            == "live_reconcile_orders"
+            == "toss_reconcile_orders"
         )
 
     def test_crypto_live(self):
@@ -50,12 +50,12 @@ class TestAugmentErrorForUnknownOutcome:
         return {
             "success": False,
             "error": "ReadTimeout",
-            "source": "kis",
+            "source": "toss",
             "symbol": "005930",
             "instrument_type": "equity_kr",
         }
 
-    def test_timeout_flags_outcome_unknown_and_names_reconcile_tool(self):
+    def test_timeout_flags_outcome_unknown_and_names_toss_reconcile_tool(self):
         from app.mcp_server.tooling.order_execution import (
             OrderSendOutcomeUnknown,
             _augment_error_for_unknown_outcome,
@@ -70,15 +70,15 @@ class TestAugmentErrorForUnknownOutcome:
 
         assert result["success"] is False
         assert result["outcome_unknown"] is True
-        assert result["reconcile_tool"] == "kis_live_reconcile_orders"
+        assert result["reconcile_tool"] == "toss_reconcile_orders"
         # Non-blank, actionable reason mentioning the reconcile tool + uncertainty.
         assert result["error"].strip()
-        assert "kis_live_reconcile_orders" in result["error"]
+        assert "toss_reconcile_orders" in result["error"]
         assert "불확실" in result["error"]
         # The concrete transport reason is preserved (ROB-600: never blank).
         assert "ReadTimeout" in result["error"]
 
-    def test_us_timeout_points_at_live_reconcile(self):
+    def test_us_timeout_points_at_toss_reconcile(self):
         from app.mcp_server.tooling.order_execution import (
             OrderSendOutcomeUnknown,
             _augment_error_for_unknown_outcome,
@@ -90,8 +90,8 @@ class TestAugmentErrorForUnknownOutcome:
             market_type="equity_us",
             is_mock=False,
         )
-        assert result["reconcile_tool"] == "live_reconcile_orders"
-        assert "live_reconcile_orders" in result["error"]
+        assert result["reconcile_tool"] == "toss_reconcile_orders"
+        assert "toss_reconcile_orders" in result["error"]
 
     def test_mock_timeout_has_no_phantom_tool(self):
         from app.mcp_server.tooling.order_execution import (

@@ -8,6 +8,7 @@ from app.core.db import get_db
 from app.models.trading import InstrumentType
 from app.routers.dependencies import get_user_from_request
 from app.services.order_estimation_service import (
+    PendingBuyCostUnavailableError,
     calculate_estimated_order_cost,
     extract_buy_prices_from_analysis,
     fetch_pending_crypto_buy_cost,
@@ -109,7 +110,17 @@ async def get_domestic_estimated_costs(
         domestic_settings, analysis_service, currency="KRW"
     )
 
-    pending_buy_cost = await fetch_pending_domestic_buy_cost()
+    try:
+        pending_buy_cost = await fetch_pending_domestic_buy_cost()
+    except PendingBuyCostUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": exc.error_code,
+                "market": exc.market,
+                "reason": exc.reason,
+            },
+        ) from exc
     net_cost = max(0.0, grand_total - pending_buy_cost)
 
     return AllEstimatedCostResponse(
@@ -144,7 +155,17 @@ async def get_overseas_estimated_costs(
         overseas_settings, analysis_service, currency="USD"
     )
 
-    pending_buy_cost = await fetch_pending_overseas_buy_cost()
+    try:
+        pending_buy_cost = await fetch_pending_overseas_buy_cost()
+    except PendingBuyCostUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": exc.error_code,
+                "market": exc.market,
+                "reason": exc.reason,
+            },
+        ) from exc
     net_cost = max(0.0, grand_total - pending_buy_cost)
 
     return AllEstimatedCostResponse(
