@@ -63,10 +63,39 @@ def _table_exists(table: str) -> bool:
         return True
 
 
+def _existing_check_names(table: str, logical_name: str) -> list[str] | None:
+    """Resolve physical check names, including naming-convention truncation."""
+    try:
+        checks = sa.inspect(op.get_bind()).get_check_constraints(table, schema=_SCHEMA)
+    except sa.exc.NoInspectionAvailable:
+        return None
+
+    names: list[str] = []
+    for check in checks:
+        sqltext = str(check.get("sqltext") or "").lower()
+        if logical_name.endswith("_account_scope"):
+            matches = "account_scope" in sqltext and "execution_mode" not in sqltext
+        elif logical_name.endswith("_live_advisory_only"):
+            matches = "account_scope" in sqltext and "execution_mode" in sqltext
+        else:
+            matches = "broker" in sqltext
+        physical_name = check.get("name")
+        if matches and isinstance(physical_name, str):
+            names.append(physical_name)
+    return names
+
+
 def _replace_check(table: str, name: str, expression: str) -> None:
     if not _table_exists(table):
         return
-    op.drop_constraint(name, table, schema=_SCHEMA, type_="check")
+    physical_names = _existing_check_names(table, name)
+    if physical_names is None:
+        op.drop_constraint(name, table, schema=_SCHEMA, type_="check")
+    else:
+        for physical_name in physical_names:
+            op.drop_constraint(
+                op.f(physical_name), table, schema=_SCHEMA, type_="check"
+            )
     op.create_check_constraint(name, table, expression, schema=_SCHEMA)
 
 

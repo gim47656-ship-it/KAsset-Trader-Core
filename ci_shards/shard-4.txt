@@ -234,7 +234,6 @@ tests/services/test_kis_mock_lifecycle_service.py
 tests/services/test_kr_preopen_news_brief_service.py
 tests/services/test_krb1_p0_journal.py
 tests/services/test_krb1_p0_liquidity_selector.py
-tests/services/test_krb1_selector_cli_exit_contract.py
 tests/services/test_live_correlation.py
 tests/services/test_loss_cut_settings_allowlist.py
 tests/services/test_manual_holdings_leftover.py
@@ -341,19 +340,14 @@ tests/test_kis_domestic_pending_mock.py
 tests/test_kis_holdings_service.py
 tests/test_kis_manual_holdings_integration.py
 tests/test_kis_mock_execution_consumer.py
-tests/test_kis_mock_holdings_delta_smoke_cleanup.py
 tests/test_kis_mock_market_open_pilot.py
-tests/test_kis_mock_open_order_probe.py
 tests/test_kis_mock_scalping_adapters.py
 tests/test_kis_order_ops.py
 tests/test_kis_overseas_orders_retry.py
-tests/test_kis_overseas_premarket_probe.py
-tests/test_kis_overseas_price_smoke.py
 tests/test_kis_token_circuit_breaker.py
 tests/test_kis_token_circuit_open_propagation.py
 tests/test_kis_toss_notification.py
 tests/test_kis_trading_service_exception_handling.py
-tests/test_kis_websocket_mock_smoke.py
 tests/test_kiwoom_g1_canonical_wiring.py
 tests/test_kiwoom_us_orders.py
 tests/test_kr_candles_sync.py

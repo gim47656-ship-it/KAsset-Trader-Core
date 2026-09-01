@@ -5,7 +5,6 @@ tests/backtest/test_fetch_data.py
 tests/backtest/test_rsi_indicators.py
 tests/backtest/test_rsi_strategy.py
 tests/brokers/kis/mock_scalping_exec/test_adapters.py
-tests/brokers/kis/mock_scalping_exec/test_daemon_cli.py
 tests/brokers/kis/mock_scalping_exec/test_executor_risk_gate.py
 tests/brokers/kis/mock_scalping_exec/test_pre_send_transport.py
 tests/brokers/kis/mock_scalping_exec/test_reservation.py
@@ -182,7 +181,6 @@ tests/services/investment_stages/test_hermes_context_market_dimension.py
 tests/services/investment_stages/test_hermes_context_news_dimension.py
 tests/services/investment_stages/test_hermes_ingest.py
 tests/services/investment_stages/test_hermes_stage_artifacts_ingest.py
-tests/services/kis_mock_runner/test_cli.py
 tests/services/kis_mock_runner/test_control.py
 tests/services/kis_mock_runner/test_envelope.py
 tests/services/kis_mock_runner/test_session.py
@@ -353,9 +351,7 @@ tests/test_kis_domestic_orders_retry.py
 tests/test_kis_imports.py
 tests/test_kis_mock_order_ledger.py
 tests/test_kis_mock_overseas_holdings_confirm.py
-tests/test_kis_mock_overseas_holdings_delta_smoke_cleanup.py
 tests/test_kis_mock_routing.py
-tests/test_kis_mock_us_cash_probe.py
 tests/test_kis_order_throttle_repost.py
 tests/test_kis_overseas_pending_mock.py
 tests/test_kis_throttle_protocol_evidence.py

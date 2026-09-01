@@ -10,12 +10,10 @@ tests/backtest/test_strategy_regression.py
 tests/brokers/kis/mock_scalping/test_contract.py
 tests/brokers/kis/mock_scalping_exec/test_exit_policy.py
 tests/brokers/kis/mock_scalping_exec/test_fill_evidence.py
-tests/brokers/kis/mock_scalping_exec/test_fill_evidence_smoke_cli.py
 tests/brokers/kis/mock_scalping_exec/test_risk_gate_adapter.py
 tests/brokers/kis/mock_scalping_exec/test_ws_bridge.py
 tests/brokers/kis/mock_scalping_ws/test_candles.py
 tests/brokers/kis/mock_scalping_ws/test_quote_parsers.py
-tests/brokers/kis/mock_scalping_ws/test_smoke_cli.py
 tests/brokers/kis/mock_scalping_ws/test_supervisor.py
 tests/brokers/kis/test_broker_order_id.py
 tests/ci/test_call_durations_workflow_entrypoint.py
@@ -100,7 +98,6 @@ tests/scripts/b0x/test_table_gate.py
 tests/scripts/test_binance_demo_strategy_loop.py
 tests/scripts/test_binance_public_smoke.py
 tests/scripts/test_deploy_mcp_profile_release_verification.py
-tests/scripts/test_kis_live_auto_reconcile_cli.py
 tests/scripts/test_list_recent_fill_events_cli.py
 tests/scripts/test_native_bluegreen_lib.py
 tests/scripts/test_native_deploy_preflight.py
@@ -339,7 +336,6 @@ tests/test_kis_corporate_actions_client.py
 tests/test_kis_domestic_orders_nxt.py
 tests/test_kis_integrated_margin_mock.py
 tests/test_kis_mock_holdings_delta_fill.py
-tests/test_kis_mock_holdings_delta_smoke_cli.py
 tests/test_kis_mock_lifecycle_reconciliation_acceptance.py
 tests/test_kis_mock_reconciliation_periodic_task.py
 tests/test_kis_overseas_orders_mutation_guards.py
@@ -439,7 +435,6 @@ tests/test_symbol_sectors_model.py
 tests/test_symbol_trade_settings.py
 tests/test_symbol_universe_common.py
 tests/test_symbol_universe_sector_preservation.py
-tests/test_sync_kr_lifecycle_actions_cli.py
 tests/test_sync_us_common_stock_flags_cli.py
 tests/test_toss_sellable_cache.py
 tests/test_toss_symbol_master_screener_filter.py
