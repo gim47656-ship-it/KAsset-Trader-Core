@@ -499,7 +499,9 @@ async def test_ineligible_member_is_excluded_without_blocking_ready_peers(
                 invalid_adjustment=1,
             ),
         ],
+        cohort=_cohort("us", requested_size=2),
         sessions=sessions,
+        session_rows=_session_rows(sessions, member_count=2),
     )
 
     market = result.for_market("us")

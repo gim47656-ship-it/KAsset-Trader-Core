@@ -1160,7 +1160,7 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
 
 
 def test_forward_track_accepts_partial_eligible_cohort_but_historical_rejects() -> None:
-    readiness = _readiness(track=FORWARD_PAPER_TRACK)
+    readiness = _readiness(track=HISTORICAL_PIT_TRACK)
     kr = readiness.for_market("kr")
     partial_kr = replace(
         kr,
