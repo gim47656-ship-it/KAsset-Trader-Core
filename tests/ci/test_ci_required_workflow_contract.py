@@ -49,6 +49,7 @@ CLASSIFIER_JOB_ID = "change-classifier"
 MIGRATION_JOB_ID = "migration"
 FRONTEND_JOB_ID = "frontend"
 
+
 @pytest.fixture(scope="module")
 def workflow() -> dict[str, Any]:
     return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
@@ -183,9 +184,7 @@ def test_aggregate_authorizes_only_docs_only_child_skips(
         "needs.change-classifier.outputs.lanes == 'docs' }}"
     )
     authorized = [
-        line.split()[-1]
-        for line in script.splitlines()
-        if "--authorize-skip" in line
+        line.split()[-1] for line in script.splitlines() if "--authorize-skip" in line
     ]
     assert sorted(authorized) == sorted(AGGREGATE_CHILD_JOB_IDS)
     assert "--allow-undeclared" not in script
@@ -256,12 +255,14 @@ def test_notify_is_neutral_when_webhook_secret_is_absent(
     assert "exit 0" in script
     assert "curl --fail-with-body --silent --show-error" in script
 
+
 def test_pr_notify_is_neutral_when_webhook_secrets_are_absent() -> None:
     script = PR_NOTIFY_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "No Discord webhook configured; skipping PR notification." in script
     assert "exit 0" in script
     assert "curl --fail-with-body --silent --show-error" in script
+
 
 # --------------------------------------------------------------------------
 # Nothing else about the workflow moved

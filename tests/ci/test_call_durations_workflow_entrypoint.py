@@ -83,9 +83,7 @@ def test_missing_refresh_token_keeps_measurement_jobs_runnable(
     workflow: dict[str, Any],
 ) -> None:
     preflight = workflow["jobs"][PREFLIGHT_JOB_ID]
-    token_step = _step(
-        workflow, PREFLIGHT_JOB_ID, "Detect DURATIONS_REFRESH_TOKEN"
-    )
+    token_step = _step(workflow, PREFLIGHT_JOB_ID, "Detect DURATIONS_REFRESH_TOKEN")
     script = token_step["run"]
 
     assert preflight["outputs"]["can_open_pr"] == (
