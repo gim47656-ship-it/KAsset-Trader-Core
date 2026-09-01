@@ -168,6 +168,41 @@ async def test_source_preserves_current_partial_timezone_segment_and_value_seman
     assert row.pre_nxt is None
 
 
+@pytest.mark.asyncio
+async def test_source_rejects_only_the_unclassifiable_row() -> None:
+    client = _Client(
+        [
+            TossCandle(
+                timestamp="2026-09-01T07:59:00",
+                open_price=Decimal("100"),
+                high_price=Decimal("100"),
+                low_price=Decimal("100"),
+                close_price=Decimal("100"),
+                volume=Decimal("0"),
+                currency="KRW",
+            ),
+            TossCandle(
+                timestamp="2026-09-01T10:05:00",
+                open_price=Decimal("100"),
+                high_price=Decimal("102"),
+                low_price=Decimal("99"),
+                close_price=Decimal("101"),
+                volume=Decimal("3"),
+                currency="KRW",
+            ),
+        ]
+    )
+    source = TossMinuteCandleSource(client)
+
+    rows = await source.fetch(
+        symbol="005930",
+        retrieved_at=datetime(2026, 9, 1, 10, 6, tzinfo=KST),
+        batch_id="partial-rejection",
+    )
+
+    assert [row.time_utc for row in rows] == [datetime(2026, 9, 1, 1, 5, tzinfo=UTC)]
+
+
 @pytest.mark.parametrize(
     ("clock", "segment"),
     [

@@ -901,6 +901,14 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(
                 f"{market.market}:benchmark_source_missing"
             )
+        if market.unevidenced_session_count > 0:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:calendar_session_unevidenced"
+            )
+        if track == FORWARD_PAPER_TRACK and cohort.evidence_scope != "forward_paper":
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_not_forward_paper"
+            )
         if track != HISTORICAL_PIT_TRACK:
             continue
         if cohort.evidence_scope != "historical_pit":

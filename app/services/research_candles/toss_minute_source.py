@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -15,6 +16,7 @@ from app.services.brokers.toss.dto import TossCandle, TossCandlesPage
 
 KST = ZoneInfo("Asia/Seoul")
 TOSS_MINUTE_FETCH_COUNT = 200
+logger = logging.getLogger(__name__)
 
 
 class TossMinuteClient(Protocol):
@@ -167,12 +169,20 @@ class TossMinuteCandleSource:
         current_minute_utc = retrieved_utc.replace(second=0, microsecond=0)
         rows: dict[datetime, TossMinuteCandleRow] = {}
         for candle in page.candles:
-            row = _normalize_candle(
-                candle=candle,
-                symbol=symbol,
-                retrieved_at=retrieved_utc,
-                batch_id=batch_id,
-            )
+            try:
+                row = _normalize_candle(
+                    candle=candle,
+                    symbol=symbol,
+                    retrieved_at=retrieved_utc,
+                    batch_id=batch_id,
+                )
+            except UnclassifiableTossMinute:
+                logger.warning(
+                    "Rejected an unclassifiable Toss minute: symbol=%s timestamp=%s",
+                    symbol,
+                    candle.timestamp,
+                )
+                continue
             if row.time_utc > current_minute_utc:
                 raise UnclassifiableTossMinute(
                     f"future_minute:{symbol}:{row.time_utc.isoformat()}"

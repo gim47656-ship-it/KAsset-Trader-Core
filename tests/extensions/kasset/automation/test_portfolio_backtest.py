@@ -632,7 +632,12 @@ def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
     )
 
     with pytest.raises(PromotionEvidenceBuildError, match="benchmark_market_mismatch"):
-        derive_promotion_metrics(diagnostics, walk, _readiness())
+        derive_promotion_metrics(
+            diagnostics,
+            walk,
+            _readiness(),
+            track=HISTORICAL_PIT_TRACK,
+        )
 
 
 def _stored_evidence_payload(
@@ -1113,6 +1118,36 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
         match="cohort_not_historical_pit",
     ):
         _require_readiness(forward, track="historical_pit")
+
+
+def test_require_readiness_forward_track_rejects_the_wrong_cohort_scope() -> None:
+    readiness = _readiness()
+
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="kr:cohort_not_forward_paper",
+    ):
+        _require_readiness(readiness, track="forward_paper")
+
+
+def test_require_readiness_rejects_a_whole_market_unevidenced_session() -> None:
+    readiness = _readiness()
+    kr = readiness.for_market("kr")
+    unevidenced = replace(
+        kr,
+        unevidenced_session_count=1,
+        unevidenced_sessions=(date(2026, 8, 31),),
+    )
+    tampered = replace(
+        readiness,
+        markets=(unevidenced, readiness.for_market("us")),
+    )
+
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="kr:calendar_session_unevidenced",
+    ):
+        _require_readiness(tampered, track="historical_pit")
 
 
 def test_require_readiness_rejects_an_unknown_track() -> None:
