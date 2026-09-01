@@ -16,8 +16,10 @@ from app.extensions.kasset.automation.contracts import (
     ExternalEvidence,
     RecommendationDraft,
     RecommendationPersistence,
+    StrategyFamily,
     StrategyName,
     StrategyResult,
+    strategies_in_family,
     utc_datetime,
 )
 
@@ -187,6 +189,7 @@ def external_evidence_from_mapping(
 
 @dataclass(frozen=True, slots=True)
 class WeightedEnsembleDecision:
+    family: StrategyFamily
     action: Action
     score: Decimal
     confidence: Decimal
@@ -194,15 +197,28 @@ class WeightedEnsembleDecision:
     votes: tuple[Mapping[str, object], ...]
 
 
+#: 전략군 가중합이 방향을 주장하기 위한 최소 절대 점수.
+_ENSEMBLE_DIRECTION_FLOOR = Decimal("0.25")
+
+
 def compose_weighted_ensemble(
     strategy_results: Sequence[StrategyResult],
     weights: Mapping[StrategyName, Decimal],
+    *,
+    family: StrategyFamily,
 ) -> WeightedEnsembleDecision:
-    """Combine all four existing strategies without reimplementing any signal."""
+    """Combine exactly one strategy family's existing signals.
 
+    ``family`` 밖의 전략 결과는 표도, 가중치도, 점수도 받지 못한다. 방향은
+    전략군 가중합 부호와 ``_ENSEMBLE_DIRECTION_FLOOR``만으로 정하며 "N개 중
+    2개 동의" 같은 일반 정족수는 쓰지 않는다. 진입 여부는 이 방향이 아니라
+    Daily Setup 적합과 장중 trigger 정책이 판정한다.
+    """
+
+    members = strategies_in_family(family)
     normalized: dict[StrategyName, Decimal] = {}
     total = Decimal("0")
-    for name in StrategyName:
+    for name in members:
         raw = weights.get(name, Decimal("0"))
         value = raw if isinstance(raw, Decimal) else Decimal(str(raw))
         if not value.is_finite() or value < 0:
@@ -216,7 +232,7 @@ def compose_weighted_ensemble(
     by_name = {result.strategy: result for result in strategy_results}
     score = Decimal("0")
     votes: list[Mapping[str, object]] = []
-    for name in StrategyName:
+    for name in members:
         result = by_name.get(name)
         if result is None:
             continue
@@ -230,28 +246,33 @@ def compose_weighted_ensemble(
         votes.append(
             {
                 "strategy": name.name,
+                "family": family.value,
                 "vote": result.action.value,
                 "weight": str(normalized[name].quantize(Decimal("0.000001"))),
                 "score": str(contribution.quantize(Decimal("0.000001"))),
             }
         )
 
-    buy_results = tuple(
-        result for result in strategy_results if result.action == Action.BUY
-    )
-    sell_results = tuple(
-        result for result in strategy_results if result.action == Action.SELL
+    member_results = tuple(
+        result for result in strategy_results if result.strategy in normalized
     )
     action = Action.HOLD
     agreeing: tuple[StrategyResult, ...] = ()
-    if score >= Decimal("0.25") and len(buy_results) >= 2:
-        action, agreeing = Action.BUY, buy_results
-    elif score <= Decimal("-0.25") and len(sell_results) >= 2:
-        action, agreeing = Action.SELL, sell_results
+    if score >= _ENSEMBLE_DIRECTION_FLOOR:
+        action = Action.BUY
+    elif score <= -_ENSEMBLE_DIRECTION_FLOOR:
+        action = Action.SELL
+    if action is not Action.HOLD:
+        agreeing = tuple(result for result in member_results if result.action == action)
+        if not agreeing:
+            # 가중합만 임계를 넘고 같은 방향 표가 하나도 없으면 진입가와
+            # 손절선을 만들 근거가 없다. 조용히 방향을 주장하지 않는다.
+            action = Action.HOLD
     confidence = (
         min(Decimal("1"), abs(score)) if action != Action.HOLD else Decimal("0")
     )
     return WeightedEnsembleDecision(
+        family=family,
         action=action,
         score=score.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN),
         confidence=confidence.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN),
@@ -281,19 +302,21 @@ class RecommendationProducer:
         symbol: str,
         market: str,
         strategy_results: Sequence[StrategyResult],
-        external_evidence: ExternalEvidence | Mapping[str, object],
+        decision_evidence: ExternalEvidence | Mapping[str, object],
         suggested_quantity: Decimal | str | None,
         now: datetime,
         name: str | None = None,
         regime: str = "RANGING",
         regime_detail: str = "",
         strategy_weights: Mapping[StrategyName, Decimal] | None = None,
+        strategy_family: StrategyFamily = StrategyFamily.BREAKOUT,
         event_evidence: Sequence[Mapping[str, object]] = (),
         ranking: Mapping[str, object] | None = None,
         portfolio: Mapping[str, object] | None = None,
         hard_risk: Mapping[str, object] | None = None,
         strategy_promotion: Mapping[str, object] | None = None,
         ai_shadow_evidence: Mapping[str, object] | None = None,
+        advisory_evidence: Sequence[Mapping[str, object]] = (),
     ) -> object:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
         normalized_symbol = symbol.strip().upper()
@@ -307,13 +330,13 @@ class RecommendationProducer:
         if normalized_name == normalized_symbol:
             normalized_name = None
 
-        external = (
-            external_evidence
-            if isinstance(external_evidence, ExternalEvidence)
-            else external_evidence_from_mapping(external_evidence, now=current)
+        decision = (
+            decision_evidence
+            if isinstance(decision_evidence, ExternalEvidence)
+            else external_evidence_from_mapping(decision_evidence, now=current)
         )
-        external = self._validated_external(
-            external,
+        decision = self._validated_external(
+            decision,
             now=current,
             symbol=normalized_symbol,
             market=normalized_market,
@@ -358,21 +381,27 @@ class RecommendationProducer:
             )
         strategy_input_valid = not rejected_reasons
         weights = strategy_weights or {name: Decimal("0.25") for name in StrategyName}
-        ensemble = compose_weighted_ensemble(tuple(valid_results.values()), weights)
+        ensemble = compose_weighted_ensemble(
+            tuple(valid_results.values()),
+            weights,
+            family=strategy_family,
+        )
         candidate = ensemble.action if strategy_input_valid else Action.HOLD
         agreeing = ensemble.agreeing if strategy_input_valid else ()
 
+        # ``decision``은 기술 판정(완료 일봉 Daily Setup + 장중 trigger)이다.
+        # AI 검토와 뉴스는 ``advisory_evidence``로만 붙고 이 관문에 참여하지
+        # 않으므로, AI 실패나 불일치가 여기서 action을 바꾸지 못한다.
         confidence = Decimal("0")
-        if candidate != Action.HOLD and external.action == candidate:
-            confidence = min(ensemble.confidence, external.confidence)
-            if confidence < Decimal("0.50"):
-                rejected_reasons.append("combined confidence is below the action floor")
-                candidate = Action.HOLD
-                confidence = Decimal("0")
+        if candidate != Action.HOLD and decision.action == candidate:
+            # Daily Setup과 intraday trigger를 통과한 기술 판정이 action의 관문이다.
+            # confidence는 근거 강도이지 별도의 숨은 허용/차단 기준이 아니다.
+            confidence = min(ensemble.confidence, decision.confidence)
         else:
-            if candidate != Action.HOLD and external.action != candidate:
+            if candidate != Action.HOLD and decision.action != candidate:
                 rejected_reasons.append(
-                    "external evidence does not confirm strategy quorum"
+                    "technical decision evidence does not confirm the "
+                    f"{ensemble.family.value} family direction"
                 )
             candidate = Action.HOLD
 
@@ -391,7 +420,7 @@ class RecommendationProducer:
             (result.valid_until.astimezone(UTC) for result in valid_results.values()),
             default=current,
         )
-        valid_until = min(strategy_valid_until, external.valid_until.astimezone(UTC))
+        valid_until = min(strategy_valid_until, decision.valid_until.astimezone(UTC))
         if valid_until <= current:
             candidate = Action.HOLD
             confidence = Decimal("0")
@@ -452,31 +481,24 @@ class RecommendationProducer:
                 "artifactFingerprint": artifact_fingerprint,
             }
 
+        # ai_shadow는 관측 기록이므로 기술 판정과 일치해야 할 이유가 없다.
+        # 예전에는 여기서 AI action/confidence를 기술 판정과 강제 일치시켰고,
+        # 그것이 AI를 사실상 PAPER 관문으로 만들었다. 이제는 형식만 검증한다.
         normalized_ai_shadow = (
             validate_selected_ai_shadow_evidence(ai_shadow_evidence)
             if ai_shadow_evidence is not None
             else None
         )
-        if normalized_ai_shadow is not None:
-            shadow_response = cast(
-                dict[str, object],
-                normalized_ai_shadow["validatedResponse"],
-            )
-            if (
-                shadow_response["action"] != external.action.value
-                or Decimal(cast(str, normalized_ai_shadow["confidence"]))
-                != external.confidence
-            ):
-                raise ValueError(
-                    "ai_shadow evidence must match the validated external action "
-                    "and confidence"
-                )
+
+        normalized_advisory = tuple(
+            self._validated_advisory(item) for item in advisory_evidence
+        )
 
         rationale = [
             _korean_vote_rationale(valid_results),
             (
-                f"외부 분석 의견은 {_ACTION_LABELS[external.action]}이며 "
-                f"신뢰도는 {external.confidence}입니다."
+                f"기술 판정 의견은 {_ACTION_LABELS[decision.action]}이며 "
+                f"신뢰도는 {decision.confidence}입니다."
             ),
         ]
         vote_by_strategy = {str(vote["strategy"]): vote for vote in ensemble.votes}
@@ -513,13 +535,16 @@ class RecommendationProducer:
         evidence.append(
             {
                 "title": "AI trading vertical-slice review evidence",
-                "source": external.source,
+                "source": decision.source,
                 "kind": "ai_vertical_slice",
                 "regime": regime,
                 "regimeDetail": regime_detail,
+                "strategyFamily": ensemble.family.value,
                 "strategyVotes": list(ensemble.votes),
-                "aiRationale": list(external.rationale),
-                "aiEvidence": [dict(item) for item in external.evidence],
+                # 앱이 이미 읽는 키다. 이제 여기 담기는 것은 AI 의견이 아니라
+                # 기술 판정 근거이며, AI 의견은 kind="ai_review" 근거로 따로 붙는다.
+                "aiRationale": list(decision.rationale),
+                "aiEvidence": [dict(item) for item in decision.evidence],
                 "eventEvidence": [dict(item) for item in event_evidence],
                 "entryPrice": str(reference_price)
                 if reference_price is not None
@@ -549,6 +574,7 @@ class RecommendationProducer:
                 "hardRisk": normalized_hard_risk,
             }
         )
+        evidence.extend(normalized_advisory)
         if normalized_ai_shadow is not None:
             evidence.append(normalized_ai_shadow)
         if normalized_strategy_promotion is not None:
@@ -580,6 +606,24 @@ class RecommendationProducer:
             owner_user_id=self._owner_user_id,
             draft=draft,
         )
+
+    @staticmethod
+    def _validated_advisory(item: Mapping[str, object]) -> Mapping[str, object]:
+        """Accept one non-gating evidence block without letting it decide.
+
+        AI 검토, 뉴스/공시 shadow, 비교 코호트는 모두 이 경로로만 들어온다.
+        형식이 깨진 근거는 조용히 버리지 않고 즉시 실패시켜 감사 원장에
+        정체불명 항목이 남지 않게 한다.
+        """
+
+        if not isinstance(item, Mapping):
+            raise ValueError("advisory_evidence entries must be mappings")
+        kind = item.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError("advisory_evidence entries require a non-empty kind")
+        if kind in {"ai_vertical_slice", "strategy", "ai_shadow", "strategy_promotion"}:
+            raise ValueError(f"advisory_evidence cannot reuse the {kind} kind")
+        return dict(item)
 
     @staticmethod
     def _validated_external(

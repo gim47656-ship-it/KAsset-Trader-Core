@@ -26,6 +26,7 @@ from app.extensions.kasset.automation.contracts import (
     Action,
     DeterministicStrategy,
     PriceBar,
+    StrategyFamily,
     StrategyResult,
     utc_datetime,
 )
@@ -1188,7 +1189,13 @@ def _evaluate_ensemble(
         )
         for strategy in strategies
     )
-    return compose_weighted_ensemble(results, regime.weights)
+    # 런타임 Daily Setup과 같은 전략군만 투표한다. Mean Reversion이 섞이면
+    # 승격 근거가 실제 진입 로직과 다른 신호를 재현하게 된다.
+    return compose_weighted_ensemble(
+        results,
+        regime.weights,
+        family=StrategyFamily.BREAKOUT,
+    )
 
 
 def _queue_entries(

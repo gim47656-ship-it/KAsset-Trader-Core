@@ -14,6 +14,7 @@ from app.extensions.kasset.automation import (
     StrategyResult,
 )
 from app.extensions.kasset.automation.ai_shadow import AI_SHADOW_SCHEMA_VERSION
+from app.extensions.kasset.automation.contracts import StrategyFamily
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
@@ -56,7 +57,7 @@ def _strategy_quorum() -> list[StrategyResult]:
     ]
 
 
-def _external(action: str = "buy") -> dict[str, object]:
+def _decision_evidence(action: str = "buy") -> dict[str, object]:
     return {
         "symbol": "AAPL",
         "market_type": "equity_us",
@@ -83,15 +84,15 @@ def _ai_shadow() -> dict[str, object]:
         "tier": "terra",
         "modelId": "configured-terra-model",
         "validatedResponse": {
-            "action": "BUY",
-            "risk": "LOW",
-            "bullishScore": 88,
-            "bearishScore": 12,
-            "rationaleTags": ["confirmed"],
+            "action": "HOLD",
+            "risk": "MEDIUM",
+            "bullishScore": 45,
+            "bearishScore": 55,
+            "rationaleTags": ["breakout_not_confirmed"],
         },
-        "confidence": "0.75",
+        "confidence": "0.10",
         "selected": True,
-        "selectionReason": "ranked_final_selection_after_strategy_ai_agreement",
+        "selectionReason": "ranked_final_selection_after_technical_gate",
         "observedAt": "2026-08-27T12:00:00Z",
     }
 
@@ -111,10 +112,18 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
         market="us",
         name="Apple Inc.",
         strategy_results=_strategy_quorum(),
-        external_evidence=_external(),
+        decision_evidence=_decision_evidence(),
         suggested_quantity="2",
         now=_NOW,
         ai_shadow_evidence=_ai_shadow(),
+        advisory_evidence=(
+            {
+                "kind": "ai_review",
+                "gating": False,
+                "status": "unavailable",
+                "failureReason": "provider_unavailable",
+            },
+        ),
     )
 
     assert persisted["id"] == "rec-1"  # type: ignore[index]
@@ -126,12 +135,12 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
     assert draft.suggested_quantity == Decimal("2")  # type: ignore[attr-defined]
     assert draft.reference_price == Decimal("100")  # type: ignore[attr-defined]
     assert draft.source == "kasset-automation"  # type: ignore[attr-defined]
-    assert len(draft.evidence) == 6  # type: ignore[attr-defined]
+    assert len(draft.evidence) == 7  # type: ignore[attr-defined]
     assert draft.name == "Apple Inc."  # type: ignore[attr-defined]
     assert draft.headline == "Apple Inc. 매수 검토 의견"  # type: ignore[attr-defined]
     assert draft.rationale == (  # type: ignore[attr-defined]
         "전략 투표 결과는 모멘텀=매수, 평균회귀=관망, 돌파=매수, 변동성추세=매수입니다.",
-        "외부 분석 의견은 매수이며 신뢰도는 0.75입니다.",
+        "기술 판정 의견은 매수이며 신뢰도는 0.75입니다.",
     )
     assert "Deterministic strategy votes" not in " ".join(  # type: ignore[attr-defined]
         draft.rationale
@@ -146,33 +155,38 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
         for item in draft.evidence  # type: ignore[attr-defined]
         if item["kind"] == "ai_vertical_slice"
     )
+    assert detail["strategyFamily"] == StrategyFamily.BREAKOUT.value
     assert detail["strategyVotes"] == [
         {
             "strategy": "MOMENTUM",
+            "family": StrategyFamily.BREAKOUT.value,
             "vote": "BUY",
-            "weight": "0.250000",
-            "score": "0.200000",
-        },
-        {
-            "strategy": "MEAN_REVERSION",
-            "vote": "HOLD",
-            "weight": "0.250000",
-            "score": "0.000000",
+            "weight": "0.333333",
+            "score": "0.266667",
         },
         {
             "strategy": "BREAKOUT",
+            "family": StrategyFamily.BREAKOUT.value,
             "vote": "BUY",
-            "weight": "0.250000",
-            "score": "0.200000",
+            "weight": "0.333333",
+            "score": "0.266667",
         },
         {
             "strategy": "VOLATILITY_TREND",
+            "family": StrategyFamily.BREAKOUT.value,
             "vote": "BUY",
-            "weight": "0.250000",
-            "score": "0.200000",
+            "weight": "0.333333",
+            "score": "0.266667",
         },
     ]
     assert detail["aiRationale"] == ["Deterministic upstream indicators agree."]
+    advisory = next(
+        item
+        for item in draft.evidence  # type: ignore[attr-defined]
+        if item["kind"] == "ai_review"
+    )
+    assert advisory["gating"] is False
+    assert advisory["status"] == "unavailable"
     shadow = next(
         item
         for item in draft.evidence  # type: ignore[attr-defined]
@@ -204,7 +218,7 @@ async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum(),
-        external_evidence=_external(),
+        decision_evidence=_decision_evidence(),
         suggested_quantity="2",
         now=_NOW,
         hard_risk=hard_risk,
@@ -221,7 +235,7 @@ async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_contradiction_fails_closed_to_hold() -> None:
+async def test_technical_decision_contradiction_fails_closed_to_hold() -> None:
     persistence = RecordingPersistence()
     producer = RecommendationProducer(
         owner_user_id="user-a",
@@ -232,7 +246,7 @@ async def test_external_contradiction_fails_closed_to_hold() -> None:
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum(),
-        external_evidence=_external("sell"),
+        decision_evidence=_decision_evidence("sell"),
         suggested_quantity="2",
         now=_NOW,
     )
@@ -240,8 +254,9 @@ async def test_external_contradiction_fails_closed_to_hold() -> None:
     draft = persistence.calls[0][1]
     assert draft.action == Action.HOLD  # type: ignore[attr-defined]
     assert draft.suggested_quantity is None  # type: ignore[attr-defined]
-    assert "external evidence does not confirm" in " ".join(  # type: ignore[attr-defined]
-        draft.risks
+    assert (
+        "technical decision evidence does not confirm the breakout family direction"
+        in draft.risks  # type: ignore[attr-defined]
     )
 
 
@@ -257,7 +272,7 @@ async def test_missing_strategy_cannot_create_actionable_recommendation() -> Non
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum()[:-1],
-        external_evidence=_external(),
+        decision_evidence=_decision_evidence(),
         suggested_quantity="2",
         now=_NOW,
     )
@@ -268,20 +283,20 @@ async def test_missing_strategy_cannot_create_actionable_recommendation() -> Non
 
 
 @pytest.mark.asyncio
-async def test_future_external_evidence_cannot_confirm_a_trade() -> None:
+async def test_future_decision_evidence_cannot_confirm_a_trade() -> None:
     persistence = RecordingPersistence()
     producer = RecommendationProducer(
         owner_user_id="user-a",
         persistence=persistence,
     )
-    external = _external()
-    external["derived_as_of"] = (_NOW + timedelta(minutes=1)).isoformat()
+    decision = _decision_evidence()
+    decision["derived_as_of"] = (_NOW + timedelta(minutes=1)).isoformat()
 
     await producer.produce(
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum(),
-        external_evidence=external,
+        decision_evidence=decision,
         suggested_quantity="2",
         now=_NOW,
     )
@@ -292,20 +307,20 @@ async def test_future_external_evidence_cannot_confirm_a_trade() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_evidence_for_another_symbol_fails_closed() -> None:
+async def test_decision_evidence_for_another_symbol_fails_closed() -> None:
     persistence = RecordingPersistence()
     producer = RecommendationProducer(
         owner_user_id="user-a",
         persistence=persistence,
     )
-    external = _external()
-    external["symbol"] = "MSFT"
+    decision = _decision_evidence()
+    decision["symbol"] = "MSFT"
 
     await producer.produce(
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum(),
-        external_evidence=external,
+        decision_evidence=decision,
         suggested_quantity="2",
         now=_NOW,
     )
@@ -316,7 +331,7 @@ async def test_external_evidence_for_another_symbol_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_injected_external_evidence_uses_the_same_deterministic_boundary() -> (
+async def test_injected_decision_evidence_uses_the_same_deterministic_boundary() -> (
     None
 ):
     persistence = RecordingPersistence()
@@ -324,7 +339,7 @@ async def test_injected_external_evidence_uses_the_same_deterministic_boundary()
         owner_user_id="user-a",
         persistence=persistence,
     )
-    external = ExternalEvidence(
+    decision = ExternalEvidence(
         source="injected-test-analysis",
         symbol="AAPL",
         market="US",
@@ -339,7 +354,7 @@ async def test_injected_external_evidence_uses_the_same_deterministic_boundary()
         symbol="AAPL",
         market="US",
         strategy_results=_strategy_quorum(),
-        external_evidence=external,
+        decision_evidence=decision,
         suggested_quantity="2",
         now=_NOW,
     )

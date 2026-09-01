@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 AI_SHADOW_SCHEMA_VERSION = "kasset.ai-shadow.v1"
 PERSISTED_FINAL_SELECTIONS_ONLY = "persisted final selections only"
-AI_SHADOW_SELECTION_REASON = "ranked_final_selection_after_strategy_ai_agreement"
+#: AI가 아니라 기술 판정이 이 행을 최종 선택했다는 사실을 남기는 사유 코드.
+AI_SHADOW_SELECTION_REASON = "ranked_final_selection_after_technical_gate"
 
 
 class _ValidatedResponse(BaseModel):

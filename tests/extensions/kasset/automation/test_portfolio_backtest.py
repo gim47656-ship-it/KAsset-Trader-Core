@@ -38,6 +38,7 @@ from app.extensions.kasset.automation.strategy_artifact import (
 )
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
+    PromotionMetrics,
 )
 from app.services.daily_candles.readiness import (
     BenchmarkCoverage,
@@ -577,6 +578,8 @@ def _thresholds() -> dict[str, object]:
         "minWinRate": str(value.min_win_rate),
         "minExpectancy": str(value.min_expectancy),
         "minExcessReturn": str(value.min_excess_return),
+        "minProfitFactor": str(value.min_profit_factor),
+        "minCostStressedTotalReturn": str(value.min_cost_stressed_total_return),
         "minTradeCount": value.min_trade_count,
         "minWalkForwardFolds": value.min_walk_forward_folds,
         "minWalkForwardPassRate": str(value.min_walk_forward_pass_rate),
@@ -615,7 +618,7 @@ def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
         derive_promotion_metrics(diagnostics, walk, _readiness())
 
 
-def _stored_evidence_payload() -> tuple[dict[str, object], object]:
+def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
     bars = _bars(count=330)
     kr_bars = _bars(count=330, scale=Decimal("10"))
     candidate = _candidate()
@@ -734,6 +737,41 @@ def _stored_evidence_payload() -> tuple[dict[str, object], object]:
 
 def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     raw, expected = _stored_evidence_payload()
+    diagnostics = raw["portfolioDiagnostics"]
+    stored = raw["derivedPromotionMetrics"]
+    thresholds = raw["promotionThresholds"]
+    assert isinstance(diagnostics, dict)
+    assert isinstance(stored, dict)
+    assert isinstance(thresholds, dict)
+    baseline = diagnostics["baseline"]
+    cost_stress = diagnostics["costStress"]
+    assert isinstance(baseline, dict)
+    assert isinstance(cost_stress, list)
+
+    assert Decimal(str(stored["grossProfit"])) == Decimal(str(baseline["grossProfit"]))
+    assert Decimal(str(stored["grossLoss"])) == Decimal(str(baseline["grossLoss"]))
+    expected_profit_factor = expected.profit_factor
+    stored_profit_factor = stored["profitFactor"]
+    assert (
+        Decimal(str(stored_profit_factor)) == expected_profit_factor
+        if expected_profit_factor is not None
+        else stored_profit_factor is None
+    )
+    expected_total_costs = Decimal(str(baseline["feesPaid"])) + Decimal(
+        str(baseline["slippageCost"])
+    )
+    assert Decimal(str(stored["totalCosts"])) == expected_total_costs
+    cost_stressed_returns: list[Decimal] = []
+    for item in cost_stress:
+        assert isinstance(item, dict)
+        cost_stressed_returns.append(Decimal(str(item["totalReturn"])))
+    assert Decimal(str(stored["costStressedTotalReturn"])) == min(cost_stressed_returns)
+    assert thresholds["minProfitFactor"] == str(
+        DEFAULT_PROMOTION_THRESHOLDS.min_profit_factor
+    )
+    assert thresholds["minCostStressedTotalReturn"] == str(
+        DEFAULT_PROMOTION_THRESHOLDS.min_cost_stressed_total_return
+    )
 
     derived = derive_metrics_from_stored_payload(raw)
 
@@ -751,6 +789,9 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
         (("data", "cohorts", "us", "evidenceScope"), "forward_paper"),
         (("benchmarks", "us", "status"), "unavailable"),
         (("portfolioDiagnostics", "baseline", "benchmarkMarkets"), ["KR"]),
+        (("portfolioDiagnostics", "baseline", "grossProfit"), None),
+        (("portfolioDiagnostics", "baseline", "grossLoss"), None),
+        (("portfolioDiagnostics", "baseline", "feesPaid"), None),
         (("benchmarks", "us", "fallbackOnly"), True),
         (("strategy", "sourceCommit"), "not-a-commit"),
         (("data", "selectedUniverse"), []),

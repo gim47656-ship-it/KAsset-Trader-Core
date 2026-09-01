@@ -126,6 +126,10 @@ def _metrics_from_snapshot(raw: object) -> PromotionMetrics | None:
         win_rate=str(raw["winRate"]),
         expectancy=str(raw["expectancy"]),
         excess_return=str(raw["excessReturn"]),
+        gross_profit=str(raw["grossProfit"]),
+        gross_loss=str(raw["grossLoss"]),
+        cost_stressed_total_return=str(raw["costStressedTotalReturn"]),
+        total_costs=str(raw["totalCosts"]),
         trade_count=raw["tradeCount"],  # type: ignore[arg-type]
         walk_forward_folds=raw["walkForwardFolds"],  # type: ignore[arg-type]
         walk_forward_passed_folds=raw["walkForwardPassedFolds"],  # type: ignore[arg-type]

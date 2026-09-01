@@ -73,7 +73,12 @@ class _StrategyBase:
     name: StrategyName
     version = "1.0.0"
     minimum_bars: int
-    validity = timedelta(days=1)
+    #: 완료 일봉으로 만든 판단이 유효한 창. 이 판단은 "직전 완료 세션의 종가로
+    #: 본 상태"이고 실제 진입은 다음 정규장에서 일어난다. 1일이면 다음 세션이
+    #: 열리기 전에 만료돼 진행 중인 부분 일봉을 쓰지 않는 한 어떤 setup도 살아
+    #: 남지 못한다. 주말·연휴를 건너 다음 거래일까지 덮되, 그 이상 오래된 일봉은
+    #: ranker의 ``maximum_bar_age``와 추천 ``valid_until``이 따로 잘라낸다.
+    validity = timedelta(days=4)
 
     def evaluate(
         self,

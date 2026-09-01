@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from app.extensions.kasset.automation.contracts import Action, PriceBar
+from app.extensions.kasset.automation.intraday_triggers import (
+    DEFAULT_INTRADAY_TRIGGER_POLICY,
+    INDEX_INTRADAY_UNAVAILABLE,
+    INTRADAY_RELATIVE_STRENGTH,
+    OPENING_RANGE_BREAKOUT,
+    RELATIVE_VOLUME_5M,
+    RELATIVE_VOLUME_20M,
+    SESSION_VWAP_RECLAIM,
+    IntradayTriggerPolicy,
+    TriggerDecisionStatus,
+    TriggerResult,
+    TriggerStatus,
+    decide_intraday_triggers,
+    intraday_relative_strength,
+    opening_range_breakout,
+    relative_volume,
+    session_vwap,
+    session_vwap_reclaim,
+)
+
+_OPEN = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+_INTERVAL = timedelta(minutes=5)
+_OPENING_RANGE = timedelta(minutes=15)
+
+
+def _bar(
+    index: int,
+    *,
+    open_price: str,
+    high: str,
+    low: str,
+    close: str,
+    volume: str,
+) -> PriceBar:
+    return PriceBar(
+        timestamp=_OPEN + _INTERVAL * index,
+        open=Decimal(open_price),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(close),
+        volume=Decimal(volume),
+    )
+
+
+def _flat(index: int, price: str = "101", volume: str = "1000") -> PriceBar:
+    return _bar(
+        index,
+        open_price=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=volume,
+    )
+
+
+def _long_session() -> list[PriceBar]:
+    """개장 3봉으로 100~102 구간을 만들고 마지막 봉이 위로 확장하는 세션."""
+
+    bars = [
+        _bar(0, open_price="100", high="102", low="99", close="100", volume="1000"),
+        _bar(1, open_price="100", high="102", low="100", close="101", volume="1000"),
+        _bar(2, open_price="101", high="102", low="100", close="101", volume="1000"),
+    ]
+    bars.extend(_flat(index) for index in range(3, 15))
+    bars.append(
+        _bar(15, open_price="101", high="106", low="101", close="105", volume="5000")
+    )
+    return bars
+
+
+def _short_session() -> list[PriceBar]:
+    """같은 구조를 아래 방향으로 뒤집은 세션."""
+
+    bars = [
+        _bar(0, open_price="102", high="103", low="100", close="102", volume="1000"),
+        _bar(1, open_price="102", high="102", low="100", close="101", volume="1000"),
+        _bar(2, open_price="101", high="102", low="100", close="101", volume="1000"),
+    ]
+    bars.extend(_flat(index) for index in range(3, 15))
+    bars.append(
+        _bar(15, open_price="101", high="101", low="95", close="96", volume="5000")
+    )
+    return bars
+
+
+def _triggers(bars: list[PriceBar], direction: Action) -> list[TriggerResult]:
+    return [
+        opening_range_breakout(
+            bars,
+            direction=direction,
+            session_open=_OPEN,
+            opening_range=_OPENING_RANGE,
+            bar_interval=_INTERVAL,
+            source="toss",
+        ),
+        session_vwap_reclaim(
+            bars,
+            direction=direction,
+            bar_interval=_INTERVAL,
+            source="toss",
+        ),
+        relative_volume(
+            bars,
+            code=RELATIVE_VOLUME_5M,
+            window_bars=1,
+            baseline_bars=12,
+            threshold=Decimal("1.5"),
+            bar_interval=_INTERVAL,
+            source="toss",
+        ),
+        relative_volume(
+            bars,
+            code=RELATIVE_VOLUME_20M,
+            window_bars=4,
+            baseline_bars=12,
+            threshold=Decimal("1.5"),
+            bar_interval=_INTERVAL,
+            source="toss",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("direction", "bars"),
+    [(Action.BUY, _long_session()), (Action.SELL, _short_session())],
+)
+def test_opening_range_breakout_is_symmetric(
+    direction: Action, bars: list[PriceBar]
+) -> None:
+    result = opening_range_breakout(
+        bars,
+        direction=direction,
+        session_open=_OPEN,
+        opening_range=_OPENING_RANGE,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.code == OPENING_RANGE_BREAKOUT
+    # 관측값·임계값·출처·as_of가 모두 근거로 남아야 한다.
+    assert result.value is not None
+    assert result.threshold is not None
+    assert result.source == "toss"
+    assert result.as_of == bars[-1].timestamp + _INTERVAL
+
+
+def test_opening_range_breakout_needs_a_completed_bar_after_the_range() -> None:
+    bars = [
+        _bar(0, open_price="100", high="102", low="99", close="100", volume="1000"),
+        _bar(1, open_price="100", high="102", low="100", close="101", volume="1000"),
+        _bar(2, open_price="101", high="102", low="100", close="101", volume="1000"),
+    ]
+
+    result = opening_range_breakout(
+        bars,
+        direction=Action.BUY,
+        session_open=_OPEN,
+        opening_range=_OPENING_RANGE,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is TriggerStatus.UNAVAILABLE
+    assert result.unavailable_reason == "no_completed_bar_after_opening_range"
+
+
+def test_session_vwap_resets_and_is_volume_weighted() -> None:
+    bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="200", high="200", low="200", close="200", volume="3"),
+    ]
+
+    curve = session_vwap(bars)
+
+    assert curve[0] == Decimal("100")
+    assert curve[1] == Decimal("175")
+
+
+@pytest.mark.parametrize(
+    ("direction", "bars"),
+    [(Action.BUY, _long_session()), (Action.SELL, _short_session())],
+)
+def test_session_vwap_trigger_is_symmetric(
+    direction: Action, bars: list[PriceBar]
+) -> None:
+    result = session_vwap_reclaim(
+        bars,
+        direction=direction,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.code == SESSION_VWAP_RECLAIM
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.threshold is not None
+
+
+def test_relative_volume_needs_completed_window_and_baseline() -> None:
+    result = relative_volume(
+        [_flat(index) for index in range(4)],
+        code=RELATIVE_VOLUME_20M,
+        window_bars=4,
+        baseline_bars=12,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is TriggerStatus.UNAVAILABLE
+    assert result.unavailable_reason == "insufficient_completed_session_bars"
+
+
+def test_relative_volume_reports_ratio_against_the_baseline() -> None:
+    bars = [_flat(index) for index in range(12)]
+    bars.extend(_flat(index, volume="3000") for index in range(12, 16))
+
+    result = relative_volume(
+        bars,
+        code=RELATIVE_VOLUME_20M,
+        window_bars=4,
+        baseline_bars=12,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "3.000000"
+    assert result.threshold == "1.500000"
+
+
+def test_relative_volume_fails_closed_on_a_zero_baseline() -> None:
+    # 기준선 창(마지막 봉 직전 12봉)이 전부 거래 없이 지나간 세션.
+    bars = [_flat(index, volume="0") for index in range(15)]
+    bars.append(_flat(15, volume="1000"))
+
+    result = relative_volume(
+        bars,
+        code=RELATIVE_VOLUME_5M,
+        window_bars=1,
+        baseline_bars=12,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is TriggerStatus.UNAVAILABLE
+    assert result.unavailable_reason == "zero_baseline_volume"
+
+
+def test_intraday_relative_strength_uses_the_shared_completed_window() -> None:
+    bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="100", high="110", low="100", close="110", volume="1"),
+    ]
+    index_bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="100", high="101", low="100", close="101", volume="1"),
+    ]
+
+    result = intraday_relative_strength(
+        bars,
+        index_bars,
+        direction=Action.BUY,
+        threshold=Decimal("0"),
+        bar_interval=_INTERVAL,
+        source="toss",
+        index_source="toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "0.090000"
+
+
+def test_intraday_relative_strength_is_unavailable_without_index_bars() -> None:
+    result = intraday_relative_strength(
+        _long_session(),
+        None,
+        direction=Action.BUY,
+        threshold=Decimal("0"),
+        bar_interval=_INTERVAL,
+        source="toss",
+        index_source="KOSPI",
+    )
+
+    assert result.status is TriggerStatus.UNAVAILABLE
+    assert result.unavailable_reason == INDEX_INTRADAY_UNAVAILABLE
+    # 지수 분봉이 없다는 사실이 근거에 남아야 한다.
+    assert result.as_evidence()["unavailableReason"] == INDEX_INTRADAY_UNAVAILABLE
+    assert result.source == "KOSPI"
+
+
+def test_intraday_relative_strength_never_falls_back_to_daily_data() -> None:
+    """공유 창이 없으면 값을 만들지 않는다."""
+
+    bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="1"),
+        _bar(1, open_price="100", high="110", low="100", close="110", volume="1"),
+    ]
+    disjoint_index = [
+        PriceBar(
+            timestamp=_OPEN - timedelta(days=1) + _INTERVAL * index,
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("100"),
+            close=Decimal("100"),
+            volume=Decimal("1"),
+        )
+        for index in range(2)
+    ]
+
+    result = intraday_relative_strength(
+        bars,
+        disjoint_index,
+        direction=Action.BUY,
+        threshold=Decimal("0"),
+        bar_interval=_INTERVAL,
+        source="toss",
+        index_source="toss",
+    )
+
+    assert result.status is TriggerStatus.UNAVAILABLE
+    assert result.unavailable_reason == "index_window_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("direction", "bars"),
+    [(Action.BUY, _long_session()), (Action.SELL, _short_session())],
+)
+def test_unavailable_index_strength_does_not_block_the_other_triggers(
+    direction: Action, bars: list[PriceBar]
+) -> None:
+    triggers = _triggers(bars, direction)
+    triggers.append(
+        intraday_relative_strength(
+            bars,
+            None,
+            direction=direction,
+            threshold=Decimal("0"),
+            bar_interval=_INTERVAL,
+            source="toss",
+            index_source="KOSPI",
+        )
+    )
+
+    decision = decide_intraday_triggers(
+        triggers,
+        symbol="005930",
+        market="KRX",
+        direction=direction,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+    )
+
+    assert decision.status is TriggerDecisionStatus.TRIGGERED
+    assert decision.blocked_reason is None
+    evidence = decision.as_evidence()
+    codes = {item["code"] for item in evidence["triggers"]}  # type: ignore[index]
+    assert codes == {
+        OPENING_RANGE_BREAKOUT,
+        SESSION_VWAP_RECLAIM,
+        RELATIVE_VOLUME_5M,
+        RELATIVE_VOLUME_20M,
+        INTRADAY_RELATIVE_STRENGTH,
+    }
+
+
+def test_available_index_strength_must_agree_with_the_direction() -> None:
+    bars = _long_session()
+    triggers = _triggers(bars, Action.BUY)
+    triggers.append(
+        TriggerResult(
+            code=INTRADAY_RELATIVE_STRENGTH,
+            status=TriggerStatus.INACTIVE,
+            value="-0.010000",
+            threshold="0.000000",
+            source="toss",
+            as_of=bars[-1].timestamp + _INTERVAL,
+            detail="index outperformed the candidate",
+        )
+    )
+
+    decision = decide_intraday_triggers(
+        triggers,
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+    )
+
+    assert decision.status is TriggerDecisionStatus.NOT_TRIGGERED
+    assert decision.blocked_reason == f"{INTRADAY_RELATIVE_STRENGTH}_disagrees"
+
+
+def test_relative_volume_alone_cannot_trigger_an_entry() -> None:
+    bars = [_flat(index) for index in range(12)]
+    bars.extend(_flat(index, volume="3000") for index in range(12, 16))
+    triggers = _triggers(bars, Action.BUY)
+
+    decision = decide_intraday_triggers(
+        triggers,
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+    )
+
+    assert decision.status is TriggerDecisionStatus.NOT_TRIGGERED
+    assert decision.blocked_reason == "no_directional_trigger"
+
+
+def test_stale_or_partial_bars_block_every_trigger() -> None:
+    decision = decide_intraday_triggers(
+        (),
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+        blocked_reason="intraday_bars_stale",
+    )
+
+    assert decision.status is TriggerDecisionStatus.UNAVAILABLE
+    assert decision.blocked_reason == "intraday_bars_stale"
+    assert decision.triggered is False
+
+
+def test_hold_direction_never_triggers() -> None:
+    decision = decide_intraday_triggers(
+        _triggers(_long_session(), Action.BUY),
+        symbol="005930",
+        market="KRX",
+        direction=Action.HOLD,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+    )
+
+    assert decision.status is TriggerDecisionStatus.UNAVAILABLE
+    assert decision.blocked_reason == "no_directional_setup"
+
+
+def test_default_policy_names_all_four_triggers() -> None:
+    policy = DEFAULT_INTRADAY_TRIGGER_POLICY
+
+    assert policy.directional == (OPENING_RANGE_BREAKOUT, SESSION_VWAP_RECLAIM)
+    assert policy.volume == (RELATIVE_VOLUME_5M, RELATIVE_VOLUME_20M)
+    assert policy.directional_confirmation == (INTRADAY_RELATIVE_STRENGTH,)
+
+
+def test_a_trigger_cannot_sit_in_two_policy_groups() -> None:
+    with pytest.raises(ValueError, match="two policy groups"):
+        IntradayTriggerPolicy(
+            directional=(OPENING_RANGE_BREAKOUT,),
+            volume=(OPENING_RANGE_BREAKOUT,),
+        )

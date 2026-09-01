@@ -47,16 +47,66 @@ from app.extensions.kasset.automation.contracts import (
     Action,
     ExternalEvidence,
     PriceBar,
+    StrategyFamily,
     StrategyResult,
 )
-from app.extensions.kasset.automation.policy import AITradingPolicyService
+from app.extensions.kasset.automation.daily_setup import (
+    DEFAULT_DAILY_SETUP_CONFIG,
+    DailySetup,
+    DailySetupConfig,
+    daily_setup_policy_evidence,
+    evaluate_daily_setup,
+    select_daily_setups,
+)
+from app.extensions.kasset.automation.decision_evidence import (
+    AI_COHORT_CONFIDENCE_FLOOR,
+    COHORT_TECHNICAL_AI,
+    COHORT_TECHNICAL_AI_NEWS,
+    COHORT_TECHNICAL_ONLY,
+    LIVE_COHORT,
+    AiReviewEvidence,
+    AiReviewStatus,
+    NewsShadowEvidence,
+    ai_review_from_observation,
+    build_decision_cohorts,
+    build_news_shadow,
+    unknown_news_shadow,
+)
+from app.extensions.kasset.automation.intraday_data import (
+    CompletedIntradayBars,
+    IntradayBarsUnavailable,
+    load_completed_session_bars,
+    load_index_session_bars,
+)
+from app.extensions.kasset.automation.intraday_triggers import (
+    DEFAULT_INTRADAY_TRIGGER_POLICY,
+    RELATIVE_VOLUME_5M,
+    RELATIVE_VOLUME_20M,
+    IntradayTriggerDecision,
+    IntradayTriggerPolicy,
+    TriggerResult,
+    decide_intraday_triggers,
+    intraday_relative_strength,
+    opening_range_breakout,
+    relative_volume,
+    session_vwap_reclaim,
+)
+from app.extensions.kasset.automation.market_session import (
+    RegularSession,
+    completed_bar_cutoff,
+    current_regular_session,
+)
+from app.extensions.kasset.automation.policy import (
+    AITradingPolicyService,
+    AITradingSnapshot,
+    PortfolioPlan,
+)
 from app.extensions.kasset.automation.position_manager_service import (
     PaperPositionManagerService,
 )
 from app.extensions.kasset.automation.producer import (
     RecommendationProducer,
     WeightedEnsembleDecision,
-    compose_weighted_ensemble,
 )
 from app.extensions.kasset.automation.regime import (
     RegimeAssessment,
@@ -99,11 +149,44 @@ logger = logging.getLogger(__name__)
 _RECOMMENDATION_LIMIT = 5
 _OWNER_COOLDOWN = timedelta(hours=1)
 
+#: 순위 상위 검토 창을 ``strategy_review_limit``의 몇 배까지 열어둘지. AI 앞단
+#: 에서 결정론적으로 걸린 행을 다음 순위 행으로 메우려면 창이 상한보다 넓어야
+#: 한다. AI로 보내는 최대 건수는 여전히 ``strategy_review_limit``이다.
+_REVIEW_WINDOW_MULTIPLIER = 2
+
+#: 앙상블 합의가 진입가를 내놓지 못해 사이징 자체가 불가능한 행.
+_PRESIZING_NO_REFERENCE_PRICE = "presizing_reference_price_unavailable"
+_PRESIZING_ZERO_QUANTITY = "presizing_zero_quantity"
+
 #: 검토 lane에 쓸 수 있는 route가 없어 cycle이 AI 없이 도는 상태의 사유.
 #: 정책 자체는 정상이므로 ``AiAvailability``의 사유 코드와 층을 구분한다.
 _AI_REVIEW_UNAVAILABLE = "review_routes_unavailable"
 _NO_REGULAR_MARKET_OPEN = "no_regular_market_open"
 _NO_CONFIGURED_REGULAR_MARKET_OPEN = "no_configured_regular_market_open"
+
+#: 장중 방아쇠가 걸리지 않아 주문 후보에서 빠진 행.
+_NO_INTRADAY_TRIGGER = "intraday_trigger_not_satisfied"
+#: Daily Setup 자체가 적합하지 않아 장중 단계로 가지 않은 행.
+_NO_DAILY_SETUP = "daily_setup_not_qualified"
+#: 장중 bar를 동시에 몇 심볼까지 읽을지. 후보 상한이 20이므로 이 폭으로
+#: 정규장 한 tick 안에 적재가 끝난다.
+_INTRADAY_FETCH_CONCURRENCY = 6
+#: 뉴스 수집 경로가 살아 있다고 인정하는 최신성 창. 이 안에 기사가 하나도
+#: 없으면 "이 종목에 뉴스가 없다"고 말할 근거가 없으므로 UNKNOWN이 된다.
+_NEWS_HEALTH_WINDOW = timedelta(hours=24)
+#: 상대거래량 임계값. 완료 bar 기준 평균의 몇 배부터 확장으로 볼지.
+_RELATIVE_VOLUME_THRESHOLD = Decimal("1.5")
+#: 5분·20분 창을 5분 bucket 개수로 표현한 값과 그 비교 기준선 길이.
+_RELATIVE_VOLUME_WINDOWS: tuple[tuple[str, int, int], ...] = (
+    (RELATIVE_VOLUME_5M, 1, 12),
+    (RELATIVE_VOLUME_20M, 4, 12),
+)
+#: 개장 구간 돌파(ORB)의 개장 구간 길이.
+_OPENING_RANGE = timedelta(minutes=15)
+#: 장중 지수 대비 상대강도 임계값.
+_INTRADAY_RELATIVE_STRENGTH_THRESHOLD = Decimal("0")
+#: ranker가 실제로 쓴 벤치마크 식별자를 담은 근거 코드.
+_RANKER_BENCHMARK_CODE = "relative_strength_benchmark"
 
 
 def _open_regular_markets(*, now: datetime) -> frozenset[str]:
@@ -179,21 +262,52 @@ class TradingCandidate:
 
 @dataclass(frozen=True, slots=True)
 class EvaluatedCandidate:
+    """완료 일봉 Daily Setup까지 통과한 한 후보."""
+
     candidate: TradingCandidate
     strategy_results: tuple[StrategyResult, ...]
     ensemble: WeightedEnsembleDecision
+    setup: DailySetup
     factor_ranking: CandidateRankResult | None = None
     regime: RegimeAssessment | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class ReviewedCandidate:
+class _PreAiSizing:
+    """One candidate's sizing, computed before AI and reused at persistence.
+
+    같은 후보를 AI 앞뒤로 두 번 사이징하면 근거가 갈라질 수 있다. 앞단에서
+    계산한 값을 그대로 들고 다녀 저장 시점 수량과 근거가 어긋나지 않게 한다.
+    """
+
+    reference_price: Decimal
+    plan: PortfolioPlan
+
+
+@dataclass(frozen=True, slots=True)
+class _PreAiExclusion:
+    """AI 슬롯을 쓰지 않고 결정론적으로 걸러낸 후보의 사유와 근거."""
+
+    reason: str
+    evidence: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedCandidate:
+    """기술 판정과 장중 방아쇠를 모두 통과한 주문 후보.
+
+    ``ai_review``와 ``news_shadow``는 기록용이다. 둘 중 무엇이 실패해도 이
+    행이 후보에서 빠지지 않는다.
+    """
+
     evaluated: EvaluatedCandidate
-    external: ExternalEvidence
+    trigger_decision: IntradayTriggerDecision
+    decision: ExternalEvidence
+    ai_review: AiReviewEvidence
+    news_shadow: NewsShadowEvidence
     events: tuple[Mapping[str, object], ...]
-    event_score: Decimal
     score: Decimal
-    ai_shadow: AiShadowObservation
+    ai_shadow: AiShadowObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +425,11 @@ async def _load_live_us_candidates(
 
 
 class AIRecommendationVerticalSlice:
-    """Run one owner through existing candles, strategies, AI, and persistence."""
+    """Run one owner through completed daily setups, intraday triggers, and PAPER.
+
+    관문은 둘뿐이다: 기술 판정(완료 일봉 Daily Setup + 완료 장중 Trigger)과
+    Hard Risk. AI 검토와 뉴스/공시는 근거로만 남고 후보를 늘리거나 줄이지 않는다.
+    """
 
     def __init__(
         self,
@@ -323,6 +441,8 @@ class AIRecommendationVerticalSlice:
         allowed_markets: frozenset[str] | None = None,
         ranker_config: CandidateRankerConfig = DEFAULT_CANDIDATE_RANKER_CONFIG,
         shadow_setup_config: ShadowSetupConfig = DEFAULT_SHADOW_SETUP_CONFIG,
+        daily_setup_config: DailySetupConfig = DEFAULT_DAILY_SETUP_CONFIG,
+        trigger_policy: IntradayTriggerPolicy = DEFAULT_INTRADAY_TRIGGER_POLICY,
         cycle_trace_id: str | None = None,
     ) -> None:
         self._db = db
@@ -343,7 +463,13 @@ class AIRecommendationVerticalSlice:
         )
         self._ranker_config = ranker_config
         self._ranker = CandidateRanker(ranker_config)
+        self._review_window_limit = min(
+            ranker_config.strategy_review_limit * _REVIEW_WINDOW_MULTIPLIER,
+            ranker_config.candidate_limit,
+        )
         self._shadow_setup_config = shadow_setup_config
+        self._daily_setup_config = daily_setup_config
+        self._trigger_policy = trigger_policy
         self._strategy_artifact_fingerprint = current_strategy_artifact().fingerprint
         self._position_manager = PaperPositionManagerService(
             db,
@@ -477,16 +603,7 @@ class AIRecommendationVerticalSlice:
             limit=_RECOMMENDATION_LIMIT,
             config=self._shadow_setup_config,
         )
-        ranks_for_review = ranking.for_strategy_review(
-            self._ranker_config.strategy_review_limit
-        )
         candidate_by_key = {candidate.ranker_key: candidate for candidate in candidates}
-        selected_candidates = [
-            candidate_by_key[result.key]
-            for result in ranks_for_review
-            if result.key in candidate_by_key
-        ]
-        selected_rankings = {result.key: result for result in ranks_for_review}
         regimes = {
             market: assess_market_regime(
                 {
@@ -497,48 +614,143 @@ class AIRecommendationVerticalSlice:
             )
             for market in sorted(allowed_markets)
         }
-        evaluated = self._evaluate_candidates(
-            selected_candidates,
-            bars_by_candidate,
-            regimes,
-            factor_rankings=selected_rankings,
+        # 1단계: 완료 일봉만으로 Daily Setup을 판정하고 상한까지 고른다.
+        # 장중 partial bar는 setup 계산에 절대 섞이지 않는다.
+        completed_cutoff_by_market = {
+            market: completed_bar_cutoff(market, self._now)
+            for market in sorted(allowed_markets)
+        }
+        setups: list[DailySetup] = []
+        for result in ranking.ranked:
+            candidate = candidate_by_key.get(result.key)
+            if candidate is None:
+                continue
+            candidate_regime = regimes.get(candidate.ranker_market)
+            if candidate_regime is None:
+                continue
+            setups.append(
+                evaluate_daily_setup(
+                    result,
+                    bars_by_candidate.get(candidate.ranker_key, ()),
+                    market=candidate.market,
+                    regime=candidate_regime,
+                    strategies=STRATEGIES,
+                    as_of=self._now,
+                    completed_cutoff=completed_cutoff_by_market.get(
+                        candidate.ranker_market
+                    ),
+                    config=self._daily_setup_config,
+                )
+            )
+        selected_setups = select_daily_setups(setups, config=self._daily_setup_config)
+        setup_statuses: Counter[str] = Counter(item.status.value for item in setups)
+        setup_rejections: Counter[str] = Counter(
+            item.rejection_reason
+            for item in setups
+            if item.rejection_reason is not None and not item.qualified
         )
-        actionable = [
-            item
-            for item in evaluated
-            if item.ensemble.action in {Action.BUY, Action.SELL}
-        ]
-        reviewed: list[ReviewedCandidate] = []
+
+        evaluated: list[EvaluatedCandidate] = []
+        actionable: list[EvaluatedCandidate] = []
+        sizing_by_key: dict[CandidateKey, _PreAiSizing] = {}
+        pre_ai_exclusions: Counter[str] = Counter()
+        pre_ai_exclusion_evidence: list[dict[str, object]] = []
+        admitted: list[AdmittedCandidate] = []
         review_outcomes: list[AIReviewOutcome] = []
         ai_failures = 0
         review_rejections: Counter[str] = Counter()
-        for item in actionable:
-            try:
-                candidate_regime = item.regime
-                if candidate_regime is None:
-                    continue
-                (
-                    reviewed_item,
-                    rejection_reason,
-                    review_outcome,
-                ) = await self._review_candidate(
-                    owner_user_id,
-                    item,
-                    candidate_regime,
-                )
-            except AiProviderUnavailable:
-                ai_failures += 1
-                rejection_reason = "provider_unavailable"
-                review_rejections[rejection_reason] += 1
-                review_outcomes.append(
-                    self._review_outcome(item, reason=rejection_reason)
+        trigger_evidence: list[dict[str, object]] = []
+        trigger_statuses: Counter[str] = Counter()
+
+        # 2단계: 선택된 setup만 장중 완료 bar를 읽는다. 세션·신선도 검증은
+        # intraday_data가 fail-closed로 하고, 여기서는 그 결과만 정책에 넣는다.
+        session_by_market = {
+            market: current_regular_session(market, self._now)
+            for market in sorted(allowed_markets)
+        }
+        intraday_by_key = await self._load_intraday_bars(selected_setups)
+        index_bars_by_symbol = await self._load_index_intraday_bars(
+            selected_setups,
+            ranking_by_key={item.key: item for item in ranking.ranked},
+            session_by_market=session_by_market,
+        )
+        news_health_by_market = await self._news_source_health(allowed_markets)
+
+        for setup in selected_setups:
+            candidate = candidate_by_key.get(_setup_key(setup))
+            if candidate is None:
+                continue
+            candidate_regime = regimes.get(candidate.ranker_market)
+            ranked_result = next(
+                (item for item in ranking.ranked if item.key == candidate.ranker_key),
+                None,
+            )
+            if candidate_regime is None or ranked_result is None:
+                continue
+            item = EvaluatedCandidate(
+                candidate=candidate,
+                strategy_results=setup.strategy_results,
+                ensemble=cast(WeightedEnsembleDecision, setup.ensemble),
+                setup=setup,
+                factor_ranking=ranked_result,
+                regime=candidate_regime,
+            )
+            evaluated.append(item)
+            if setup.direction not in {Action.BUY, Action.SELL}:
+                continue
+            actionable.append(item)
+            trigger_decision = self._decide_triggers(
+                item,
+                intraday=intraday_by_key.get(candidate.ranker_key),
+                index_bars=index_bars_by_symbol.get(_benchmark_symbol(ranked_result)),
+            )
+            trigger_statuses[trigger_decision.status.value] += 1
+            trigger_evidence.append(trigger_decision.as_evidence())
+            if not trigger_decision.triggered:
+                review_rejections[_NO_INTRADAY_TRIGGER] += 1
+                pre_ai_exclusion_evidence.append(
+                    _trigger_exclusion_evidence(item, trigger_decision)
                 )
                 continue
-            review_outcomes.append(review_outcome)
-            if rejection_reason is not None:
-                review_rejections[rejection_reason] += 1
-            if reviewed_item is not None:
-                reviewed.append(reviewed_item)
+            sizing = await self._pre_ai_sizing(
+                owner_user_id,
+                item,
+                candidate_regime,
+                snapshot=snapshot,
+            )
+            if isinstance(sizing, _PreAiExclusion):
+                pre_ai_exclusions[sizing.reason] += 1
+                pre_ai_exclusion_evidence.append(sizing.evidence)
+                continue
+            # 3단계: 기술 판정이 이미 후보를 확정했다. AI 검토와 뉴스 수집은
+            # 설명과 보조순위를 위한 관측이며 실패해도 이 행은 남는다.
+            review = await self._review_candidate(owner_user_id, item)
+            if review.ai_review.status is AiReviewStatus.UNAVAILABLE:
+                ai_failures += 1
+            review_rejections[f"ai_{review.ai_review.status.value}"] += 1
+            review_outcomes.append(
+                self._review_outcome(
+                    item,
+                    reason="admitted",
+                    observation=review.ai_shadow,
+                )
+            )
+            news_shadow = await self._news_shadow(
+                candidate,
+                health_proven=news_health_by_market.get(candidate.ranker_market, False),
+            )
+            sizing_by_key[candidate.ranker_key] = sizing
+            admitted.append(
+                _admitted_candidate(
+                    item,
+                    trigger_decision=trigger_decision,
+                    review=review,
+                    news_shadow=news_shadow,
+                    now=self._now,
+                )
+            )
+
+        reviewed = admitted
 
         reviewed.sort(
             key=lambda item: (
@@ -554,7 +766,8 @@ class AIRecommendationVerticalSlice:
         total = len(ranking.ranked)
         for position, item in enumerate(reviewed[:_RECOMMENDATION_LIMIT], start=1):
             candidate_regime = item.evaluated.regime
-            if candidate_regime is None:
+            sizing = sizing_by_key.get(item.evaluated.candidate.ranker_key)
+            if candidate_regime is None or sizing is None:
                 continue
             row = await self._persist_recommendation(
                 owner_user_id,
@@ -562,7 +775,7 @@ class AIRecommendationVerticalSlice:
                 candidate_regime,
                 position=position,
                 total=total,
-                snapshot=snapshot,
+                sizing=sizing,
             )
             persisted_candidate = item.evaluated.candidate
             recommendation_id_by_candidate[
@@ -583,7 +796,7 @@ class AIRecommendationVerticalSlice:
 
         ranked_evidence = [
             result.as_evidence()
-            for result in ranking.ranked[: self._ranker_config.strategy_review_limit]
+            for result in ranking.ranked[: self._review_window_limit]
         ]
         result: dict[str, object] = {
             "ownerUserId": owner_user_id,
@@ -619,6 +832,27 @@ class AIRecommendationVerticalSlice:
             "aiReviewOutcomes": [outcome.as_dict() for outcome in review_outcomes],
             "collectionPolicy": self._collection_policy(),
             "candleSync": candle_sync,
+            "strategyEvaluationWindow": self._review_window_limit,
+            "strategyReviewCapReached": False,
+            "preAiExclusions": dict(sorted(pre_ai_exclusions.items())),
+            "dailySetupPolicy": daily_setup_policy_evidence(self._daily_setup_config),
+            "dailySetupStatuses": dict(sorted(setup_statuses.items())),
+            "dailySetupRejections": dict(sorted(setup_rejections.items())),
+            "dailySetupSelectedCount": len(selected_setups),
+            "dailySetups": [item.as_evidence() for item in selected_setups],
+            "intradayTriggerPolicy": self._trigger_policy.as_evidence(),
+            "intradayTriggerStatuses": dict(sorted(trigger_statuses.items())),
+            "intradayTriggers": trigger_evidence,
+            "decisionCohortPolicy": {
+                "liveCohort": LIVE_COHORT,
+                "cohorts": [
+                    COHORT_TECHNICAL_ONLY,
+                    COHORT_TECHNICAL_AI,
+                    COHORT_TECHNICAL_AI_NEWS,
+                ],
+                "gating": ["daily_setup", "intraday_triggers", "hard_risk"],
+                "nonGating": ["ai_review", "news_shadow"],
+            },
             "regime": (
                 next(iter(regimes.values())).regime.value
                 if len(regimes) == 1
@@ -636,8 +870,11 @@ class AIRecommendationVerticalSlice:
                 "configFingerprint": self._shadow_setup_config.fingerprint,
                 "candidates": [shadow_setups_evidence(item) for item in shadow_setups],
             },
+            # AI 앞단 제외 근거를 먼저 담는다. 감사 원장은 이 목록을 앞에서
+            # 자르므로, 새로 진단해야 하는 행이 잘려 나가지 않게 한다.
             "candidateExclusions": [
-                result.as_evidence() for result in ranking.excluded
+                *pre_ai_exclusion_evidence,
+                *(excluded.as_evidence() for excluded in ranking.excluded),
             ],
             "heldManagementOnly": [
                 {
@@ -654,10 +891,14 @@ class AIRecommendationVerticalSlice:
             result["dataPrerequisite"] = (
                 "fewer than 50 screener candidates have usable 52-week daily candles"
             )
-        if not actionable:
-            result["skipped"] = "no_dynamic_ensemble_signal"
-        elif not reviewed:
-            result["skipped"] = "no_ai_confirmed_signal"
+        if not selected_setups:
+            result["skipped"] = _NO_DAILY_SETUP
+        elif not actionable:
+            result["skipped"] = "no_breakout_family_direction"
+        elif not admitted and pre_ai_exclusions:
+            result["skipped"] = "no_affordable_actionable_candidate"
+        elif not admitted:
+            result["skipped"] = _NO_INTRADAY_TRIGGER
         return result
 
     async def _load_candidate_bars(
@@ -937,59 +1178,240 @@ class AIRecommendationVerticalSlice:
         await self._db.commit()
         return {"requested": len(missing), "synced": synced, "failed": failed}
 
-    def _evaluate_candidates(
+    async def _load_intraday_bars(
         self,
-        candidates: Sequence[TradingCandidate],
-        bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
-        regimes: Mapping[str, RegimeAssessment],
-        *,
-        factor_rankings: Mapping[CandidateKey, CandidateRankResult],
-    ) -> list[EvaluatedCandidate]:
-        evaluated: list[EvaluatedCandidate] = []
-        for candidate in candidates:
-            ranking = factor_rankings.get(candidate.ranker_key)
-            if ranking is None or not ranking.included:
-                continue
-            regime = regimes.get(candidate.ranker_market)
-            if regime is None:
-                continue
-            bars = bars_by_candidate.get(candidate.ranker_key, ())
-            if len(bars) < 20:
-                continue
-            results = tuple(
-                strategy.evaluate(
-                    bars,
-                    symbol=candidate.symbol,
-                    market=cast(Any, candidate.market),
+        setups: Sequence[DailySetup],
+    ) -> dict[CandidateKey, CompletedIntradayBars | IntradayBarsUnavailable]:
+        """선택된 setup만 공용 Toss-first 경로로 완료 장중 bar를 읽는다."""
+
+        if not setups:
+            return {}
+        semaphore = asyncio.Semaphore(_INTRADAY_FETCH_CONCURRENCY)
+
+        async def load(setup: DailySetup):
+            async with semaphore:
+                return _setup_key(setup), await load_completed_session_bars(
+                    symbol=setup.symbol,
+                    market=setup.market,
                     as_of=self._now,
                 )
-                for strategy in STRATEGIES
+
+        return dict(await asyncio.gather(*(load(setup) for setup in setups)))
+
+    async def _load_index_intraday_bars(
+        self,
+        setups: Sequence[DailySetup],
+        *,
+        ranking_by_key: Mapping[CandidateKey, CandidateRankResult],
+        session_by_market: Mapping[str, RegularSession | None],
+    ) -> dict[str, CompletedIntradayBars | IntradayBarsUnavailable]:
+        """후보가 실제로 쓴 벤치마크 지수의 완료 분봉을 지수별로 한 번만 읽는다.
+
+        지수 분봉이 없으면 그 사실만 남는다. 일봉으로 대체하지 않는다.
+        """
+
+        wanted: dict[str, Literal["KRX", "US"]] = {}
+        for setup in setups:
+            ranked = ranking_by_key.get(_setup_key(setup))
+            if ranked is None:
+                continue
+            symbol = _benchmark_symbol(ranked)
+            if symbol is not None:
+                wanted[symbol] = setup.market
+        if not wanted:
+            return {}
+
+        async def load(index_symbol: str, market: Literal["KRX", "US"]):
+            return index_symbol, await load_index_session_bars(
+                index_symbol=index_symbol,
+                market=market,
+                as_of=self._now,
+                session=session_by_market.get("KR" if market == "KRX" else "US"),
             )
-            evaluated.append(
-                EvaluatedCandidate(
-                    candidate=candidate,
-                    strategy_results=results,
-                    ensemble=compose_weighted_ensemble(results, regime.weights),
-                    factor_ranking=ranking,
-                    regime=regime,
-                )
+
+        return dict(
+            await asyncio.gather(
+                *(load(symbol, market) for symbol, market in sorted(wanted.items()))
             )
-        return evaluated
+        )
+
+    def _decide_triggers(
+        self,
+        item: EvaluatedCandidate,
+        *,
+        intraday: CompletedIntradayBars | IntradayBarsUnavailable | None,
+        index_bars: CompletedIntradayBars | IntradayBarsUnavailable | None,
+    ) -> IntradayTriggerDecision:
+        """완료 장중 bar로 명시적 trigger 정책을 판정한다."""
+
+        direction = item.setup.direction
+        symbol = item.candidate.symbol
+        market = item.candidate.market
+        if intraday is None or isinstance(intraday, IntradayBarsUnavailable):
+            # stale·부분 bar·세션 밖은 개별 trigger가 아니라 판정 전체를 막는다.
+            return decide_intraday_triggers(
+                (),
+                symbol=symbol,
+                market=market,
+                direction=direction,
+                evaluated_at=self._now,
+                policy=self._trigger_policy,
+                blocked_reason=(
+                    "intraday_bars_not_loaded"
+                    if intraday is None
+                    else intraday.blocked_reason
+                ),
+            )
+
+        triggers: list[TriggerResult] = [
+            opening_range_breakout(
+                intraday.bars,
+                direction=direction,
+                session_open=intraday.session.opens_at,
+                opening_range=_OPENING_RANGE,
+                bar_interval=intraday.bar_interval,
+                source=intraday.source,
+            ),
+            session_vwap_reclaim(
+                intraday.bars,
+                direction=direction,
+                bar_interval=intraday.bar_interval,
+                source=intraday.source,
+            ),
+        ]
+        triggers.extend(
+            relative_volume(
+                intraday.bars,
+                code=code,
+                window_bars=window_bars,
+                baseline_bars=baseline_bars,
+                threshold=_RELATIVE_VOLUME_THRESHOLD,
+                bar_interval=intraday.bar_interval,
+                source=intraday.source,
+            )
+            for code, window_bars, baseline_bars in _RELATIVE_VOLUME_WINDOWS
+        )
+        usable_index = (
+            index_bars if isinstance(index_bars, CompletedIntradayBars) else None
+        )
+        triggers.append(
+            intraday_relative_strength(
+                intraday.bars,
+                usable_index.bars if usable_index is not None else None,
+                direction=direction,
+                threshold=_INTRADAY_RELATIVE_STRENGTH_THRESHOLD,
+                bar_interval=intraday.bar_interval,
+                source=intraday.source,
+                index_source=(
+                    usable_index.source
+                    if usable_index is not None
+                    else (index_bars.symbol if index_bars is not None else None)
+                ),
+                unavailable_reason=(
+                    index_bars.blocked_reason
+                    if isinstance(index_bars, IntradayBarsUnavailable)
+                    else None
+                ),
+            )
+        )
+        return decide_intraday_triggers(
+            triggers,
+            symbol=symbol,
+            market=market,
+            direction=direction,
+            evaluated_at=self._now,
+            policy=self._trigger_policy,
+        )
+
+    async def _pre_ai_sizing(
+        self,
+        owner_user_id: int,
+        item: EvaluatedCandidate,
+        regime: RegimeAssessment,
+        *,
+        snapshot: AITradingSnapshot,
+    ) -> _PreAiSizing | _PreAiExclusion:
+        """Size the candidate before AI so unaffordable rows cost no AI slot.
+
+        Hard Risk와 AI 임계값은 그대로다. 여기서 걸리는 행은 어차피 저장
+        단계에서 수량 0으로 버려질 행이므로, AI 검토 예산만 아낀다.
+        """
+
+        candidate = item.candidate
+        reference_price_text = _level_text(item.ensemble.agreeing, "entry")
+        if reference_price_text is None:
+            return _PreAiExclusion(
+                reason=_PRESIZING_NO_REFERENCE_PRICE,
+                evidence=_presizing_exclusion_evidence(
+                    item,
+                    reason=_PRESIZING_NO_REFERENCE_PRICE,
+                    plan=None,
+                ),
+            )
+        reference_price = Decimal(reference_price_text)
+        strategy_stop_text = _level_text(item.ensemble.agreeing, "stop")
+        ranking = item.factor_ranking
+        plan = await self._policy.portfolio_plan(
+            self._db,
+            owner_user_id,
+            action=item.ensemble.action.value,
+            market=candidate.market,
+            symbol=candidate.symbol,
+            reference_price=reference_price,
+            limits=snapshot.limits,
+            usage=snapshot.usage,
+            strategy_stop=(
+                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
+            ),
+            strategy_atr=ranking.atr_14 if ranking is not None else None,
+            price_as_of=ranking.data_as_of if ranking is not None else None,
+            evaluated_at=self._now,
+            regime=regime.regime,
+            average_volume=_liquidity_cap(
+                candidate.volume,
+                ranking.average_volume_20 if ranking is not None else None,
+            ),
+            average_turnover=_liquidity_cap(
+                candidate.turnover,
+                ranking.average_turnover_20 if ranking is not None else None,
+            ),
+        )
+        quantity = plan.target_quantity
+        sizing = plan.position_sizing
+        if (
+            not quantity.is_finite()
+            or quantity <= 0
+            or (sizing is not None and not sizing.actionable)
+        ):
+            reason = _presizing_exclusion_reason(plan)
+            return _PreAiExclusion(
+                reason=reason,
+                evidence=_presizing_exclusion_evidence(item, reason=reason, plan=plan),
+            )
+        return _PreAiSizing(reference_price=reference_price, plan=plan)
 
     async def _review_candidate(
         self,
         owner_user_id: int,
         item: EvaluatedCandidate,
-        regime: RegimeAssessment,
-    ) -> tuple[ReviewedCandidate | None, str | None, AIReviewOutcome]:
-        if self._ai_router is None:
-            reason = "provider_unavailable"
-            return None, reason, self._review_outcome(item, reason=reason)
+    ) -> _AiReviewOutcomeBundle:
+        """AI에게 설명과 보조순위만 물어본다.
+
+        이 메서드는 후보를 절대 탈락시키지 않는다. router가 없거나 실패하거나
+        기술 판정과 다른 방향을 말하거나 신뢰도가 낮아도 상태만 기록한다.
+        """
+
+        regime = item.regime
         ranking = item.factor_ranking
-        if ranking is None or not ranking.included or ranking.valid_until is None:
-            reason = "ranking_unavailable"
-            return None, reason, self._review_outcome(item, reason=reason)
-        events = await self._event_evidence(item.candidate)
+        if self._ai_router is None or regime is None or ranking is None:
+            return _AiReviewOutcomeBundle(
+                ai_review=ai_review_from_observation(
+                    status=AiReviewStatus.NOT_REQUESTED,
+                    failure_reason=_AI_REVIEW_UNAVAILABLE,
+                    detail="no AI route was available for this cycle",
+                ),
+                ai_shadow=None,
+            )
         payload = {
             "symbol": item.candidate.symbol,
             "market": item.candidate.market,
@@ -997,11 +1419,12 @@ class AIRecommendationVerticalSlice:
             "candidateRanking": ranking.as_evidence(),
             "regime": regime.regime.value,
             "regimeDetail": regime.detail,
+            "strategyFamily": item.ensemble.family.value,
             "strategyVotes": list(item.ensemble.votes),
+            "dailySetup": item.setup.as_evidence(),
             "entry": _level_text(item.ensemble.agreeing, "entry"),
             "stop": _level_text(item.ensemble.agreeing, "stop"),
             "target": _level_text(item.ensemble.agreeing, "target"),
-            "events": [dict(event) for event in events],
         }
         try:
             verdict = await self._ai_router.analyze_for_owner(
@@ -1014,122 +1437,55 @@ class AIRecommendationVerticalSlice:
                     f"{item.candidate.symbol}:{int(self._now.timestamp())}"
                 ),
             )
+        except AiProviderUnavailable:
+            return _AiReviewOutcomeBundle(
+                ai_review=ai_review_from_observation(
+                    status=AiReviewStatus.UNAVAILABLE,
+                    failure_reason="provider_unavailable",
+                    detail="the AI provider route was unavailable",
+                ),
+                ai_shadow=None,
+            )
         except ValidationError:
-            reason = "invalid_ai_response"
             logger.warning(
                 "KAsset AI candidate response rejected: market=%s symbol=%s",
                 item.candidate.market,
                 item.candidate.symbol,
             )
-            return None, reason, self._review_outcome(item, reason=reason)
-        shadow_observation = build_ai_shadow_observation(
-            verdict,
-            observed_at=self._now,
-        )
+            return _AiReviewOutcomeBundle(
+                ai_review=ai_review_from_observation(
+                    status=AiReviewStatus.INVALID,
+                    failure_reason="invalid_ai_response",
+                    detail="the AI response failed schema validation",
+                ),
+                ai_shadow=None,
+            )
+        observation = build_ai_shadow_observation(verdict, observed_at=self._now)
         action_text = str(verdict.action).strip().upper()
-        action = (
+        ai_action = (
             Action(action_text)
             if action_text in {"BUY", "SELL", "HOLD"}
             else Action.HOLD
         )
-        if action != item.ensemble.action:
-            reason = "action_mismatch"
-            return (
-                None,
-                reason,
-                self._review_outcome(
-                    item,
-                    reason=reason,
-                    observation=shadow_observation,
-                ),
-            )
         confidence = Decimal(str(verdict.confidence))
-        if not confidence.is_finite() or confidence < Decimal("0.50"):
-            reason = "low_confidence"
-            return (
-                None,
-                reason,
-                self._review_outcome(
-                    item,
-                    reason=reason,
-                    observation=shadow_observation,
+        if ai_action is not item.setup.direction:
+            status = AiReviewStatus.DISAGREES
+        elif not confidence.is_finite() or confidence < AI_COHORT_CONFIDENCE_FLOOR:
+            status = AiReviewStatus.LOW_CONFIDENCE
+        else:
+            status = AiReviewStatus.AGREES
+        return _AiReviewOutcomeBundle(
+            ai_review=ai_review_from_observation(
+                status=status,
+                observation=observation,
+                detail=(
+                    f"technical direction={item.setup.direction.value} "
+                    f"aiAction={ai_action.value} risk={verdict.risk}"
                 ),
-            )
-        valid_until = min(
-            (
-                result.valid_until.astimezone(UTC)
-                for result in item.strategy_results
-                if result.valid_until.tzinfo is not None
-                and result.valid_until.utcoffset() is not None
             ),
-            default=self._now,
-        )
-        valid_until = min(
-            valid_until,
-            ranking.valid_until.astimezone(UTC),
-            self._now + timedelta(hours=1),
-        )
-        if valid_until <= self._now:
-            reason = "expired"
-            return (
-                None,
-                reason,
-                self._review_outcome(
-                    item,
-                    reason=reason,
-                    observation=shadow_observation,
-                ),
-            )
-        external = ExternalEvidence(
-            source=f"model_router:{verdict.model_id}",
-            symbol=item.candidate.symbol,
-            market=cast(Any, item.candidate.market),
-            action=action,
-            confidence=confidence,
-            as_of=self._now,
-            valid_until=valid_until,
-            rationale=tuple(str(value) for value in verdict.rationale_tags)
-            + (f"AI risk={verdict.risk}",),
-            evidence=(
-                {
-                    "title": "AI candidate review",
-                    "source": f"model_router:{verdict.model_id}",
-                    "kind": "ai_analysis",
-                    "tier": verdict.tier_used,
-                    "confidence": str(confidence),
-                    "risk": str(verdict.risk),
-                    "bullishScore": int(verdict.bullish_score),
-                    "bearishScore": int(verdict.bearish_score),
-                    "eventCount": len(events),
-                },
-                ranking.as_evidence(),
-            ),
-        )
-        directional_score = Decimal(
-            verdict.bullish_score if action == Action.BUY else verdict.bearish_score
-        ) / Decimal("100")
-        event_score = directional_score if events else Decimal("0")
-        score = (
-            ranking.total_score * Decimal("0.40")
-            + abs(item.ensemble.score) * Decimal("0.35")
-            + confidence * Decimal("0.15")
-            + event_score * Decimal("0.10")
-        ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
-        return (
-            ReviewedCandidate(
-                evaluated=item,
-                external=external,
-                events=events,
-                event_score=event_score,
-                score=score,
-                ai_shadow=shadow_observation,
-            ),
-            None,
-            self._review_outcome(
-                item,
-                reason="accepted",
-                observation=shadow_observation,
-            ),
+            ai_shadow=observation,
+            bullish_score=int(verdict.bullish_score),
+            bearish_score=int(verdict.bearish_score),
         )
 
     def _review_outcome(
@@ -1165,57 +1521,28 @@ class AIRecommendationVerticalSlice:
     async def _persist_recommendation(
         self,
         owner_user_id: int,
-        item: ReviewedCandidate,
+        item: AdmittedCandidate,
         regime: RegimeAssessment,
         *,
         position: int,
         total: int,
-        snapshot,
+        sizing: _PreAiSizing,
     ) -> AIRecommendation:
         candidate = item.evaluated.candidate
-        reference_price_text = _level_text(item.evaluated.ensemble.agreeing, "entry")
-        ranking = item.evaluated.factor_ranking
-        strategy_stop_text = _level_text(
-            item.evaluated.ensemble.agreeing,
-            "stop",
-        )
-        if reference_price_text is None:
-            raise ValueError("ensemble has no reference price")
-        reference_price = Decimal(reference_price_text)
-        plan = await self._policy.portfolio_plan(
-            self._db,
-            owner_user_id,
-            action=item.external.action.value,
-            market=candidate.market,
-            symbol=candidate.symbol,
-            reference_price=reference_price,
-            limits=snapshot.limits,
-            usage=snapshot.usage,
-            strategy_stop=(
-                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
-            ),
-            strategy_atr=ranking.atr_14 if ranking is not None else None,
-            price_as_of=ranking.data_as_of if ranking is not None else None,
-            evaluated_at=self._now,
-            regime=regime.regime,
-            average_volume=_liquidity_cap(
-                candidate.volume,
-                ranking.average_volume_20 if ranking is not None else None,
-            ),
-            average_turnover=_liquidity_cap(
-                candidate.turnover,
-                ranking.average_turnover_20 if ranking is not None else None,
-            ),
-        )
+        # 기술 판정 근거의 방향은 Daily Setup 방향과 같아야 한다. 이 불변식이
+        # 깨지면 조용히 다른 방향/수량으로 저장하지 않고 멈춘다.
+        if item.decision.action is not item.evaluated.setup.direction:
+            raise ValueError("decision evidence must match the daily setup direction")
+        plan = sizing.plan
         hard_risk = await self._policy.evaluate_hard_risk(
             self._db,
             owner_user_id,
-            action=item.external.action.value,
+            action=item.decision.action.value,
             market=candidate.market,
             symbol=candidate.symbol,
             quantity=plan.target_quantity,
-            reference_price=reference_price,
-            ai_confidence=item.external.confidence,
+            reference_price=sizing.reference_price,
+            ai_confidence=item.decision.confidence,
             now=self._now,
         )
         persistence = AIRecommendationService(
@@ -1223,6 +1550,21 @@ class AIRecommendationVerticalSlice:
             clock=lambda: self._now,
             cycle_trace_id=self._cycle_trace_id,
         )
+        hard_risk_evidence = hard_risk.as_evidence()
+        cohorts = build_decision_cohorts(
+            action=item.decision.action,
+            technical_admitted=bool(hard_risk.passed),
+            technical_reason=(None if hard_risk.passed else "hard_risk_blocked"),
+            ai_review=item.ai_review,
+            news_shadow=item.news_shadow,
+        )
+        advisory_evidence: list[Mapping[str, object]] = [
+            item.evaluated.setup.as_evidence(),
+            item.trigger_decision.as_evidence(),
+            item.ai_review.as_evidence(),
+            item.news_shadow.as_evidence(),
+            cohorts,
+        ]
         row = await RecommendationProducer(
             owner_user_id=str(owner_user_id),
             persistence=persistence,
@@ -1231,33 +1573,109 @@ class AIRecommendationVerticalSlice:
             market=candidate.market,
             name=candidate.name,
             strategy_results=item.evaluated.strategy_results,
-            external_evidence=item.external,
+            decision_evidence=item.decision,
             suggested_quantity=plan.target_quantity,
             now=self._now,
             regime=regime.regime.value,
             regime_detail=regime.detail,
             strategy_weights=regime.weights,
+            strategy_family=StrategyFamily.BREAKOUT,
             event_evidence=item.events,
             ranking={
                 "score": str(item.score),
                 "position": position,
                 "total": total,
                 "note": (
-                    f"{candidate.source} 후보 {total}개 중 dynamic ensemble, "
-                    f"AI, news/DART event score {item.event_score}로 "
-                    "순위화했습니다."
+                    f"{candidate.source} 후보 {total}개 중 완료 일봉 Daily Setup과 "
+                    "완료 장중 trigger로 진입 후보를 정하고, AI는 보조순위로만 "
+                    "썼습니다."
                 ),
             },
             portfolio=plan.as_evidence(),
-            hard_risk=hard_risk.as_evidence(),
+            hard_risk=hard_risk_evidence,
             strategy_promotion={
                 "strategyKey": DEFAULT_PAPER_STRATEGY_KEY,
                 "version": DEFAULT_PAPER_STRATEGY_VERSION,
                 "artifactFingerprint": self._strategy_artifact_fingerprint,
             },
-            ai_shadow_evidence=item.ai_shadow.as_selected_evidence(),
+            ai_shadow_evidence=(
+                item.ai_shadow.as_selected_evidence()
+                if item.ai_shadow is not None
+                else None
+            ),
+            advisory_evidence=advisory_evidence,
         )
         return cast(AIRecommendation, row)
+
+    async def _news_source_health(
+        self,
+        allowed_markets: frozenset[str],
+    ) -> dict[str, bool]:
+        """뉴스 수집 경로가 최근에 살아 있었는지 시장별로 한 번만 확인한다.
+
+        입증하지 못한 시장은 ``False``로 남아 종목별 shadow가 ``UNKNOWN``이 된다.
+        """
+
+        health: dict[str, bool] = {}
+        for ranker_market in sorted(allowed_markets):
+            market = "kr" if ranker_market == "KR" else "us"
+            try:
+                count = await self._db.scalar(
+                    select(func.count())
+                    .select_from(NewsArticle)
+                    .where(
+                        NewsArticle.market == market,
+                        NewsArticle.article_published_at
+                        >= self._now - _NEWS_HEALTH_WINDOW,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - health proof only, never a gate
+                logger.warning(
+                    "kasset news source health unprovable: market=%s",
+                    market,
+                    exc_info=True,
+                )
+                health[ranker_market] = False
+                continue
+            health[ranker_market] = bool(count)
+        return health
+
+    async def _news_shadow(
+        self,
+        candidate: TradingCandidate,
+        *,
+        health_proven: bool,
+    ) -> NewsShadowEvidence:
+        """뉴스/공시를 shadow로만 관측한다. 실패는 ``UNKNOWN``이다."""
+
+        try:
+            events = await self._event_evidence(candidate)
+        except Exception:  # noqa: BLE001 - shadow collection never gates a decision
+            logger.warning(
+                "kasset news shadow collection failed: market=%s symbol=%s",
+                candidate.market,
+                candidate.symbol,
+                exc_info=True,
+            )
+            return unknown_news_shadow(
+                observed_at=self._now,
+                detail="news and disclosure collection raised; treated as UNKNOWN",
+            )
+        news_count = sum(1 for event in events if event.get("kind") == "NEWS")
+        disclosure_count = sum(
+            1 for event in events if event.get("kind") == "DISCLOSURE"
+        )
+        return build_news_shadow(
+            items=events,
+            news_count=news_count,
+            disclosure_count=disclosure_count,
+            source_health_proven=health_proven,
+            observed_at=self._now,
+            detail=(
+                "news_shadow never gates BUY/SELL; source health window is "
+                f"{_NEWS_HEALTH_WINDOW}"
+            ),
+        )
 
     async def _event_evidence(
         self,
@@ -1320,6 +1738,130 @@ class AIRecommendationVerticalSlice:
             )
         )
         return bool(count)
+
+
+@dataclass(frozen=True, slots=True)
+class _AiReviewOutcomeBundle:
+    """AI 검토 관측 결과. 어떤 필드도 후보 채택을 바꾸지 않는다."""
+
+    ai_review: AiReviewEvidence
+    ai_shadow: AiShadowObservation | None
+    bullish_score: int = 0
+    bearish_score: int = 0
+
+
+def _setup_key(setup: DailySetup) -> CandidateKey:
+    return ("KR" if setup.market == "KRX" else "US", setup.symbol)
+
+
+def _benchmark_symbol(ranking: CandidateRankResult) -> str | None:
+    """ranker가 일봉 상대강도에 실제로 쓴 벤치마크 식별자."""
+
+    for item in ranking.evidence:
+        if item.code == _RANKER_BENCHMARK_CODE:
+            symbol = str(item.value).strip().upper()
+            return symbol or None
+    return None
+
+
+def _trigger_exclusion_evidence(
+    item: EvaluatedCandidate,
+    decision: IntradayTriggerDecision,
+) -> dict[str, object]:
+    """방아쇠가 걸리지 않은 행을 ranker 제외 근거와 같은 모양으로 남긴다."""
+
+    return {
+        "title": "Intraday trigger exclusion",
+        "source": "kasset_intraday_triggers",
+        "kind": "candidate_exclusion",
+        "symbol": item.candidate.symbol,
+        "market": item.candidate.ranker_market,
+        "exclusionReason": (
+            f"{_NO_INTRADAY_TRIGGER}:{decision.compact_reason()}"[:128]
+        ),
+        "dailySetup": item.setup.as_evidence(),
+        "intradayTriggers": decision.as_evidence(),
+    }
+
+
+def _admitted_candidate(
+    item: EvaluatedCandidate,
+    *,
+    trigger_decision: IntradayTriggerDecision,
+    review: _AiReviewOutcomeBundle,
+    news_shadow: NewsShadowEvidence,
+    now: datetime,
+) -> AdmittedCandidate:
+    """기술 판정을 확정 근거로 굳히고 AI는 보조순위에만 쓴다."""
+
+    ranking = item.factor_ranking
+    setup = item.setup
+    active = tuple(trigger for trigger in trigger_decision.triggers if trigger.active)
+    available = tuple(
+        trigger for trigger in trigger_decision.triggers if trigger.available
+    )
+    trigger_strength = (
+        Decimal(len(active)) / Decimal(len(available)) if available else Decimal("0")
+    )
+    valid_until = min(
+        (
+            result.valid_until.astimezone(UTC)
+            for result in item.strategy_results
+            if result.valid_until.tzinfo is not None
+            and result.valid_until.utcoffset() is not None
+        ),
+        default=now + timedelta(hours=1),
+    )
+    if ranking is not None and ranking.valid_until is not None:
+        valid_until = min(valid_until, ranking.valid_until.astimezone(UTC))
+    valid_until = min(valid_until, now + timedelta(hours=1))
+    confidence = min(
+        Decimal("1"),
+        (item.ensemble.confidence + trigger_strength) / Decimal("2"),
+    ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
+    decision = ExternalEvidence(
+        source="kasset_technical_decision:daily_setup+intraday_triggers",
+        symbol=item.candidate.symbol,
+        market=cast(Any, item.candidate.market),
+        action=setup.direction,
+        confidence=confidence,
+        as_of=now,
+        valid_until=valid_until,
+        rationale=(
+            "완료 일봉 Daily Setup이 적합하고 완료 장중 trigger 정책이 "
+            "충족되어 진입 후보로 남았습니다.",
+            f"활성 trigger: {', '.join(trigger.code for trigger in active) or '없음'}",
+        ),
+        evidence=(
+            setup.as_evidence(),
+            trigger_decision.as_evidence(),
+        ),
+    )
+    # AI는 순위에만 5% 기여한다. AI가 없으면 그 항은 0이 되고 채택은 바뀌지 않는다.
+    ai_bonus = Decimal("0")
+    if review.ai_review.agrees:
+        directional = (
+            review.bullish_score
+            if setup.direction is Action.BUY
+            else review.bearish_score
+        )
+        ai_bonus = Decimal(directional) / Decimal("100")
+    score = (
+        (ranking.total_score if ranking is not None else Decimal("0")) * Decimal("0.45")
+        + abs(item.ensemble.score) * Decimal("0.35")
+        + trigger_strength * Decimal("0.15")
+        + ai_bonus * Decimal("0.05")
+    ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
+    return AdmittedCandidate(
+        evaluated=item,
+        trigger_decision=trigger_decision,
+        decision=decision,
+        ai_review=review.ai_review,
+        news_shadow=news_shadow,
+        events=news_shadow.items,
+        score=score,
+        ai_shadow=review.ai_shadow,
+    )
 
 
 async def run_ai_recommendation_cycle_once(
@@ -1465,7 +2007,8 @@ async def run_ai_recommendation_cycle_once(
         logger.info(
             "kasset AI recommendation cycle owner=%s trace=%s skipped=%s "
             "candidates=%s "
-            "markets=%s sources=%s ranked=%s actionable=%s reviewed=%s "
+            "markets=%s sources=%s ranked=%s evaluated=%s "
+            "actionable=%s pre_ai_exclusions=%s reviewed=%s review_cap_reached=%s "
             "review_rejections=%s recommendations=%d",
             owner_id,
             cycle_trace_id,
@@ -1474,8 +2017,11 @@ async def run_ai_recommendation_cycle_once(
             result.get("candidateMarkets"),
             result.get("candidateSources"),
             result.get("rankedCount"),
+            result.get("strategyEvaluatedCount"),
             result.get("strategyActionableCount"),
+            result.get("preAiExclusions"),
             result.get("aiReviewedCount"),
+            result.get("strategyReviewCapReached"),
             result.get("aiReviewRejections"),
             produced,
         )
@@ -1558,6 +2104,43 @@ def _liquidity_cap(
     return min(values) if values else None
 
 
+def _presizing_exclusion_reason(plan: PortfolioPlan) -> str:
+    """Name the deterministic sizing verdict that kept this row away from AI."""
+
+    sizing = plan.position_sizing
+    codes = (
+        ",".join(dict.fromkeys(reason.code.value for reason in sizing.zero_reasons))
+        if sizing is not None
+        else ""
+    )
+    return f"{_PRESIZING_ZERO_QUANTITY}:{codes}" if codes else _PRESIZING_ZERO_QUANTITY
+
+
+def _presizing_exclusion_evidence(
+    item: EvaluatedCandidate,
+    *,
+    reason: str,
+    plan: PortfolioPlan | None,
+) -> dict[str, object]:
+    """Shape the pre-AI rejection like a ranker exclusion so the audit reads it."""
+
+    ranking = item.factor_ranking
+    evidence: dict[str, object] = {
+        "title": "Pre-AI position sizing exclusion",
+        "source": "kasset_vertical_slice",
+        "kind": "candidate_exclusion",
+        "symbol": item.candidate.symbol,
+        "market": item.candidate.ranker_market,
+        "exclusionReason": reason,
+        "strategyAction": item.ensemble.action.value,
+        "rankPosition": ranking.rank_position if ranking is not None else None,
+    }
+    if plan is not None:
+        evidence["targetQuantity"] = str(plan.target_quantity)
+        evidence["portfolio"] = plan.as_evidence()
+    return evidence
+
+
 def _price_bars(rows: Sequence[Any]) -> tuple[PriceBar, ...]:
     bars: list[PriceBar] = []
     for row in rows:
@@ -1615,8 +2198,8 @@ def _session() -> AbstractAsyncContextManager[AsyncSession]:
 
 __all__ = [
     "AIRecommendationVerticalSlice",
+    "AdmittedCandidate",
     "EvaluatedCandidate",
-    "ReviewedCandidate",
     "TradingCandidate",
     "run_ai_recommendation_cycle_once",
 ]

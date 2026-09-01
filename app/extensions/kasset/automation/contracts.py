@@ -29,6 +29,34 @@ class StrategyName(StrEnum):
     VOLATILITY_TREND = "volatility_trend"
 
 
+class StrategyFamily(StrEnum):
+    """서로 투표를 섞지 않는 전략군.
+
+    Breakout 계열은 추세 지속을 전제하고 Mean Reversion은 되돌림을 전제한다.
+    같은 합의에 넣으면 반대 전제가 서로를 상쇄해 근거 없는 중립이 나오므로,
+    한 진입 결정은 정확히 한 전략군의 표만 센다.
+    """
+
+    BREAKOUT = "breakout"
+    MEAN_REVERSION = "mean_reversion"
+
+
+#: 전략 하나는 정확히 한 전략군에 속한다. Volatility Trend는 추세가 살아 있을
+#: 때만 행동하므로 breakout 계열의 추세 확인 표로 센다.
+FAMILY_BY_STRATEGY: Mapping[StrategyName, StrategyFamily] = {
+    StrategyName.MOMENTUM: StrategyFamily.BREAKOUT,
+    StrategyName.BREAKOUT: StrategyFamily.BREAKOUT,
+    StrategyName.VOLATILITY_TREND: StrategyFamily.BREAKOUT,
+    StrategyName.MEAN_REVERSION: StrategyFamily.MEAN_REVERSION,
+}
+
+
+def strategies_in_family(family: StrategyFamily) -> tuple[StrategyName, ...]:
+    """``StrategyName`` 선언 순서를 유지한 해당 전략군의 구성원."""
+
+    return tuple(name for name in StrategyName if FAMILY_BY_STRATEGY[name] is family)
+
+
 @dataclass(frozen=True, slots=True)
 class PriceBar:
     """One normalized OHLCV bar.

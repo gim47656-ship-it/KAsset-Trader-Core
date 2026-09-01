@@ -70,9 +70,7 @@ def test_selected_shadow_evidence_is_closed_and_secret_free() -> None:
     }
     assert evidence["confidence"] == "0.9"
     assert evidence["selected"] is True
-    assert evidence["selectionReason"] == (
-        "ranked_final_selection_after_strategy_ai_agreement"
-    )
+    assert evidence["selectionReason"] == "ranked_final_selection_after_technical_gate"
     assert evidence["observedAt"] == "2026-08-30T03:00:00Z"
 
     serialized = json.dumps(evidence, sort_keys=True)

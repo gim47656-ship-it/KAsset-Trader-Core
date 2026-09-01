@@ -575,12 +575,30 @@ def derive_promotion_metrics(
     )
     if any(not _is_hash(value) for value in hashes):
         raise PromotionEvidenceBuildError("determinism_hash_missing")
+    gross_profit = sum(
+        (trade.net_pnl for trade in baseline.trades if trade.net_pnl > 0),
+        start=Decimal("0"),
+    )
+    gross_loss = -sum(
+        (trade.net_pnl for trade in baseline.trades if trade.net_pnl < 0),
+        start=Decimal("0"),
+    )
+    if not diagnostics.cost_stress:
+        raise PromotionEvidenceBuildError("cost_stress_scenarios_missing")
     return PromotionMetrics(
         total_return=baseline.total_return,
         max_drawdown=baseline.max_drawdown,
         win_rate=baseline.win_rate,
         expectancy=baseline.expectancy,
         excess_return=baseline.excess_return,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        # 비용을 1x/2x/3x로 물린 시나리오 중 최악의 총수익률. 승격 조건이
+        # "비용을 넉넉히 물려도 성과가 남는가"를 실제로 검사하게 한다.
+        cost_stressed_total_return=min(
+            item.total_return for item in diagnostics.cost_stress
+        ),
+        total_costs=baseline.fees_paid + baseline.slippage_cost,
         trade_count=baseline.trade_count,
         walk_forward_folds=len(folds),
         walk_forward_passed_folds=sum(_fold_passed(fold) for fold in folds),
@@ -1154,6 +1172,19 @@ def _backtest_summary(result: PortfolioBacktestResult) -> dict[str, object]:
         "tradeCount": result.trade_count,
         "winRate": str(result.win_rate),
         "expectancy": str(result.expectancy),
+        # 비용 차감 후 profit factor를 저장 payload만으로 재구성할 수 있게 한다.
+        "grossProfit": str(
+            sum(
+                (trade.net_pnl for trade in result.trades if trade.net_pnl > 0),
+                start=Decimal("0"),
+            )
+        ),
+        "grossLoss": str(
+            -sum(
+                (trade.net_pnl for trade in result.trades if trade.net_pnl < 0),
+                start=Decimal("0"),
+            )
+        ),
         "feesPaid": str(result.fees_paid),
         "slippageCost": str(result.slippage_cost),
         "openPositionCount": len(result.open_positions),
@@ -1204,6 +1235,8 @@ def _thresholds_snapshot(thresholds: PromotionThresholds) -> dict[str, object]:
         "minWinRate": str(thresholds.min_win_rate),
         "minExpectancy": str(thresholds.min_expectancy),
         "minExcessReturn": str(thresholds.min_excess_return),
+        "minProfitFactor": str(thresholds.min_profit_factor),
+        "minCostStressedTotalReturn": str(thresholds.min_cost_stressed_total_return),
         "minTradeCount": thresholds.min_trade_count,
         "minWalkForwardFolds": thresholds.min_walk_forward_folds,
         "minWalkForwardPassRate": str(thresholds.min_walk_forward_pass_rate),
@@ -1465,12 +1498,26 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         raise PromotionEvidenceBuildError("fold_determinism_hash_mismatch")
 
     excess_return = _required_decimal(baseline, "excessReturn")
+    stored_cost_stress = _required_sequence(diagnostics.get("costStress"), "costStress")
+    cost_stressed_returns = [
+        _required_decimal(_required_mapping(item, "costStress.item"), "totalReturn")
+        for item in stored_cost_stress
+    ]
+    if not cost_stressed_returns:
+        raise PromotionEvidenceBuildError("cost_stress_scenarios_missing")
     metrics = PromotionMetrics(
         total_return=_required_decimal(baseline, "totalReturn"),
         max_drawdown=_required_decimal(baseline, "maxDrawdown"),
         win_rate=_required_decimal(baseline, "winRate"),
         expectancy=_required_decimal(baseline, "expectancy"),
         excess_return=excess_return,
+        gross_profit=_required_decimal(baseline, "grossProfit"),
+        gross_loss=_required_decimal(baseline, "grossLoss"),
+        cost_stressed_total_return=min(cost_stressed_returns),
+        total_costs=(
+            _required_decimal(baseline, "feesPaid")
+            + _required_decimal(baseline, "slippageCost")
+        ),
         trade_count=_required_int(baseline, "tradeCount"),
         walk_forward_folds=len(folds),
         walk_forward_passed_folds=passed_folds,

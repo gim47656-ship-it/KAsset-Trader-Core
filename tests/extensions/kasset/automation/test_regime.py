@@ -10,6 +10,7 @@ import pytest
 from app.extensions.kasset.automation.contracts import (
     Action,
     PriceBar,
+    StrategyFamily,
     StrategyName,
     StrategyResult,
 )
@@ -98,16 +99,31 @@ def test_dynamic_weights_change_the_action_without_reimplementing_strategies() -
         _result(StrategyName.VOLATILITY_TREND, Action.SELL, "0.8"),
     ]
 
-    bull = compose_weighted_ensemble(results, weights_for_regime(MarketRegime.BULL))
-    bear = compose_weighted_ensemble(results, weights_for_regime(MarketRegime.BEAR))
+    bull = compose_weighted_ensemble(
+        results,
+        weights_for_regime(MarketRegime.BULL),
+        family=StrategyFamily.BREAKOUT,
+    )
+    bear = compose_weighted_ensemble(
+        results,
+        weights_for_regime(MarketRegime.BEAR),
+        family=StrategyFamily.BREAKOUT,
+    )
 
-    assert bull.action == Action.HOLD
+    assert bull.family is StrategyFamily.BREAKOUT
+    assert bull.action == Action.BUY
     assert bear.action == Action.HOLD
-    assert bull.score == Decimal("0.240000")
-    assert bear.score == Decimal("-0.240000")
+    assert bull.score == Decimal("0.355556")
+    assert bear.score == Decimal("0.061538")
+    assert all(vote["family"] == StrategyFamily.BREAKOUT.value for vote in bull.votes)
+    assert {vote["strategy"] for vote in bull.votes} == {
+        "MOMENTUM",
+        "BREAKOUT",
+        "VOLATILITY_TREND",
+    }
 
 
-def test_ensemble_requires_two_directional_votes_even_with_dominant_weight() -> None:
+def test_breakout_family_allows_one_directional_vote_at_the_score_floor() -> None:
     results = [
         _result(StrategyName.MOMENTUM, Action.BUY, "1"),
         _result(StrategyName.MEAN_REVERSION, Action.HOLD, "0"),
@@ -121,8 +137,12 @@ def test_ensemble_requires_two_directional_votes_even_with_dominant_weight() -> 
         StrategyName.VOLATILITY_TREND: Decimal("0"),
     }
 
-    decision = compose_weighted_ensemble(results, weights)
+    decision = compose_weighted_ensemble(
+        results,
+        weights,
+        family=StrategyFamily.BREAKOUT,
+    )
 
     assert decision.score == Decimal("1.000000")
-    assert decision.action == Action.HOLD
-    assert len(decision.votes) == 4
+    assert decision.action == Action.BUY
+    assert len(decision.votes) == 3
