@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -167,6 +167,10 @@ class TossMinuteCandleSource:
             else retrieved_at.astimezone(UTC)
         )
         current_minute_utc = retrieved_utc.replace(second=0, microsecond=0)
+        # A bounded batch can cross a minute boundary while Toss requests are
+        # in flight. Accept only that immediately following minute; anything
+        # farther ahead is still clock/data corruption and fails the symbol.
+        latest_acceptable_minute = current_minute_utc + timedelta(minutes=1)
         rows: dict[datetime, TossMinuteCandleRow] = {}
         for candle in page.candles:
             try:
@@ -183,7 +187,7 @@ class TossMinuteCandleSource:
                     candle.timestamp,
                 )
                 continue
-            if row.time_utc > current_minute_utc:
+            if row.time_utc > latest_acceptable_minute:
                 raise UnclassifiableTossMinute(
                     f"future_minute:{symbol}:{row.time_utc.isoformat()}"
                 )

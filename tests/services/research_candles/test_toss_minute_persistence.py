@@ -169,6 +169,34 @@ async def test_source_preserves_current_partial_timezone_segment_and_value_seman
 
 
 @pytest.mark.asyncio
+async def test_source_accepts_the_next_minute_when_the_request_crosses_boundary() -> (
+    None
+):
+    client = _Client(
+        [
+            TossCandle(
+                timestamp="2026-09-01T10:06:00",
+                open_price=Decimal("100"),
+                high_price=Decimal("102"),
+                low_price=Decimal("99"),
+                close_price=Decimal("101"),
+                volume=Decimal("3"),
+                currency="KRW",
+            )
+        ]
+    )
+    source = TossMinuteCandleSource(client)
+
+    rows = await source.fetch(
+        symbol="005930",
+        retrieved_at=datetime(2026, 9, 1, 10, 5, 59, tzinfo=KST),
+        batch_id="minute-boundary",
+    )
+
+    assert [row.time_utc for row in rows] == [datetime(2026, 9, 1, 1, 6, tzinfo=UTC)]
+
+
+@pytest.mark.asyncio
 async def test_source_rejects_only_the_unclassifiable_row() -> None:
     client = _Client(
         [
