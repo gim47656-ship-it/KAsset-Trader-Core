@@ -61,18 +61,11 @@ async def _clean(db_session, toss_ledger_cleanup_lock):
 def _patch_session_factory(db_session):
     from app.mcp_server.tooling import toss_live_ledger
 
-    # Create a mock that when called twice returns db_session
-    # async with _order_session_factory()() as db:
     mock_cm = AsyncMock()
     mock_cm.__aenter__.return_value = db_session
     mock_cm.__aexit__.return_value = None
 
-    def factory_call():
-        return mock_cm
-
-    with patch.object(
-        toss_live_ledger, "_order_session_factory", return_value=factory_call
-    ):
+    with patch.object(toss_live_ledger, "AsyncSessionLocal", return_value=mock_cm):
         yield
 
 
