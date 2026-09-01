@@ -1,14 +1,9 @@
-"""ROB-1294 — static contract on `.github/workflows/test.yml`.
+"""Static contract for the stable CI gate and docs-only fast path.
 
-Two things must stay true and are easy to break by accident:
-
-1. The six checks branch protection names today -- ``lint``,
-   ``taskiq-smoke``, ``test (3.13, 1..4)`` -- keep their displayed names,
-   their matrix shape and their (absent) ``if:`` conditions. Renaming any of
-   them silently turns a required check into "expected -- waiting for status"
-   forever.
-2. The new classifier stays **shadow**: no existing job's execution may
-   depend on it in this PR.
+The classifier may skip resource-heavy jobs only when every changed path is a
+known documentation path. Any mixed, unknown, deleted, renamed, or shared-CI
+change remains full coverage. ``ci-required`` must explicitly authorize only
+the aggregate children skipped by that proven docs-only verdict.
 """
 
 from __future__ import annotations
@@ -22,21 +17,34 @@ import yaml
 
 WORKFLOW_PATH = Path(__file__).resolve().parents[2] / ".github/workflows/test.yml"
 
-#: Branch-protection snapshot (verified 2026-07-28, unchanged by ROB-1294).
+#: Live branch-protection snapshot verified before this cutover.
 REQUIRED_CHECK_NAMES = (
-    "lint",
-    "taskiq-smoke",
-    "test (3.13, 1)",
-    "test (3.13, 2)",
-    "test (3.13, 3)",
-    "test (3.13, 4)",
+    "ci-required",
+    "migration (PostgreSQL 15)",
+    "frontend",
 )
-REQUIRED_JOB_IDS = ("lint", "taskiq-smoke", "test")
+AGGREGATE_CHILD_JOB_IDS = ("lint", "taskiq-smoke", "test")
+DOCS_GATED_JOB_IDS = (
+    "lint",
+    "migration",
+    "test",
+    "taskiq-smoke",
+    "security",
+    "alpaca-track-fast-tests",
+    "intraday-harness-v2-tests",
+    "kiwoom-dual-surface-smoke",
+    "alpaca-track-walkforward-tests",
+    "frontend",
+)
+DOCS_GATE_CONDITION = (
+    "needs.change-classifier.outputs.run_all == 'true' || "
+    "needs.change-classifier.outputs.lanes != 'docs'"
+)
 
 AGGREGATE_JOB_ID = "ci-required"
 CLASSIFIER_JOB_ID = "change-classifier"
 MIGRATION_JOB_ID = "migration"
-
+FRONTEND_JOB_ID = "frontend"
 
 @pytest.fixture(scope="module")
 def workflow() -> dict[str, Any]:
@@ -63,42 +71,18 @@ def _displayed_names(job_id: str, job: dict[str, Any]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# The six required checks are untouched
+# Protected names and docs-only job gates
 # --------------------------------------------------------------------------
 
 
-def test_required_check_names_are_exactly_the_protected_six(
-    workflow: dict[str, Any],
-) -> None:
-    names: list[str] = []
-    for job_id in REQUIRED_JOB_IDS:
-        names += _displayed_names(job_id, workflow["jobs"][job_id])
-    assert sorted(names) == sorted(REQUIRED_CHECK_NAMES)
-
-
-@pytest.mark.parametrize("job_id", REQUIRED_JOB_IDS)
-def test_required_jobs_carry_no_name_override(
-    workflow: dict[str, Any], job_id: str
-) -> None:
-    """A `name:` key would decouple the displayed check from the job id."""
-
-    assert "name" not in workflow["jobs"][job_id]
-
-
-@pytest.mark.parametrize("job_id", REQUIRED_JOB_IDS)
-def test_required_jobs_carry_no_if_condition(
-    workflow: dict[str, Any], job_id: str
-) -> None:
-    """They must run unconditionally; a conditional required check can hang."""
-
-    assert "if" not in workflow["jobs"][job_id]
-
-
-@pytest.mark.parametrize("job_id", REQUIRED_JOB_IDS)
-def test_required_jobs_declare_no_needs(workflow: dict[str, Any], job_id: str) -> None:
-    """ROB-1294 must not sequence the required jobs behind the classifier."""
-
-    assert "needs" not in workflow["jobs"][job_id]
+def test_protected_check_names_remain_stable(workflow: dict[str, Any]) -> None:
+    jobs = workflow["jobs"]
+    names = [
+        *_displayed_names(AGGREGATE_JOB_ID, jobs[AGGREGATE_JOB_ID]),
+        *_displayed_names(MIGRATION_JOB_ID, jobs[MIGRATION_JOB_ID]),
+        *_displayed_names(FRONTEND_JOB_ID, jobs[FRONTEND_JOB_ID]),
+    ]
+    assert names == list(REQUIRED_CHECK_NAMES)
 
 
 def test_test_job_matrix_shape_is_unchanged(workflow: dict[str, Any]) -> None:
@@ -108,12 +92,17 @@ def test_test_job_matrix_shape_is_unchanged(workflow: dict[str, Any]) -> None:
     }
 
 
-def test_kasset_migration_job_runs_unconditionally_on_pg15(
-    workflow: dict[str, Any],
+@pytest.mark.parametrize("job_id", DOCS_GATED_JOB_IDS)
+def test_resource_job_has_the_exact_docs_only_gate(
+    workflow: dict[str, Any], job_id: str
 ) -> None:
+    job = workflow["jobs"][job_id]
+    assert job["needs"] == CLASSIFIER_JOB_ID
+    assert job["if"] == DOCS_GATE_CONDITION
+
+
+def test_kasset_migration_job_still_uses_pg15(workflow: dict[str, Any]) -> None:
     job = workflow["jobs"][MIGRATION_JOB_ID]
-    assert "if" not in job
-    assert "needs" not in job
     assert job["services"]["postgres"]["image"] == "postgres:15-alpine"
     assert job.get("continue-on-error") is not True
 
@@ -156,7 +145,7 @@ def test_aggregate_job_needs_every_currently_required_job_and_the_classifier(
     workflow: dict[str, Any],
 ) -> None:
     needs = workflow["jobs"][AGGREGATE_JOB_ID]["needs"]
-    assert set(needs) == {*REQUIRED_JOB_IDS, CLASSIFIER_JOB_ID}
+    assert set(needs) == {*AGGREGATE_CHILD_JOB_IDS, CLASSIFIER_JOB_ID}
 
 
 def test_aggregate_required_flags_match_its_needs_list(
@@ -175,10 +164,27 @@ def test_aggregate_required_flags_match_its_needs_list(
     assert sorted(declared) == sorted(job["needs"])
 
 
-def test_aggregate_authorizes_no_skips(workflow: dict[str, Any]) -> None:
+def test_aggregate_authorizes_only_docs_only_child_skips(
+    workflow: dict[str, Any],
+) -> None:
     job = workflow["jobs"][AGGREGATE_JOB_ID]
     script = "\n".join(step.get("run", "") for step in job["steps"] if step.get("run"))
-    assert "--authorize-skip" not in script
+    env = next(
+        step["env"]
+        for step in job["steps"]
+        if step.get("name") == "Evaluate required child results"
+    )
+
+    assert env["DOCS_ONLY"] == (
+        "${{ needs.change-classifier.outputs.run_all == 'false' && "
+        "needs.change-classifier.outputs.lanes == 'docs' }}"
+    )
+    authorized = [
+        line.split()[-1]
+        for line in script.splitlines()
+        if "--authorize-skip" in line
+    ]
+    assert sorted(authorized) == sorted(AGGREGATE_CHILD_JOB_IDS)
     assert "--allow-undeclared" not in script
 
 
@@ -192,7 +198,7 @@ def test_aggregate_invokes_the_checked_in_aggregator_script(
 
 
 # --------------------------------------------------------------------------
-# The classifier is wired, and wired to nothing
+# Classifier cutover
 # --------------------------------------------------------------------------
 
 
@@ -217,35 +223,35 @@ def test_classifier_job_invokes_the_checked_in_classifier_script(
     assert (WORKFLOW_PATH.parents[2] / "scripts/ci/classify_changes.py").is_file()
 
 
-def test_no_job_other_than_the_aggregate_depends_on_the_classifier(
+def test_only_docs_gated_jobs_and_aggregate_read_classifier_outputs(
     workflow: dict[str, Any],
 ) -> None:
+    allowed = {*DOCS_GATED_JOB_IDS, AGGREGATE_JOB_ID}
     for job_id, job in workflow["jobs"].items():
-        if job_id == AGGREGATE_JOB_ID:
-            continue
-        needs = job.get("needs") or []
-        if isinstance(needs, str):
-            needs = [needs]
-        assert CLASSIFIER_JOB_ID not in needs, job_id
+        if "needs.change-classifier.outputs" in str(job):
+            assert job_id in allowed
 
 
-def test_no_job_condition_references_the_classifier(
+def test_docs_gate_is_fail_closed_for_every_non_docs_verdict(
     workflow: dict[str, Any],
 ) -> None:
-    """The shadow guarantee: classifier outputs drive no skip in this PR."""
-
-    for job_id, job in workflow["jobs"].items():
-        condition = str(job.get("if", ""))
-        assert CLASSIFIER_JOB_ID not in condition, job_id
-        for step in job["steps"]:
-            assert CLASSIFIER_JOB_ID not in str(step.get("if", "")), job_id
+    for job_id in DOCS_GATED_JOB_IDS:
+        condition = workflow["jobs"][job_id]["if"]
+        assert "run_all == 'true'" in condition
+        assert "lanes != 'docs'" in condition
 
 
-def test_classifier_outputs_are_never_read_by_an_expression(
-    workflow_text: str,
+def test_notify_is_neutral_when_webhook_secret_is_absent(
+    workflow: dict[str, Any],
 ) -> None:
-    assert f"needs.{CLASSIFIER_JOB_ID}.outputs" not in workflow_text
+    notify = workflow["jobs"]["notify"]
+    script = "\n".join(
+        step.get("run", "") for step in notify["steps"] if step.get("run")
+    )
 
+    assert 'if [[ -z "${DISCORD_WEBHOOK:-}" ]]' in script
+    assert "exit 0" in script
+    assert "curl --fail-with-body --silent --show-error" in script
 
 # --------------------------------------------------------------------------
 # Nothing else about the workflow moved

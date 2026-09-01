@@ -12,11 +12,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Branch protection snapshot (verified 2026-07-28): only lint,
-  # taskiq-smoke, and test (3.13, 1..4) are required checks. The
-  # report-only security job and both research jobs remain diagnostic,
-  # non-required checks; this workflow does not change protection policy.
+  # Branch protection snapshot (verified 2026-09-01): `ci-required`,
+  # `migration (PostgreSQL 15)`, and `frontend` are required. A proven
+  # docs-only change may report the resource jobs as skipped; every other
+  # classification preserves the existing full job topology.
   lint:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     env:
       PYTHON_VERSION: "3.13"
@@ -58,6 +60,8 @@ jobs:
       run: uv run pytest scripts/call_durations_test.py -q
 
   migration:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     name: migration (PostgreSQL 15)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -142,11 +146,10 @@ jobs:
         path: write-fence-report.json
         if-no-files-found: warn
 
-  # ROB-1294 (R2B) — SHADOW ONLY. Classifies this run's change set into
-  # resource lanes and publishes the verdict as job outputs + an artifact.
-  # Nothing consumes those outputs to skip a job in this PR; the six
-  # branch-protection-required checks (lint, taskiq-smoke, test (3.13, 1..4))
-  # run exactly as before. See docs/runbooks/ci-required-aggregator.md.
+  # Deterministically classifies this run's changed paths. This workflow uses
+  # only the narrowest verdict: exactly docs-only changes skip resource jobs.
+  # Every mixed lane and every conservative `run_all` result keeps full
+  # coverage. See docs/runbooks/ci-required-aggregator.md.
   #
   # Fail-closed: an unknown path, a rename/copy/delete, any shared CI/config
   # /test-infrastructure file, an empty change set, or an absent base SHA all
@@ -173,7 +176,7 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
 
-    - name: Classify changed paths (shadow)
+    - name: Classify changed paths
       id: classify
       env:
         CLASSIFY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
@@ -194,6 +197,8 @@ jobs:
         if-no-files-found: warn
 
   test:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -338,6 +343,8 @@ jobs:
         disable_search: true
 
   taskiq-smoke:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -446,6 +453,8 @@ jobs:
         if-no-files-found: warn
 
   security:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     env:
       PYTHON_VERSION: "3.13"
@@ -522,6 +531,8 @@ jobs:
           safety-report.json
 
   alpaca-track-fast-tests:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     # H1/H2/H3 are separate pytest invocations because they contain duplicate
     # test module basenames under prepend import mode. They share one job so
     # checkout/Python/uv/dependency setup is paid once instead of three times.
@@ -570,6 +581,8 @@ jobs:
         uv run pytest research/alpaca_track_signals/tests/ -q -ra --strict-markers
 
   intraday-harness-v2-tests:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -604,6 +617,8 @@ jobs:
       run: uv run pytest research/intraday_harness_v2/tests/ -v -ra --strict-markers
 
   kiwoom-dual-surface-smoke:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     # This is an orchestration smoke only: synthetic clients/pool are injected
     # by the test, so it performs zero broker HTTP, account access, or DB write.
     runs-on: ubuntu-latest
@@ -640,6 +655,8 @@ jobs:
       run: uv run pytest tests/test_kiwoom_dual_surface.py -k 'dual_orchestrator' -v -ra --strict-markers
 
   alpaca-track-walkforward-tests:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     # ROB-1062 H4 remains a separate gate from the consolidated H1/H2/H3 job:
     # it has its own conftest.py sys.path wiring onto its three
     # producer siblings (research/alpaca_track, research/alpaca_track_seal,
@@ -711,6 +728,8 @@ jobs:
   # classifier output, so a red run is always a real signal, never a skip
   # laundered into green.
   frontend:
+    needs: change-classifier
+    if: needs.change-classifier.outputs.run_all == 'true' || needs.change-classifier.outputs.lanes != 'docs'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -741,18 +760,15 @@ jobs:
     - name: Run Vitest suite
       run: npm test
 
-  # ROB-1294 (R2B) — fixed-name aggregate over the currently required checks.
-  #
-  # 🔴 This PR does NOT make `ci-required` a required check and writes no
-  # branch-protection setting. Branch protection still names lint,
-  # taskiq-smoke and test (3.13, 1..4) directly. The operator-only cutover
-  # procedure lives in docs/runbooks/ci-required-aggregator.md.
+  # Stable required aggregate. Branch protection requires `ci-required`
+  # directly; migration and frontend remain separately required while the
+  # docs-only fast path is observed.
   #
   # `if: always()` is load-bearing: without it this job is skipped whenever a
-  # child fails, and a required check that vanishes on failure is a green
-  # merge button. Red on child failure, child cancellation, classifier
-  # failure, an absent child result, or any unrecognised result string; only
-  # an explicitly `--authorize-skip`ped child may be skipped and still pass.
+  # child fails. Classifier failure, unauthorized skips, child failure, child
+  # cancellation, an absent result, or an unknown result stay red. The only
+  # authorized skip set is the three aggregate children on a proven docs-only
+  # change.
   ci-required:
     name: ci-required
     if: always()
@@ -772,14 +788,24 @@ jobs:
         # matrix `test` job GitHub collapses all four shards into one result,
         # which is failure if any shard failed.
         CI_REQUIRED_NEEDS: ${{ toJSON(needs) }}
+        DOCS_ONLY: ${{ needs.change-classifier.outputs.run_all == 'false' && needs.change-classifier.outputs.lanes == 'docs' }}
       # stdlib-only: no uv sync, no dependency install.
       run: |
+        authorized_skips=()
+        if [[ "$DOCS_ONLY" == "true" ]]; then
+          authorized_skips=(
+            --authorize-skip lint
+            --authorize-skip test
+            --authorize-skip taskiq-smoke
+          )
+        fi
         python3 scripts/ci/aggregate_required.py \
           --results-env CI_REQUIRED_NEEDS \
           --required lint \
           --required test \
           --required taskiq-smoke \
           --required change-classifier \
+          "${authorized_skips[@]}" \
           --summary \
           --json-out ci-required-report.json
 
@@ -800,7 +826,11 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -s -H "Content-Type: application/json" \
+          if [[ -z "${DISCORD_WEBHOOK:-}" ]]; then
+            echo "::notice::DISCORD_WEBHOOK_URL is not configured; skipping failure notification."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error -H "Content-Type: application/json" \
             -d "{
               \"embeds\": [{
                 \"title\": \"❌ Test CI 실패\",

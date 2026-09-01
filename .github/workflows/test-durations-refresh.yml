@@ -39,21 +39,26 @@ permissions:
 
 jobs:
   preflight:
-    name: Verify duration refresh token
+    name: Detect duration refresh token
     runs-on: ubuntu-latest
     timeout-minutes: 1
     env:
       DURATIONS_REFRESH_TOKEN: ${{ secrets.DURATIONS_REFRESH_TOKEN }}
+    outputs:
+      can_open_pr: ${{ steps.token.outputs.can_open_pr }}
 
     steps:
-    - name: Require DURATIONS_REFRESH_TOKEN
+    - name: Detect DURATIONS_REFRESH_TOKEN
+      id: token
       shell: bash
       run: |
         set -euo pipefail
         if [[ -z "${DURATIONS_REFRESH_TOKEN:-}" ]]; then
-          echo "::error::DURATIONS_REFRESH_TOKEN is required for the duration refresh auto-PR."
-          exit 1
+          echo "can_open_pr=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::DURATIONS_REFRESH_TOKEN is not configured; measurements and artifacts will still be produced, but the auto-PR job will be skipped."
+          exit 0
         fi
+        echo "can_open_pr=true" >> "$GITHUB_OUTPUT"
         echo "DURATIONS_REFRESH_TOKEN is configured."
 
   collect-authoritative:
@@ -423,8 +428,8 @@ jobs:
 
   pull-request:
     name: Open duration refresh PR
-    needs: merge
-    if: needs.merge.outputs.changed == 'true' || needs.merge.outputs.call_durations_changed == 'true' || needs.merge.outputs.ci_shards_changed == 'true'
+    needs: [merge, preflight]
+    if: needs.preflight.outputs.can_open_pr == 'true' && (needs.merge.outputs.changed == 'true' || needs.merge.outputs.call_durations_changed == 'true' || needs.merge.outputs.ci_shards_changed == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

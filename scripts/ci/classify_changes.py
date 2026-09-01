@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic changed-path classifier for CI resource lanes.
 
-ROB-1294 (R2B) ships this as **shadow output only**: nothing in
-``.github/workflows/test.yml`` consumes its outputs to skip a job. It exists so
-that a later change can move shard/lane topology behind a stable required
-check without inventing the fail-closed semantics at that moment.
+The classifier is consumed by ``.github/workflows/test.yml`` only for the
+proven docs-only fast path. Every mixed lane, unknown path, unsafe status, or
+classifier uncertainty preserves full CI coverage.
 
 Fail-closed contract
 --------------------
@@ -48,8 +47,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 
 #: Every CI job name the classifier can address. ``run_all`` selects all of
-#: them; these strings are the vocabulary a later resource-lane change would
-#: bind actual job ``if:`` conditions to.
+#: them. The workflow currently consumes only the empty docs job set; broader
+#: lane-based skipping remains disabled.
 ALL_JOBS: tuple[str, ...] = (
     "lint",
     "test",

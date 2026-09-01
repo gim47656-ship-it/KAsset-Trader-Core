@@ -1,35 +1,30 @@
-# `ci-required` shadow aggregator + change classifier (ROB-1294)
+# `ci-required` aggregator + docs-only change classifier
 
-**Status: shadow.** Nothing here changes what CI enforces today. The two new
-jobs observe and report; the six branch-protection-required checks run exactly
-as they did before this PR.
+**Status: active for docs-only changes.** The classifier skips resource jobs
+only when every changed path belongs to the `docs` lane. Mixed lanes and all
+fail-closed outcomes keep the full CI topology.
 
 ## 1. Why this exists
 
-Branch protection currently names six checks directly:
+Branch protection currently requires:
 
 ```
-lint
-taskiq-smoke
-test (3.13, 1)
-test (3.13, 2)
-test (3.13, 3)
-test (3.13, 4)
+ci-required
+migration (PostgreSQL 15)
+frontend
 ```
 
-Those names are derived from the `test` job's matrix (`python-version` ×
-`group`). Any change to shard count, shard naming, or lane topology therefore
-*also* requires a branch-protection edit, and an edit that is forgotten leaves
-either a permanently pending required check (the old name never reports) or a
-silently unenforced one (the new shard is not required). ROB-1294 builds the
-two pieces a later change needs so that topology can move behind one fixed
-name:
+The stable aggregate decouples branch protection from the four test-shard
+display names. The first active optimization is deliberately narrow:
+documentation-only changes no longer start PostgreSQL/Redis service containers
+or install Python/Node dependencies. Any broader lane cutover is a separate
+change.
 
 | piece | file | what it is |
 |---|---|---|
 | change classifier | `scripts/ci/classify_changes.py` | deterministic changed-path → lane mapping, fail-closed |
 | aggregate evaluator | `scripts/ci/aggregate_required.py` | fixed-name gate over the required children's results |
-| workflow wiring | `.github/workflows/test.yml` (`change-classifier`, `ci-required`) | runs both on every PR/push run |
+| workflow wiring | `.github/workflows/test.yml` (`change-classifier`, resource-job conditions, `ci-required`) | runs classification first; only an exact docs-only verdict skips resource jobs |
 
 ## 2. Change classifier contract
 
@@ -118,25 +113,21 @@ resynchronises quietly is a parser that reports the wrong lane confidently:
 
 `ci-required` declares `if: always()` and
 `needs: [lint, test, taskiq-smoke, change-classifier]`. `always()` is
-load-bearing: a job with no `if:` is *skipped* when a `needs:` child fails, and
-a required check that disappears on failure is a green merge button.
+load-bearing: classifier or child failure must still produce the fixed required
+check.
 
 `scripts/ci/aggregate_required.py` evaluates `toJSON(needs)`:
 
 | child result | verdict |
 |---|---|
 | `success` | pass |
-| `skipped` | pass **only** with `--authorize-skip <name>`; red otherwise |
-| `failure` | red |
-| `cancelled` | red |
-| absent from the payload | red (`missing`) |
-| any other string, `""`, `null`, a missing `result` key | red (`unexpected`) |
-| present in the payload but not `--required` | red (`undeclared`) |
+| `skipped` | pass **only** with `--authorize-skip <name>` |
+| `failure` / `cancelled` | red |
+| absent or unknown result | red |
 
-Malformed input — non-JSON, a non-object payload, an unset env var, a child
-whose value is neither a string nor an object with `result` — is red. The
-workflow passes **no** `--authorize-skip` and **no** `--allow-undeclared`
-today, so `ci-required` is green only when all four children report `success`.
+The workflow adds `--authorize-skip lint`, `test`, and `taskiq-smoke` only when
+the classifier reports `run_all=false` and `lanes=docs`. A classifier failure,
+mixed lane, unknown path, unsafe Git status, or unexpected skip stays red.
 
 The *declaration itself* is validated before the payload is even read
 (`validate_configuration`), so a malformed gate can never reach a verdict:
@@ -151,50 +142,38 @@ The *declaration itself* is validated before the payload is even read
 
 For the matrix `test` job, GitHub collapses all four shards into a single
 `needs.test.result`, which is `failure` if any shard failed. The aggregate
-therefore covers all six protected checks through three child entries.
+therefore covers all four shard results through one child entry.
 
-## 4. Verifying the shadow property
+## 4. Verification
 
 `tests/ci/test_ci_required_workflow_contract.py` machine-checks that:
 
-- the six displayed check names, the `test` matrix shape, and the absence of
-  `if:`/`name:`/`needs:` on `lint`, `test` and `taskiq-smoke` are unchanged;
-- `ci-required` exists with a constant displayed name and `if: always()`;
-- its `--required` flags match its `needs:` list exactly;
-- no job other than `ci-required` lists `change-classifier` in `needs:`, no
-  `if:` expression anywhere mentions it, and `needs.change-classifier.outputs`
-  appears nowhere in the workflow.
+- the live protected names remain `ci-required`, `migration (PostgreSQL 15)`,
+  and `frontend`;
+- every resource job has the same fail-closed docs gate and depends on the
+  classifier;
+- the test matrix remains Python 3.13 × four shards;
+- `ci-required` runs with `always()` and authorizes exactly the three docs-only
+  child skips;
+- only gated jobs and the aggregate read classifier outputs.
 
-Run the whole ROB-1294 suite with:
+Run:
 
 ```bash
 uv run pytest tests/ci/ -q -ra
 actionlint .github/workflows/test.yml
 ```
 
-## 5. Operator-only follow-up — OUT OF SCOPE for ROB-1294
+## 5. Expanding beyond docs-only
 
-🔴 **Not performed by this PR.** ROB-1294 writes no GitHub repository setting
-and no branch-protection configuration. What follows is a description of the
-work, not an instruction to run it now.
+Do not reuse the docs condition for another lane. A broader cutover requires:
 
-Making `ci-required` the sole stable required check would be, in order:
+1. Evidence that the lane-to-job map covers every consumer and generated
+   artifact affected by that path.
+2. Contract tests for mixed-lane changes and every newly authorized skip.
+3. `ci-required` `needs:` and `--required` parity for every merge-gating job.
+4. A real PR demonstrating that required skipped checks report and that a
+   classifier failure remains red.
 
-1. Let `ci-required` run on `main` for a while and confirm it reports on every
-   PR and push run and that its verdict always matches the six checks it
-   summarises. Any divergence is a bug in the aggregate, not in the children.
-2. In branch protection, **add** `ci-required` to the required-checks list
-   while keeping the existing six. Merge a few PRs in that overlapping state.
-3. Only then **remove** the six from the required list, leaving `ci-required`
-   alone. Removing them first would leave a window with no enforcement at all.
-4. From that point the shard count, the matrix shape, and lane topology can
-   change without touching branch protection — provided every new job that
-   must gate a merge is added to `ci-required`'s `needs:` **and** to its
-   `--required` flags. The contract test in §4 fails if those two lists drift.
-5. Activating the classifier (letting `run_all=false` actually skip jobs) is a
-   separate change again, and it must keep the skipped jobs' *displayed names*
-   reporting — a required check that is skipped is not a passing check unless
-   it is passed to `--authorize-skip` deliberately.
-
-Ordering matters more than any individual step: at no point should the set of
-enforced checks be empty.
+Unknown paths, deletes, renames, copies, rewrites, and shared CI/config inputs
+must continue to force full coverage.
