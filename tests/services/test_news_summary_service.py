@@ -834,9 +834,15 @@ async def test_pre_ai_gate_blocks_noise_unreliable_and_duplicate_before_generato
         [korean_title, market_moving_title]
     )
     assert result.summarized == 2
-    assert result.skipped_insufficient == 4
     assert result.failed == 0
-    assert result.selected == 6
+    # 신뢰할 수 없는 출처는 SQL 술어가 ``LIMIT`` 이전에 지우므로 스캔에 등장하지
+    # 않는다. Python gate가 세는 탈락은 중복 1건 + 잡음 2건이다.
+    assert result.skipped_insufficient == 3
+    assert result.selected == 5
+    unreliable_id = next(
+        article.id for article in articles if article.source == "Naver Blog"
+    )
+    assert unreliable_id not in result.skipped_article_ids
 
     korean_analysis = await db_session.scalar(
         select(NewsAnalysisResult).where(NewsAnalysisResult.article_id == korean_id)
@@ -891,11 +897,11 @@ async def test_pre_ai_gate_makes_zero_generator_calls_when_nothing_qualifies(
     assert generator.calls == []
     assert result.status == "success"
     assert result.summarized == 0
-    assert result.selected == 2
-    assert result.skipped_insufficient == 2
-    assert sorted(result.skipped_article_ids) == sorted(
-        article.id for article in articles
-    )
+    # 제외 출처 행은 스캔 창에 아예 들어오지 않는다. 잡음 제목만 Python gate가
+    # 판정하므로 보고되는 스킵도 그 1건뿐이다.
+    assert result.selected == 1
+    assert result.skipped_insufficient == 1
+    assert result.skipped_article_ids == (articles[0].id,)
     assert (
         await db_session.scalar(
             select(func.count())
@@ -905,6 +911,113 @@ async def test_pre_ai_gate_makes_zero_generator_calls_when_nothing_qualifies(
             )
         )
     ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scan_reaches_admissible_rows_behind_a_full_page_of_rejects(
+    db_session,
+) -> None:
+    """제목 잡음이 첫 page를 가득 채워도 스캔이 그 뒤 후보에 도달한다.
+
+    잡음 탈락 행은 ``NewsAnalysisResult``를 남기지 않아 backoff에도, 완료 분석
+    조건에도 걸리지 않는다. page를 이어 읽지 않으면 같은 행이 매 회차 창을
+    영구 점유해 뒤의 정상 기사가 한국어 요약을 영영 받지 못한다.
+    """
+
+    suffix = uuid.uuid4().hex
+    page_size = 1 * news_summary_service.CANDIDATE_SCAN_MULTIPLIER
+    admissible_title = "삼성전자 신규 공장 투자 계획 공개"
+    # 첫 page를 통째로 채우고도 남을 만큼의 잡음 제목. 모두 published_at이 더
+    # 최신이라 정렬에서 정상 기사보다 앞선다.
+    noise_articles = [
+        _article(
+            url=f"https://news.test.invalid/{suffix}/noise-{index}",
+            title=f"Top {index + 3} coins to buy before the next rally",
+            summary=(
+                "The promotional roundup lists tokens the author expects to rise. "
+                "It repeats the same claim for every listed token."
+            ),
+            published_at=datetime(2026, 8, 29, 12, 0) + timedelta(minutes=index),
+        )
+        for index in range(page_size + 2)
+    ]
+    admissible = _article(
+        url=f"https://news.test.invalid/{suffix}/admissible",
+        title=admissible_title,
+        summary=(
+            "삼성전자는 신규 공장 투자 계획과 예상 가동 시점을 공개했다. "
+            "회사는 투자 재원 조달 방식도 함께 설명했다."
+        ),
+        published_at=datetime(2026, 8, 29, 9, 0),
+    )
+    articles = [*noise_articles, admissible]
+    db_session.add_all(articles)
+    await db_session.flush()
+    admissible_id = admissible.id
+    await db_session.commit()
+
+    generator = FakeSummaryGenerator(
+        {
+            admissible_title: (
+                "삼성전자가 신규 공장 투자 계획과 가동 시점을 공개했다. "
+                "회사는 투자 재원 조달 방식도 함께 설명했다."
+            )
+        }
+    )
+
+    result = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[article.url for article in articles],
+        generator=generator,
+    )
+
+    assert [call.title for call in generator.calls] == [admissible_title]
+    assert result.summarized == 1
+    analysis = await db_session.scalar(
+        select(NewsAnalysisResult).where(NewsAnalysisResult.article_id == admissible_id)
+    )
+    assert analysis is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scan_stops_after_the_bounded_page_budget(db_session) -> None:
+    """적격 모집단이 잡음뿐이면 스캔은 page 상한에서 멈춘다(무한 루프 방지)."""
+
+    suffix = uuid.uuid4().hex
+    page_size = 1 * news_summary_service.CANDIDATE_SCAN_MULTIPLIER
+    pages = news_summary_service.CANDIDATE_SCAN_MAX_PAGES
+    articles = [
+        _article(
+            url=f"https://news.test.invalid/{suffix}/noise-{index}",
+            title=f"Top {index + 3} coins to buy before the next rally",
+            summary=(
+                "The promotional roundup lists tokens the author expects to rise. "
+                "It repeats the same claim for every listed token."
+            ),
+            published_at=datetime(2026, 8, 29, 12, 0) + timedelta(minutes=index),
+        )
+        for index in range(page_size * pages + page_size)
+    ]
+    db_session.add_all(articles)
+    await db_session.commit()
+    generator = FakeSummaryGenerator({})
+
+    result = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[article.url for article in articles],
+        generator=generator,
+    )
+
+    assert generator.calls == []
+    assert result.summarized == 0
+    # 통과 후보가 끝내 나오지 않아도 스캔은 page 상한에서 멈춘다. 남은 한 page는
+    # 이번 회차에서 평가조차 되지 않는다.
+    assert result.skipped_insufficient == page_size * pages
+    assert result.selected == page_size * pages
 
 
 @pytest.mark.integration

@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -43,12 +43,20 @@ MAX_TRANSLATED_EXCERPT_CHARS = 6_000
 MIN_SOURCE_BODY_CHARS = 40
 MIN_SOURCE_BODY_WORDS = 6
 CANDIDATE_SCAN_MULTIPLIER = 10
+#: 제목 잡음(``classify_pre_summary_noise``)은 SQL 술어로 옮길 수 없어 gate 탈락이
+#: 한 page를 통째로 채울 수 있다. 그때 스캔을 멈추지 않고 다음 page를 이어 읽되,
+#: page 수를 고정 상한으로 묶어 무한 스캔과 무한 루프를 함께 막는다.
+CANDIDATE_SCAN_MAX_PAGES = 5
 _SUMMARY_MAX_CHARS = 1_200
 #: 신뢰할 수 없는 출처 정책은 수집 시점(``google_news_rss``)과 하나를 공유한다.
 #: 정책 도입 전에 저장된 행이나 ``excluded_sources``를 덮어쓴 수집 회차의 행이
 #: 모델 호출까지 도달하지 않도록 AI 경계에서 같은 목록을 다시 적용한다.
 _EXCLUDED_SOURCE_KEYS: frozenset[str] = frozenset(
     value.casefold() for value in DEFAULT_EXCLUDED_SOURCES
+)
+#: 같은 목록의 SQL 비교용 표현. PostgreSQL ``lower()`` 결과와 맞춘다.
+_EXCLUDED_SOURCE_SQL_KEYS: tuple[str, ...] = tuple(
+    sorted(value.lower() for value in DEFAULT_EXCLUDED_SOURCES)
 )
 
 _SUMMARY_SCHEMA: dict[str, object] = {
@@ -742,43 +750,78 @@ def _ai_rejection_reason(*, title: str, source: str) -> str | None:
     return None
 
 
-def _gated_candidates(
-    rows: Sequence[tuple[int, str | None, str | None]],
-) -> _GatedCandidates:
+class _CandidateGate:
     """출처·품질·중복을 AI 호출 전에 판정해 후보를 둘로 나눈다.
 
-    ``rows``의 순서는 후보 질의의 순서(본문 풍부함 → 최신 게시 → 최신 id)를 그대로
-    따르므로, 같은 (제목, 출처) 중복 중에서는 본문이 가장 풍부하고 최신인 한 건만
-    모델을 본다. 나머지는 요약이 이미 있는 쪽으로 수렴한다.
+    ``consume``이 받는 행의 순서는 후보 질의의 순서(본문 풍부함 → 최신 게시 →
+    최신 id)를 그대로 따르므로, 같은 (제목, 출처) 중복 중에서는 본문이 가장
+    풍부하고 최신인 한 건만 모델을 본다. 상태는 page를 가로질러 유지되므로 page
+    경계가 중복 판정을 갈라놓지 않는다.
     """
 
-    admitted: list[int] = []
-    rejected: list[int] = []
-    reasons: Counter[str] = Counter()
-    seen: set[tuple[str, str]] = set()
-    for article_id, raw_title, raw_source in rows:
-        title = _normalized_text(raw_title)
-        source = _normalized_text(raw_source)
-        reason = _ai_rejection_reason(title=title, source=source)
-        if reason is None:
-            key = (_comparison_key(title), _comparison_key(source))
-            if key in seen:
-                reason = "duplicate:title_source"
-            else:
-                seen.add(key)
-        if reason is not None:
-            rejected.append(article_id)
-            reasons[reason] += 1
-            continue
-        admitted.append(article_id)
-    if rejected:
-        logger.info(
-            "일반 뉴스 요약 AI 호출 전 배제: rejected=%d admitted=%d reasons=%s",
-            len(rejected),
-            len(admitted),
-            dict(sorted(reasons.items())),
+    __slots__ = ("_admitted", "_rejected", "_reasons", "_seen")
+
+    def __init__(self) -> None:
+        self._admitted: list[int] = []
+        self._rejected: list[int] = []
+        self._reasons: Counter[str] = Counter()
+        self._seen: set[tuple[str, str]] = set()
+
+    @property
+    def admitted_count(self) -> int:
+        return len(self._admitted)
+
+    def consume(self, rows: Iterable[tuple[int, str | None, str | None]]) -> None:
+        for article_id, raw_title, raw_source in rows:
+            title = _normalized_text(raw_title)
+            source = _normalized_text(raw_source)
+            reason = _ai_rejection_reason(title=title, source=source)
+            if reason is None:
+                key = (_comparison_key(title), _comparison_key(source))
+                if key in self._seen:
+                    reason = "duplicate:title_source"
+                else:
+                    self._seen.add(key)
+            if reason is not None:
+                self._rejected.append(article_id)
+                self._reasons[reason] += 1
+                continue
+            self._admitted.append(article_id)
+
+    def finish(self) -> _GatedCandidates:
+        """스캔 1회의 최종 판정. 탈락 집계는 여기서 한 번만 남긴다."""
+
+        if self._rejected:
+            logger.info(
+                "일반 뉴스 요약 AI 호출 전 배제: rejected=%d admitted=%d reasons=%s",
+                len(self._rejected),
+                len(self._admitted),
+                dict(sorted(self._reasons.items())),
+            )
+        return _GatedCandidates(
+            admitted=tuple(self._admitted),
+            rejected=tuple(self._rejected),
         )
-    return _GatedCandidates(admitted=tuple(admitted), rejected=tuple(rejected))
+
+
+def _sql_expressible_gate_conditions():
+    """결정론 gate 중 SQL로 표현되는 배제를 ``LIMIT`` 이전으로 끌어올린다.
+
+    이 두 사유(``content:missing_title``·``source:excluded``)는 영속 흔적을 전혀
+    남기지 않아 backoff에도, 완료 분석 조건에도 걸리지 않는다. 스캔 창 안에
+    남겨두면 매 회차 같은 행이 창을 영구 점유해 신규 후보를 밀어낸다.
+
+    ``_ai_rejection_reason``이 여전히 최종 판정자다. Python 정규화가 유니코드
+    공백까지 접고 ``casefold``를 쓰므로 여기의 술어는 의도적으로 더 느슨하다 —
+    Python gate가 반드시 탈락시킬 행만 지운다.
+    """
+
+    return (
+        func.btrim(func.coalesce(NewsArticle.title, "")) != "",
+        func.lower(func.btrim(func.coalesce(NewsArticle.source, ""))).not_in(
+            _EXCLUDED_SOURCE_SQL_KEYS
+        ),
+    )
 
 
 async def _scan_candidates(
@@ -809,6 +852,7 @@ async def _scan_candidates(
             ),
             ~complete_korean_analysis_exists(),
             ~recent_incomplete_attempt,
+            *_sql_expressible_gate_conditions(),
         )
         .order_by(
             case(
@@ -819,7 +863,6 @@ async def _scan_candidates(
             NewsArticle.article_published_at.desc().nullslast(),
             NewsArticle.id.desc(),
         )
-        .limit(batch_size * CANDIDATE_SCAN_MULTIPLIER)
     )
     if market is not None:
         statement = statement.where(NewsArticle.market == market)
@@ -829,8 +872,19 @@ async def _scan_candidates(
         statement = statement.where(
             NewsArticle.url.in_(tuple(dict.fromkeys(article_urls)))
         )
-    rows = (await db.execute(statement)).all()
-    return _gated_candidates([(row.id, row.title, row.source) for row in rows])
+
+    # SQL로 옮길 수 없는 제목 잡음은 여전히 창을 채울 수 있다. batch를 채울 만큼
+    # 통과 후보가 모이거나 적격 모집단이 소진될 때까지만 page를 이어 읽는다.
+    page_size = batch_size * CANDIDATE_SCAN_MULTIPLIER
+    gate = _CandidateGate()
+    for page in range(CANDIDATE_SCAN_MAX_PAGES):
+        rows = (
+            await db.execute(statement.limit(page_size).offset(page * page_size))
+        ).all()
+        gate.consume((row.id, row.title, row.source) for row in rows)
+        if gate.admitted_count >= batch_size or len(rows) < page_size:
+            break
+    return gate.finish()
 
 
 def _batch_status(

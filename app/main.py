@@ -86,6 +86,7 @@ from app.services.error_serialization import (
 from app.services.order_proposals.callback_inbox.ingress import (
     shutdown_callback_enqueue_tasks,
 )
+from app.services.screener_service import shutdown_screener_report_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,9 @@ def create_app() -> FastAPI:
             yield
         finally:
             await cleanup_monitoring()
+            # fire-and-forget screener 보고서 task는 Redis에 job 상태를 남긴다.
+            # 파괴되도록 두지 말고 취소한 뒤 유한하게 회수한다.
+            await shutdown_screener_report_tasks()
             if not broker.is_worker_process:
                 # R33: an enqueue timeout can leave a cancellation-resistant
                 # producer alive. Ask it to stop and give cooperative tasks a
