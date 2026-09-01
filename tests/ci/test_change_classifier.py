@@ -35,10 +35,13 @@ from scripts.ci.classify_changes import (
 @pytest.mark.parametrize(
     ("path", "expected_lane"),
     [
-        # docs
-        ("docs/runbooks/ci-required-aggregator.md", "docs"),
-        ("README.md", "docs"),
-        ("CLAUDE.md", "docs"),
+        # only proven metadata is docs-only; contract documentation is shared
+        ("HANDOFF.md", "docs"),
+        ("docs/a.md", "ci_shared"),
+        ("docs/runbooks/ci-required-aggregator.md", "ci_shared"),
+        ("README.md", "ci_shared"),
+        ("CLAUDE.md", "ci_shared"),
+        ("AGENTS.md", "ci_shared"),
         # app / tests / research / scripts
         ("app/services/halt_detection.py", "app"),
         ("tests/test_symbol_conversion.py", "tests"),
@@ -88,7 +91,7 @@ def _added(*paths: str) -> list[ChangeEntry]:
 
 
 def test_docs_only_change_selects_no_ci_job() -> None:
-    result = classify_entries(_added("docs/a.md", "README.md"))
+    result = classify_entries(_added("HANDOFF.md"))
     assert result.run_all is False
     assert result.result == "classified"
     assert result.lanes == ("docs",)
@@ -110,7 +113,7 @@ def test_tests_only_change_selects_lint_and_test() -> None:
 
 
 def test_mixed_lanes_union_their_jobs() -> None:
-    result = classify_entries(_added("docs/a.md", "tests/test_a.py"))
+    result = classify_entries(_added("HANDOFF.md", "tests/test_a.py"))
     assert result.run_all is False
     assert result.lanes == ("docs", "tests")
     assert result.jobs == ("lint", "test")
@@ -127,7 +130,7 @@ def test_mixed_lanes_union_their_jobs() -> None:
     ],
 )
 def test_shared_infrastructure_change_forces_run_all(path: str) -> None:
-    result = classify_entries(_added("docs/a.md", path))
+    result = classify_entries(_added("HANDOFF.md", path))
     assert result.run_all is True
     assert result.reason == "forcing_path"
     assert path in result.forcing_paths
@@ -135,7 +138,7 @@ def test_shared_infrastructure_change_forces_run_all(path: str) -> None:
 
 
 def test_unknown_path_forces_run_all_even_beside_a_known_docs_path() -> None:
-    result = classify_entries(_added("docs/a.md", "brand_new_dir/file.py"))
+    result = classify_entries(_added("HANDOFF.md", "brand_new_dir/file.py"))
     assert result.run_all is True
     assert result.reason == "forcing_path"
     assert result.forcing_paths == ("brand_new_dir/file.py",)
@@ -207,9 +210,9 @@ def test_parse_name_status_rejects_a_status_with_no_path() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_build_outputs_marks_shadow_and_emits_every_job_flag() -> None:
-    outputs = build_outputs(classify_entries(_added("docs/a.md")))
-    assert outputs["shadow"] == "true"
+def test_build_outputs_marks_classifier_active_and_emits_every_job_flag() -> None:
+    outputs = build_outputs(classify_entries(_added("HANDOFF.md")))
+    assert outputs["shadow"] == "false"
     assert outputs["result"] == "classified"
     assert outputs["run_all"] == "false"
     for job in ALL_JOBS:
@@ -275,14 +278,14 @@ def _run_cli(repo_path: Path, tmp_path: Path, *extra: str) -> tuple[int, dict]:
 
 def test_cli_classifies_a_real_docs_only_diff(repo: Path, tmp_path: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    head = _commit(repo, "docs/new.md", "hello\n", "docs")
+    head = _commit(repo, "HANDOFF.md", "hello\n", "docs")
     code, report = _run_cli(repo, tmp_path, "--base-sha", base, "--head-sha", head)
     assert code == 0
     assert report["result"] == "classified"
     assert report["run_all"] is False
     assert report["lanes"] == ["docs"]
     assert report["jobs"] == []
-    assert report["shadow"] is True
+    assert report["shadow"] is False
 
 
 def test_cli_run_alls_on_a_real_workflow_change(repo: Path, tmp_path: Path) -> None:
@@ -455,29 +458,25 @@ def test_a_literal_leading_space_path_is_not_normalized_into_the_docs_lane() -> 
     assert result.forcing_paths == (" docs/only.md",)
 
 
-def test_a_trailing_space_path_inside_docs_stays_in_the_docs_lane() -> None:
-    """The literal path really is under `docs/`, so narrowing is honest."""
+def test_a_trailing_space_path_inside_docs_forces_run_all() -> None:
+    """Contract documentation never takes the zero-job lane."""
 
-    assert classify_path("docs/only.md ") == "docs"
+    assert classify_path("docs/only.md ") == "ci_shared"
 
 
 @pytest.mark.parametrize(
     "path",
-    ["snapshots/expected.md", "some_new_dir/notes.md", " docs/only.md"],
+    ["snapshots/expected.md", "some_new_dir/notes.md", " docs/only.md", "NOTES.md"],
 )
-def test_a_nested_markdown_path_in_an_unknown_directory_is_unknown(path: str) -> None:
-    """The `*.md` suffix rule is top-level only.
-
-    A bare suffix rule would swallow any unmatched nested markdown path --
-    including a fixture a test reads -- and answer "docs, no jobs needed".
-    """
+def test_unlisted_markdown_path_is_unknown(path: str) -> None:
+    """Only the explicit HANDOFF.md allowlist may take the zero-job lane."""
 
     assert classify_path(path) == "unknown"
 
 
 @pytest.mark.parametrize("path", ["README.md", "CLAUDE.md", "AGENTS.md"])
-def test_top_level_markdown_is_still_docs(path: str) -> None:
-    assert classify_path(path) == "docs"
+def test_top_level_contract_markdown_forces_run_all(path: str) -> None:
+    assert classify_path(path) == "ci_shared"
 
 
 def test_a_scored_modify_is_a_rewrite_and_forces_run_all() -> None:
@@ -561,7 +560,7 @@ def test_a_real_leading_space_filename_from_git_forces_run_all(
     assert report["jobs"] == sorted(ALL_JOBS)
 
 
-def test_a_real_trailing_space_filename_from_git_is_classified_literally(
+def test_a_real_trailing_space_filename_from_git_forces_run_all(
     repo: Path, tmp_path: Path
 ) -> None:
     base = _git(repo, "rev-parse", "HEAD")
@@ -571,8 +570,8 @@ def test_a_real_trailing_space_filename_from_git_is_classified_literally(
     head = _git(repo, "rev-parse", "HEAD")
     code, report = _run_cli(repo, tmp_path, "--base-sha", base, "--head-sha", head)
     assert code == 0
-    assert report["path_lanes"] == {"docs/only.md ": "docs"}
-    assert report["run_all"] is False
+    assert report["path_lanes"] == {"docs/only.md ": "ci_shared"}
+    assert report["run_all"] is True
 
 
 # --------------------------------------------------------------------------
@@ -694,7 +693,7 @@ def test_an_offline_name_status_file_still_needs_no_sha_resolution(
     """`--name-status-file` remains a pure offline path."""
 
     payload = tmp_path / "diff.txt"
-    payload.write_text("A\0docs/a.md\0", encoding="utf-8")
+    payload.write_text("A\0HANDOFF.md\0", encoding="utf-8")
     out = tmp_path / "report.json"
     assert main(["--name-status-file", str(payload), "--json-out", str(out)]) == 0
     assert json.loads(out.read_text(encoding="utf-8"))["lanes"] == ["docs"]

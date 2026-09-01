@@ -63,7 +63,6 @@ jobs:
 
   collect-authoritative:
     name: Collect authoritative test manifest
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -125,7 +124,6 @@ jobs:
 
   measure:
     name: Measure shard ${{ matrix.group }}/4
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

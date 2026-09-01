@@ -1,8 +1,8 @@
-# `ci-required` aggregator + docs-only change classifier
+# `ci-required` aggregator + HANDOFF-only change classifier
 
-**Status: active for docs-only changes.** The classifier skips resource jobs
-only when every changed path belongs to the `docs` lane. Mixed lanes and all
-fail-closed outcomes keep the full CI topology.
+**Status: active for HANDOFF-only changes.** The classifier skips resource
+jobs only when `HANDOFF.md` is the sole added or modified path. Mixed lanes
+and all fail-closed outcomes keep the full CI topology.
 
 ## 1. Why this exists
 
@@ -24,7 +24,7 @@ change.
 |---|---|---|
 | change classifier | `scripts/ci/classify_changes.py` | deterministic changed-path → lane mapping, fail-closed |
 | aggregate evaluator | `scripts/ci/aggregate_required.py` | fixed-name gate over the required children's results |
-| workflow wiring | `.github/workflows/test.yml` (`change-classifier`, resource-job conditions, `ci-required`) | runs classification first; only an exact docs-only verdict skips resource jobs |
+| workflow wiring | `.github/workflows/test.yml` (`change-classifier`, resource-job conditions, `ci-required`) | runs classification first; only an exact HANDOFF-only verdict skips resource jobs |
 
 ## 2. Change classifier contract
 
@@ -60,7 +60,7 @@ Lanes and the jobs each one implies:
 
 | lane | example paths | jobs |
 |---|---|---|
-| `docs` | `docs/**`, `*.md` | *(none)* |
+| `docs` | top-level `HANDOFF.md` only | *(none)* |
 | `app` | `app/**` | `lint`, `test`, `taskiq-smoke`, `security` |
 | `tests` | `tests/**` | `lint`, `test` |
 | `research` | `research/**`, `research_contracts/**` | `lint`, `research` |
@@ -68,7 +68,7 @@ Lanes and the jobs each one implies:
 | `frontend` | `frontend/**` | `frontend` |
 | `migrations` | `alembic/**` | `lint`, `test` |
 | `config` | `config/**` | `lint`, `test` |
-| `ci_shared` | `.github/**`, `scripts/ci/**`, `pyproject.toml`, `uv.lock`, `Makefile`, `.test_durations`, `tests/conftest.py`, `tests/_socket_guard*.py`, `env.example`, `scripts/setup-test-env.sh`, `alembic.ini`, `codecov.yml` | **forces `run_all`** |
+| `ci_shared` | `.github/**`, `scripts/ci/**`, `docs/**`, `README.md`, `CLAUDE.md`, `AGENTS.md`, `pyproject.toml`, `uv.lock`, `Makefile`, `.test_durations`, `tests/conftest.py`, `tests/_socket_guard*.py`, `env.example`, `scripts/setup-test-env.sh`, `alembic.ini`, `codecov.yml` | **forces `run_all`** |
 | `unknown` | anything unmatched | **forces `run_all`** |
 
 Design points that look over-conservative and are meant to be:
@@ -84,11 +84,10 @@ Design points that look over-conservative and are meant to be:
   `" docs"`, and it is emitted verbatim under `--name-status -z`; trimming it
   would answer "docs-only, no jobs needed" for a path that is not under
   `docs/` at all. Unmatched literals are `unknown` → `run_all`.
-- **The `*.md` suffix rule is top-level only.** It exists for `README.md`,
-  `CLAUDE.md`, `AGENTS.md`. A bare suffix rule would swallow every unmatched
-  *nested* markdown path — including a fixture some test reads — and answer
-  "docs". Nested markdown under a directory the prefix table does not know is
-  `unknown` → `run_all`.
+- **Only `HANDOFF.md` is metadata-only.** Tests read exact text from
+  `docs/**`, `README.md`, `CLAUDE.md`, and `AGENTS.md`; those paths therefore
+  force `run_all`. Unlisted top-level Markdown also remains `unknown` and
+  forces `run_all`.
 
 ### NUL stream and status grammar
 
@@ -150,11 +149,11 @@ therefore covers all four shard results through one child entry.
 
 - the live protected names remain `ci-required`, `migration (PostgreSQL 15)`,
   and `frontend`;
-- every resource job has the same fail-closed docs gate and depends on the
+- every resource job has the same fail-closed HANDOFF gate and depends on the
   classifier;
 - the test matrix remains Python 3.13 × four shards;
-- `ci-required` runs with `always()` and authorizes exactly the three docs-only
-  child skips;
+- `ci-required` runs with `always()` and authorizes exactly the three
+  HANDOFF-only child skips;
 - only gated jobs and the aggregate read classifier outputs.
 
 Run:
@@ -164,7 +163,7 @@ uv run pytest tests/ci/ -q -ra
 actionlint .github/workflows/test.yml
 ```
 
-## 5. Expanding beyond docs-only
+## 5. Expanding beyond HANDOFF-only
 
 Do not reuse the docs condition for another lane. A broader cutover requires:
 

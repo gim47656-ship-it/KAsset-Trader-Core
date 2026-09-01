@@ -1,9 +1,10 @@
-"""Static contract for the stable CI gate and docs-only fast path.
+"""Static contract for the stable CI gate and HANDOFF-only fast path.
 
-The classifier may skip resource-heavy jobs only when every changed path is a
-known documentation path. Any mixed, unknown, deleted, renamed, or shared-CI
-change remains full coverage. ``ci-required`` must explicitly authorize only
-the aggregate children skipped by that proven docs-only verdict.
+The classifier may skip resource-heavy jobs only when `HANDOFF.md` is the
+sole added or modified path. Any mixed, unknown, deleted, renamed,
+documentation-contract, or shared-CI change remains full coverage.
+``ci-required`` must explicitly authorize only the aggregate children skipped
+by that proven verdict.
 """
 
 from __future__ import annotations

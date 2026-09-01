@@ -91,8 +91,8 @@ def test_missing_refresh_token_keeps_measurement_jobs_runnable(
     )
     assert 'echo "can_open_pr=false" >> "$GITHUB_OUTPUT"' in script
     assert "exit 1" not in script
-    assert workflow["jobs"]["collect-authoritative"]["needs"] == PREFLIGHT_JOB_ID
-    assert workflow["jobs"]["measure"]["needs"] == PREFLIGHT_JOB_ID
+    assert "needs" not in workflow["jobs"]["collect-authoritative"]
+    assert "needs" not in workflow["jobs"]["measure"]
 
 
 def test_auto_pr_requires_the_refresh_token_output(

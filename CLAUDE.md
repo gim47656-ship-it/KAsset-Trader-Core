@@ -907,7 +907,7 @@ git branch -D <branch-name>
 - 이관: `git worktree move <old-path> <new-path>` (dirty 없는 상태에서)
 - 삭제된 원격 브랜치(`upstream gone`) 는 주기적으로 `git fetch --prune && git branch -vv | grep ': gone\]'` 로 확인하고 정리
 
-### CI required check — `ci-required` 집계와 docs-only fast path
+### CI required check — `ci-required` 집계와 HANDOFF-only fast path
 
 branch protection은 `ci-required` · `migration (PostgreSQL 15)` · `frontend`
 세 이름을 required check로 사용한다. `ci-required`는 lint · taskiq-smoke ·
@@ -919,12 +919,13 @@ test(3.13, shard 1..4)를 고정 이름 뒤에서 집계한다.
 - **계약 테스트**: `tests/ci/`
 - **런북**: `docs/runbooks/ci-required-aggregator.md`
 
-활성화된 최적화는 **정확한 docs-only 변경 하나뿐**이다. `docs/**`와 최상위
-`*.md`의 add/modify만 있으면 Python/Node/DB/Redis resource job을 skip한다.
-`ci-required`는 이때에만 lint · test · taskiq-smoke의 skip을 명시적으로
-인가한다. 혼합 lane, unknown path, rename/copy/delete/rewrite, 공유 CI/config/test
-인프라, 빈 change set, base SHA 부재는 모두 `run_all=true`; SHA 해석·git·파싱
-실패는 classifier job 자체를 red로 만든다.
+활성화된 최적화는 **최상위 `HANDOFF.md` add/modify 한정**이다. 이 경우에만
+Python/Node/DB/Redis resource job을 skip하고, `ci-required`가 lint · test ·
+taskiq-smoke의 skip을 명시적으로 인가한다. 테스트가 문언을 고정하는 `docs/**`,
+`README.md`, `CLAUDE.md`, `AGENTS.md`는 `ci_shared`로 분류해 전체 CI를 실행한다.
+혼합 lane, unknown path, rename/copy/delete/rewrite, 공유 CI/config/test 인프라,
+빈 change set, base SHA 부재는 모두 `run_all=true`; SHA 해석·git·파싱 실패는
+classifier job 자체를 red로 만든다.
 
 ## 주요 워크플로우
 
