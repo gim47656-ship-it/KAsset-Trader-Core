@@ -1618,9 +1618,7 @@ class AIRecommendationVerticalSlice:
         ``UNKNOWN``이 된다.
         """
 
-        cutoff = (
-            self._now.astimezone(UTC).replace(tzinfo=None) - _NEWS_HEALTH_WINDOW
-        )
+        cutoff = self._now.astimezone(UTC).replace(tzinfo=None) - _NEWS_HEALTH_WINDOW
 
         health: dict[str, bool] = {}
         for ranker_market in sorted(allowed_markets):

@@ -104,6 +104,7 @@ async def test_get_ohlcv_rejects_invalid_period_message() -> None:
             count=10,
         )
 
+
 def _us_intraday_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -133,9 +134,7 @@ async def test_get_ohlcv_us_intraday_uses_reader_without_calling_toss(
     read_mock = AsyncMock(return_value=frame)
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
     toss_mock = AsyncMock()
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     candles = await market_data_service.get_ohlcv(
         symbol="AAPL",
@@ -185,9 +184,7 @@ async def test_get_ohlcv_us_intraday_falls_back_to_toss_on_reader_error(
     read_mock = AsyncMock(side_effect=exc_type(message))
     toss_mock = AsyncMock(return_value=_us_intraday_frame())
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     candles = await market_data_service.get_ohlcv(
         symbol="AAPL",
@@ -214,9 +211,7 @@ async def test_get_ohlcv_us_intraday_falls_back_to_toss_on_empty_reader(
     read_mock = AsyncMock(return_value=pd.DataFrame())
     toss_mock = AsyncMock(return_value=_us_intraday_frame())
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     candles = await market_data_service.get_ohlcv(
         symbol="AAPL",
@@ -249,9 +244,7 @@ async def test_get_ohlcv_us_intraday_both_empty_remains_empty(
     read_mock = AsyncMock(return_value=pd.DataFrame())
     toss_mock = AsyncMock(return_value=pd.DataFrame())
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     candles = await market_data_service.get_ohlcv(
         symbol="AAPL",
@@ -272,9 +265,7 @@ async def test_get_ohlcv_us_intraday_both_errors_remain_unavailable(
     read_mock = AsyncMock(side_effect=RuntimeError("KIS unavailable"))
     toss_mock = AsyncMock(side_effect=RuntimeError("Toss unavailable"))
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     with pytest.raises(UpstreamUnavailableError, match="Toss unavailable"):
         _ = await market_data_service.get_ohlcv(
@@ -292,9 +283,7 @@ async def test_get_ohlcv_us_intraday_does_not_swallow_cancellation(
     read_mock = AsyncMock(side_effect=asyncio.CancelledError())
     toss_mock = AsyncMock()
     monkeypatch.setattr(market_data_service, "read_us_intraday_candles", read_mock)
-    monkeypatch.setattr(
-        market_data_service, "fetch_us_intraday_toss_frame", toss_mock
-    )
+    monkeypatch.setattr(market_data_service, "fetch_us_intraday_toss_frame", toss_mock)
 
     with pytest.raises(asyncio.CancelledError):
         _ = await market_data_service.get_ohlcv(
