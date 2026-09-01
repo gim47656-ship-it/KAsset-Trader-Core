@@ -754,7 +754,7 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     assert stored["profitFactor"] == (
         str(expected_profit_factor) if expected_profit_factor is not None else None
     )
-    assert stored["totalCosts"] == str(
+    assert Decimal(str(stored["totalCosts"])) == (
         Decimal(str(baseline["feesPaid"])) + Decimal(str(baseline["slippageCost"]))
     )
     cost_stressed_returns: list[Decimal] = []
