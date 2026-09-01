@@ -514,15 +514,18 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
     db_session.add_all(articles)
     await db_session.flush()
     article_ids.extend(article.id for article in articles)
+    # 완료 한국어 분석 fixture. Korean-gate 음성 케이스 한 건만 비워 두고 나머지는
+    # 모두 채운다. 그래야 "Old Reuters item"은 24h cutoff로만, "Local sports
+    # result"는 출처 allowlist로만 걸러진다는 사실이 각각 독립적으로 검증된다.
     generic_analysis_articles = [
         article
         for article in articles
         if article.title
         not in {
+            # 아래 두 건은 전용 분석 fixture를 따로 넣는다.
             "CNBC market bulletin",
             "Markets await a decision",
-            "Old Reuters item",
-            "Local sports result",
+            # Korean-gate 음성 케이스: 완료 한국어 분석이 없어야 한다.
             "Reuters item without Korean analysis",
         }
     ]
@@ -633,11 +636,13 @@ async def test_news_alerts_apply_24h_source_topic_dedup_summary_and_caps_read_on
     assert wire_alerts["Markets await a decision"]["translatedExcerpt"] == (
         "연방준비제도는 저장된 기사 본문에서 정책 결정과 현재 시장 여건을 설명했다."
     )
-    assert "Old Reuters item" not in {alert.headline for alert in response.alerts}
-    assert "Local sports result" not in {alert.headline for alert in response.alerts}
-    assert "Reuters item without Korean analysis" not in {
-        alert.headline for alert in response.alerts
-    }
+    alert_headlines = {alert.headline for alert in response.alerts}
+    # 완료 한국어 분석이 있어도 24h cutoff에서 걸린다.
+    assert "Old Reuters item" not in alert_headlines
+    # 완료 한국어 분석이 있어도 출처 allowlist에서 걸린다.
+    assert "Local sports result" not in alert_headlines
+    # 완료 한국어 분석만 없어서 Korean gate에서 걸린다.
+    assert "Reuters item without Korean analysis" not in alert_headlines
     assert {alert.id for alert in context.routine_alerts} == {
         alert.id for alert in response.alerts
     }

@@ -93,6 +93,25 @@ def classify_title_noise(title: str) -> list[str]:
     ]
 
 
+#: 모델 호출 **이전** gate가 써도 되는 category. ``broad_tech``는 의도적으로 빠져 있다.
+#: 읽기 시점 gate는 broad_tech를 배제해도 원본 행이 그대로 남지만, 요약 이전 gate에서
+#: 배제한 기사는 한국어 분석을 영구히 받지 못하고 한국어 분석을 요구하는 읽기 경로에서
+#: 사라진다. "OpenAI가 Broadcom과 공급 계약" 같은 시장 이동 뉴스를 잃지 않기 위해
+#: 그 category는 읽기 시점 판단으로만 남긴다.
+PRE_SUMMARY_NOISE_CATEGORIES: frozenset[str] = frozenset(
+    {"personal_finance", "lifestyle", "sponsored", "price_prediction"}
+)
+
+
+def classify_pre_summary_noise(title: str) -> list[str]:
+    """Return only the noise categories safe to exclude before an AI summary."""
+    return [
+        category
+        for category in classify_title_noise(title)
+        if category in PRE_SUMMARY_NOISE_CATEGORIES
+    ]
+
+
 def noise_reason(categories: list[str]) -> str:
     """Stable excluded-reason string, e.g. ``noise:personal_finance``."""
     return "noise:" + ",".join(categories)

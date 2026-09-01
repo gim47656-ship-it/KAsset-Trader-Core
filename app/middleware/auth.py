@@ -56,7 +56,6 @@ class AuthMiddleware:
         # Retired callback alias: allow the missing router to return 404 instead
         # of masking removal behind auth middleware.
         "/api/v1/openclaw/callback",
-        "/api/screener/callback",
     ]
     NEWS_INGESTOR_BULK_INGEST_PATH: ClassVar[str] = "/api/v1/news/ingest/bulk"
     RESEARCH_REPORTS_BULK_INGEST_PATH: ClassVar[str] = (

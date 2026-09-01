@@ -75,10 +75,13 @@ _ROUTE_PROVIDERS: Final[Mapping[AiRouteId, AiProviderName]] = MappingProxyType(
 
 
 #: lane별 허용 route allowlist. 여기 없는 조합은 읽기/쓰기 모두에서 거부한다.
+#:
+#: ``summary_luna``에 ``mcp_tool``이 없는 것은 의도다. 요약 lane은
+#: ``build_summary_json_client``의 API route builder만 쓰고 ``mcp`` provider를
+#: 만들지 않으므로, 허용하면 저장은 되지만 요약이 조용히 꺼진다.
 LANE_ROUTE_IDS: Final[AiRoutePolicy] = MappingProxyType(
     {
         AiLane.SUMMARY_LUNA: (
-            AiRouteId.MCP_TOOL,
             AiRouteId.DIRECT_LUNA,
             AiRouteId.OPENROUTER_FLASH,
         ),

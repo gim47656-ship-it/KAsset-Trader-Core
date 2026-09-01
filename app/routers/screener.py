@@ -6,9 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from app.analysis.models import PriceAnalysis
 from app.core.templates import templates
-from app.routers.agent_callback import _require_agent_callback_token
 from app.services.screener_service import ScreenerService
 
 router = APIRouter(tags=["Screener"])
@@ -46,18 +44,6 @@ class ScreenerReportRequest(BaseModel):
     market: Literal["kr", "us", "crypto"]
     symbol: str = Field(min_length=1)
     name: str | None = None
-
-
-class ScreenerCallbackRequest(BaseModel):
-    request_id: str
-    symbol: str
-    name: str
-    instrument_type: str
-    decision: Literal["buy", "hold", "sell"]
-    confidence: int = Field(ge=0, le=100)
-    reasons: list[str] | None = None
-    price_analysis: PriceAnalysis
-    detailed_text: str | None = None
 
 
 class ScreenerOrderRequest(BaseModel):
@@ -199,15 +185,6 @@ async def screener_report_status(
     service: ScreenerService = Depends(get_screener_service),
 ):
     return await service.get_report_status(job_id)
-
-
-@router.post("/api/screener/callback")
-async def screener_callback(
-    payload: ScreenerCallbackRequest,
-    _: None = Depends(_require_agent_callback_token),
-    service: ScreenerService = Depends(get_screener_service),
-):
-    return await service.process_callback(payload.model_dump(exclude_none=True))
 
 
 @router.post("/api/screener/order")

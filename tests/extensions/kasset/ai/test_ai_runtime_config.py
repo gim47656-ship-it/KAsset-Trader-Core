@@ -352,13 +352,18 @@ def test_normalize_accepts_the_default_payload() -> None:
     assert normalized == dict(DEFAULT_ROUTE_POLICY)
 
 
-def test_normalize_accepts_mcp_only_summary_policy() -> None:
+def test_summary_lane_does_not_advertise_the_mcp_route() -> None:
+    assert AiRouteId.MCP_TOOL not in LANE_ROUTE_IDS[AiLane.SUMMARY_LUNA]
+
+
+def test_normalize_rejects_mcp_only_summary_policy() -> None:
     payload = _valid_payload()
     payload["summary_luna"] = ["mcp_tool"]
 
-    normalized = normalize_route_policy(payload)
+    with pytest.raises(AiRoutePolicyError) as exc:
+        normalize_route_policy(payload)
 
-    assert normalized[AiLane.SUMMARY_LUNA] == (AiRouteId.MCP_TOOL,)
+    assert exc.value.code == "lane_route_mismatch"
 
 
 def test_normalize_rejects_unknown_route() -> None:
