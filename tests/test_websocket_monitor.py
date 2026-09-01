@@ -102,7 +102,7 @@ class TestUnifiedWebSocketMonitor:
         ledger_kwargs = record_mock.await_args.kwargs
         assert ledger_args[0] is event
         assert isinstance(ledger_args[1], FillOrder)
-        assert ledger_kwargs == {"broker": "upbit", "correlation_id": "upbit-order-1"}
+        assert ledger_kwargs == {"correlation_id": "upbit-order-1"}
         assert call_order == ["ledger", "notify"]
 
     @pytest.mark.asyncio

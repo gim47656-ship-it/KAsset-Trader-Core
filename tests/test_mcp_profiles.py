@@ -332,11 +332,10 @@ class TestKiwoomKrProfile:
         }
         assert kr_names <= kiwoom_kr.tools.keys()
         assert KIWOOM_MOCK_TOOL_NAMES <= kiwoom_kr.tools.keys()
-        # ROB-1173 also removes the shared KIS mock mirror broker mutation.
-        assert kiwoom.tools.keys() - kiwoom_kr.tools.keys() == (
-            KIWOOM_MOCK_US_TOOL_NAMES | MIRROR_COUNTERFACTUAL_TOOL_NAMES
-        )
+        assert kiwoom.tools.keys() - kiwoom_kr.tools.keys() == KIWOOM_MOCK_US_TOOL_NAMES
         assert kiwoom_kr.tools.keys() - kiwoom.tools.keys() == set()
+        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom.tools)
+        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom_kr.tools)
 
     def test_kiwoom_profile_still_registers_us_namespace(self) -> None:
         # The split is additive: MCP_PROFILE=kiwoom is deliberately unchanged by

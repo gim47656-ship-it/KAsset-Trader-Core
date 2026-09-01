@@ -109,7 +109,7 @@ def _create_kwargs(
         "market": market,
         "market_session": "regular",
         "account_scope": "upbit_live" if market == "crypto" else "toss_live",
-        "execution_mode": "mock_preview",
+        "execution_mode": "mock_preview" if market == "crypto" else "advisory_only",
         "created_by_profile": "test",
         "title": f"t-{kst_date}",
         "summary": "s",
