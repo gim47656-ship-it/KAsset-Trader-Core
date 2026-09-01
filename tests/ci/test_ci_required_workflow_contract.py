@@ -16,6 +16,9 @@ import pytest
 import yaml
 
 WORKFLOW_PATH = Path(__file__).resolve().parents[2] / ".github/workflows/test.yml"
+PR_NOTIFY_WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[2] / ".github/workflows/pr-notify.yml"
+)
 
 #: Live branch-protection snapshot verified before this cutover.
 REQUIRED_CHECK_NAMES = (
@@ -250,6 +253,13 @@ def test_notify_is_neutral_when_webhook_secret_is_absent(
     )
 
     assert 'if [[ -z "${DISCORD_WEBHOOK:-}" ]]' in script
+    assert "exit 0" in script
+    assert "curl --fail-with-body --silent --show-error" in script
+
+def test_pr_notify_is_neutral_when_webhook_secrets_are_absent() -> None:
+    script = PR_NOTIFY_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "No Discord webhook configured; skipping PR notification." in script
     assert "exit 0" in script
     assert "curl --fail-with-body --silent --show-error" in script
 
