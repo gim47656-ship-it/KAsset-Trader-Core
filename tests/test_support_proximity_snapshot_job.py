@@ -58,7 +58,7 @@ def _batch() -> SupportProximityBuildBatch:
         support_strength="strong",
         dist_to_support_pct=Decimal("2.0000"),
         support_computed_at=dt.datetime(2026, 7, 20, 10, 0, tzinfo=dt.UTC),
-        source="kis",
+        source="toss",
     )
     return SupportProximityBuildBatch(
         source_partition_date=dt.date(2026, 7, 20),

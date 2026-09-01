@@ -89,6 +89,17 @@ def _kwargs(**overrides):
 
 
 @pytest.mark.asyncio
+async def test_create_rejects_explicit_kis_scope_before_db():
+    result = await h.investment_report_create_impl(**_kwargs(account_scope="kis_live"))
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": "kis_live",
+    }
+
+
+@pytest.mark.asyncio
 async def test_create_invalid_item_returns_structured_error_without_db():
     # client_item_key 누락 — DB 세션을 열기 전에 구조화 에러로 단락되어야 한다.
     res = await h.investment_report_create_impl(
@@ -172,7 +183,7 @@ def test_validate_report_items_rejects_legacy_watch_bad_max_action():
                     "threshold": "5",
                 },
                 "valid_until": "2026-12-31T00:00:00Z",
-                "max_action": {"side": "buy", "account_mode": "kis_mock"},
+                "max_action": {"side": "buy", "account_mode": "toss_live"},
             }
         ]
     )

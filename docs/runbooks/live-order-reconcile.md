@@ -4,25 +4,25 @@
 US/해외 (`equity_us`) 및 crypto (`crypto`) live 주문 전송 시, fill/journal/realized_pnl을 즉시 선반영하지 않고 새 제네릭 테이블 `review.live_order_ledger`에 `accepted` (또는 `rejected`) 상태로 Accepted-only 기록만 남깁니다.
 장부는 오직 **`live_reconcile_orders`** 도구를 통해 수집된 broker별 체결 증거(evidence)를 바탕으로만 최종 확정(book)됩니다.
 
-- **US/해외 주문 (`kis` broker):** KIS 해외 일별주문 내역(`inquire_daily_order_overseas`)을 순회하며 체결 증거를 수집한 후 canonical 키로 정규화하여 `classify_fill_evidence`로 판정을 내려 반영합니다.
-- **Crypto/Upbit 주문 (`upbit` broker):** Upbit 주문 상세 조회 API(`fetch_order_detail`)를 사용하여 `uuid`별 상태 및 체결 수량을 대조하여 반영합니다.
-- **시장가 Crypto 주문 (Inline Confirm):** 시장가 Upbit 주문은 전송 직후 체결이 즉시 완료되므로, 전송 직후 즉시 inline으로 `fetch_order_detail`을 조회해 1회성 Reconcile을 자동 수행(선반영 없는 확정 체결 기록)합니다.
+- **US equity orders (`toss` broker):** use `toss_reconcile_orders` and Toss
+  order-detail/fill evidence; no KIS history request or fallback is allowed.
+- **Crypto/Upbit orders (`upbit` broker):** use `fetch_order_detail` to compare
+  broker status and executed quantity by `uuid`.
+- **Market crypto inline confirm:** a market Upbit send may perform one immediate
+  evidence read; it still does not pre-book a fill.
 
 ## Reconcile workflow
-1. **주문 제출:** `kis_live_place_order(..., dry_run=False)` 또는 Upbit 주문 실행. `broker_status: "accepted"`, `fill_recorded: false` 확인.
-2. **체결 대기:** 주문이 체결되거나 취소/만료될 때까지 대기.
-3. **Reconcile 드라이런:**
-   ```bash
-   # live_reconcile_orders MCP 도구를 default인 dry_run=True로 실행
-   live_reconcile_orders(dry_run=True)
-   ```
-   출력되는 각 주문의 verdict (filled / partial / pending / cancelled) 및 예상 booking 내용 확인.
-4. **Reconcile 실행:**
-   ```bash
-   # dry_run=False로 실행하여 실제 trades/journals에 체결 반영
-   live_reconcile_orders(dry_run=False)
-   ```
-   - 특정 시장/종목/주문번호로 대상을 한정하려면 `market`, `broker`, `symbol`, `order_id` 매개변수 사용 가능.
+1. **Order submit:** execute a Toss or Upbit order and confirm
+   `broker_status: "accepted"`, `fill_recorded: false`.
+2. **Wait for evidence:** do not infer a fill from HTTP acceptance.
+3. **Toss reconcile:** run targeted
+   `toss_reconcile_orders(order_id=<broker-order-id>, dry_run=False)`.
+   Production polling must run at most every two minutes; when that cadence is
+   unavailable, invoke targeted reconcile immediately after the accepted send.
+4. **Upbit reconcile:** use the operational Upbit reconcile surface scoped to
+   its broker order ID. Pending/unknown evidence never becomes a terminal fill.
+5. KIS ledger rows remain historical and are never routed through these
+   operational reconcilers.
 
 ## Verdicts
 - **`filled` / `partial`**
@@ -48,8 +48,8 @@ US/해외 (`equity_us`) 및 crypto (`crypto`) live 주문 전송 시, fill/journ
 | **A. 데이터 공백** — 매수 저널 원천이 아예 없음(저널 시스템 도입 이전 legacy 포지션 등) | `SELECT ... FROM review.trade_journals WHERE symbol = '<SYM>' AND status = 'active'` 이 **0행** | retro(trade_retrospectives) 수기 보정으로 정본화. 자동 백필은 하지 않음(ROB-955에서 백필 안 함으로 확정) |
 | **B. FIFO 부분매도 < 랏 (의도된 설계)** | 활성 저널이 **실재**하지만, 매도 수량이 가장 오래된 활성 저널의 `quantity`(랏 크기)보다 작음 | **정상 동작, 무조치.** `_close_journals_on_sell` (`app/mcp_server/tooling/order_journal.py`)의 FIFO 워크가 no-lot-splitting 정책상 아무 랏도 소비하지 않고 멈춘 것 — 버그 아님 |
 
-원인 B의 예: 활성 KIS BAC 저널(qty 3)에 매도 qty 2 < 3 → FIFO break, 저널 미종결.
-원인 A의 예: XOM/AMZN 등 `review.trade_journals` 행 자체가 0인 심볼.
+원인 B의 예: 과거 ledger의 활성 BAC 저널(qty 3)에 매도 qty 2 < 3이면 FIFO가
+중단되어 저널이 종결되지 않는다.
 
 **향후 개선안 (스코프 밖):** reconcile 응답에 `no_active_journal`(원인 A) vs
 `partial_sell_below_lot`(원인 B)을 구분하는 진단 필드를 추가하면 운영자가 SQL

@@ -231,7 +231,7 @@ async def _resolve_holdings_news_candidates(
     Explicit ``symbols`` are normalized and passed through (market inferred per
     symbol, name unknown -> None). When ``symbols`` is omitted, current
     cross-market holdings are resolved through the canonical aggregation entry
-    point ``_collect_portfolio_positions`` (KIS KR/US, Upbit, manual, Toss).
+    point ``_collect_portfolio_positions`` (Toss, Upbit, manual).
     De-dupes on (symbol, market) preserving first occurrence. Never raises.
     Returns ``(candidates, degraded_reason)``.
     """

@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.schemas.funding_advisory import canonical_decimal
 
 SUPPORTED_MARKETS = frozenset({"crypto", "equity_kr", "equity_us"})
-REAL_ACCOUNT_MODES = frozenset({"upbit", "kis_live", "toss_live"})
+REAL_ACCOUNT_MODES = frozenset({"upbit", "toss_live"})
 _EVALUATION_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -70,7 +70,8 @@ class PassedNonFundingGateEvidence(BaseModel):
     gate_evaluated_at: datetime
     valid_until: datetime
     market: Literal["crypto", "equity_kr", "equity_us"]
-    target_account_mode: Literal["upbit", "kis_live", "toss_live"]
+    # kis_* 값은 기존 증거 역직렬화 전용이며 신규 평가는 서비스에서 거부한다.
+    target_account_mode: Literal["upbit", "toss_live", "kis_live", "kis_mock"]
     broker_account_id: str = Field(min_length=1, max_length=160)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     symbol: str = Field(min_length=1, max_length=64)
@@ -91,6 +92,15 @@ class PassedNonFundingGateEvidence(BaseModel):
 
     @model_validator(mode="after")
     def validate_contract(self) -> Self:
+        if self.target_account_mode == "upbit" and self.market != "crypto":
+            raise ValueError("upbit funding evidence requires market='crypto'")
+        if self.target_account_mode == "toss_live" and self.market not in {
+            "equity_kr",
+            "equity_us",
+        }:
+            raise ValueError(
+                "toss_live funding evidence requires an equity_kr/equity_us market"
+            )
         if _EVALUATION_HASH_RE.fullmatch(self.gate_version):
             raise ValueError(
                 "gate_version is a contract/schema version, not an evaluation hash"
@@ -110,6 +120,14 @@ class PassedNonFundingGateEvidence(BaseModel):
     @classmethod
     def issue(cls, **payload: Any) -> PassedNonFundingGateEvidence:
         """Issue test/upstream evidence while keeping verification mandatory."""
+
+        target_account_mode = str(payload.get("target_account_mode") or "")
+        if target_account_mode in {"kis_live", "kis_mock"}:
+            raise ValueError("provider kis is not operational")
+        if target_account_mode not in REAL_ACCOUNT_MODES:
+            raise ValueError(
+                f"unsupported funding target_account_mode: {target_account_mode}"
+            )
 
         normalized = dict(payload)
         normalized["non_funding_checks"] = [

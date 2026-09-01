@@ -3,7 +3,7 @@ Candidate Discovery page.
 
 Provides:
   - the same `screen_stocks` filters MCP exposes,
-  - held-position annotation via MergedPortfolioService + Upbit holdings,
+  - held-position annotation via Toss + manual portfolio and Upbit holdings,
   - data-quality warnings forwarded as-is (NEVER hidden).
 
 NEVER mutates broker state. NEVER writes order-intent / watch / candidate rows.
@@ -129,7 +129,6 @@ class CandidateScreeningService:
 
     async def _load_held_symbols(self, user_id: int, market: str) -> set[str]:
         try:
-            from app.services.brokers.kis import KISClient
             from app.services.merged_portfolio_service import MergedPortfolioService
         except ImportError:
             return set()
@@ -137,13 +136,16 @@ class CandidateScreeningService:
         held: set[str] = set()
         try:
             service = MergedPortfolioService(self.db)
-            kis_client = KISClient()
             if market in ("kr", "kospi", "kosdaq", "konex", "all"):
-                rows = await service.get_merged_portfolio_domestic(user_id, kis_client)
-                held.update(str(r.ticker).upper() for r in rows if r.quantity)
+                rows = await service.get_merged_portfolio_domestic(user_id)
+                held.update(
+                    str(row.ticker).upper() for row in rows if row.total_quantity > 0
+                )
             if market in ("us", "all"):
-                rows = await service.get_merged_portfolio_overseas(user_id, kis_client)
-                held.update(str(r.ticker).upper() for r in rows if r.quantity)
+                rows = await service.get_merged_portfolio_overseas(user_id)
+                held.update(
+                    str(row.ticker).upper() for row in rows if row.total_quantity > 0
+                )
         except Exception:
             pass
 

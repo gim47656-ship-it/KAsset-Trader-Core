@@ -144,58 +144,50 @@ def build_opening_lot_plan(
 async def load_opening_lot_candidates(
     brokers: list[str],
 ) -> list[OpeningLotCandidate]:
+    requested = {str(broker).strip().lower() for broker in brokers}
+    if "kis" in requested:
+        raise ValueError("provider kis is not operational")
     candidates: list[OpeningLotCandidate] = []
-    if "kis" in brokers:
-        candidates.extend(await load_kis_opening_lot_candidates())
-    if "upbit" in brokers:
+    if "toss" in requested:
+        candidates.extend(await load_toss_opening_lot_candidates())
+    if "upbit" in requested:
         candidates.extend(await load_upbit_opening_lot_candidates())
     return candidates
 
 
-async def load_kis_opening_lot_candidates() -> list[OpeningLotCandidate]:
-    from app.services.brokers.kis.client import KISClient
+async def load_toss_opening_lot_candidates() -> list[OpeningLotCandidate]:
+    from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 
-    kis = KISClient()
+    snapshot = await fetch_toss_portfolio_snapshot(
+        need_sellable=False,
+        need_cash=False,
+    )
     candidates: list[OpeningLotCandidate] = []
-    for row in await kis.fetch_my_stocks():
-        qty = Decimal(str(row.get("hldg_qty") or "0"))
-        avg_price = Decimal(str(row.get("pchs_avg_pric") or "0"))
-        symbol = str(row.get("pdno") or "").strip().upper()
-        if symbol:
-            candidates.append(
-                OpeningLotCandidate(
-                    broker="kis",
-                    account_mode="live",
-                    venue="krx",
-                    instrument_type="equity_kr",
-                    symbol=symbol,
-                    raw_symbol=symbol,
-                    currency="KRW",
-                    current_qty=qty,
-                    avg_price=avg_price,
-                )
+    for position in snapshot.positions:
+        symbol = str(position.symbol or "").strip().upper()
+        if not symbol:
+            continue
+        if position.instrument_type == "equity_kr":
+            venue = "toss_kr"
+            currency = "KRW"
+        elif position.instrument_type == "equity_us":
+            venue = "toss_us"
+            currency = "USD"
+        else:
+            continue
+        candidates.append(
+            OpeningLotCandidate(
+                broker="toss",
+                account_mode="live",
+                venue=venue,
+                instrument_type=position.instrument_type,
+                symbol=symbol,
+                raw_symbol=symbol,
+                currency=currency,
+                current_qty=Decimal(str(position.quantity)),
+                avg_price=Decimal(str(position.avg_buy_price)),
             )
-    for row in await kis.fetch_my_us_stocks():
-        symbol = str(row.get("ovrs_pdno") or "").strip().upper()
-        venue = str(row.get("ovrs_excg_cd") or row.get("excg_cd") or "").strip().upper()
-        if not venue:
-            venue = "NASD"
-        qty = Decimal(str(row.get("ovrs_cblc_qty") or "0"))
-        avg_price = Decimal(str(row.get("pchs_avg_pric") or "0"))
-        if symbol:
-            candidates.append(
-                OpeningLotCandidate(
-                    broker="kis",
-                    account_mode="live",
-                    venue=venue,
-                    instrument_type="equity_us",
-                    symbol=symbol,
-                    raw_symbol=symbol,
-                    currency="USD",
-                    current_qty=qty,
-                    avg_price=avg_price,
-                )
-            )
+        )
     return candidates
 
 

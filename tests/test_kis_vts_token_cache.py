@@ -152,7 +152,6 @@ async def test_expired_vts_token_reissues_once_and_replaces_scoped_cache(
 def test_vts_manager_is_shared_and_keys_are_scoped_by_host_and_appkey(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.services.invest_home_readers import SafeKISMockClient
     from app.services.redis_token_manager import redis_token_manager
 
     live = KISClient()
@@ -162,7 +161,6 @@ def test_vts_manager_is_shared_and_keys_are_scoped_by_host_and_appkey(
     _set_mock_credentials(monkeypatch, base_url=host_a, app_key=app_key_a)
     mock_a = KISClient(is_mock=True)
     mock_a_again = KISClient(is_mock=True)
-    safe_mock_a = SafeKISMockClient()
     _set_mock_credentials(
         monkeypatch,
         base_url=f"{host_a}/",
@@ -183,10 +181,8 @@ def test_vts_manager_is_shared_and_keys_are_scoped_by_host_and_appkey(
     assert live._token_manager is redis_token_manager
     assert live._token_manager._lock_wait_timeout_seconds == 3.0
     assert mock_a._token_manager is mock_a_again._token_manager
-    assert mock_a._token_manager is safe_mock_a._token_manager
     assert mock_a._token_manager is mock_a_trailing_slash._token_manager
     assert mock_a._token_manager._lock_wait_timeout_seconds == 11.0
-    assert safe_mock_a._token_request_timeout() == 10.0
 
     token_keys = {
         live._token_manager._token_key,

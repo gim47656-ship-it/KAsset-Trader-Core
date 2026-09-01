@@ -1,22 +1,13 @@
-"""ROB-518 — live accounts must not realize a loss-sell by mistake.
+"""ROB-518 — Upbit live loss-sell 및 대기 주문 재가격 안전 경계.
 
-Live limit sells were already double-guarded (avg*1.01 floor + below-current
-block), but two live paths bypassed the floor entirely:
-
-1. market sells — ``_preview_sell`` / ``_validate_sell_side`` only ran the
-   guards for ``order_type == "limit"``, so a live market sell with the
-   current price below the avg*1.01 floor went straight through (reachable
-   via POST /api/screener/order and any internal ``_place_order_impl`` caller).
-2. modify — ``modify_order_impl`` re-priced a resting live sell order with no
-   floor check, so a guarded placement could be repriced into a loss.
-
-Mock equity keeps the ROB-461 ``allow_loss_sell`` bypass (손절 practice).
-defensive_trim / scalping_exit are limit-only by precondition and unaffected.
+주식은 Toss 전용 주문 구현에서 검증한다. 이 모듈은 공통 순수 guard와
+레거시 Upbit 실행 helper가 평균단가 이하의 실자금 매도를 허용하지 않는지
+검증한다.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -85,8 +76,7 @@ def test_market_guard_default_is_blocking() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _preview_sell: live market sells below floor are blocked; mock equity stays open
-# ---------------------------------------------------------------------------
+# Upbit sell preview
 def _patch_holdings(monkeypatch, avg_price: float, quantity: float = 10) -> None:
     monkeypatch.setattr(
         order_validation,
@@ -97,16 +87,15 @@ def _patch_holdings(monkeypatch, avg_price: float, quantity: float = 10) -> None
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-@pytest.mark.parametrize("market_type", ["equity_kr", "equity_us", "crypto"])
-async def test_preview_sell_live_market_loss_blocked(monkeypatch, market_type) -> None:
+async def test_preview_sell_live_market_loss_blocked(monkeypatch) -> None:
     _patch_holdings(monkeypatch, avg_price=90400.0)
     result = await order_validation._preview_sell(
-        symbol="375500",
+        symbol="KRW-BTC",
         order_type="market",
         quantity=10,
         price=None,
         current_price=68500.0,
-        market_type=market_type,
+        market_type="crypto",
         is_mock=False,
     )
     assert "error" in result and "market sell blocked" in result["error"].lower()
@@ -117,42 +106,17 @@ async def test_preview_sell_live_market_loss_blocked(monkeypatch, market_type) -
 async def test_preview_sell_live_market_profit_allowed(monkeypatch) -> None:
     _patch_holdings(monkeypatch, avg_price=60000.0)
     result = await order_validation._preview_sell(
-        symbol="375500",
+        symbol="KRW-BTC",
         order_type="market",
         quantity=10,
         price=None,
         current_price=68500.0,
-        market_type="equity_kr",
+        market_type="crypto",
         is_mock=False,
     )
     assert "error" not in result
     assert result["price"] == 68500.0
     assert result["realized_pnl"] > 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@pytest.mark.parametrize("market_type", ["equity_kr", "equity_us"])
-async def test_preview_sell_mock_equity_market_loss_allowed(
-    monkeypatch, market_type
-) -> None:
-    # ROB-461 practice semantics survive: mock equity may book a market loss.
-    _patch_holdings(monkeypatch, avg_price=90400.0)
-    log_mock = Mock()
-    monkeypatch.setattr(order_validation, "_log_mock_loss_sell_bypass", log_mock)
-    result = await order_validation._preview_sell(
-        symbol="375500",
-        order_type="market",
-        quantity=10,
-        price=None,
-        current_price=68500.0,
-        market_type=market_type,
-        is_mock=True,
-    )
-    assert "error" not in result
-    assert result["realized_pnl"] < 0
-    # The bypass is audited like the limit-path one.
-    assert log_mock.call_args.kwargs["phase"] == "preview"
 
 
 @pytest.mark.unit
@@ -183,7 +147,7 @@ async def test_validate_sell_side_live_market_loss_blocked(monkeypatch) -> None:
     qty, avg, err = await order_validation._validate_sell_side(
         symbol="375500",
         normalized_symbol="375500",
-        market_type="equity_kr",
+        market_type="crypto",
         quantity=10,
         order_type="market",
         price=None,
@@ -198,39 +162,6 @@ async def test_validate_sell_side_live_market_loss_blocked(monkeypatch) -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_validate_sell_side_mock_equity_market_loss_allowed(monkeypatch) -> None:
-    _patch_holdings(monkeypatch, avg_price=90400.0)
-    monkeypatch.setattr(
-        order_validation,
-        "_get_kis_mock_shadow_exposure",
-        AsyncMock(
-            return_value={
-                "confidence": "db_shadow_pending",
-                "sell_reserved_quantity": 0,
-            }
-        ),
-    )
-    log_mock = Mock()
-    monkeypatch.setattr(order_validation, "_log_mock_loss_sell_bypass", log_mock)
-    errors: list[str] = []
-    qty, avg, err = await order_validation._validate_sell_side(
-        symbol="375500",
-        normalized_symbol="375500",
-        market_type="equity_kr",
-        quantity=10,
-        order_type="market",
-        price=None,
-        current_price=68500.0,
-        order_error_fn=lambda m: errors.append(m) or {"error": m},
-        is_mock=True,
-        dry_run=True,
-    )
-    assert err is None and errors == []
-    assert log_mock.call_args.kwargs["phase"] == "execution"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
 async def test_validate_sell_side_live_limit_guard_unchanged(monkeypatch) -> None:
     # Regression: the existing live limit guard message is byte-for-byte intact.
     _patch_holdings(monkeypatch, avg_price=90400.0)
@@ -238,7 +169,7 @@ async def test_validate_sell_side_live_limit_guard_unchanged(monkeypatch) -> Non
     qty, avg, err = await order_validation._validate_sell_side(
         symbol="375500",
         normalized_symbol="375500",
-        market_type="equity_kr",
+        market_type="crypto",
         quantity=10,
         order_type="limit",
         price=68000.0,
@@ -250,161 +181,12 @@ async def test_validate_sell_side_live_limit_guard_unchanged(monkeypatch) -> Non
     assert err is not None and "below minimum" in errors[0]
 
 
-# ---------------------------------------------------------------------------
-# modify_order: live sell orders must not be repriced below the floor
-# ---------------------------------------------------------------------------
+# Upbit modify: live sell orders must not be repriced below the floor
 def _patch_modify_holdings(monkeypatch, avg_price: float | None) -> AsyncMock:
     holdings = {"avg_price": avg_price, "quantity": 10} if avg_price else {}
     mock = AsyncMock(return_value=holdings)
     monkeypatch.setattr(orders_modify_cancel, "_get_holdings_for_order", mock)
     return mock
-
-
-class _KISModifyClient:
-    def __init__(self, open_orders):
-        self._open_orders = open_orders
-        self.modify_korea_order = AsyncMock(return_value={"odno": "NEW1"})
-        self.modify_overseas_order = AsyncMock(return_value={"odno": "NEW2"})
-
-    async def inquire_korea_orders(self, is_mock=False):
-        return self._open_orders
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_domestic_live_sell_reprice_below_floor_blocked(
-    monkeypatch,
-) -> None:
-    _patch_modify_holdings(monkeypatch, avg_price=90400.0)
-    client = _KISModifyClient(
-        [
-            {
-                "odno": "0001",
-                "ord_unpr": "95000",
-                "ord_qty": "10",
-                "sll_buy_dvsn_cd": "01",  # sell
-                "ord_gno_brno": "06010",
-            }
-        ]
-    )
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0001", "375500", "equity_kr", 68000.0, None, False, is_mock=False
-    )
-    assert result["success"] is False
-    assert "modify blocked" in result["error"].lower()
-    client.modify_korea_order.assert_not_called()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_domestic_live_buy_reprice_allowed(monkeypatch) -> None:
-    holdings_mock = _patch_modify_holdings(monkeypatch, avg_price=90400.0)
-    client = _KISModifyClient(
-        [
-            {
-                "odno": "0002",
-                "ord_unpr": "70000",
-                "ord_qty": "10",
-                "sll_buy_dvsn_cd": "02",  # buy
-                "ord_gno_brno": "06010",
-            }
-        ]
-    )
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0002", "375500", "equity_kr", 68000.0, None, False, is_mock=False
-    )
-    assert result["success"] is True
-    client.modify_korea_order.assert_called_once()
-    holdings_mock.assert_not_called()  # buy modifies never touch holdings
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_domestic_live_sell_reprice_above_floor_allowed(
-    monkeypatch,
-) -> None:
-    _patch_modify_holdings(monkeypatch, avg_price=60000.0)
-    client = _KISModifyClient(
-        [
-            {
-                "odno": "0003",
-                "ord_unpr": "70000",
-                "ord_qty": "10",
-                "sll_buy_dvsn_cd": "01",
-                "ord_gno_brno": "06010",
-            }
-        ]
-    )
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0003", "375500", "equity_kr", 68000.0, None, False, is_mock=False
-    )
-    assert result["success"] is True
-    client.modify_korea_order.assert_called_once()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_domestic_quantity_only_modify_skips_floor(
-    monkeypatch,
-) -> None:
-    # Quantity-only modifies (new_price=None) introduce no new price risk.
-    holdings_mock = _patch_modify_holdings(monkeypatch, avg_price=90400.0)
-    client = _KISModifyClient(
-        [
-            {
-                "odno": "0004",
-                "ord_unpr": "95000",
-                "ord_qty": "10",
-                "sll_buy_dvsn_cd": "01",
-                "ord_gno_brno": "06010",
-            }
-        ]
-    )
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0004", "375500", "equity_kr", None, 5, False, is_mock=False
-    )
-    assert result["success"] is True
-    holdings_mock.assert_not_called()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_overseas_live_sell_reprice_below_floor_blocked(
-    monkeypatch,
-) -> None:
-    _patch_modify_holdings(monkeypatch, avg_price=300.0)
-    client = _KISModifyClient([])
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    target_order = {
-        "ft_ord_unpr3": "310.0",
-        "ft_ord_qty": "10",
-        "sll_buy_dvsn_cd": "01",  # sell
-    }
-    monkeypatch.setattr(
-        orders_modify_cancel,
-        "_find_us_open_order_by_id",
-        AsyncMock(return_value=(target_order, "NASD", ["NASD"])),
-    )
-    result = await orders_modify_cancel._modify_kis_overseas(
-        "0005", "AAPL", "equity_us", 250.0, None, False, is_mock=False
-    )
-    assert result["success"] is False
-    assert "modify blocked" in result["error"].lower()
-    client.modify_overseas_order.assert_not_called()
 
 
 @pytest.mark.unit
@@ -462,45 +244,4 @@ async def test_modify_upbit_buy_reprice_allowed(monkeypatch) -> None:
     )
     assert result["success"] is True
     reorder.assert_called_once()
-    holdings_mock.assert_not_called()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_unknown_basis_fails_open(monkeypatch) -> None:
-    # Holdings without an avg_price (or missing entirely) must not brick modify.
-    _patch_modify_holdings(monkeypatch, avg_price=None)
-    client = _KISModifyClient(
-        [
-            {
-                "odno": "0006",
-                "ord_unpr": "95000",
-                "ord_qty": "10",
-                "sll_buy_dvsn_cd": "01",
-                "ord_gno_brno": "06010",
-            }
-        ]
-    )
-    monkeypatch.setattr(
-        orders_modify_cancel, "_create_kis_client", lambda *, is_mock: client
-    )
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0006", "375500", "equity_kr", 68000.0, None, False, is_mock=False
-    )
-    assert result["success"] is True
-    client.modify_korea_order.assert_called_once()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_kis_mock_domestic_skips_floor(monkeypatch) -> None:
-    # Mock modifies delegate before the live guard (ROB-461 practice semantics).
-    delegate = AsyncMock(return_value={"success": True, "status": "modified"})
-    monkeypatch.setattr(orders_modify_cancel, "_modify_kis_mock_domestic", delegate)
-    holdings_mock = _patch_modify_holdings(monkeypatch, avg_price=90400.0)
-    result = await orders_modify_cancel._modify_kis_domestic(
-        "0007", "375500", "equity_kr", 68000.0, None, False, is_mock=True
-    )
-    assert result["success"] is True
-    delegate.assert_called_once()
     holdings_mock.assert_not_called()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import desc, or_, select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trade_journal import TradeJournal
@@ -57,12 +57,9 @@ class JournalSnapshotCollector:
         itype = _MARKET_TO_INSTRUMENT.get(request.market)
         if itype is not None:
             scope_filters.append(TradeJournal.instrument_type == itype)
-        if request.account_scope == "kis_live":
-            # KIS broker scope; legacy rows may carry account=NULL (kis_live_ledger
-            # now writes account="kis"). instrument_type already excludes crypto.
-            scope_filters.append(
-                or_(TradeJournal.account == "kis", TradeJournal.account.is_(None))
-            )
+        if request.account_scope == "toss_live":
+            # Toss 보고서에는 Toss 체결 journal만 포함하고 과거 KIS 행은 섞지 않는다.
+            scope_filters.append(TradeJournal.account == "toss")
 
         active_stmt = (
             select(TradeJournal)

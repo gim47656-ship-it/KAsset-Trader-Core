@@ -54,17 +54,20 @@ def classify_held_symbol(
     *,
     in_candidate_universe: bool,
 ) -> str:
-    """Deterministic verdict for ONE KIS-primary held symbol (decision C′).
+    """Toss 보유 종목 하나의 결정론적 검토 판정이다.
 
-    Order (honest range only):
-      1. quote missing / not actionable -> ``data_gap`` (no directional call)
-      2. sellable_quantity > 0          -> ``sell_review`` (reviewable reduce)
-      3. held + in screener universe    -> ``no_add`` (trending, don't add)
-      4. otherwise                      -> ``keep`` (default hold)
+    판정 순서:
+      1. quote가 없거나 실행 판단 불가 -> ``data_gap``
+      2. 보유 수량 > 0                 -> ``sell_review`` (감축 검토 가능)
+      3. 보유 중이고 screener universe 포함 -> ``no_add``
+      4. 그 외                         -> ``keep``
+
+    이 단계의 수량은 매도 가능 수량 주장이 아니다. 실제 주문은 전송 직전의
+    Toss sellable preflight를 통과해야 한다.
     """
     if not _quote_is_actionable(quote):
         return "data_gap"
-    if (holding.get("sellable_quantity") or 0) > 0:
+    if (holding.get("quantity") or 0) > 0:
         return "sell_review"
     if in_candidate_universe:
         return "no_add"

@@ -19,7 +19,7 @@ from app.services.brokers.kis.base import BaseKISClient
 from app.services.brokers.kis.domestic_orders import DomesticOrderClient
 from app.services.brokers.kis.mock_scalping.contract import ReasonCode
 from app.services.brokers.kis.overseas_orders import OverseasOrderClient
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
+from app.services.brokers.pre_send import PreSendFreshnessError
 
 
 @pytest.fixture(autouse=True)

@@ -19,6 +19,24 @@ from app.services.execution_ledger.normalizers import (
 )
 
 
+def _toss_equity_fill(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "symbol": "214150",
+        "raw_symbol": "214150",
+        "instrument_type": "equity_kr",
+        "side": "sell",
+        "price": "100000",
+        "quantity": "2",
+        "total_amount": "200000",
+        "currency": "KRW",
+        "account": "toss",
+        "order_id": "toss-order-1",
+        "filled_at": "2026-07-15T15:17:28+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
 def test_upbit_normalizer_redacts_and_maps_execution_upsert() -> None:
     raw = {
         "state": "done",
@@ -47,64 +65,38 @@ def test_upbit_normalizer_redacts_and_maps_execution_upsert() -> None:
     assert upsert.filled_notional == Decimal("1000000.0")
 
 
-def test_kis_empty_filled_at_uses_kst_order_date_and_time() -> None:
-    upsert = to_execution_ledger_upsert(
-        {
-            "symbol": "214150",
-            "raw_symbol": "214150",
-            "instrument_type": "equity_kr",
-            "side": "sell",
-            "price": "100000",
-            "quantity": "2",
-            "total_amount": "200000",
-            "currency": "KRW",
-            "account": "kis",
-            "order_id": "rob933-empty-filled-at",
-            "filled_at": "",
-            "ord_dt": "20260716",
-            "ord_tmd": "001728",
-        }
-    )
+def test_toss_account_infers_toss_provenance() -> None:
+    upsert = to_execution_ledger_upsert(_toss_equity_fill())
 
+    assert upsert.broker == "toss"
+    assert upsert.venue == "toss"
     assert upsert.filled_at == datetime(2026, 7, 16, 0, 17, 28, tzinfo=KST)
 
 
-def test_kis_filled_at_rejects_trade_day_drift_from_order_date() -> None:
-    with pytest.raises(ValueError, match="KST trade day"):
-        to_execution_ledger_upsert(
-            {
-                "symbol": "214150",
-                "raw_symbol": "214150",
-                "instrument_type": "equity_kr",
-                "side": "sell",
-                "price": "100000",
-                "quantity": "2",
-                "total_amount": "200000",
-                "currency": "KRW",
-                "account": "kis",
-                "order_id": "rob933-day-drift",
-                "filled_at": "2026-07-15T15:17:28+00:00",
-                "ord_dt": "20260715",
-            }
-        )
+def test_operational_adapter_rejects_kis_account() -> None:
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        to_execution_ledger_upsert(_toss_equity_fill(account="kis"))
 
 
-def test_malformed_filled_at_fails_closed_instead_of_using_current_time() -> None:
+def test_operational_adapter_rejects_explicit_kis_broker() -> None:
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        to_execution_ledger_upsert(_toss_equity_fill(), broker="kis")
+
+
+def test_operational_adapter_rejects_unknown_account_without_kis_default() -> None:
+    with pytest.raises(ValueError, match="unsupported normalized account"):
+        to_execution_ledger_upsert(_toss_equity_fill(account="unknown"))
+
+
+def test_explicit_broker_must_match_normalized_account() -> None:
+    with pytest.raises(ValueError, match="broker/account mismatch"):
+        to_execution_ledger_upsert(_toss_equity_fill(), broker="upbit")
+
+
+def test_malformed_toss_filled_at_fails_closed() -> None:
     with pytest.raises(ValueError, match="filled_at"):
         to_execution_ledger_upsert(
-            {
-                "symbol": "214150",
-                "raw_symbol": "214150",
-                "instrument_type": "equity_kr",
-                "side": "sell",
-                "price": "100000",
-                "quantity": "2",
-                "total_amount": "200000",
-                "currency": "KRW",
-                "account": "kis",
-                "order_id": "rob933-malformed-filled-at",
-                "filled_at": "definitely-not-a-timestamp",
-            }
+            _toss_equity_fill(filled_at="definitely-not-a-timestamp")
         )
 
 

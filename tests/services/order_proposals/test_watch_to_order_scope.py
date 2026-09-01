@@ -20,7 +20,7 @@ def _scope(*, suffix: str | None = None) -> WatchToOrderScope:
     return WatchToOrderScope(
         symbol=f"SEAM-{unique}",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=f"account-{unique}",
         action="place",
     )

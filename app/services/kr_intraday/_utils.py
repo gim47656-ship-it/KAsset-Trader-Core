@@ -21,8 +21,8 @@ def _ensure_kst_aware(value: datetime.datetime) -> datetime.datetime:
     return value.astimezone(_KST)
 
 
-def _convert_kis_datetime_to_utc(kst_dt: datetime.datetime) -> datetime.datetime:
-    """Convert KIS API datetime (KST) to UTC for storage."""
+def _kst_datetime_to_utc_naive(kst_dt: datetime.datetime) -> datetime.datetime:
+    """Convert a KST datetime to the UTC-naive storage representation."""
     kst_aware = _ensure_kst_aware(kst_dt)
     return kst_aware.astimezone(datetime.UTC).replace(tzinfo=None)
 
@@ -307,43 +307,6 @@ def _store_minute_row(
     minute_by_key[(minute_time, venue)] = minute_row
     if api_minute_rows is not None:
         api_minute_rows.append(minute_row)
-
-
-def _should_call_api(
-    *, now_kst: datetime.datetime, end_date: datetime.datetime | None
-) -> bool:
-    if end_date is not None:
-        end_day = (
-            _ensure_kst_aware(end_date).date() if end_date.tzinfo else end_date.date()
-        )
-        if end_day < now_kst.date():
-            return False
-
-    now_clock = now_kst.time()
-    if now_clock < datetime.time(8, 0, 0):
-        return False
-    if now_clock >= datetime.time(20, 0, 0):
-        return False
-    return True
-
-
-def _api_markets_for_now(
-    *,
-    now_kst: datetime.datetime,
-    nxt_eligible: bool,
-    end_date: datetime.datetime | None,
-) -> list[str]:
-    if not _should_call_api(now_kst=now_kst, end_date=end_date):
-        return []
-
-    now_clock = now_kst.time()
-    if datetime.time(8, 0, 0) <= now_clock < datetime.time(9, 0, 0):
-        return ["NX"] if nxt_eligible else []
-    if datetime.time(9, 0, 0) <= now_clock < datetime.time(15, 35, 0):
-        return ["J", "NX"] if nxt_eligible else ["J"]
-    if datetime.time(15, 35, 0) <= now_clock < datetime.time(20, 0, 0):
-        return ["NX"] if nxt_eligible else []
-    return []
 
 
 def _history_rows_to_frame(

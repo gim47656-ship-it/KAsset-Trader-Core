@@ -9,12 +9,6 @@ from app.mcp_server.tooling.analysis_artifact_registration import (
 )
 from app.mcp_server.tooling.analysis_readonly_registration import _AllowlistedMCP
 from app.mcp_server.tooling.forecast_registration import FORECAST_TOOL_NAMES
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
-    register_kis_live_order_tools,
-)
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_TOOL_NAMES,
 )
@@ -67,15 +61,11 @@ ACCOUNT_READ_TOOL_NAMES: set[str] = {
     "get_cash_balance",
     "toss_get_orderable_cash",
     "get_order_history",
-    "kis_live_get_order_history",
     "toss_get_order_history",
 } | KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES
 
 ACCOUNT_READ_FORBIDDEN_TOOL_NAMES: set[str] = (
     (ORDER_TOOL_NAMES - {"get_order_history"})
-    | (KIS_LIVE_ORDER_TOOL_NAMES - {"kis_live_get_order_history"})
-    | KIS_MOCK_ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
     | (KIWOOM_MOCK_TOOL_NAMES - KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES)
     | KIWOOM_MOCK_US_TOOL_NAMES
     | PAPER_LIMIT_ORDER_TOOL_NAMES
@@ -105,7 +95,6 @@ def register_account_read_tools(mcp: FastMCP) -> None:
     filtered = cast("FastMCP", _AllowlistedMCP(mcp, ACCOUNT_READ_TOOL_NAMES))
     register_portfolio_tools(filtered)
     register_order_tools(filtered)
-    register_kis_live_order_tools(filtered)
     register_toss_live_order_tools(filtered)
     register_kiwoom_mock_tools(filtered)
 

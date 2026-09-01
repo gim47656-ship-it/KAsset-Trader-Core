@@ -14,8 +14,7 @@ import pandas as pd
 import pytest
 
 import app.services.brokers.upbit.client as upbit_service
-import app.services.brokers.yahoo.client as yahoo_service
-from app.mcp_server.tooling import shared
+from app.mcp_server.tooling import market_data_quotes, shared
 from app.services import naver_finance
 from app.services.us_symbol_universe_service import USSymbolNotRegisteredError
 from tests._mcp_tooling_support import _patch_runtime_attr, build_tools
@@ -39,7 +38,7 @@ class TestNormalizeMarket:
             assert shared.normalize_market(alias) == "crypto"
 
     def test_equity_kr_aliases(self):
-        for alias in ["kr", "krx", "korea", "kospi", "kosdaq", "kis", "equity_kr"]:
+        for alias in ["kr", "krx", "korea", "kospi", "kosdaq", "equity_kr"]:
             assert shared.normalize_market(alias) == "equity_kr"
 
     def test_equity_us_aliases(self):
@@ -54,6 +53,11 @@ class TestNormalizeMarket:
     def test_unknown_returns_none(self):
         assert shared.normalize_market("unknown") is None
         assert shared.normalize_market("invalid") is None
+
+    def test_kis_provider_name_is_not_a_market_alias(self):
+        assert shared.normalize_market("kis") is None
+        with pytest.raises(ValueError, match="Unsupported market"):
+            shared.resolve_market_type("005930", "kis")
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +294,7 @@ class TestErrorPayload:
 
     def test_none_values_excluded(self):
         result = shared.error_payload(
-            source="kis", message="error", symbol=None, instrument_type=None
+            source="test", message="error", symbol=None, instrument_type=None
         )
         assert "symbol" not in result
         assert "instrument_type" not in result
@@ -365,37 +369,38 @@ class TestSymbolNotFound:
     async def test_get_quote_korean_equity_not_found(self, monkeypatch):
         tools = build_tools()
 
-        class DummyKISClient:
-            async def inquire_daily_itemchartprice(self, code, market, n):
-                return pd.DataFrame()  # Empty DataFrame
-
-        _patch_runtime_attr(monkeypatch, "KISClient", DummyKISClient)
+        monkeypatch.setattr(
+            market_data_quotes.toss_market_data,
+            "prices",
+            AsyncMock(return_value={}),
+        )
+        monkeypatch.setattr(
+            market_data_quotes,
+            "fetch_daily_toss_frame",
+            AsyncMock(return_value=pd.DataFrame()),
+        )
 
         result = await tools["get_quote"]("999999")
 
         assert "error" in result
         assert "not found" in result["error"].lower()
-        assert result["source"] == "kis"
+        assert result["source"] == "toss"
 
     @pytest.mark.asyncio
-    async def test_get_quote_us_equity_not_found_raises(self, monkeypatch):
+    async def test_get_quote_us_equity_not_found_returns_error(self, monkeypatch):
         tools = build_tools()
-        # ROB-416: true symbol_not_found requires an explicit provider not-found
-        # signal; a successful fast_info payload with no price is quote_unavailable.
-        _patch_runtime_attr(
-            monkeypatch,
-            "get_us_exchange_by_symbol",
-            AsyncMock(side_effect=USSymbolNotRegisteredError("not registered")),
+        # Active symbol-universe gate가 Toss 호출보다 먼저 거부한다.
+        exchange_lookup = AsyncMock(
+            side_effect=USSymbolNotRegisteredError("not registered")
         )
-        mock_fetch_fast_info = AsyncMock(
-            side_effect=ValueError("Quote not found for symbol: INVALID")
-        )
-        monkeypatch.setattr(yahoo_service, "fetch_fast_info", mock_fetch_fast_info)
+        _patch_runtime_attr(monkeypatch, "get_us_exchange_by_symbol", exchange_lookup)
 
-        with pytest.raises(ValueError, match="Symbol 'INVALID' not found"):
-            await tools["get_quote"]("INVALID")
+        result = await tools["get_quote"]("INVALID")
 
-        mock_fetch_fast_info.assert_awaited_once_with("INVALID")
+        assert result["error"] == "not registered"
+        assert result["source"] == "toss"
+
+        exchange_lookup.assert_awaited_once_with("INVALID")
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +421,7 @@ class TestSymbolNormalizationIntegration:
             "symbol": "012450",
             "price": 50000,
             "instrument_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
         }
 
         async def mock_fetch_quote_kr(symbol):

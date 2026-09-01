@@ -30,7 +30,7 @@ def _group(**overrides):
         "approval_dispatch_published_at": None,
         "valid_until": NOW + timedelta(hours=1),
         "market": "equity_kr",
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "symbol": "052690",
         "side": "sell",
         "thesis": "premarket exit",
@@ -106,6 +106,27 @@ async def test_redispatch_validation_accepts_exact_fresh_limit_terms() -> None:
     assert result.failure_code is None
     place.assert_awaited_once()
     assert place.await_args.kwargs["dry_run"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_mode", ["kis_live", "kis_mock"])
+async def test_redispatch_rejects_non_operational_kis_before_preview(account_mode):
+    place = AsyncMock(return_value=_preview())
+
+    result = await validate_proposal_redispatch(
+        group=_group(account_mode=account_mode),
+        rungs=[_rung()],
+        now=NOW,
+        now_fn=lambda: NOW,
+        window_evaluator=_allow,
+        place_order_fn=place,
+    )
+
+    assert result.eligible is False
+    assert result.failure_code == "redispatch_provider_not_operational"
+    assert result.detail["error"] == "provider kis is not operational"
+    place.assert_not_awaited()
 
 
 @pytest.mark.unit

@@ -244,15 +244,15 @@ coverage.
 ### adj_close enrichment is not yet run by any scheduled task
 
 The `adj_close` column exists on `us_candles_1d` for storing split/dividend-
-adjusted close prices. Populating it from Yahoo Finance (without changing
-`source='kis'` for existing rows) is a planned follow-up. Until then the
-column will be NULL for all rows.
+adjusted close prices. Existing historical rows retain their original `source`
+provenance; no cutover rewrites KIS-tagged history. Until a dedicated enrichment
+job is approved, the column may remain NULL.
 
-### `_fetch_ohlcv_for_volume_profile` still uses the legacy path for KR
+### KR volume-profile source boundary
 
-The `_fetch_ohlcv_for_volume_profile` helper in the MCP tooling still uses
-the legacy `kis_ohlcv_cache` path for KR market data. It was not migrated to
-the durable store in this PR. Migration is a separate follow-up.
+The volume-profile helper must use the shared Toss/durable candle boundary.
+The dormant `kis_ohlcv_cache` is not an operational fallback; unsupported or
+failed provider reads must remain explicit rather than synthesizing data.
 
 ---
 

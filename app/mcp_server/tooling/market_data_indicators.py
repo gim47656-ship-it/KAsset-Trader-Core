@@ -11,15 +11,14 @@ import numpy as np
 import pandas as pd
 
 import app.services.brokers.upbit.client as upbit_service
-import app.services.brokers.yahoo.client as yahoo_service
-import app.services.kis_ohlcv_cache as kis_ohlcv_cache
 from app.mcp_server.tooling.shared import (
     to_float as _to_float,
 )
 from app.mcp_server.tooling.shared import (
     to_optional_float as _to_optional_float,
 )
-from app.services.brokers.kis.client import KISClient
+from app.services.market_data.toss_ohlcv import fetch_daily_toss_frame
+from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -110,24 +109,15 @@ async def _fetch_ohlcv_for_volume_profile(
 ) -> pd.DataFrame:
     if market_type == "crypto":
         return await _fetch_ohlcv_crypto_paginated(
-            symbol=symbol, count=period_days, period="day"
-        )
-    if market_type == "equity_kr":
-        kis = KISClient()
-
-        async def _raw_fetch_kr_daily_vp(n: int) -> pd.DataFrame:
-            return await kis.inquire_daily_itemchartprice(
-                code=symbol, market="J", n=n, period="D"
-            )
-
-        return await kis_ohlcv_cache.get_candles(
             symbol=symbol,
             count=period_days,
             period="day",
-            raw_fetcher=_raw_fetch_kr_daily_vp,
         )
-    return await yahoo_service.fetch_ohlcv(
-        ticker=symbol, days=period_days, period="day"
+    if market_type == "equity_us":
+        await get_us_exchange_by_symbol(symbol)
+    return await fetch_daily_toss_frame(
+        symbol=symbol,
+        count=period_days,
     )
 
 
@@ -150,38 +140,34 @@ from app.services.daily_candles.read_service import (  # noqa: E402
 
 
 async def _cache_first_kr(*, symbol: str, count: int) -> pd.DataFrame:
-    """Read KR daily candles from DB; fall back to KIS and upsert on miss."""
+    """Read KR daily candles from DB; fetch and persist Toss rows on miss."""
     from app.core.db import AsyncSessionLocal
-    from app.services.brokers.kis.client import KISClient as _KISClient
-    from app.services.daily_candles.kis_daily_fetcher import fetch_kr_daily_unclamped
+    from app.services.daily_candles.converters import frame_to_rows
+    from app.services.daily_candles.read_service import drop_forming_daily_rows
     from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 
     partition = "KRX"
     async with AsyncSessionLocal() as session:
         repo = DailyCandlesRepository(session=session)
         cached = await repo.fetch_recent(
-            market=MarketKey.KR, symbol=symbol, partition=partition, count=count
+            market=MarketKey.KR,
+            symbol=symbol,
+            partition=partition,
+            count=count,
         )
         if len(cached) >= count and _cache_is_fresh_equity(cached, "XKRX"):
-            logger.debug(
-                "daily_candles cache hit market=%s symbol=%s rows=%d",
-                "kr",
-                symbol,
-                len(cached),
-            )
             return _rows_to_frame(cached)
-
         try:
-            kis = _KISClient()
-            frame = await fetch_kr_daily_unclamped(kis=kis, code=symbol, n=count)
+            frame = await fetch_daily_toss_frame(symbol=symbol, count=count)
         except Exception:
-            logger.exception("KIS fetch failed for KR symbol; returning cached rows")
+            logger.exception("Toss fetch failed for KR symbol; returning cached rows")
             return _rows_to_frame(cached)
-
-        from app.services.daily_candles.converters import frame_to_rows
-
+        frame = drop_forming_daily_rows(frame, market="kr")
         repo_rows = frame_to_rows(
-            frame, symbol=symbol, partition=partition, source="kis"
+            frame,
+            symbol=symbol,
+            partition=partition,
+            source="toss",
         )
         if repo_rows:
             await repo.upsert_rows(market=MarketKey.KR, rows=repo_rows)
@@ -190,86 +176,41 @@ async def _cache_first_kr(*, symbol: str, count: int) -> pd.DataFrame:
 
 
 async def _cache_first_us(*, symbol: str, count: int) -> pd.DataFrame:
-    """Read US daily candles from DB; fall back to KIS (then Yahoo) and upsert on miss."""
+    """Read active US daily candles from DB; fetch Toss rows on miss."""
     from app.core.db import AsyncSessionLocal
-    from app.services.brokers.kis.client import KISClient as _KISClient
-    from app.services.daily_candles.kis_daily_fetcher import fetch_us_daily_unclamped
-    from app.services.daily_candles.repository import (
-        DailyCandlesRepository,
-        MarketKey,
-    )
-    from app.services.daily_candles.yahoo_us_fallback import (
-        fetch_us_daily_yahoo_fallback,
-    )
-    from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
+    from app.services.daily_candles.converters import frame_to_rows
+    from app.services.daily_candles.read_service import drop_forming_daily_rows
+    from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 
     async with AsyncSessionLocal() as session:
-        # Resolve exchange partition; fall back to "NASD" on any error.
-        try:
-            partition = await get_us_exchange_by_symbol(symbol, db=session)
-        except Exception:
-            logger.warning("Could not resolve US exchange; defaulting to NASD")
-            partition = "NASD"
-
+        partition = await get_us_exchange_by_symbol(symbol, db=session)
         repo = DailyCandlesRepository(session=session)
         cached = await repo.fetch_recent(
-            market=MarketKey.US, symbol=symbol, partition=partition, count=count
+            market=MarketKey.US,
+            symbol=symbol,
+            partition=partition,
+            count=count,
         )
         if len(cached) >= count and _cache_is_fresh_equity(cached, "XNYS"):
-            logger.debug(
-                "daily_candles cache hit market=%s symbol=%s rows=%d",
-                "us",
-                symbol,
-                len(cached),
-            )
             return _rows_to_frame(cached)
-
         try:
-            kis = _KISClient()
-            frame = await fetch_us_daily_unclamped(
-                kis=kis, symbol=symbol, exchange_code=partition, n=count
-            )
+            frame = await fetch_daily_toss_frame(symbol=symbol, count=count)
         except Exception:
-            logger.exception("KIS fetch failed for US symbol; returning cached rows")
+            logger.exception("Toss fetch failed for US symbol; returning cached rows")
             return _rows_to_frame(cached)
-
-        from app.services.daily_candles.converters import frame_to_rows
-
+        frame = drop_forming_daily_rows(frame, market="us")
         repo_rows = frame_to_rows(
-            frame, symbol=symbol, partition=partition, source="kis"
+            frame,
+            symbol=symbol,
+            partition=partition,
+            source="toss",
         )
-
-        if not repo_rows:
-            # KIS returned empty — try Yahoo fallback.
-            logger.warning("KIS returned no rows for US symbol; trying Yahoo fallback")
-            try:
-                yahoo_rows = await fetch_us_daily_yahoo_fallback(symbol=symbol, n=count)
-            except Exception:
-                logger.exception("Yahoo fallback failed for US symbol")
-                yahoo_rows = []
-
-            if yahoo_rows:
-                from app.services.daily_candles.repository import DailyCandleRow
-
-                repo_rows = [
-                    DailyCandleRow(
-                        time_utc=r.time_utc,
-                        symbol=r.symbol,
-                        partition=partition,
-                        open=r.open,
-                        high=r.high,
-                        low=r.low,
-                        close=r.close,
-                        adj_close=r.adj_close,
-                        volume=r.volume,
-                        value=r.value,
-                        source="yahoo_fallback",
-                    )
-                    for r in yahoo_rows
-                ]
-
         if repo_rows:
-            await repo.upsert_rows(market=MarketKey.US, rows=repo_rows)
+            await repo.upsert_rows(
+                market=MarketKey.US,
+                rows=repo_rows,
+                update_adj_close=False,
+            )
             await session.commit()
         return _rows_to_frame(repo_rows) if repo_rows else _rows_to_frame(cached)
 

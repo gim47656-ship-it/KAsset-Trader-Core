@@ -41,11 +41,10 @@ def _imported_modules(tree: ast.AST) -> list[str]:
 
 
 @pytest.mark.unit
-def test_automated_kis_mock_mutation_defaults_off() -> None:
-    s = Settings()
-    assert s.kis_mock_scalping_ws_enabled is False
-    assert s.kis_mock_scalping_ws_confirm is False
-    assert s.WATCH_AUTO_EXECUTE_MOCK_ENABLED is False
+def test_automated_kis_mock_mutation_is_not_configurable() -> None:
+    assert "kis_mock_scalping_ws_enabled" not in Settings.model_fields
+    assert "kis_mock_scalping_ws_confirm" not in Settings.model_fields
+    assert Settings().WATCH_AUTO_EXECUTE_MOCK_ENABLED is False
 
 
 @pytest.mark.unit

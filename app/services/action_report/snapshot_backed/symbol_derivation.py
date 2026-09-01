@@ -141,13 +141,10 @@ class _DefaultJournalRepo:
         instrument_type = _JOURNAL_MARKET_TO_INSTRUMENT.get(market)
         if instrument_type is not None:
             filters.append(TradeJournal.instrument_type == instrument_type)
-        if account_scope == "kis_live":
-            # KIS live journal rows are written with account="kis" today; older
-            # live rows may have NULL account. Keep both, but do not let Upbit,
-            # paper/mock, or other-market journals into US/KR KIS reports.
-            filters.append(
-                sa.or_(TradeJournal.account == "kis", TradeJournal.account.is_(None))
-            )
+        if account_scope == "toss_live":
+            # 신규 Toss 보고서는 Toss 체결로 생성된 활성 journal만 포함한다.
+            # 과거 KIS 및 출처 미상 행을 Toss 운영 scope로 재분류하지 않는다.
+            filters.append(TradeJournal.account == "toss")
 
         stmt = sa.select(TradeJournal.symbol).where(*filters).distinct()
         result = await self._session.execute(stmt)
@@ -165,14 +162,12 @@ class _DefaultWatchRepo:
 
 
 class _DefaultLiveHoldingsRepo:
-    """ROB-357 — read-only live-holdings adapter.
+    """ROB-357 — 읽기 전용 live-holdings adapter.
 
-    Crypto holdings live on the exchange (Upbit), not in ``manual_holdings``,
-    so the symbol scope previously omitted them. We read them through the
-    sanctioned read-only ``UpbitHomeReader`` (the same abstraction the
-    portfolio collector uses for KIS), never the low-level broker client, and
-    fail soft: any error propagates to the service's best-effort ``_safe``
-    wrapper which records it under ``source_errors`` and returns ``[]``.
+    Crypto 보유는 ``manual_holdings``가 아니라 Upbit에 있으므로 별도로
+    종목 범위에 합친다. 저수준 broker client 대신 승인된 읽기 전용
+    ``UpbitHomeReader``를 사용한다. 오류는 서비스의 best-effort ``_safe``
+    wrapper로 전달되어 ``source_errors``에 기록되고 결과는 ``[]``가 된다.
     """
 
     def __init__(self, session: AsyncSession) -> None:

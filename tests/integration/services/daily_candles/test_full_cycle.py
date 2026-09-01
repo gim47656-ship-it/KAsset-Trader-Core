@@ -43,7 +43,7 @@ class TestFullCycle:
                 adj_close=None,
                 volume=1000.0,
                 value=100500.0,
-                source="kis",
+                source="toss",
             )
             for d in range(1, 6)
         ]
@@ -61,7 +61,7 @@ class TestFullCycle:
                 count=10,
             )
             assert len(fetched) == 5
-            assert all(r.source == "kis" for r in fetched)
+            assert all(r.source == "toss" for r in fetched)
         except Exception:
             await db_session.rollback()
             raise
@@ -75,10 +75,10 @@ class TestFullCycle:
             await db_session.commit()
 
     @pytest.mark.asyncio
-    async def test_yahoo_fallback_does_not_clobber_kis(self, db_session):
+    async def test_yahoo_fallback_does_not_clobber_toss(self, db_session):
         repo = DailyCandlesRepository(session=db_session)
         t = datetime(2026, 5, 14, tzinfo=UTC)
-        kis_row = DailyCandleRow(
+        toss_row = DailyCandleRow(
             time_utc=t,
             symbol=_SYMBOL_US,
             partition="NASD",
@@ -89,7 +89,7 @@ class TestFullCycle:
             adj_close=None,
             volume=1000.0,
             value=100500.0,
-            source="kis",
+            source="toss",
         )
         yahoo_row = DailyCandleRow(
             time_utc=t,
@@ -105,7 +105,7 @@ class TestFullCycle:
             source="yahoo_fallback",
         )
         try:
-            await repo.upsert_rows(market=MarketKey.US, rows=[kis_row])
+            await repo.upsert_rows(market=MarketKey.US, rows=[toss_row])
             await db_session.commit()
             await repo.upsert_rows(market=MarketKey.US, rows=[yahoo_row])
             await db_session.commit()
@@ -117,8 +117,8 @@ class TestFullCycle:
                 count=1,
             )
             assert len(fetched) == 1
-            assert fetched[0].source == "kis"
-            assert fetched[0].close == pytest.approx(100.5)  # KIS row not clobbered
+            assert fetched[0].source == "toss"
+            assert fetched[0].close == pytest.approx(100.5)  # Toss row not clobbered
         except Exception:
             await db_session.rollback()
             raise

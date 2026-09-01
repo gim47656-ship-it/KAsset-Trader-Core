@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas.funding_advisory import canonical_decimal
 from app.services.funding_advisory._repository import FundingAdvisoryRepository
 from app.services.funding_advisory.contracts import (
+    REAL_ACCOUNT_MODES,
     FundingCandidateEvent,
     FundingRoute,
 )
@@ -236,6 +237,17 @@ class FundingAdvisoryService:
         current_now = _aware(now, "now")
         evidence = event.evidence
         assessment = event.assessment
+        if event_kind == "candidate_event":
+            if evidence.target_account_mode in {"kis_live", "kis_mock"}:
+                return {
+                    "status": "not_triggered",
+                    "reason": "provider_kis_not_operational",
+                }
+            if evidence.target_account_mode not in REAL_ACCOUNT_MODES:
+                return {
+                    "status": "not_triggered",
+                    "reason": "target_account_mode_not_supported",
+                }
         if current_now >= _aware(evidence.valid_until, "evidence.valid_until"):
             return {"status": "not_triggered", "reason": "evidence_expired"}
         if current_now >= _aware(assessment.valid_until, "assessment.valid_until"):
@@ -581,6 +593,12 @@ class FundingAdvisoryService:
         revision = await self._repository.latest_revision(advisory.advisory_id)
         if revision is None:
             raise FundingAdvisoryNotFound(f"{advisory_id}:revision")
+        if advisory.target_account_mode in {"kis_live", "kis_mock"}:
+            # 전환 전 증거는 조회만 허용하고 새 평가/리비전 쓰기는 만들지 않는다.
+            return await self.get_detail(
+                advisory_id=advisory_id,
+                owner_user_id=owner_user_id,
+            )
         event = FundingCandidateEvent.model_validate(
             {
                 "evidence": revision.evidence["gate"],

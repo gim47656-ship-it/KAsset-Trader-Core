@@ -61,9 +61,7 @@ if [[ "$code" != "200" ]]; then
 fi
 
 if [[ "${AUTO_TRADER_HEALTHCHECK_SKIP_WS:-0}" != "1" && "$MODE" == "stable" ]]; then
-  WS_MONITOR_HEARTBEAT_PATH="$AUTO_TRADER_BASE/state/heartbeat/kis.json" WS_MONITOR_EXPECT_MODE=kis \
-    uv run python scripts/websocket_healthcheck.py || rc=1
-  WS_MONITOR_HEARTBEAT_PATH="$AUTO_TRADER_BASE/state/heartbeat/upbit.json" WS_MONITOR_EXPECT_MODE=upbit \
+  WS_MONITOR_HEARTBEAT_PATH="$AUTO_TRADER_BASE/state/heartbeat/upbit.json" \
     uv run python scripts/websocket_healthcheck.py || rc=1
 fi
 

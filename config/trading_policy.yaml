@@ -837,7 +837,8 @@ decision_rules:
       - no_resistance_reference
       - composite_gates
   sell.single_share_exit:
-    lanes: [sell]
+    # KIS 제거 후에도 [kis, toss] 증거 계약은 보존하되 평가 lane에서 제외한다.
+    lanes: []
     semantics: >-
       DEPRECATED AS THE GENERAL SINGLE-SHARE EXCLUSION/FALLBACK. Retained without
       key deletion or activation change for historical KR KIS+Toss shadow and

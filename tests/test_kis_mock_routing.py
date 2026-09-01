@@ -4,36 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-KOREA_PENDING_MOCK_UNSUPPORTED = (
-    "KIS domestic pending-orders inquiry (TTTC8036R) is not available in mock mode."
-)
-OVERSEAS_PENDING_MOCK_UNSUPPORTED = (
-    "KIS overseas pending-orders inquiry (TTTS3018R) is not available in mock mode."
-)
-
-
-class KoreaPendingMockUnsupportedKIS:
-    def __init__(self, *, is_mock: bool = False) -> None:
-        self.is_mock = is_mock
-
-    async def inquire_korea_orders(self, *, is_mock=False):
-        raise RuntimeError(KOREA_PENDING_MOCK_UNSUPPORTED)
-
-    cancel_korea_order = AsyncMock(
-        side_effect=AssertionError("must not call cancel under mock-unsupported")
-    )
-    modify_korea_order = AsyncMock(
-        side_effect=AssertionError("must not call modify under mock-unsupported")
-    )
-
-
-class OverseasPendingMockUnsupportedKIS:
-    def __init__(self, *, is_mock: bool = False) -> None:
-        self.is_mock = is_mock
-
-    async def inquire_overseas_orders(self, exchange, *, is_mock=False):
-        raise RuntimeError(OVERSEAS_PENDING_MOCK_UNSUPPORTED)
-
 
 def _use_placeholder_kis_account(monkeypatch, client) -> None:
     monkeypatch.setattr(
@@ -100,122 +70,57 @@ async def test_kis_mock_fetch_token_posts_to_mock_base_url(monkeypatch):
     )
 
 
-def test_order_execution_mock_client_factory_does_not_fallback_to_live(monkeypatch):
+def test_order_execution_exposes_no_kis_client_factory():
     from app.mcp_server.tooling import order_execution
 
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            if is_mock:
-                raise TypeError("is_mock unsupported")
-
-    monkeypatch.setattr(order_execution, "KISClient", BrokenKISClient)
-
-    with pytest.raises(TypeError, match="is_mock unsupported"):
-        order_execution._create_kis_client(is_mock=True)
+    assert not hasattr(order_execution, "KISClient")
+    assert not hasattr(order_execution, "_create_kis_client")
 
 
-def test_orders_history_mock_client_factory_does_not_fallback_to_live(monkeypatch):
+def test_orders_history_exposes_no_kis_client_factory():
     from app.mcp_server.tooling import orders_history
 
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            if is_mock:
-                raise TypeError("is_mock unsupported")
-
-    monkeypatch.setattr(orders_history, "KISClient", BrokenKISClient)
-
-    with pytest.raises(TypeError, match="is_mock unsupported"):
-        orders_history._create_kis_client(is_mock=True)
+    assert not hasattr(orders_history, "KISClient")
+    assert not hasattr(orders_history, "_create_kis_client")
 
 
-def test_portfolio_cash_mock_client_factory_does_not_fallback_to_live(monkeypatch):
+def test_portfolio_cash_exposes_no_kis_client_factory():
     from app.mcp_server.tooling import portfolio_cash
 
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            if is_mock:
-                raise TypeError("is_mock unsupported")
-
-    monkeypatch.setattr(portfolio_cash, "KISClient", BrokenKISClient)
-
-    with pytest.raises(TypeError, match="is_mock unsupported"):
-        portfolio_cash._create_kis_client(is_mock=True)
+    assert not hasattr(portfolio_cash, "KISClient")
+    assert not hasattr(portfolio_cash, "_create_kis_client")
 
 
-def test_order_validation_mock_client_factory_does_not_fallback_to_live(monkeypatch):
+def test_order_validation_exposes_no_kis_client_factory():
     from app.mcp_server.tooling import order_validation
 
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            if is_mock:
-                raise TypeError("is_mock unsupported")
-
-    monkeypatch.setattr(order_validation, "KISClient", BrokenKISClient)
-
-    with pytest.raises(TypeError, match="is_mock unsupported"):
-        order_validation._create_kis_client(is_mock=True)
+    assert not hasattr(order_validation, "KISClient")
+    assert not hasattr(order_validation, "_create_kis_client")
 
 
 @pytest.mark.asyncio
-async def test_order_validation_kis_mock_balance_uses_domestic_cash_not_integrated_margin(
-    monkeypatch,
-):
+async def test_order_validation_kis_mock_balance_is_non_operational():
     from app.mcp_server.tooling import order_validation
 
-    fake_kis = MagicMock()
-    fake_kis.inquire_integrated_margin = AsyncMock(
-        side_effect=AssertionError("must not call integrated margin in mock")
-    )
-    fake_kis.inquire_domestic_cash_balance = AsyncMock(
-        return_value={"stck_cash_ord_psbl_amt": "900000", "dnca_tot_amt": "1000000"}
-    )
-
-    monkeypatch.setattr(
-        order_validation, "_create_kis_client", lambda *, is_mock: fake_kis
-    )
-
-    balance = await order_validation._get_balance_for_order("equity_kr", is_mock=True)
-
-    assert balance == pytest.approx(900000.0)
-    fake_kis.inquire_integrated_margin.assert_not_called()
-    fake_kis.inquire_domestic_cash_balance.assert_awaited_once_with(is_mock=True)
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        await order_validation._get_balance_for_order("equity_kr", is_mock=True)
 
 
 @pytest.mark.asyncio
-async def test_portfolio_holdings_mock_collection_does_not_fallback_to_live(
-    monkeypatch,
-):
+async def test_portfolio_holdings_exposes_no_kis_collector():
     from app.mcp_server.tooling import portfolio_holdings
 
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            if is_mock:
-                raise TypeError("is_mock unsupported")
-
-    monkeypatch.setattr(portfolio_holdings, "KISClient", BrokenKISClient)
-
-    with pytest.raises(TypeError, match="is_mock unsupported"):
-        await portfolio_holdings._collect_kis_positions(None, is_mock=True)
+    assert not hasattr(portfolio_holdings, "KISClient")
+    assert not hasattr(portfolio_holdings, "_collect_kis_positions")
 
 
-# ROB-406 — the old inquire_korea_orders-based mock cancel/modify success path
-# was replaced by the ledger-resolver path (resolve_mock_order_for_cancel →
-# VTTC0013U). Mock-routing + success + soft-cancel behavior is now covered with
-# proper KISMockOrderLedger seeding in tests/test_kis_mock_cancel_modify.py.
-# The no-ledger-row contract is asserted below.
+# 운영 MCP 주문 경로는 KIS mock을 preview 포함 전 단계에서 거부한다.
 
 
-def test_modify_order_kis_mock_dry_run_does_not_instantiate_kis(monkeypatch):
-    """Dry-run preview must not require any KIS client instantiation."""
-    from app.mcp_server.tooling import orders_modify_cancel
-
-    class BrokenKISClient:
-        def __init__(self, *, is_mock: bool = False) -> None:
-            raise AssertionError("must not instantiate KIS in dry-run preview")
-
-    monkeypatch.setattr(orders_modify_cancel, "KISClient", BrokenKISClient)
-    # Dry-run should succeed without instantiating KIS client.
+def test_modify_order_kis_mock_dry_run_is_non_operational():
     import asyncio
+
+    from app.mcp_server.tooling import orders_modify_cancel
 
     result = asyncio.run(
         orders_modify_cancel.modify_order_impl(
@@ -227,89 +132,56 @@ def test_modify_order_kis_mock_dry_run_does_not_instantiate_kis(monkeypatch):
             is_mock=True,
         )
     )
-    assert result["success"] is True
-    assert result["dry_run"] is True
+    assert result["success"] is False
+    assert result["error"] == "provider kis is not operational"
+    assert result["mutation_sent"] is False
 
 
 @pytest.mark.asyncio
-async def test_get_order_history_pending_us_mock_surfaces_unsupported(
-    monkeypatch, caplog
-):
-    """Mock pending US history must NOT silently return empty."""
+async def test_get_order_history_pending_us_mock_is_non_operational():
     from app.mcp_server.tooling import orders_history
 
-    monkeypatch.setattr(orders_history, "KISClient", OverseasPendingMockUnsupportedKIS)
     result = await orders_history.get_order_history_impl(
         status="pending", market="us", is_mock=True
     )
 
-    if result["orders"]:
-        assert result["success"] is True
-        assert all(
-            o.get("source") == "kis_mock_ledger_shadow" for o in result["orders"]
-        )
-        assert any("shadow pending" in warning for warning in result["warnings"])
-        assert result["errors"] == []
-    else:
-        assert result["errors"] == [] or any(
-            e.get("market") == "equity_us" for e in result["errors"]
-        )
-        assert result["errors"] or any(
-            "using DB shadow pending ledger" in record.getMessage()
-            for record in caplog.records
-        )
+    assert result["success"] is False
+    assert result["error"] == "provider kis is not operational"
+    assert result["orders"] == []
 
 
-# ROB-406 — mock cancel/modify no longer depends on TTTC8036R pending-orders
-# inquiry. With no matching kis_mock_order_ledger row, the ledger resolver
-# returns "order not found" (success False) rather than the old
-# mock_unsupported flag. The injected KISClient is never consulted because the
-# resolver short-circuits before any broker call.
+# KIS mock 취소·변경은 ledger 유무와 관계없이 broker 접근 전에 거부한다.
 
 
 @pytest.mark.asyncio
-async def test_cancel_order_kis_mock_kr_no_ledger_row_not_found(monkeypatch):
+async def test_cancel_order_kis_mock_kr_is_non_operational():
     from app.mcp_server.tooling import orders_modify_cancel
-
-    monkeypatch.setattr(
-        orders_modify_cancel, "KISClient", KoreaPendingMockUnsupportedKIS
-    )
 
     result = await orders_modify_cancel.cancel_order_impl(
         order_id="0001", symbol="005930", market="kr", is_mock=True
     )
 
     assert result["success"] is False
-    assert result.get("mock_unsupported") is not True
-    assert "not found in kis_mock_order_ledger" in result["error"]
+    assert result["error"] == "provider kis is not operational"
+    assert result["mutation_sent"] is False
 
 
 @pytest.mark.asyncio
-async def test_cancel_order_kis_mock_kr_without_symbol_no_ledger_row_not_found(
-    monkeypatch,
-):
+async def test_cancel_order_kis_mock_kr_without_symbol_is_non_operational():
     from app.mcp_server.tooling import orders_modify_cancel
-
-    monkeypatch.setattr(
-        orders_modify_cancel, "KISClient", KoreaPendingMockUnsupportedKIS
-    )
 
     result = await orders_modify_cancel.cancel_order_impl(
         order_id="0001", symbol=None, market="kr", is_mock=True
     )
 
     assert result["success"] is False
-    assert result.get("mock_unsupported") is not True
-    assert "not found in kis_mock_order_ledger" in result["error"]
+    assert result["error"] == "provider kis is not operational"
+    assert result["mutation_sent"] is False
 
 
 @pytest.mark.asyncio
-async def test_modify_order_kis_mock_kr_no_ledger_row_not_found(monkeypatch):
+async def test_modify_order_kis_mock_kr_is_non_operational():
     from app.mcp_server.tooling import orders_modify_cancel
-
-    monkeypatch.setattr(
-        orders_modify_cancel, "KISClient", KoreaPendingMockUnsupportedKIS
-    )
 
     result = await orders_modify_cancel.modify_order_impl(
         order_id="0001",
@@ -321,8 +193,8 @@ async def test_modify_order_kis_mock_kr_no_ledger_row_not_found(monkeypatch):
     )
 
     assert result["success"] is False
-    assert result.get("mock_unsupported") is not True
-    assert "not found in kis_mock_order_ledger" in result["error"]
+    assert result["error"] == "provider kis is not operational"
+    assert result["mutation_sent"] is False
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.order_estimation_service import (
+    PendingBuyCostUnavailableError,
     calculate_estimated_order_cost,
     extract_buy_prices_from_analysis,
     fetch_pending_crypto_buy_cost,
@@ -143,53 +144,109 @@ class TestCalculateEstimatedOrderCost:
         assert result["buy_prices"][0]["cost"] == 10000
 
 
+def _pending_toss_order(
+    order_id: str,
+    symbol: str,
+    *,
+    side: str = "BUY",
+    quantity: str = "10",
+    price: str = "100",
+    filled: str | None = "0",
+):
+    from app.services.brokers.toss.dto import TossOrder
+
+    execution = {} if filled is None else {"filledQuantity": Decimal(filled)}
+    return TossOrder(
+        order_id=order_id,
+        symbol=symbol,
+        side=side,
+        order_type="LIMIT",
+        time_in_force="DAY",
+        status="OPEN",
+        price=Decimal(price),
+        quantity=Decimal(quantity),
+        order_amount=None,
+        currency="KRW" if symbol.isdigit() else "USD",
+        ordered_at="2026-06-15T09:00:00+09:00",
+        canceled_at=None,
+        execution=execution,
+    )
+
+
+def _pending_toss_client(*orders, error: Exception | None = None):
+    from app.services.brokers.toss.dto import TossOrdersPage
+
+    client = MagicMock()
+    if error is None:
+        client.list_orders = AsyncMock(
+            return_value=TossOrdersPage(
+                orders=list(orders), next_cursor=None, has_next=False
+            )
+        )
+    else:
+        client.list_orders = AsyncMock(side_effect=error)
+    client.aclose = AsyncMock()
+    return client
+
+
 class TestFetchPendingBuyCost:
-    """미체결 주문 금액 조회 테스트"""
+    """Toss 미체결 매수 주문 금액 조회 테스트."""
 
     @pytest.mark.asyncio
-    async def test_fetch_pending_domestic_buy_cost(self):
-        """국내 미체결 매수 주문 금액"""
-        mock_orders = [
-            {"sll_buy_dvsn_cd": "02", "ord_qty": "10", "ord_unpr": "50000"},
-            {"sll_buy_dvsn_cd": "01", "ord_qty": "5", "ord_unpr": "60000"},
-            {"sll_buy_dvsn_cd": "02", "ord_qty": "3", "ord_unpr": "48000"},
-        ]
-        with patch("app.services.brokers.kis.client.KISClient") as MockKIS:
-            mock_instance = AsyncMock()
-            mock_instance.inquire_korea_orders.return_value = mock_orders
-            MockKIS.return_value = mock_instance
+    async def test_fetch_pending_domestic_buy_cost_uses_remaining_limit_quantity(self):
+        client = _pending_toss_client(
+            _pending_toss_order(
+                "KR-BUY", "005930", quantity="10", filled="2", price="50000"
+            ),
+            _pending_toss_order(
+                "KR-SELL", "000660", side="SELL", quantity="3", price="100000"
+            ),
+            _pending_toss_order("US-BUY", "AAPL", quantity="4", price="180"),
+        )
 
-            result = await fetch_pending_domestic_buy_cost()
+        result = await fetch_pending_domestic_buy_cost(
+            toss_client_factory=lambda: client
+        )
 
-            assert result == (10 * 50000) + (3 * 48000)
-
-    @pytest.mark.asyncio
-    async def test_fetch_pending_domestic_buy_cost_error(self):
-        """국내 미체결 조회 실패 시 0 반환"""
-        with patch("app.services.brokers.kis.client.KISClient") as MockKIS:
-            mock_instance = AsyncMock()
-            mock_instance.inquire_korea_orders.side_effect = Exception("API Error")
-            MockKIS.return_value = mock_instance
-
-            result = await fetch_pending_domestic_buy_cost()
-
-            assert result == pytest.approx(0.0)
+        assert result == pytest.approx(8 * 50000)
+        client.list_orders.assert_awaited_once_with(status="OPEN", cursor=None)
+        client.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_fetch_pending_overseas_buy_cost(self):
-        """해외 미체결 매수 주문 금액"""
-        mock_orders = [
-            {"sll_buy_dvsn_cd": "02", "ft_ord_qty": "5", "ft_ord_unpr3": "150.50"},
-            {"sll_buy_dvsn_cd": "01", "ft_ord_qty": "3", "ft_ord_unpr3": "200.00"},
-        ]
-        with patch("app.services.brokers.kis.client.KISClient") as MockKIS:
-            mock_instance = AsyncMock()
-            mock_instance.inquire_overseas_orders.return_value = mock_orders
-            MockKIS.return_value = mock_instance
+    async def test_fetch_pending_overseas_buy_cost_uses_remaining_limit_quantity(self):
+        client = _pending_toss_client(
+            _pending_toss_order(
+                "US-BUY", "AAPL", quantity="5", filled="1.5", price="150.50"
+            ),
+            _pending_toss_order("KR-BUY", "005930", quantity="2", price="70000"),
+        )
 
-            result = await fetch_pending_overseas_buy_cost()
+        result = await fetch_pending_overseas_buy_cost(
+            toss_client_factory=lambda: client
+        )
 
-            assert result == pytest.approx(5 * 150.50)
+        assert result == pytest.approx(3.5 * 150.50)
+
+    @pytest.mark.asyncio
+    async def test_missing_toss_fill_evidence_is_explicitly_unavailable(self):
+        client = _pending_toss_client(
+            _pending_toss_order("KR-BUY", "005930", filled=None)
+        )
+
+        with pytest.raises(PendingBuyCostUnavailableError) as excinfo:
+            await fetch_pending_domestic_buy_cost(toss_client_factory=lambda: client)
+
+        assert excinfo.value.error_code == "pending_buy_cost_unavailable"
+        assert excinfo.value.reason == "missing_filled_quantity"
+
+    @pytest.mark.asyncio
+    async def test_toss_provider_failure_is_explicitly_unavailable(self):
+        client = _pending_toss_client(error=RuntimeError("provider secret"))
+
+        with pytest.raises(PendingBuyCostUnavailableError) as excinfo:
+            await fetch_pending_domestic_buy_cost(toss_client_factory=lambda: client)
+
+        assert excinfo.value.reason == "provider_unavailable"
 
     @pytest.mark.asyncio
     async def test_fetch_pending_crypto_buy_cost_limit_order(self):

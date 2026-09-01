@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.symbol import to_db_symbol
 from app.schemas.execution_contracts import OrderLifecycleEvent
-from app.services.brokers.kis import KISClient
+from app.services.brokers.kis.client import KISClient
 from app.services.kis_mock_holdings_reconciler import (
     HoldingsSnapshot,
     LedgerOrderInput,

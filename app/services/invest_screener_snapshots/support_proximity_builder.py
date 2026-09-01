@@ -362,7 +362,7 @@ async def build_support_proximity_snapshot_for_candidate(
         # Record completion, not fan-out start. Freshness metadata must not
         # claim a calculation finished before its provider work actually did.
         support_computed_at=clock(),
-        source="kis",
+        source="toss",
     )
 
 

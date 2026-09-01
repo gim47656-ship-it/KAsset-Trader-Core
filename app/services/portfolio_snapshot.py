@@ -342,14 +342,10 @@ async def fetch_uncached_portfolio_snapshot_payload(
 ) -> dict[str, Any]:
     """Compose all read-only sources for a cache owner request."""
 
-    from app.core.config import settings
     from app.core.db import AsyncSessionLocal
     from app.services.invest_home_readers import (
         AlpacaPaperHomeReader,
-        KISHomeReader,
-        KISMockHomeReader,
         ManualHomeReader,
-        SafeKISClient,
         TossApiHomeReader,
         UpbitHomeReader,
     )
@@ -357,18 +353,12 @@ async def fetch_uncached_portfolio_snapshot_payload(
     from app.services.invest_quote_service import InvestQuoteService
 
     async with AsyncSessionLocal() as db:
-        kis_client = SafeKISClient()
-        quote_service = InvestQuoteService(kis_client, db)
+        quote_service = InvestQuoteService(db)
         service = InvestHomeService(
-            kis_reader=KISHomeReader(db),
             upbit_reader=UpbitHomeReader(db),
             manual_reader=ManualHomeReader(db, quote_service=quote_service),
-            toss_api_reader=(
-                TossApiHomeReader()
-                if bool(getattr(settings, "toss_api_enabled", False))
-                else None
-            ),
-            paper_readers=[KISMockHomeReader(), AlpacaPaperHomeReader()],
+            toss_api_reader=TossApiHomeReader(),
+            paper_readers=[AlpacaPaperHomeReader()],
         )
         response = await service._get_home_uncached(
             user_id=user_id,

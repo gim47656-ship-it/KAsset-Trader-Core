@@ -7,10 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.services.funding_advisory.contracts import (
+    REAL_ACCOUNT_MODES,
     FundingAssessment,
     FundingCandidateEvent,
     FundingRoute,
     PassedNonFundingGateEvidence,
+    compute_evidence_hash,
 )
 from app.services.funding_advisory.ranking import (
     build_reference_combination,
@@ -119,6 +121,34 @@ def test_evidence_hash_tamper_is_rejected() -> None:
 def test_mock_shadow_and_paper_accounts_are_not_valid_evidence() -> None:
     with pytest.raises(ValidationError):
         evidence(target_account_mode="upbit_shadow")
+
+
+def test_new_funding_evidence_rejects_kis_and_binds_active_brokers_to_markets():
+    assert REAL_ACCOUNT_MODES == frozenset({"upbit", "toss_live"})
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        evidence(target_account_mode="kis_live")
+    with pytest.raises(ValidationError, match="requires an equity"):
+        evidence(target_account_mode="toss_live", market="crypto")
+    with pytest.raises(ValidationError, match="requires market='crypto'"):
+        evidence(target_account_mode="upbit", market="equity_us")
+
+
+def test_historical_kis_evidence_can_be_deserialized_for_read_only_projection():
+    payload = evidence().model_dump(mode="json")
+    payload.update(
+        {
+            "market": "equity_kr",
+            "target_account_mode": "kis_live",
+            "broker_account_id": "legacy-kis-account",
+            "symbol": "005930",
+        }
+    )
+    canonical = {key: value for key, value in payload.items() if key != "evidence_hash"}
+    payload["evidence_hash"] = compute_evidence_hash(canonical)
+
+    historical = PassedNonFundingGateEvidence.model_validate(payload)
+
+    assert historical.target_account_mode == "kis_live"
 
 
 def test_assessment_is_bound_to_evidence_currency_and_lifetime() -> None:

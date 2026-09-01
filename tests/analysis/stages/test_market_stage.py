@@ -122,7 +122,7 @@ async def test_fetch_market_snapshot_us_overlays_live_last_close(monkeypatch):
     res = await _fetch_market_snapshot("PLTR", "equity_us")
 
     assert res["last_close"] == pytest.approx(157.24)
-    assert res["last_close_source"] == "yahoo_live"
+    assert res["last_close_source"] == "toss_live"
 
 
 @pytest.mark.unit

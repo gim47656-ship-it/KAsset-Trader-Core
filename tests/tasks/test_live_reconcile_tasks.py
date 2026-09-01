@@ -6,16 +6,10 @@ import pytest
 from app.tasks import live_reconcile_tasks as mod
 
 
-def test_tasks_registered_without_recurring_schedule():
+def test_task_module_is_not_registered():
     import app.tasks as task_package
 
-    assert mod in task_package.TASKIQ_TASK_MODULES
-
-    us_labels = getattr(mod.live_reconcile_us_periodic, "labels", {}) or {}
-    assert us_labels.get("schedule") is None
-
-    crypto_labels = getattr(mod.live_reconcile_crypto_periodic, "labels", {}) or {}
-    assert crypto_labels.get("schedule") is None
+    assert mod not in task_package.TASKIQ_TASK_MODULES
 
 
 @pytest.mark.asyncio

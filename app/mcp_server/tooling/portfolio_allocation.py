@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.core.config import validate_kis_mock_config
 from app.mcp_server.tooling.account_modes import (
     apply_account_routing_metadata,
     normalize_account_mode,
@@ -97,12 +96,11 @@ def register_portfolio_allocation_tool(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_portfolio_allocation",
         description=(
-            "Read-only cross-asset allocation roll-up across holdings and cash. "
-            "Converts USD holdings/cash to KRW, classifies US/KR/crypto/cash, "
-            "and looks through KR-listed ETFs such as TIGER/KODEX/SOL/RISE "
-            "US index ETFs into effective US equity exposure. No order actions "
-            "are performed. target_weights is optional and only controls "
-            "overweight/underweight flags."
+            "Toss, Upbit, 수동 보유 및 PAPER 계정의 자산 배분을 읽기 전용으로 "
+            "집계합니다. USD 자산/현금을 KRW로 환산하고 KR 상장 ETF의 기초 "
+            "노출을 분류합니다. target_weights는 과대/과소 비중 표시만 제어하며 "
+            "주문을 실행하지 않습니다. KIS account_mode/account 필터는 운영 "
+            "경로가 아니므로 명시적으로 거부합니다."
         ),
     )
     async def get_portfolio_allocation(
@@ -119,15 +117,20 @@ def register_portfolio_allocation_tool(mcp: FastMCP) -> None:
             account_mode=account_mode,
             account_type=account_type,
         )
+        if (
+            routing.is_kis_live
+            or routing.is_kis_mock
+            or str(account or "").strip().lower().startswith("kis")
+        ):
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                },
+                routing,
+            )
         if routing.is_db_simulated and account is None:
             account = "paper"
-        if routing.is_kis_mock:
-            missing = validate_kis_mock_config()
-            if missing:
-                raise RuntimeError(
-                    "KIS mock account is disabled or missing required "
-                    "configuration: " + ", ".join(missing)
-                )
         return apply_account_routing_metadata(
             await get_portfolio_allocation_impl(
                 account=account,

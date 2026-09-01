@@ -45,13 +45,9 @@ from app.mcp_server.tooling import (
 )
 from app.mcp_server.tooling.fundamentals import _fx_rates as fundamentals_fx_rates
 from app.mcp_server.tooling.fundamentals import (
-    _intraday_investor_flow as intraday_investor_flow,
-)
-from app.mcp_server.tooling.fundamentals import (
     _investor_flow_common as ifc,
 )
 from app.mcp_server.tooling.screening import enrichment as screening_enrichment
-from app.services import market_data as market_data_service
 from app.services import naver_finance
 from app.services.analyst_normalizer import build_consensus
 from app.services.exchange_rate_service import UsdKrwExchangeRateQuote
@@ -206,7 +202,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 75000},
             "indicators": {
                 "indicators": {
@@ -245,7 +241,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "AAPL",
             "market_type": "equity_us",
-            "source": "yahoo",
+            "source": "toss",
             "quote": {"price": 150.0},
             "support_resistance": {"supports": [], "resistances": []},
             "opinions": {
@@ -276,7 +272,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "AAPL",
             "market_type": "equity_us",
-            "source": "yahoo",
+            "source": "toss",
             "quote": {"price": 150.0},
             "support_resistance": {"supports": [], "resistances": []},
             "opinions": {
@@ -305,7 +301,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 100_000},
             "support_resistance": {"supports": [], "resistances": []},
             "opinions": {
@@ -337,7 +333,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 100_000},
             "indicators": {"indicators": {"rsi": {"14": 25.0}}},
             "support_resistance": {"supports": [], "resistances": []},
@@ -523,7 +519,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 100_000},
             "support_resistance": {"supports": [], "resistances": []},
             "opinions": {
@@ -577,7 +573,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "475150",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 44350},
             "support_resistance": {"supports": [], "resistances": []},
             "opinions": {
@@ -690,7 +686,7 @@ class TestAnalyzeStock:
                 "symbol": "AAPL",
                 "price": 150.0,
                 "instrument_type": "equity_us",
-                "source": "yahoo",
+                "source": "toss",
                 "indicators": {"rsi": {"14": 45.8}},
             }
         }
@@ -738,7 +734,7 @@ class TestAnalyzeStock:
                 "symbol": symbol,
                 "price": 150.0,
                 "instrument_type": "equity_us",
-                "source": "yahoo",
+                "source": "toss",
                 "indicators": {
                     "rsi": {"14": 45.8},
                     "bollinger": {"lower": 145.0},
@@ -793,7 +789,7 @@ class TestAnalyzeStock:
                 "symbol": sym,
                 "price": 150.0,
                 "instrument_type": "equity_us",
-                "source": "yahoo",
+                "source": "toss",
                 "indicators": {
                     "rsi": {"14": 45.8},
                     "bollinger": {"lower": 145.0},
@@ -904,7 +900,7 @@ class TestAnalyzeStock:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 75000},
         }
 
@@ -928,7 +924,7 @@ class TestAnalyzeStock:
             return {
                 "symbol": symbol,
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
             }
 
@@ -1099,7 +1095,7 @@ class TestAnalyzeStockBatch:
         mock_analysis = {
             "symbol": "AAPL",
             "market_type": "equity_us",
-            "source": "yahoo",
+            "source": "toss",
             "quote": {"price": 185.5},
             "news": [{"title": "Full payload should keep news"}],
             "profile": {"name": "Apple Inc."},
@@ -1128,7 +1124,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": symbol,
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
             }
 
@@ -1160,7 +1156,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": symbol,
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
             }
 
@@ -1186,7 +1182,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": "005930",
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
                 "indicators": {"rsi": {"14": 45.0}},
                 "support_resistance": {"supports": [], "resistances": []},
@@ -1220,7 +1216,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": "005930",
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
                 "support_resistance": {"supports": [], "resistances": []},
             }
@@ -1253,7 +1249,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": "005930",
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
                 "support_resistance": {"supports": [], "resistances": []},
             }
@@ -1300,7 +1296,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": "005930",
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
                 "support_resistance": {"supports": [], "resistances": []},
             }
@@ -1324,7 +1320,7 @@ class TestAnalyzeStockBatch:
             return {
                 "symbol": "005930",
                 "market_type": "equity_kr",
-                "source": "kis",
+                "source": "toss",
                 "quote": {"price": 75000},
                 "support_resistance": {"supports": [], "resistances": []},
             }
@@ -1599,155 +1595,22 @@ class TestGetValuation:
 
 @pytest.mark.asyncio
 class TestGetShortInterest:
-    """Test get_short_interest tool."""
+    async def test_kr_short_interest_is_explicitly_provider_unsupported(self):
+        result = await build_tools()["get_short_interest"]("005930", days=20)
 
-    async def test_successful_short_interest_fetch(self, monkeypatch):
-        """Test successful short interest fetch for Korean stock."""
-        tools = build_tools()
-
-        mock_short_interest = {
-            "symbol": "005930",
-            "name": "삼성전자",
-            "short_data": [
-                {
-                    "date": "2024-01-15",
-                    "short_amount": 1_000_000_000,
-                    "total_amount": 20_000_000_000,
-                    "short_ratio": 5.0,
-                    "short_volume": None,
-                    "total_volume": None,
-                },
-                {
-                    "date": "2024-01-14",
-                    "short_amount": 800_000_000,
-                    "total_amount": 15_000_000_000,
-                    "short_ratio": 5.33,
-                    "short_volume": None,
-                    "total_volume": None,
-                },
-            ],
-            "avg_short_ratio": 5.17,
-        }
-
-        async def mock_fetch_short_interest(code, days):
-            return mock_short_interest
-
-        monkeypatch.setattr(
-            market_data_service, "get_short_interest", mock_fetch_short_interest
-        )
-
-        result = await tools["get_short_interest"]("005930", days=20)
-
+        assert result["success"] is False
+        assert result["source"] == "unsupported"
         assert result["symbol"] == "005930"
-        assert result["name"] == "삼성전자"
-        assert len(result["short_data"]) == 2
-        assert result["short_data"][0]["date"] == "2024-01-15"
-        assert result["short_data"][0]["short_amount"] == 1_000_000_000
-        assert result["short_data"][0]["short_ratio"] == pytest.approx(5.0)
-        assert result["avg_short_ratio"] == pytest.approx(5.17)
-        assert "short_balance" not in result
+        assert "provider_unsupported" in result["error"]
 
-    async def test_rejects_us_equity(self):
-        """Test that US equity symbol raises ValueError."""
-        tools = build_tools()
-
+    @pytest.mark.parametrize("symbol", ["AAPL", "KRW-BTC", "5930"])
+    async def test_rejects_non_kr_equity_symbols(self, symbol):
         with pytest.raises(ValueError, match="Korean stocks"):
-            await tools["get_short_interest"]("AAPL")
-
-    async def test_rejects_crypto(self):
-        """Test that crypto symbol raises ValueError."""
-        tools = build_tools()
-
-        with pytest.raises(ValueError, match="Korean stocks"):
-            await tools["get_short_interest"]("KRW-BTC")
+            await build_tools()["get_short_interest"](symbol)
 
     async def test_empty_symbol_raises_error(self):
-        """Test that empty symbol raises ValueError."""
-        tools = build_tools()
-
         with pytest.raises(ValueError, match="symbol is required"):
-            await tools["get_short_interest"]("")
-
-    async def test_rejects_unpadded_kr_code(self):
-        tools = build_tools()
-
-        with pytest.raises(ValueError, match="Korean stocks"):
-            await tools["get_short_interest"]("5930")
-
-    @pytest.mark.parametrize("symbol", ["AAPL", "SMCI", "KRW-BTC", "5930"])
-    async def test_get_short_interest_rejects_non_kr_equity_symbols(self, symbol):
-        """Test that get_short_interest rejects non-KR equity symbols."""
-        tools = build_tools()
-
-        with pytest.raises(ValueError, match="Korean stocks"):
-            await tools["get_short_interest"](symbol)
-
-    async def test_days_limit_capped(self, monkeypatch):
-        """Test that days parameter is capped at 60."""
-        tools = build_tools()
-
-        captured_days = None
-
-        async def mock_fetch_short_interest(code, days):
-            nonlocal captured_days
-            captured_days = days
-            return {
-                "symbol": code,
-                "name": "테스트",
-                "short_data": [],
-                "avg_short_ratio": None,
-            }
-
-        monkeypatch.setattr(
-            market_data_service, "get_short_interest", mock_fetch_short_interest
-        )
-
-        await tools["get_short_interest"]("005930", days=100)
-
-        assert captured_days == 60
-
-    async def test_error_handling(self, monkeypatch):
-        """Test error handling when fetch fails."""
-        tools = build_tools()
-
-        async def mock_fetch_short_interest(code, days):
-            raise RuntimeError("KIS API error")
-
-        monkeypatch.setattr(
-            market_data_service, "get_short_interest", mock_fetch_short_interest
-        )
-
-        result = await tools["get_short_interest"]("005930")
-
-        assert "error" in result
-        assert result["source"] == "kis"
-        assert result["symbol"] == "005930"
-        assert result["instrument_type"] == "equity_kr"
-
-    async def test_empty_short_data(self, monkeypatch):
-        """Test response with no short data."""
-        tools = build_tools()
-
-        mock_short_interest = {
-            "symbol": "000000",
-            "name": "테스트종목",
-            "short_data": [],
-            "avg_short_ratio": None,
-        }
-
-        async def mock_fetch_short_interest(code, days):
-            return mock_short_interest
-
-        monkeypatch.setattr(
-            market_data_service, "get_short_interest", mock_fetch_short_interest
-        )
-
-        result = await tools["get_short_interest"]("000000")
-
-        assert result["symbol"] == "000000"
-        assert result["short_data"] == []
-        assert result["avg_short_ratio"] is None
-        assert "short_balance" not in result
+            await build_tools()["get_short_interest"]("")
 
 
 # ---------------------------------------------------------------------------
@@ -2978,6 +2841,11 @@ class TestGetSectorPeers:
         tools = build_tools()
         with pytest.raises(ValueError, match="market must be"):
             await tools["get_sector_peers"]("005930", market="invalid")
+
+    async def test_rejects_kis_provider_alias(self):
+        tools = build_tools()
+        with pytest.raises(ValueError, match="market must be"):
+            await tools["get_sector_peers"]("005930", market="kis")
 
     async def test_korean_equity_success(self, monkeypatch):
         tools = build_tools()
@@ -4453,7 +4321,7 @@ class TestScreenEnrichmentHelpers:
         mock_analysis = {
             "symbol": "005930",
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 75000},
             "indicators": {
                 "indicators": {
@@ -4546,7 +4414,7 @@ async def test_analyze_stock_us_reuses_preloaded_yfinance_analyst_snapshot(
             "symbol": symbol,
             "instrument_type": "equity_us",
             "price": 150.0,
-            "source": "yahoo",
+            "source": "toss",
         }
 
     monkeypatch.setattr(analysis_analyze, "_get_quote_impl", mock_get_quote)
@@ -4571,11 +4439,6 @@ async def test_analyze_stock_us_reuses_preloaded_yfinance_analyst_snapshot(
         "_build_recommendation_for_equity",
         lambda analysis, market_type: None,
     )
-
-    class MockKISClient:
-        pass
-
-    _patch_runtime_attr(monkeypatch, "KISClient", MockKISClient)
 
     def mock_yf_ticker(symbol, session=None):
         class MockTicker:
@@ -4800,7 +4663,7 @@ async def test_analyze_stock_kr_reuses_preloaded_ohlcv_and_bundled_naver(monkeyp
     bundle_mock.assert_awaited_once_with("005930", 5, 10)
     assert result["symbol"] == "005930"
     assert result["market_type"] == "equity_kr"
-    assert result["source"] == "kis"
+    assert result["source"] == "toss"
     assert result["quote"] == {
         "symbol": "005930",
         "instrument_type": "equity_kr",
@@ -4810,7 +4673,7 @@ async def test_analyze_stock_kr_reuses_preloaded_ohlcv_and_bundled_naver(monkeyp
         "low": 73000.0,
         "volume": 1000000,
         "value": 75000000000.0,
-        "source": "kis",
+        "source": "toss",
         "price_as_of": "2024-01-01T00:00:00+09:00",
         "is_stale_price": True,
         "price_freshness": "stale",
@@ -4857,7 +4720,7 @@ async def test_analyze_stock_kr_falls_back_to_quote_helper_when_ohlcv_empty(
             "low": 73100.0,
             "volume": 1100000,
             "value": 76000000000.0,
-            "source": "kis",
+            "source": "toss",
             "price_as_of": pd.Timestamp.now().isoformat(),
         }
     )
@@ -5849,615 +5712,15 @@ class TestGetInvestorTrendsOwnershipFlag:
         assert result["data"][0]["individual_net"] == -2372813
 
 
-class TestClassifySession:
-    """Pure truth-table for _classify_session (no I/O). KST-aware now."""
-
-    KST = intraday_investor_flow.KST
-
-    def _now(self, y, mo, d, h, mi):
-        import datetime as _dt
-
-        return _dt.datetime(y, mo, d, h, mi, tzinfo=self.KST)
-
-    def _classify(
-        self,
-        slot_time,
-        now,
-        market_state,
-        last_confirmed,
-        monkeypatch,
-        session_day=True,
-        prior="2026-06-09",
-    ):
-        import datetime as _dt
-
-        monkeypatch.setattr(
-            intraday_investor_flow, "is_kr_session_day", lambda date: session_day
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "previous_kr_session",
-            lambda date: _dt.date.fromisoformat(prior),
-        )
-        return intraday_investor_flow._classify_session(
-            slot_time,
-            now=now,
-            market_state=market_state,
-            last_confirmed_date=last_confirmed,
-        )
-
-    def test_no_rows(self, monkeypatch):
-        out = self._classify(
-            None,
-            self._now(2026, 6, 10, 12, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        assert out == (None, None, None, False, False)
-
-    def test_non_session_day_is_carry_over(self, monkeypatch):
-        out = self._classify(
-            "14:30",
-            self._now(2026, 6, 13, 15, 0),
-            "market_closed",
-            "2026-06-09",
-            monkeypatch,
-            session_day=False,
-            prior="2026-06-12",
-        )
-        as_of, as_of_date, conf, prior_sess, today_avail = out
-        assert conf == "carry_over" and prior_sess is True
-        assert as_of is None and as_of_date == "2026-06-12" and today_avail is False
-
-    def test_future_slot_is_carry_over(self, monkeypatch):
-        out = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 11, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        as_of, as_of_date, conf, prior_sess, today_avail = out
-        assert conf == "carry_over" and as_of is None
-        assert as_of_date == "2026-06-09" and today_avail is False
-
-    def test_today_confirmed_is_inferred(self, monkeypatch):
-        out = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 16, 0),
-            "market_closed",
-            "2026-06-10",
-            monkeypatch,
-        )
-        as_of, as_of_date, conf, prior_sess, today_avail = out
-        assert conf == "inferred" and today_avail is True
-        assert as_of == "2026-06-10T14:30:00+09:00" and as_of_date == "2026-06-10"
-
-    def test_observed_live_before_last_slot(self, monkeypatch):
-        out = self._classify(
-            "11:20",
-            self._now(2026, 6, 10, 12, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        as_of, as_of_date, conf, prior_sess, today_avail = out
-        assert conf == "observed" and today_avail is True
-        assert as_of == "2026-06-10T11:20:00+09:00" and as_of_date == "2026-06-10"
-
-    def test_provisional_unconfirmed_live_after_last_slot(self, monkeypatch):
-        out = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 15, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        as_of, as_of_date, conf, prior_sess, today_avail = out
-        assert conf == "provisional_unconfirmed" and today_avail is False
-        assert as_of is None and as_of_date is None
-
-    def test_provisional_unconfirmed_after_close_unconfirmed(self, monkeypatch):
-        out = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 16, 0),
-            "market_closed",
-            "2026-06-09",
-            monkeypatch,
-        )
-        assert out[2] == "provisional_unconfirmed" and out[4] is False
-
-    def test_stale_full_set_is_never_observed(self, monkeypatch):
-        am = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 10, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        pm = self._classify(
-            "14:30",
-            self._now(2026, 6, 10, 15, 0),
-            "fresh",
-            "2026-06-09",
-            monkeypatch,
-        )
-        assert am[2] == "carry_over"
-        assert pm[2] == "provisional_unconfirmed"
-        assert am[2] != "observed" and pm[2] != "observed"
-
-    def test_deterministic_same_inputs(self, monkeypatch):
-        now = self._now(2026, 6, 10, 12, 0)
-        a = self._classify("11:20", now, "fresh", "2026-06-09", monkeypatch)
-        b = self._classify("11:20", now, "fresh", "2026-06-09", monkeypatch)
-        assert a == b
-
-
-@pytest.mark.asyncio
 class TestGetIntradayInvestorFlow:
-    @staticmethod
-    def _mock_confirmed(monkeypatch, last_confirmed="2026-06-09", history=None):
-        resolved_history = (
-            history
-            if history is not None
-            else [
-                {
-                    "date": last_confirmed,
-                    "foreign_net": -596340,
-                    "institutional_net": 2969153,
-                    "individual_net": -2372813,
-                    "close": 340500,
-                },
-            ]
+    def test_kis_only_tool_is_physically_unregistered(self):
+        from app.mcp_server.tooling import fundamentals_handlers
+
+        assert "get_intraday_investor_flow" not in build_tools()
+        assert (
+            "get_intraday_investor_flow"
+            not in fundamentals_handlers.FUNDAMENTALS_TOOL_NAMES
         )
-        block = {
-            "source": "naver",
-            "foreign_ownership_pct": 47.41 if resolved_history else None,
-            "foreign_ownership_trend": "down" if resolved_history else None,
-            "foreign_ownership_rate_change": -0.42 if resolved_history else None,
-            "history": resolved_history,
-            "days": len(resolved_history),
-        }
-
-        async def fake_build(symbol, days=5):
-            return block, last_confirmed
-
-        monkeypatch.setattr(intraday_investor_flow, "build_confirmed_block", fake_build)
-        return block
-
-    async def test_maps_latest_kis_intraday_estimate(self, monkeypatch):
-        # now 15:01 live + latest slot 14:30 → ambiguous → provisional_unconfirmed.
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                assert code == "000660"
-                return [
-                    {
-                        "bsop_hour_gb": "1",
-                        "frgn_fake_ntby_qty": "-10000",
-                        "orgn_fake_ntby_qty": "",
-                        "sum_fake_ntby_qty": "-10000",
-                    },
-                    {
-                        "bsop_hour_gb": "5",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 15, 1, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "fresh",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-09")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["source"] == "kis"
-        assert result["confidence"] == "provisional_unconfirmed"
-        assert result["today_available"] is False
-        assert result["as_of"] is None
-        assert result["as_of_date"] is None
-        assert result["foreign_net_qty"] == -120000
-        assert result["institution_net_qty"] == 50000
-        assert result["combined_net_qty"] == -70000
-        assert len(result["rows"]) == 2
-        assert result["confirmed"]["foreign_ownership_pct"] == 47.41
-        assert result["last_confirmed_session_date"] == "2026-06-09"
-
-    async def test_observed_during_live_session_before_last_slot(self, monkeypatch):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "3",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 12, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "is_kr_session_day", lambda d: True)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "fresh",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-09")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["confidence"] == "observed"
-        assert result["today_available"] is True
-        assert result["as_of"] == "2026-06-10T11:20:00+09:00"
-        assert result["as_of_date"] == "2026-06-10"
-        assert result["warning"] is None
-
-    async def test_inferred_when_naver_confirms_today(self, monkeypatch):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "5",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 16, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "is_kr_session_day", lambda d: True)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "market_closed",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-10")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["confidence"] == "inferred"
-        assert result["today_available"] is True
-        assert result["as_of"] == "2026-06-10T14:30:00+09:00"
-        assert result["as_of_date"] == "2026-06-10"
-        assert result["last_confirmed_session_date"] == "2026-06-10"
-
-    async def test_provisional_unconfirmed_after_close_today_unconfirmed(
-        self, monkeypatch
-    ):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "5",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 16, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "is_kr_session_day", lambda d: True)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "market_closed",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-09")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["confidence"] == "provisional_unconfirmed"
-        assert result["today_available"] is False
-        assert result["as_of"] is None
-        assert result["as_of_date"] is None
-        assert result["warning"] is None
-        assert result["combined_net_qty"] == -70000
-        # Note path for provisional_unconfirmed is reachable end-to-end.
-        assert result["note"] == (
-            intraday_investor_flow._PROVISIONAL_NOTE
-            + intraday_investor_flow._UNCONFIRMED_NOTE
-        )
-
-    async def test_returns_empty_success_when_kis_has_no_rows(self, monkeypatch):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return []
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 8, 30, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "premarket_unavailable",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed=None, history=[])
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["rows"] == []
-        assert result["as_of"] is None
-        assert result["as_of_date"] is None
-        assert result["confidence"] is None
-        assert result["is_prior_session"] is False
-        assert result["today_available"] is False
-        assert result["last_confirmed_session_date"] is None
-        assert result["warning"] is None
-        assert result["foreign_net_qty"] is None
-        assert result["institution_net_qty"] is None
-        assert result["combined_net_qty"] is None
-        assert result["market_session_state"] == "premarket_unavailable"
-        assert "No KIS provisional investor-flow rows" in result["note"]
-
-    async def test_as_of_null_when_latest_slot_is_in_future(self, monkeypatch):
-        """After midnight KIS still serves the prior session's rows; a
-        same-date stamp would be a future timestamp, so as_of must be null."""
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "5",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 11, 0, 30, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow, "is_kr_session_day", lambda date: True
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "premarket_unavailable",
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "previous_kr_session",
-            lambda date: _dt.date(2026, 6, 10),
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-10")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["as_of"] is None
-        assert result["as_of_time_kst"] == "14:30"
-        assert result["confidence"] == "carry_over"
-        assert result["is_prior_session"] is True
-        assert result["today_available"] is False
-        assert result["as_of_date"] == "2026-06-10"
-        assert result["warning"] is not None
-        assert result["warning"]["code"] == "prior_session_carry_over"
-        assert result["foreign_net_qty"] == -120000
-        assert "previous trading session" in result["note"]
-
-    async def test_as_of_null_on_non_session_day(self, monkeypatch):
-        """On weekends/holidays KIS rows belong to the prior session, so a
-        same-date stamp would carry the wrong date even when not in the
-        future."""
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "5",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 13, 15, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow, "is_kr_session_day", lambda date: False
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "market_closed",
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "previous_kr_session",
-            lambda date: _dt.date(2026, 6, 12),
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-12")
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["as_of"] is None
-        assert result["as_of_time_kst"] == "14:30"
-        assert result["confidence"] == "carry_over"
-        assert result["is_prior_session"] is True
-        assert result["today_available"] is False
-        assert result["as_of_date"] == "2026-06-12"
-        assert result["combined_net_qty"] == -70000
-        assert "previous trading session" in result["note"]
-
-    async def test_naver_degraded_keeps_kis_block(self, monkeypatch):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "3",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        async def boom_build(symbol, days=5):
-            return (
-                {
-                    "source": "naver",
-                    "error": "naver down",
-                    "foreign_ownership_pct": None,
-                    "foreign_ownership_trend": None,
-                    "foreign_ownership_rate_change": None,
-                    "history": [],
-                    "days": 0,
-                },
-                None,
-            )
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 12, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "is_kr_session_day", lambda d: True)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "fresh",
-        )
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "previous_kr_session",
-            lambda d: _dt.date(2026, 6, 9),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "build_confirmed_block", boom_build)
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["foreign_net_qty"] == -120000
-        assert result["confidence"] == "observed"
-        assert result["confirmed"]["error"] == "naver down"
-        assert result["last_confirmed_session_date"] == "2026-06-09"
-
-    async def test_freshness_label_is_deterministic_across_calls(self, monkeypatch):
-        import datetime as _dt
-
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                return [
-                    {
-                        "bsop_hour_gb": "3",
-                        "frgn_fake_ntby_qty": "-120000",
-                        "orgn_fake_ntby_qty": "50000",
-                        "sum_fake_ntby_qty": "-70000",
-                    },
-                ]
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "now_kst",
-            lambda: _dt.datetime(2026, 6, 10, 12, 0, tzinfo=intraday_investor_flow.KST),
-        )
-        monkeypatch.setattr(intraday_investor_flow, "is_kr_session_day", lambda d: True)
-        monkeypatch.setattr(
-            intraday_investor_flow,
-            "kr_market_data_state",
-            lambda *_a, **_k: "fresh",
-        )
-        self._mock_confirmed(monkeypatch, last_confirmed="2026-06-09")
-
-        r1 = await tools["get_intraday_investor_flow"]("000660")
-        r2 = await tools["get_intraday_investor_flow"]("000660")
-        for key in (
-            "confidence",
-            "as_of",
-            "as_of_date",
-            "today_available",
-            "last_confirmed_session_date",
-        ):
-            assert r1[key] == r2[key]
-
-    async def test_rejects_non_kr_symbol(self):
-        tools = build_tools()
-
-        with pytest.raises(ValueError, match="Korean stocks"):
-            await tools["get_intraday_investor_flow"]("AAPL")
-
-    async def test_upstream_error_returns_error_payload(self, monkeypatch):
-        tools = build_tools()
-
-        class MockKISClient:
-            async def investor_trend_estimate(self, code):
-                raise RuntimeError("KIS down")
-
-        monkeypatch.setattr(intraday_investor_flow, "KISClient", MockKISClient)
-
-        result = await tools["get_intraday_investor_flow"]("000660")
-
-        assert result["source"] == "kis"
-        assert result["symbol"] == "000660"
-        assert result["instrument_type"] == "equity_kr"
-        assert "KIS down" in (result.get("error") or result.get("message") or "")
 
 
 # ---------------------------------------------------------------------------

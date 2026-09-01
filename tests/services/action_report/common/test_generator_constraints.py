@@ -12,7 +12,7 @@ def test_bundle_failed_blocks_action_language():
     c = derive_generator_constraints(
         bundle_status="failed",
         freshness_summary={"overall": "failed"},
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "no_action"
@@ -23,7 +23,7 @@ def test_bundle_stale_fallback_blocks_action_language():
     c = derive_generator_constraints(
         bundle_status="stale_fallback",
         freshness_summary={"overall": "hard_stale"},
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "no_action"
@@ -37,7 +37,7 @@ def test_portfolio_hard_stale_downgrades_to_informational_only():
             "overall": "partial",
             "portfolio": {"status": "hard_stale"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "informational_only"
@@ -51,7 +51,7 @@ def test_journal_unavailable_downgrades():
             "overall": "partial",
             "journal": {"status": "unavailable"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "informational_only"
@@ -65,7 +65,7 @@ def test_watch_context_failed_downgrades():
             "overall": "partial",
             "watch_context": {"status": "failed"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "informational_only"
@@ -79,7 +79,7 @@ def test_market_hard_stale_downgrades():
             "overall": "partial",
             "market": {"status": "hard_stale"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is False
     assert c.forced_action_mode == "informational_only"
@@ -96,7 +96,7 @@ def test_complete_with_fresh_kinds_allows_action_language():
             "watch_context": {"status": "fresh"},
             "market": {"status": "fresh"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is True
     assert c.forced_action_mode == "default"
@@ -116,7 +116,7 @@ def test_partial_with_optional_unavailable_still_allows_action_language():
             "market": {"status": "fresh"},
             "news": {"status": "unavailable"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is True
     assert c.forced_action_mode == "default"
@@ -139,7 +139,7 @@ def test_bundle_status_none_legacy_pass_through():
     c = derive_generator_constraints(
         bundle_status=None,
         freshness_summary=None,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is True
     assert c.forced_action_mode == "default"
@@ -156,7 +156,7 @@ def test_reused_bundle_treated_as_active_bundle():
             "journal": {"status": "fresh"},
             "watch_context": {"status": "fresh"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert c.allow_action_language is True
     assert c.forced_action_mode == "default"

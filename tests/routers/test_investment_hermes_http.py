@@ -153,7 +153,7 @@ async def test_prepare_bundle_routes_through_ensure_service(
         ) as client:
             resp = await client.post(
                 "/trading/api/investment-reports/hermes/prepare-bundle",
-                json={"market": "kr", "account_scope": "kis_live"},
+                json={"market": "kr", "account_scope": "toss_live"},
             )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -162,8 +162,32 @@ async def test_prepare_bundle_routes_through_ensure_service(
     called = ensure_svc.ensure.call_args.args[0]
     assert called.purpose == "report_generation"
     assert called.market == "kr"
-    assert called.account_scope == "kis_live"
+    assert called.account_scope == "toss_live"
     assert called.requested_by == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_prepare_bundle_rejects_kis_before_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings, "SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED", True, raising=False
+    )
+    app = _build_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://test"
+    ) as client:
+        resp = await client.post(
+            "/trading/api/investment-reports/hermes/prepare-bundle",
+            json={"market": "kr", "account_scope": "kis_live"},
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == {
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": "kis_live",
+    }
 
 
 @pytest.mark.asyncio
@@ -206,7 +230,7 @@ async def test_prepare_bundle_injects_production_registry_and_user_id(
                 "/trading/api/investment-reports/hermes/prepare-bundle",
                 json={
                     "market": "kr",
-                    "account_scope": "kis_live",
+                    "account_scope": "toss_live",
                     "symbols": ["005930"],
                     "user_id": 7,
                 },
@@ -218,7 +242,7 @@ async def test_prepare_bundle_injects_production_registry_and_user_id(
     called = ensure_svc.ensure.call_args.args[0]
     assert called.user_id == 7
     assert called.market == "kr"
-    assert called.account_scope == "kis_live"
+    assert called.account_scope == "toss_live"
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +337,7 @@ def _stage_artifact_body() -> dict:
             "snapshot_bundle_uuid": str(uuid.uuid4()),
             "market": "kr",
             "market_session": "regular",
-            "account_scope": "kis_live",
+            "account_scope": "toss_live",
         },
         "artifacts": [
             {

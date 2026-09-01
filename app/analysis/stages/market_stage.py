@@ -41,7 +41,7 @@ async def _fetch_market_snapshot(symbol: str, instrument_type: str) -> dict[str,
         live = await fetch_us_live_last_price(symbol)
         if live is not None:
             last_close = live
-            last_close_source = "yahoo_live"
+            last_close_source = "toss_live"
     prev_close = close.iloc[-2]
     change_pct = (last_close - prev_close) / prev_close * 100
 

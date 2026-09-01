@@ -2,10 +2,10 @@
 
 The auto-emitter is deterministic and fail-closed:
 
-* Sell candidates require ``portfolio.primary_source='kis'`` + a held row
-  with positive ``sellable_quantity`` AND the matching symbol snapshot's
-  quote must report ``status='ok'`` with non-zero best bid/ask and at
-  least one side of book depth.
+* Sell candidates require ``portfolio.primary_source='toss'`` + a held row
+  with positive ``quantity`` AND the matching symbol snapshot's quote must
+  report ``status='ok'`` with non-zero best bid/ask and at least one side of
+  book depth.
 * Buy candidates require ``candidate_universe.usefulness='useful'`` AND
   the symbol's quote evidence to be actionable (same gate as sell). The
   symbol must not already be held.
@@ -41,7 +41,7 @@ def _make_snapshot(
     )
 
 
-def _ok_quote_payload(symbol: str, sellable: float = 0.0) -> dict:
+def _ok_quote_payload(symbol: str) -> dict:
     return {
         "symbol": symbol,
         "quote": {
@@ -60,15 +60,15 @@ def _ok_quote_payload(symbol: str, sellable: float = 0.0) -> dict:
     }
 
 
-def _kis_portfolio_payload(*, ticker: str, sellable: float) -> dict:
+def _toss_portfolio_payload(*, ticker: str, quantity: float) -> dict:
     return {
-        "primary_source": "kis",
+        "primary_source": "toss",
         "holdings": [
             {
                 "ticker": ticker,
-                "quantity": sellable + 2.0,
-                "sellable_quantity": sellable,
-                "source": "kis",
+                "quantity": quantity,
+                "sellable_quantity": None,
+                "source": "toss_api",
                 "market": "KR",
             }
         ],
@@ -112,7 +112,9 @@ def _news_payload(symbol_matches: dict[str, int]) -> dict:
 # ---------------------------------------------------------------------------
 def test_empty_snapshots_emits_nothing():
     emitter = EvidenceAutoEmitter()
-    items = emitter.propose(snapshots=[], request_market="kr", account_scope="kis_live")
+    items = emitter.propose(
+        snapshots=[], request_market="kr", account_scope="toss_live"
+    )
     assert items == []
 
 
@@ -129,7 +131,7 @@ def test_no_evidence_combo_emits_nothing():
         )
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     assert items == []
 
@@ -137,13 +139,13 @@ def test_no_evidence_combo_emits_nothing():
 # ---------------------------------------------------------------------------
 # Sell candidates.
 # ---------------------------------------------------------------------------
-def test_sell_emitted_when_kis_held_and_quote_actionable():
-    """KIS primary + sellable > 0 + quote.status='ok' → sell review item."""
+def test_sell_emitted_when_toss_holding_and_quote_actionable():
+    """Toss 양수 보유 수량과 actionable quote가 sell 검토 항목을 만든다."""
     emitter = EvidenceAutoEmitter()
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=8.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=10.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -152,7 +154,7 @@ def test_sell_emitted_when_kis_held_and_quote_actionable():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     sells = [i for i in items if i.item_kind == "action" and i.side == "sell"]
     assert len(sells) == 1
@@ -161,7 +163,7 @@ def test_sell_emitted_when_kis_held_and_quote_actionable():
     assert sell.operation == "review"
     assert sell.apply_policy == "requires_user_approval"
     assert sell.evidence_snapshot["proposer"] == "auto_emit/sell_from_held"
-    assert sell.evidence_snapshot["sellable_quantity"] == 8.0
+    assert sell.evidence_snapshot["held_quantity"] == 10.0
     assert sell.evidence_snapshot["snapshot_kind"] == "symbol"
 
 
@@ -174,7 +176,7 @@ def test_no_sell_when_portfolio_primary_source_is_manual():
             payload={
                 "primary_source": "manual",
                 "holdings": [
-                    {"ticker": "005930", "sellable_quantity": 10.0, "source": "manual"}
+                    {"ticker": "005930", "quantity": 10.0, "source": "manual"}
                 ],
                 "reference_holdings": [],
             },
@@ -186,19 +188,19 @@ def test_no_sell_when_portfolio_primary_source_is_manual():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     sells = [i for i in items if i.item_kind == "action" and i.side == "sell"]
     assert sells == []
 
 
 def test_no_sell_when_quote_unavailable():
-    """KIS held but quote.status='unavailable' → no sell candidate (fail-closed)."""
+    """Toss 보유 종목의 quote가 unavailable이면 sell 후보를 내지 않는다."""
     emitter = EvidenceAutoEmitter()
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=8.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=10.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -213,19 +215,19 @@ def test_no_sell_when_quote_unavailable():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     sells = [i for i in items if i.item_kind == "action" and i.side == "sell"]
     assert sells == []
 
 
-def test_no_sell_when_sellable_quantity_zero():
-    """KIS held but sellable_quantity == 0 → no sell candidate."""
+def test_no_sell_when_holding_quantity_zero():
+    """Toss 보유 수량이 0이면 sell 후보를 내지 않는다."""
     emitter = EvidenceAutoEmitter()
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=0.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=0.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -234,7 +236,7 @@ def test_no_sell_when_sellable_quantity_zero():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     sells = [i for i in items if i.item_kind == "action" and i.side == "sell"]
     assert sells == []
@@ -249,7 +251,7 @@ def test_buy_emitted_when_candidate_useful_and_quote_ok_and_not_held():
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=8.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=10.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -266,7 +268,7 @@ def test_buy_emitted_when_candidate_useful_and_quote_ok_and_not_held():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     buys = [i for i in items if i.item_kind == "action" and i.side == "buy"]
     assert len(buys) == 1
@@ -293,7 +295,7 @@ def test_no_buy_when_candidate_universe_stale_only():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     buys = [i for i in items if i.item_kind == "action" and i.side == "buy"]
     assert buys == []
@@ -305,7 +307,7 @@ def test_no_buy_when_already_held():
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=8.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=10.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -318,7 +320,7 @@ def test_no_buy_when_already_held():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     buys = [i for i in items if i.item_kind == "action" and i.side == "buy"]
     assert buys == []
@@ -349,7 +351,7 @@ def test_buy_respects_cap():
         )
     emitter = EvidenceAutoEmitter(max_buy_candidates=3)
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     buys = [i for i in items if i.item_kind == "action" and i.side == "buy"]
     assert len(buys) == 3
@@ -368,7 +370,7 @@ def test_watch_emitted_when_news_active_but_no_quote_evidence():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     watches = [i for i in items if i.item_kind == "watch"]
     assert len(watches) == 1
@@ -402,7 +404,7 @@ def test_no_duplicate_watch_when_already_proposed_as_buy():
         ),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     by_symbol_kind = [(i.symbol, i.item_kind) for i in items]
     # Buy proposal should win; watch on the same symbol must not also fire.
@@ -445,7 +447,7 @@ def test_all_emitted_items_are_review_and_require_user_approval():
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=8.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=10.0),
         ),
         _make_snapshot(
             kind="symbol",
@@ -464,7 +466,7 @@ def test_all_emitted_items_are_review_and_require_user_approval():
         _make_snapshot(kind="news", payload=_news_payload({"035420": 2})),
     ]
     items = emitter.propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     assert items, "test setup should produce at least one proposal"
     for item in items:
@@ -481,14 +483,14 @@ def test_existing_sell_item_is_stamped_with_verdict_and_bucket() -> None:
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=5.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=7.0),
         ),
         _make_snapshot(
             kind="symbol", symbol="005930", payload=_ok_quote_payload("005930")
         ),
     ]
     items = EvidenceAutoEmitter().propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     sell = next(i for i in items if i.symbol == "005930" and i.side == "sell")
     assert sell.evidence_snapshot["action_verdict"] == "sell_review"
@@ -501,11 +503,11 @@ def test_intraday_floor_classifies_every_held_symbol() -> None:
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=0.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=2.0),
         ),
     ]
     items = EvidenceAutoEmitter(intraday_floor=True).propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     held = next(i for i in items if i.symbol == "005930")
     assert held.evidence_snapshot["action_verdict"] == "data_gap"
@@ -516,14 +518,14 @@ def test_intraday_floor_emits_no_new_buy_marker_when_stale_only() -> None:
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=0.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=2.0),
         ),
         _make_snapshot(
             kind="candidate_universe", payload=_candidate_payload("stale_only")
         ),
     ]
     items = EvidenceAutoEmitter(intraday_floor=True).propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     marker = next(
         i
@@ -540,14 +542,14 @@ def test_default_mode_emits_no_marker_and_no_keep_items() -> None:
     snapshots = [
         _make_snapshot(
             kind="portfolio",
-            payload=_kis_portfolio_payload(ticker="005930", sellable=0.0),
+            payload=_toss_portfolio_payload(ticker="005930", quantity=2.0),
         ),
         _make_snapshot(
             kind="candidate_universe", payload=_candidate_payload("stale_only")
         ),
     ]
     items = EvidenceAutoEmitter().propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     verdicts = {i.evidence_snapshot.get("action_verdict") for i in items}
     assert "no_new_buy_candidates" not in verdicts
@@ -555,18 +557,18 @@ def test_default_mode_emits_no_marker_and_no_keep_items() -> None:
 
 
 def test_intraday_floor_never_classifies_reference_holdings() -> None:
-    # Toss/manual rows live in reference_holdings; primary_source != 'kis'
-    # means _held_kis_symbols returns {} -> no held_actions promoted.
+    # manual rows는 primary_source가 Toss가 아니므로 held action으로
+    # 승격되지 않는다.
     payload = {
         "primary_source": "manual",
-        "holdings": [{"ticker": "AAPL", "sellable_quantity": 3, "source": "manual"}],
-        "reference_holdings": [{"ticker": "AAPL", "source": "toss"}],
+        "holdings": [{"ticker": "AAPL", "quantity": 3, "source": "manual"}],
+        "reference_holdings": [{"ticker": "AAPL", "source": "toss_api"}],
         "count": 1,
         "market": "us",
     }
     snapshots = [_make_snapshot(kind="portfolio", payload=payload)]
     items = EvidenceAutoEmitter(intraday_floor=True).propose(
-        snapshots=snapshots, request_market="us", account_scope="kis_live"
+        snapshots=snapshots, request_market="us", account_scope="toss_live"
     )
     assert all(
         i.symbol != "AAPL"
@@ -588,7 +590,7 @@ def test_intraday_floor_user_id_missing_portfolio_yields_no_held_items() -> None
     }
     snapshots = [_make_snapshot(kind="portfolio", payload=payload)]
     items = EvidenceAutoEmitter(intraday_floor=True).propose(
-        snapshots=snapshots, request_market="kr", account_scope="kis_live"
+        snapshots=snapshots, request_market="kr", account_scope="toss_live"
     )
     held_verdicts = {"sell_review", "keep", "no_add", "data_gap"}
     assert not [

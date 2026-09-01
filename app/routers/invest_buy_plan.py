@@ -29,8 +29,7 @@ Market = Literal["all", "kr", "us", "crypto"]
 def get_buy_plan_service(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BuyPlanService:
-    # Imported lazily for the same reason as invest_api.get_invest_home_service:
-    # importing this router module must not drag in the KIS/Upbit reader chain.
+    # 홈 집계 reader graph를 라우터 import 시점에 구성하지 않도록 지연 import한다.
     from app.routers.invest_api import get_invest_home_service
     from app.services.current_orders_service import CurrentOrdersService
     from app.services.invest_view_model.watch_panel_service import WatchPanelService

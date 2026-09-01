@@ -2,6 +2,21 @@
 
 MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 
+## Current operational boundary
+
+- KR/US live account, order, portfolio, quote, and candle paths use Toss.
+  `account_mode` defaults to `toss_live`; ambiguous `real`/`live` values and
+  `kis_live`/`kis_mock` operational dispatch fail closed.
+- NH PLUG is a KR mock read-only source for account, balance, positions, and
+  quotes. It has no order, fill, reconcile, scheduler, or US capability.
+- KIS registrars, tasks, WebSockets, and provider-backed tools are not part of
+  any deployed MCP profile. Dormant adapters and KIS ledger models remain only
+  so historical rows can be read without reinterpretation.
+- Toss fill confirmation is polling-based. Production live equity operation
+  requires `toss_live.poll_fills_periodic` at least every two minutes
+  (`TOSS_FILL_POLL_ENABLED=true`, `TOSS_FILL_POLL_CRON=*/2 * * * *`) or an
+  immediate targeted non-dry reconcile after every accepted order.
+
 ## Observability (Sentry MCP)
 - MCP tracing uses `sentry_sdk.integrations.mcp.MCPIntegration` when enabled.
 - Recommended trace filter:
@@ -84,12 +99,8 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 
 - `search_symbol(query, limit=20)`
 - `get_quote(symbol, market=None)`
-  - KR equity `get_quote` uses KRX daily quote data for the regular-session baseline and includes `previous_close` when at least two daily rows are available.
-  - During KR NXT pre-market (`session: "nxt_premarket"`) and trading-day NXT after-hours (`session: "nxt_after"`), KR `get_quote` overlays `price` from `get_orderbook(symbol, market="kr", venue="nxt")`.
-  - NXT price selection order is `expected_price` (`price_source: "nxt_expected_price"`), then best bid/ask mid (`"nxt_mid"`), then a single available best ask or bid (`"nxt_best_ask"` / `"nxt_best_bid"`).
-  - A successful NXT overlay returns `data_state: "fresh"`, `regular_session_data_state` with the KRX classifier value, and venue diagnostics (`venue`, `venue_label`, `kis_market_code`, `source_endpoint`, `source_tr_id`) when KIS supplies them.
-  - If the NXT orderbook is empty or unavailable, `get_quote` keeps the ROB-464 stale-session behavior: KRX daily `price`, `data_state` from `kr_market_data_state()`, and no NXT diagnostic fields.
-  - KR NXT overlay honors Toss market-calendar partial-session closures when the Toss API is enabled; otherwise it falls back to XKRX session days and the corrected NXT windows.
+  - KR equity quotes use Toss data. NXT/unified venue data that depended on KIS
+    is not synthesized; unsupported venue requests return `provider_unsupported`.
 - `get_fx_rate(pair="USDKRW")`
   - Read-only spot FX quote for exchange-timing and US-market cash conversion decisions.
   - P1 supports USD/KRW only. Accepted spellings: `USDKRW`, `USD/KRW`, `USD_KRW`, `USD-KRW`.
@@ -98,25 +109,17 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
   - `default_rate` mirrors the scalar exchange-rate behavior used by existing portfolio and cash consumers.
   - Unsupported pairs raise a tool argument error. FX pairs are not market indices; `get_market_index("USDKRW")` remains unsupported.
   - Trends, bank-specific quotes, preferential effective rates, exchange execution, and US-order total-cost routing are outside ROB-567 P1.
-- `suggest_order_account(symbol, market=None, side="buy", quantity, price=None, usd_krw=None)`
-  - Read-only advisory tool. It never submits, previews, routes, modifies, or cancels an order.
-  - Supports KR/US buys only. Crypto, Upbit, manual cash, paper accounts, and sells are out of scope.
-  - Compares KIS/Toss using orderable cash, commission bps, FX spread bps, optional Toss notional limit, and existing-position consolidation.
-  - If a symbol is already held in one candidate account, that account wins unless the cheaper alternative saves at least `position_consolidation_threshold_bps` of order notional.
-  - Default thresholds: KR 25 bps, US 40 bps. US is stricter because FX basis and overseas tax lots split by account.
-  - Always returns `cost_comparison` for both candidate accounts and `position_consolidation` with either `foregone_savings_krw` or `distribution_warning`.
-- `get_orderbook(symbol, market="kr")`
+- `get_orderbook(symbol, market="kr", venue="krx")`
+  - KR orderbook support is limited to the NH PLUG mock read-only KRX
+    10-level snapshot. NXT/unified venues return `provider_unsupported`.
 - KR quote responses expose `price_as_of`, `price_freshness`
   (`fresh|stale|unavailable`), `price_usable`, and a stable
   `price_unavailable_reason` when unusable. Missing timestamps and epoch-zero
   values are unavailable; prior-date timestamps are stale. NXT tradability
   similarly returns `nxt_tradable=null` plus the observed value and reason when
   its as-of is missing or stale.
-- US equity quote price resolution uses KIS overseas current price first when `settings.us_quote_kis_primary` is enabled, then falls back to Yahoo `fast_info`.
-  - US quote response keeps `source: "kis_overseas"` or `source: "yahoo"` and includes `previous_close/open/high/low/volume` when the provider supplies them.
-  - US quote response includes `session` (`premarket`, `regular`, `afterhours`, `closed`), `data_state` (`fresh` during the extended-hours envelope, `stale` when closed), `price_source` (`kis_overseas_last` or `yahoo_fast_info_close`), `delayed: true`, and optional `quote_asof` when KIS supplies parseable quote date/time fields.
-  - KIS-backed US quote response includes `venue` with the DB-resolved KIS exchange code (`NASD`, `NYSE`, `AMEX`) used for the upstream request.
-  - US quote failures are propagated as tool-level errors (exceptions), not returned as in-band error payload dicts.
+- US equity quotes use Toss. Provider failures are propagated as tool-level
+  errors rather than silently falling back to KIS.
 - `get_holdings(account=None, market=None, include_current_price=True, minimum_value=None, account_mode=None)`
   - Crypto positions may include optional `strategy_signal` field when Phase 2 exit logic triggers (4.5% stop-loss or RSI > 46 mean-reversion on profitable positions)
 - `get_position(symbol, market=None, account_mode=None)`
@@ -135,29 +138,17 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
   - `1h`: KR/US equity + crypto
   - Crypto `1m` / `5m` / `15m` / `30m` rows expose `timestamp`, `date`, `time`, `open`, `high`, `low`, `close`, `volume`, `value`, `trade_amount` and do not expose raw `datetime`
 - US OHLCV behavior:
-  - US `day`/`week`/`month` uses Yahoo Finance (`app.services.brokers.yahoo.client.fetch_ohlcv`)
-  - US daily uses Yahoo first and Toss as a `period="day"` fallback; US `week` and `month` remain Yahoo-only
-  - US intraday (`1m`/`5m`/`15m`/`30m`/`1h`) uses KIS via DB-first reader (`read_us_intraday_candles`) with ET-naive timestamps
-  - US intraday rows include `session` field (`PRE_MARKET`, `REGULAR`, `POST_MARKET`)
-  - US intraday `end_date="YYYY-MM-DD"` is interpreted as ET `20:00:00` for that market date; timestamp inputs use the exact provided instant
+  - US intraday (`1m`/`5m`/`15m`/`30m`/`1h`) uses Toss and returns ET-naive
+    timestamps at the shared Candle boundary. An active symbol with a normal
+    empty provider response returns `[]`; provider failures raise.
+  - Daily/weekly/monthly reads use the registered non-KIS data providers.
 - KR OHLCV behavior:
-  - KR `day` keeps the existing Redis-backed `kis_ohlcv_cache` path when `end_date` is omitted
-  - KR intraday `1m/5m/15m/30m` use Toss candles first when `TOSS_API_ENABLED` is configured, then fall back to the existing DB/KIS reader. `1h` uses the DB hourly aggregate directly (ROB-548: 60x Toss `1m` aggregation is heavy and shallow) — same on the `get_ohlcv` service and MCP surfaces
-  - Toss only provides `1m`; `5m/15m/30m` are aggregated from Toss `1m` (paginated to the requested depth) using the same bucket rules as the KIS path; an empty Toss frame falls back to the DB/KIS reader
-  - When Toss is unavailable or disabled, KR `1m` falls back to DB-first reads from raw `public.kr_candles_1m` with venue merge (`KRX` price priority, `volume/value` sum)
-  - When Toss is unavailable or disabled, KR `5m/15m/30m/1h` fall back to DB-first reads from Timescale continuous aggregates (`public.kr_candles_5m`, `public.kr_candles_15m`, `public.kr_candles_30m`, `public.kr_candles_1h`)
-  - On Toss fallback, KR intraday overlays the most recent 30 minutes from `public.kr_candles_1m` + KIS minute API to cover the unchanged 10-minute sync cadence
-  - KR intraday includes the current partial bucket when minute data is available
-  - KIS minute venues are merged with strict dedup to prevent double-counting (API overwrites DB per minute+venue)
-  - KIS minute API call plan (KST):
-    - `09:00 <= now < 15:35`: call KRX (`J`) + NTX (`NX`) in parallel when `nxt_eligible=true` (15:35 delay defense)
-    - `08:00 <= now < 09:00`: call NTX (`NX`) only when `nxt_eligible=true`
-    - `15:35 <= now < 20:00`: call NTX (`NX`) only when `nxt_eligible=true`
-    - When `end_date` is in the past: DB-only (0 API calls)
-  - KR intraday degrades to an empty result when symbol is missing/inactive in `kr_symbol_universe` (used for `nxt_eligible`)
-  - KR intraday does not use Redis OHLCV cache (`kis_ohlcv_cache`)
-  - KR intraday degrades to DB-backed partial data when recent KIS minute overlay calls fail
-  - KR intraday response rows add `session` and `venues` fields
+  - KR daily and intraday provider reads use Toss. Wider intraday intervals are
+    aggregated from Toss `1m`; persisted DB rows remain the read-through source
+    where the service contract allows it.
+  - Missing or inactive universe symbols fail closed before provider access.
+    No KIS minute overlay or fallback runs.
+  - KR intraday response rows include `session` and `venues` fields.
 - `get_indicators(symbol, indicators, market=None)`
 - `get_market_index(symbol=None, period="day", count=20)`
   - KR indices (`KOSPI`/`KOSDAQ`) are tagged with `data_state` from the KRX
@@ -169,20 +160,9 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 - `get_analyst_consensus(symbol)`
   - Get analyst consensus (recommendation mean and price target mean) for a Korean stock from Naver mobile integration API. Distinct from `get_investment_opinions` (report-level). Korean stocks only.
 - `get_short_interest(symbol, days=20)`
-  - 6자리 KR 종목코드만 지원 (예: `005930`)
-  - US ticker (`AAPL`, `SMCI`) 와 crypto symbol (`KRW-BTC`) 은 지원하지 않음
-  - `days` 는 1~60 범위로 cap 됨
-- `get_intraday_investor_flow(symbol)`
-  - KR-only read-only tool for same-day provisional foreign/institution flow by symbol.
-  - Source: KIS `investor-trend-estimate` (`/uapi/domestic-stock/v1/quotations/investor-trend-estimate`, TR `HHPTJ04160200`).
-  - Returns quantity estimates only: `foreign_net_qty`, `institution_net_qty`, `combined_net_qty`.
-  - The response always marks successful data as `provisional: true` and `data_state: "intraday_provisional"`.
-  - `as_of` is inferred deterministically from the latest returned KIS slot (`bsop_hour_gb`: 09:30, 10:00, 11:20, 13:20, 14:30) on the KST request date because the KIS payload does not include a date field. Session attribution is a pure function of a single captured `now`, the market state, and the Naver-confirmed latest date, so identical inputs always yield an identical label and a stale prior-session payload is never labeled `observed`.
-  - `confidence` is one of: `observed` (KRX session live before 14:30 and the rows are positively today's), `inferred` (today's confirmed daily row already exists), `carry_over` (future slot or non-session day — rows belong to a prior session), or `provisional_unconfirmed` (could be today OR a prior session and today could NOT be positively confirmed — e.g. live after 14:30, or after close before the confirmed daily is posted). `as_of` is a full ISO datetime only for `observed`/`inferred` and is `null` for `carry_over`/`provisional_unconfirmed` — it is never silently upgraded.
-  - `today_available` (bool): true only when today's data is positively confirmed (`observed`/`inferred`). `is_prior_session` (bool) and `warning` ({code, message} when `carry_over`, else null) flag prior-session leftovers. `as_of_date` is null for `provisional_unconfirmed` and the prior XKRX session DATE for `carry_over` — never a fabricated time.
-  - `last_confirmed_session_date`: most recent confirmed session (Naver-recent when available, else the previous XKRX session).
-  - `confirmed`: embedded confirmed multi-day series (source `naver`) carrying `foreign_ownership_pct` (외인소진율), `foreign_ownership_trend` (up/down/flat), `foreign_ownership_rate_change` (pp), and `history` (last 5 confirmed days of foreign/institution/individual net-buy + close). Best-effort: on Naver failure the KIS block stays intact and `confirmed.error` is set.
-  - This is not a confirmed daily close figure and should not be mixed with `get_investor_trends` day/week/month history.
+  - KIS-only short-interest data is unavailable. The tool returns
+    `provider_unsupported` and does not synthesize a replacement.
+- `get_intraday_investor_flow` and `get_execution_strength` are not registered because their provider-only evidence has no Toss/NH PLUG equivalent
 - `get_toss_buy_balance(symbol)`
   - Toss orderbook balance rate (buyBalanceRate/sellBalanceRate) and foreigner holding ratio — NOT user buy ratio. Live per-call, operator-gated. Disabled by default (returns `status='disabled'` unless `TOSS_CONSUMER_SIGNALS_ENABLED=true` is set). Korean stocks only.
 - `get_toss_ai_signal(symbol)`
@@ -218,10 +198,10 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 - `get_krx_session_health()`
   - Read-only authenticated KRX-session probe. It uses the normal KRX login/re-authentication path and reports `status`, `reason`, `retryable`, and `authenticated`; no market, broker, or order state is changed.
 - `screen_stocks_snapshot(preset=None, presets=None, market="kr", filters=None, exclude_watched=false, exclude_held=false, exclude_symbols=None, min_analyst_count=None, min_analyst_buy_count=None, min_market_cap=None, min_market_cap_eok=None, max_market_cap_eok=None, sort=None, limit=40, offset=0)`
-  - **DB-only (ROB-1309): makes zero external HTTP calls** — no sector lazy-fill, no analyst-consensus fetch, no live KIS holdings lookup, no live price fetch. Snapshot-backed discovery workflow. Pass either `preset="consecutive_gainers"` or `presets=["consecutive_gainers", "double_buy"]`; `preset` also accepts a comma-separated list for compatibility.
+  - **DB-only (ROB-1309): makes zero external HTTP calls** — no sector lazy-fill, no analyst-consensus fetch, no live broker holdings lookup, no live price fetch. Snapshot-backed discovery workflow. Pass either `preset="consecutive_gainers"` or `presets=["consecutive_gainers", "double_buy"]`; `preset` also accepts a comma-separated list for compatibility.
   - Returns symbols that matched the preset(s) from the persisted daily snapshots.
   - Supports multi-preset sweeps with symbol deduplication and `matchedPresets` tagging.
-  - `exclude_held` is NOT supported here — it would require the live KIS holdings call this DB-only tool never makes; passing `exclude_held=True` returns a fail-closed error pointing at `screen_stocks_enrich` (same redirect pattern as `min_analyst_count`/`min_analyst_buy_count`). `isHeld` is always `false` on every returned row.
+  - `exclude_held` is NOT supported here — it would require the live holdings call this DB-only tool never makes; passing `exclude_held=True` returns a fail-closed error pointing at `screen_stocks_enrich` (same redirect pattern as `min_analyst_count`/`min_analyst_buy_count`). `isHeld` is always `false` on every returned row.
   - `exclude_watched` (bool): accepted for compatibility, but currently unsupported in MCP because no user watchlist context is wired; requests emit an explicit warning.
   - `exclude_symbols`: explicit symbols to remove after dedupe.
   - `min_analyst_count` / `min_analyst_buy_count`: NOT applied here — this tool never returns consensus data; passing either returns the same fail-closed redirect error as `exclude_held`. Use `screen_stocks_enrich` for analyst-count filtering.
@@ -239,11 +219,11 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
     - `screen_stocks_snapshot(preset="crypto_momentum", market="crypto", filters=[{"field":"trade_amount_24h","operator":"gte","value":10000000000}], limit=40)`
   - Use `get_crypto_top_movers` for live Upbit top movers; use `screen_stocks_snapshot(..., market="crypto")` for persisted snapshot-backed filtering.
 - `screen_stocks_enrich(preset=None, presets=None, market="kr", filters=None, exclude_watched=false, exclude_held=false, exclude_symbols=None, min_analyst_count=None, min_analyst_buy_count=None, min_market_cap=None, min_market_cap_eok=None, max_market_cap_eok=None, sort=None, limit=40, offset=0)`
-  - **ROB-1309 opt-in live-enrichment counterpart to `screen_stocks_snapshot`.** Runs the identical preset/filter/discovery/pagination pipeline (same params), then makes external calls: KR/US analyst consensus (buy/hold/sell counts + target prices, Redis cache-aside with a call-time-fresh target-upside recompute), sector-label lazy-fill, RSI14 from persisted snapshot closes, and the one live KIS holdings call for `exclude_held`/`isHeld`.
+  - **ROB-1309 opt-in live-enrichment counterpart to `screen_stocks_snapshot`.** Runs the identical preset/filter/discovery/pagination pipeline (same params), then makes external calls: KR/US analyst consensus (buy/hold/sell counts + target prices, Redis cache-aside with a call-time-fresh target-upside recompute), sector-label lazy-fill, RSI14 from persisted snapshot closes, and one live Toss holdings call for `exclude_held`/`isHeld`.
   - `min_analyst_count`/`min_analyst_buy_count` filter on resolved consensus counts before pagination (capped at 200 merged rows before enrichment); only the returned page is fully enriched with `analysisContext`.
   - Only call this after `screen_stocks_snapshot` when analyst consensus / sector labels / analyst-count filtering / `exclude_held` are actually needed — every call fans out one HTTP round-trip per uncached symbol on the page and can take tens of seconds for a full page.
   - A symbol whose sector/consensus fetch just failed is not retried within a bounded window (`meta.enrichment_excluded`); a symbol with >=3 consecutive failures is dropped from `results` on that call only, reported under `meta.chronic_failure_candidates` (self-healing on the next success). Read-only wrt broker/order/watch state.
-- `get_top_stocks(market="kr", ranking_type="volume", limit=20, min_market_cap=None, min_turnover=None)` - Cross-market rankings. KR quality floors are raw KRW and fail closed; `min_market_cap` uses normalized Naver-backed valuation snapshots, while turnover uses trade amount or price × volume. Crypto supports `volume`, `gainers`, `losers`, and `relative_strength`.
+- `get_top_stocks(market="kr", ...)` - KIS volume-rank based KR rankings return `provider_unsupported`; crypto rankings remain available from Upbit.
 - `get_crypto_top_movers(ranking_type="relative_strength", limit=20)` - Crypto-only Upbit KRW discovery wrapper. Default ranking sorts non-BTC coins by 24h outperformance vs KRW-BTC.
 - `get_upbit_altseason(include_constituents=false, constituents_limit=50)` - Upbit altseason ratio and 24h breadth. With constituents enabled, `breadth.constituents` lists KRW alts beating BTC with 24h change, vs-BTC relative strength, volume, and traded value.
 - ~~`recommend_stocks(...)`~~ — **DEPRECATED / registry-hidden (ROB-359).** No longer registered on the MCP tool surface. Use `screen_stocks` for candidate discovery. The implementation is retained in `analysis_tool_handlers.recommend_stocks_impl` for a possible future narrow `build_buy_plan` tool; do not call it from active report/operator prompts.
@@ -490,13 +470,12 @@ full payload, by numeric `id` or `artifact_uuid` string. Missing ids return
 
 - `investment_report_add_items(report_uuid, items, actor=None)` - Append new proposal items to an existing draft investment report. The item payload contract matches `investment_report_create`. Duplicate `client_item_key` rows are returned as existing items and are not rewritten. Non-draft reports return `error="not_draft"`. No broker, order, or watch mutation is performed.
 - `investment_report_update(report_uuid, title=None, summary=None, risk_summary=None, thesis_text=None, no_action_note=None, market_snapshot=None, portfolio_snapshot=None, metadata=None, valid_until=None, actor=None, reason=None)` - Update draft report header fields without changing report identity, lifecycle status, predecessor chain, account scope, generator version, or items. Each successful update appends an audit entry to `report.metadata.draft_updates`. Non-draft reports return `error="not_draft"`.
-- `kis_mock_mirror_execute_report(report_uuid, dry_run=True, min_rung_quantity=1.0, confirm=False)` - Execute ROB-734 mirror counterfactual orders through KIS mock only. `dry_run=True` returns per-item `plan` previews including symbol, side, quantity/amount, limit price, target/stop, correlation id, source bucket, and WATCH approximation notes. `dry_run=False` requires `confirm=True`; otherwise the tool fails closed with `error_code="mirror_confirm_required"`. The planner mirrors only KR report items with `target_kind="asset"` and a six-digit numeric symbol. Non-KR, US, crypto, index, and FX items are skipped with `reason="non_kr_equity_out_of_mirror_scope"` and counted in `plan_skipped_count`; they are never submitted to `place_order`. WATCH thresholds are used as prices only when `watch_condition.metric == "price"`; non-price metrics such as RSI are skipped with `reason="unsupported_watch_metric_for_limit_price"`. Breakout/above WATCH conditions are labeled as `watch_approximation=limit_at_threshold`. If a KIS mock mirror send fails before a ledger row is written, the scoped mock mirror pre-send intent is released so the same report item can be retried. If a duplicate mock mirror intent is still present, the tool fails closed with mock-specific duplicate wording and operators should inspect `kis_mock_order_ledger.report_item_uuid` / `mirror_cohort` before manual cleanup.
 
 ### Alpaca paper read-only smoke tools
 
 ROB-69 exposes Alpaca paper broker inspection via explicit read-only MCP tool
 names only. These tools are registered under `MCP_PROFILE=us-paper`; they are
-not part of the default or `hermes-paper-kis` surfaces.
+not part of the default surface.
 
 - `alpaca_paper_get_account(account_mode="alpaca_paper")`
 - `alpaca_paper_get_cash(account_mode="alpaca_paper")`
@@ -728,9 +707,8 @@ Dev submit/cancel smoke helper: `scripts/smoke/alpaca_paper_dev_smoke.py` (previ
 ROB-755 exposes the same fill-event triage surface that powers the operator-host
 alert poller (`scripts/list_recent_fill_events.py`) over MCP. Read-only; no broker
 mutation; no order mutation; no watch mutation. Registered in the "Always" block
-of `register_all_tools` (default, crypto, hermes-paper-kis, us-paper, db-paper,
-kiwoom profiles). Not on `analysis_readonly`, which uses its own curated
-allowlist.
+of `register_all_tools` (default, crypto, us-paper, db-paper, and Kiwoom
+profiles). Not on `analysis_readonly`, which uses its own curated allowlist.
 
 - `execution_ledger_fill_events_list_recent(after_id=None, market=None, side=None, source="websocket", broker=None, account_mode=None, limit=50)`
   - Read-only. Returns recent fills from `execution_ledger` rows newer than
@@ -836,7 +814,7 @@ order mutation.
   - `market` uses canonical `equity_kr`, `equity_us`, or `crypto`; the tool
     accepts `kr` and `us` aliases and normalizes them before validation,
     payload hashing, and persistence.
-  - Supported place combinations are `kis_live` or `toss_live` with
+  - Supported place combinations are `toss_live` with
     `equity_kr`/`equity_us`, and `upbit` with `crypto`.
   - `action="place"` is the default and `target_broker_order_id=None` is the
     default.
@@ -851,7 +829,7 @@ order mutation.
     an exact snapshot of the target order (side, remaining quantity, and limit
     price). It performs no new-order submit.
   - Target-action tuples are supported only for
-    `kis_live/equity_kr`, `kis_live/equity_us`, and `upbit/crypto`.
+    `toss_live/equity_kr`, `toss_live/equity_us`, and `upbit/crypto`.
   - When `valid_until` is omitted, it defaults to the next `00:00 KST`.
   - Before an approval card/nonce is published, dispatch enforces
     timezone-aware `valid_until` and the proposal's broker/market submission
@@ -992,7 +970,7 @@ order mutation.
 Telegram approval rechecks the persisted dispatch policy stamp, proposal
 validity, and authoritative market session before consuming a nonce, then
 repeats the same window policy inside revalidation and through a pre-send hook
-at the final KIS, Toss, or Upbit HTTP boundary for submit and cancel. The
+at the final Toss or Upbit HTTP boundary for submit and cancel. The
 session evidence includes the allowed interval end, so a close crossed while
 an awaited check is running is rejected at the transport boundary. A missing
 or mismatched policy stamp and unknown/stale evidence fail closed. An expired
@@ -1007,8 +985,8 @@ the callback restores the rung, lease, and durable proposal nonce instead of
 stranding a consumed approval.
 Batch approval locks and verifies the exact ordered proposal/nonce-snapshot
 membership before consuming its own nonce; one missing, changed, expired, or
-closed member blocks the whole displayed batch. KIS/Upbit then rerun their
-applicable ROB-800 checks through `_place_order_impl`.
+closed member blocks the whole displayed batch. Toss/Upbit then rerun their
+applicable ROB-800 checks through the broker-specific submit boundary.
 Successful automatic submissions retain `approved_by_telegram_user_id=NULL`
 and write policy/version/eligibility evidence under
 `source_asof.auto_approved`. Their Telegram summary carries a single-use
@@ -1023,11 +1001,11 @@ Operators must set it explicitly and add the exact same trimmed identity to
 identity, so `loss_cut` validation fails closed. Do not use a hardcoded UUID as
 a fallback for this setting.
 
-Loss-cut proposal binding supports `kis_live` and `toss_live` equities
-(`equity_kr`/`equity_us`) plus `upbit`/`crypto`. KIS/Upbit proposals use the shared
-`_place_order_impl` fallback; Toss proposals never use that path and instead
-route through `toss_preview_order` and `toss_place_order`. Toss preview owns the
-wire price/quantity used for revalidation, including KR tick normalization, and
+Loss-cut proposal binding supports `toss_live` equities
+(`equity_kr`/`equity_us`) plus `upbit`/`crypto`. Toss proposals route through
+`toss_preview_order` and `toss_place_order`; an already-approved KIS intent is
+never reinterpreted or rerouted to Toss.
+`toss_preview_order` owns the wire price/quantity used for revalidation, including KR tick normalization, and
 provides its read-only warning, price/cost, NXT-context, and advisory sector
 concentration checks. For `loss_cut`, preview and submit both reuse the shared
 ROB-800 validator (caller allowlist and matching fresh retrospective), exempt
@@ -1058,110 +1036,40 @@ followed by an ellipsis when truncated.
 
 ### Account Routing
 
-MCP account-facing tools use `account_mode` to avoid mixing DB simulation,
-official KIS mock, and KIS live account paths:
+MCP account-facing tools use an explicit `account_mode`:
 
-- `account_mode="db_simulated"`: DB-backed paper trading only. No KIS broker
-  calls. Existing `account_type="paper"`, `account_mode="paper"`, and
-  `account_mode="simulated"` remain aliases and return warnings.
-- `account_mode="kis_mock"`: official KIS mock/sandbox account. Uses KIS mock
-  credentials only, passes `is_mock=True` to KIS broker methods, and fails
-  closed if `KIS_MOCK_ENABLED=true`, `KIS_MOCK_APP_KEY`,
-  `KIS_MOCK_APP_SECRET`, or `KIS_MOCK_ACCOUNT_NO` are missing. HTTP requests
-  use `KIS_MOCK_BASE_URL`, which defaults to the official KIS mock host
-  `https://openapivts.koreainvestment.com:29443`.
-  KIS mock is a KIS venue only. It does not simulate Upbit crypto orders:
-  symbols that resolve to crypto, such as `KRW-BTC`, fail closed with
-  `error: "crypto has no mock venue"` before Upbit balance reads or order
-  mutation calls.
-  For US buys only, preflight reads mock `VTTS3007R` and validates its
-  `ord_psbl_frcr_amt` USD buying power. A missing or failed response remains
-  fail-closed; this does not change KIS live US routing or mock pending-order
-  support.
-- `account_mode="kis_live"` or omitted: existing live KIS behavior. For
-  `place_order`, `dry_run=True` remains the default. KR live buy paths query
-  Toss stock warnings before order submission; active `LIQUIDATION_TRADING`
-  blocks non-dry-run buys before KIS POST, while lookup failures are fail-open
-  and surfaced in the response metadata.
-- **Buy balance pre-check (ROB-625/951)**: For `side="buy"`, both `dry_run=True`
-  and `dry_run=False` apply the same orderable-cash pre-check. KIS mock US uses
-  `VTTS3007R.ord_psbl_frcr_amt`; all existing live routing remains on its shared
-  `get_cash_balance` source. Insufficient balance returns `success=false` with an
-  `insufficient_balance: true` flag and an `insufficient_balance_detail` block
-  (`balance`, `order_amount`, `currency`, `shortfall`, and — for US — a KIS field
-  `breakdown` exposing `frcr_dncl_amt1`/`frcr_gnrl_ord_psbl_amt`). On `dry_run=True`
-  the preview body (estimated value, fee) is still returned so the operator can
-  size a deposit. This closes the prior "dry_run passes → live rejects" gap.
-- `account_mode="toss_live"`: official Toss Securities live KR/US account. Uses Toss credentials, maps to `toss_live` routing, and fails closed when `TOSS_API_ENABLED=false` or credentials are missing. Actual Toss order mutation POSTs also require `TOSS_LIVE_ORDER_MUTATIONS_ENABLED=true`; keep this false until the accepted-order ledger and operator live-smoke hold are cleared.
+- `account_mode="toss_live"` or omitted: Toss Securities KR/US live account.
+  Reads require Toss configuration; mutation POSTs additionally require
+  `TOSS_LIVE_ORDER_MUTATIONS_ENABLED=true`. Live sells retain the fresh
+  broker-authoritative sellable-quantity preflight.
+- `account_mode="upbit"`: Upbit crypto account and order path.
+- `account_mode="db_simulated"`: DB-backed paper trading only. Existing
+  `paper`/`simulated` aliases remain simulation-only and never become live.
+- `account_mode="kis_live"` and `account_mode="kis_mock"`: historical selectors
+  may still be parsed for ledger reads, but operational account/order dispatch
+  rejects them with `provider kis is not operational`.
+- `account_mode="real"` and `account_mode="live"` are ambiguous and rejected;
+  callers must name `toss_live`.
 
-Do not use `account_type="paper"` for official KIS mock. It is always DB
-simulation. Responses from updated surfaces include `account_mode`; deprecated
-aliases include `warnings`.
-  - Set `quick=False` for full analysis payload (like `analyze_portfolio`)
-  - Example: `analyze_stock_batch(symbols=["NVDA", "AMZN", "MSFT", "GOOGL"], market="us")`
-
-#### KIS mock unsupported endpoints
-
-> See [`docs/kis-mock-tr-routing-matrix.md`](../../docs/kis-mock-tr-routing-matrix.md)
-> for the full live ↔ mock TR routing matrix.
-
-`account_mode="kis_mock"` returns explicit "mock unsupported" errors instead
-of silently degrading for the following KIS endpoints, which are live-only on
-the official KIS mock account:
-
-- `inquire_integrated_margin` (`TTTC0869R`) — returns `OPSQ0002 없는 서비스 코드 입니다`
-  on mock. Mock cash routes via `inquire_domestic_cash_balance` (`VTTC8434R`)
-  instead.
-- `inquire_overseas_orders` (`TTTS3018R`) — KIS does not publish a mock TR.
-  Pending US history under `account_mode="kis_mock"` returns
-  `errors: [{market: "equity_us", error: "kis_mock: overseas pending-orders
-  inquiry ..."}]` and an empty orders list.
-- `inquire_korea_orders` (`TTTC8036R`) — confirmed live-only on the mock
-  account (returns `EGW02006 모의투자 TR 이 아닙니다`). Pending KR history
-  and KR cancel/modify lookup under `account_mode="kis_mock"` return
-  `mock_unsupported=true` errors instead of attempting the call.
-- KIS overseas margin (`TTTC2101R` / `VTTS2101R`) — treated as
-  mock-unsupported; the USD account row is omitted under
-  `account_mode="kis_mock"` and the failure is reported in `errors[]`.
-
-#### Operator runtime config
-
-`account_mode="kis_mock"` reads only `KIS_MOCK_*` settings. To enable the
-mock account in production, the operator should source a separate env file
-(for example `~/services/auto_trader/shared/.env.kis-mock`) into the launchd
-plist environment for the MCP / API processes — **never** merge mock
-secrets into the live `.env.prod.native` file. When any of
-`KIS_MOCK_ENABLED=true`, `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET`, or
-`KIS_MOCK_ACCOUNT_NO` are missing, every mock surface returns:
-
-```
-{
-  "success": false,
-  "error": "KIS mock account is disabled or missing required configuration: KIS_MOCK_ENABLED, ...",
-  "source": "kis",
-  "account_mode": "kis_mock"
-}
-```
-
-The error names variables only — never values.
+NH PLUG is outside live account routing. It supplies only KR mock read-only
+account/balance/position/quote evidence and cannot place, modify, cancel, or
+reconcile an order. No KIS environment or profile activation is supported.
 
 ### Position-intake retrospective (ROB-1285)
 
-`save_position_intake_retrospective` is a DEFAULT-profile-only, narrowly scoped
-write surface for a KIS live KR holding acquired outside the execution ledger
-or before that ledger existed. It is hard-pinned to `kis_live/equity_kr` and writes only
-`review.trade_retrospectives` plus its existing action projection. Before the
-write it locks and scans all same-symbol rows in
-`review.kis_live_order_ledger`; any raw status in `filled`, `rejected`,
-`unknown`, `anomaly`, `cancelled`, or `expired` rejects the intake.
+`save_position_intake_retrospective` is a narrowly scoped historical-review
+write surface for a pre-cutover KR holding whose provenance is already
+`kis_live`. It does not make KIS provider calls, create an order intent, or
+authorize current KIS activity. The original `kis_live/equity_kr` identity is
+preserved solely so historical review rows are not mislabeled as Toss.
 
-The row stores `evidence_snapshot.retrospective_type="intake"`, the observed
-account/quantity/average/current-price snapshot, acquisition provenance, and
-the zero-match terminal-guard receipt. Ordinary `save_trade_retrospective`
-calls cannot supply that reserved type. Intake rows are excluded by the
-retrospective aggregate and setup-tag learning consumers; forecast Brier
-scoring reads the separate `trade_forecasts` ledger and has no intake write or
-resolution path. This tool never creates a proposal or calls a broker.
+Before writing `review.trade_retrospectives`, the tool locks and scans the
+same-symbol historical `review.kis_live_order_ledger` rows and applies its
+existing terminal guard. The row stores
+`evidence_snapshot.retrospective_type="intake"`, observed acquisition evidence,
+and the zero-match guard receipt. Intake rows remain excluded from aggregate
+and setup-tag learning consumers. This surface never creates a proposal or
+calls a broker.
 
 ### Toss Live Order MCP Tools
 
@@ -1206,71 +1114,61 @@ Operator activation and the one-share live smoke are documented in
 ### `get_orderbook` spec
 Parameters:
 - `symbol`: KR equity symbol/code or Upbit market code (required)
-- `market`: defaults to `"kr"`; supports KR aliases (`"kr"`, `"kospi"`, `"kosdaq"`, `"korea"`, `"kis"`, `"equity_kr"`) plus crypto aliases (`"crypto"`, `"upbit"`)
-- `venue`: optional, KR equity only; selects the KIS trading venue for the orderbook. Non-blank values are rejected for crypto. Defaults to `"krx"` (KRX regular session) for backward compatibility.
+- `market`: defaults to `"kr"`; supports KR aliases (`"kr"`, `"kospi"`, `"kosdaq"`, `"korea"`, `"equity_kr"`) plus crypto aliases (`"crypto"`, `"upbit"`)
+- `venue`: optional, KR equity only. Non-blank values are rejected for crypto. Defaults to `"krx"`.
 
-Venue mapping (KR equity only):
-| `venue` input | Canonical venue | KIS code | Korean label |
-|---|---|---|---|
-| `null`, `""`, `"krx"`, `"regular"`, `"j"` | `krx` | `J` | `KRX` |
-| `"nxt"`, `"ntx"`, `"nx"`, `"afterhours"`, `"extended"` | `nxt` | `NX` | `NXT` |
-| `"unified"`, `"combined"`, `"integrated"`, `"all"`, `"un"`, `"통합"`, `"통합시장"` | `unified` | `UN` | `통합` |
+Venue boundary (KR equity only):
+| `venue` input | Result |
+|---|---|
+| `null`, `""`, `"krx"`, `"regular"`, `"j"` | NH PLUG mock KRX snapshot |
+| `"nxt"`, `"ntx"`, `"nx"`, `"afterhours"`, `"extended"` | `provider_unsupported` |
+| `"unified"`, `"combined"`, `"integrated"`, `"all"`, `"un"`, `"통합"`, `"통합시장"` | `provider_unsupported` |
+| any other value | argument error |
 
 Behavior:
 - KR requests follow the existing KR quote normalization path, including zero-padding numeric codes such as `5930 -> 005930`
+- KR orderbook data is read-only and comes only from the NH PLUG mock snapshot store for `market="KRX"`; NH PLUG does not provide NXT or unified orderbooks
+- NXT and unified venue requests return an in-band error payload whose error is explicitly `provider_unsupported`; they are never synthesized from KRX data
 - Crypto orderbook requests require explicit `market="crypto"` (or `"upbit"`) and a raw `KRW-*` symbol such as `KRW-BTC`; plain coins (`BTC`) and non-KRW crypto pairs (`USDT-BTC`) raise an argument error
 - Providing a non-blank `venue` with `market="crypto"` raises an argument error
-- Valid KR requests use KIS endpoint `inquire-asking-price-exp-ccn` (TR_ID `FHKST01010200`) and return 10-level asks/bids, total residual quantities, expected match metadata, and integer-valued `price`, `quantity`, `total_ask_qty`, `total_bid_qty`, and `spread`
-- Valid crypto requests use Upbit orderbook data and return the same shared snapshot fields, but `price`, `quantity`, `total_ask_qty`, `total_bid_qty`, and `spread` can be fractional numbers
-- `expected_qty` keeps the public `int | null` contract; when KIS leaves `output2.antc_cnqn` blank or omits it, the response serializes `expected_qty` as `null` instead of inventing a fallback quantity
-- During the NXT after session (`15:30`-`20:00` KST; Toss market-calendar when available, corrected hardcoded fallback otherwise), KIS may return `expected_price` while leaving `expected_qty` blank or absent; this is treated as a valid upstream state, not an MCP error
-- Successful responses always include MCP-only derived fields: `pressure`, `pressure_desc`, `spread`, `spread_pct`, `bid_walls`, and `ask_walls`
-- Successful KR responses include venue diagnostics: `venue`, `venue_label`, `kis_market_code`, `source_endpoint`, `source_tr_id`, `is_empty_book`, `requires_final_recheck`, and (when empty) `empty_reason`
-- Successful KR responses use `source: "kis"`, `instrument_type: "equity_kr"`, and return `bid_walls: []`, `ask_walls: []`
+- Successful KR responses use `source: "nhplug"`, `instrument_type: "equity_kr"`, `venue: "krx"`, and `venue_label: "KRX"`
+- NH PLUG mock store의 `asOf`는 transport 수신 시각이므로 provider freshness 증거로 사용하거나 합성하지 않으며, KR 응답은 `as_of`와 `price_as_of_source`를 제공하지 않는다
 - Successful crypto responses use `source: "upbit"`, `instrument_type: "crypto"`, and may return non-empty wall arrays
+- Successful responses always include MCP-only derived fields: `pressure`, `pressure_desc`, `spread`, `spread_pct`, `bid_walls`, and `ask_walls`
+- Successful KR responses return `bid_walls: []`, `ask_walls: []`; wall detection remains crypto-only
 - Invalid input raises; upstream failures for otherwise valid requests return an in-band error payload via the shared MCP error contract. When the underlying exception is a `DomainServiceError`, the payload may also include `error_type`
-- `venue` does not affect order routing or trading venue defaults; this is market-data only. WebSocket streaming for NXT/UN is out of scope for this REST read-only slice.
+- `venue` does not affect order routing or trading venue defaults; this is market-data only
 
 Response format (KR equity):
 ```json
 {
   "symbol": "005930",
   "instrument_type": "equity_kr",
-  "source": "kis",
-  "asks": [{"price": 70100, "quantity": 123}],
-  "bids": [{"price": 70000, "quantity": 321}],
-  "total_ask_qty": 1000,
-  "total_bid_qty": 1500,
+  "source": "nhplug",
+  "asks": [{"price": 70100.0, "quantity": 123.0}],
+  "bids": [{"price": 70000.0, "quantity": 321.0}],
+  "total_ask_qty": 1000.0,
+  "total_bid_qty": 1500.0,
   "bid_ask_ratio": 1.5,
   "pressure": "buy",
   "pressure_desc": "매수잔량이 매도잔량의 1.5배 - 매수 압력",
-  "spread": 100,
+  "spread": 100.0,
   "spread_pct": 0.143,
-  "expected_price": 70050,
-  "expected_qty": null,
   "bid_walls": [],
   "ask_walls": [],
-  "venue": "nxt",
-  "venue_label": "NXT",
-  "kis_market_code": "NX",
-  "source_endpoint": "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
-  "source_tr_id": "FHKST01010200",
+  "venue": "krx",
+  "venue_label": "KRX",
   "is_empty_book": false,
   "requires_final_recheck": false
 }
 ```
 
-`expected_qty: null` means KIS did not provide `antc_cnqn`; it does not by itself indicate a tool failure.
-
 KR-only diagnostic fields:
-- `venue`: canonical venue name (`"krx"`, `"nxt"`, `"unified"`)
-- `venue_label`: Korean-facing label (`"KRX"`, `"NXT"`, `"통합"`)
-- `kis_market_code`: KIS `FID_COND_MRKT_DIV_CODE` sent to KIS (`"J"`, `"NX"`, `"UN"`)
-- `source_endpoint`: REST endpoint path used
-- `source_tr_id`: KIS TR_ID used
-- `is_empty_book`: `true` when the orderbook returned no asks and no bids
-- `requires_final_recheck`: `true` for empty KR books (caller should re-check before acting on empty depth)
-- `empty_reason`: stable short string (e.g. `"empty_kis_orderbook"`) when `is_empty_book` is `true`; absent when book is non-empty
+- `venue`: always `"krx"` for a successful NH PLUG response
+- `venue_label`: always `"KRX"` for a successful NH PLUG response
+- `is_empty_book`: `true` when the snapshot is not ready or either side has no levels
+- `requires_final_recheck`: `true` for an empty KR book
+- `empty_reason`: `"empty_nh_orderbook"` when `is_empty_book` is `true`; absent when the book is non-empty
 
 Derived fields:
 - `pressure` is derived from `bid_ask_ratio` using fixed inclusive boundaries:
@@ -1938,27 +1836,19 @@ Error response format (unexpected internal failure):
 
 ### `get_cash_balance` spec
 Parameters:
-- `account`: optional account filter (`upbit`, `kis`, `kis_domestic`, `kis_overseas`)
+- `account`: optional operational account filter (`upbit`, `toss`)
+- `account_mode`: defaults to `toss_live`; `kis_live`/`kis_mock` reject with
+  `provider kis is not operational`
 
 Broker-specific contract:
-- With `account_mode="kis_mock"`, this tool is a KIS-only data plane. It never
-  reads Upbit or Toss live cash, rejects non-KIS account selectors, and marks
-  KIS rows/errors with `account_mode="kis_mock"`.
 - **Upbit (`account="upbit"`)**
   - `balance`: total KRW (`balance + locked`)
   - `orderable`: orderable KRW (`balance`)
-  - `formatted`: formatted total KRW string (e.g. `"700,000 KRW"`)
-- **KIS domestic (`account="kis_domestic"`)**
-  - `balance`: `stck_cash_objt_amt` (`intgr-margin`)
-  - `orderable`: domestic integrated-margin orderable (`stck_cash100_max_ord_psbl_amt`). ROB-596: this KIS field already nets accepted-but-unfilled buy orders in real time, so pending buys are **not** subtracted again (no double-count). It is the single source shared by `get_available_capital` and the `place_order` KRW buy pre-check.
-- **KIS overseas (`account="kis_overseas"`)**
-  - `balance`: USD cash balance (`frcr_dncl_amt1` fallback `frcr_dncl_amt_2`)
-  - `orderable`: USD orderable cash (`frcr_gnrl_ord_psbl_amt`). ROB-596: this KIS field already nets accepted-but-unfilled buy orders in real time, so pending buys are **not** subtracted again (no double-count). It is the single source shared by `get_available_capital` and the `place_order` USD buy pre-check.
-- **Toss (`account="toss"`, only when `TOSS_API_ENABLED=true`)**
-  - `balance`: Toss buying power for the row currency
-  - `orderable`: `0.0`; Toss portfolio integration is read-only in ROB-532, while order mutation tools are delivered separately
-  - Emits one KRW row when KRW buying power is available and one USD row when USD buying power is available
-  - If `account="toss"` is requested and the Toss API read fails, the tool fails closed; in all-account mode it records a partial `toss_api` error
+  - `formatted`: formatted total KRW string
+- **Toss (`account="toss"`)**
+  - Returns supported KRW/USD cash and orderable evidence from Toss.
+  - An explicit Toss read failure fails closed rather than returning a KIS or
+    synthetic fallback.
 
 Response shape:
 - `accounts`: per-account cash entries
@@ -1968,48 +1858,33 @@ Response shape:
 
 ### `get_available_capital` spec
 Parameters:
-- `account`: optional account filter (`upbit`, `kis`, `kis_domestic`, `kis_overseas`, `toss`)
-- `include_manual`: whether to include manual cash in aggregation (default: `true`)
+- `account`: optional operational account filter (`upbit`, `toss`)
+- `include_manual`: whether to include owner-scoped manual cash (default: `true`)
 
 Behavior:
-- Aggregates orderable cash across all broker accounts (Upbit, KIS domestic, KIS overseas)
-- Converts USD orderable amounts to KRW equivalents using current exchange rate
-- Includes manual cash (Toss/non-API cash) when `include_manual=True`
-- Marks manual cash as stale when older than 3 days
-- With `account_mode="kis_mock"`, manual cash is not read or aggregated; the
-  result is derived only from the KIS mock cash response.
-
-Response shape:
-- `accounts`: per-account cash entries with `krw_equivalent` added for USD accounts
-- `manual_cash`: manual cash details with `amount`, `updated_at`, and `stale_warning`
-- `summary.total_orderable_krw`: total orderable amount in KRW across all sources
-- `summary.exchange_rate_usd_krw`: USD to KRW exchange rate used for conversion
-- `summary.as_of`: ISO timestamp of when the data was retrieved
-- `errors`: per-source partial failures
+- Aggregates orderable cash only from operational Toss/Upbit sources.
+- Converts supported USD orderable amounts to KRW equivalents using the current
+  exchange rate.
+- Marks manual cash as stale when older than 3 days.
+- KIS account selectors are non-operational and never trigger provider I/O.
 
 ### `get_holdings` spec
 Parameters:
-- `account`: optional account filter (`kis`, `upbit`, `toss`, `samsung_pension`, `isa`)
+- `account`: optional operational account filter (`upbit`, `toss`,
+  `samsung_pension`, `isa`)
 - `market`: optional market filter (`kr`, `us`, `crypto`)
-- `include_current_price`: if `True`, tries to fetch latest prices and calculate PnL fields
-- `minimum_value`: optional numeric threshold. When `None` (default), per-currency thresholds apply: KRW=5000, USD=10. Explicit number uses uniform threshold. Positions below threshold are excluded only when `include_current_price=True`
+- `include_current_price`: if `True`, resolves supported current prices and PnL
+- `minimum_value`: optional numeric threshold; when omitted, KRW/crypto uses
+  5000 and USD uses 10
 
 Filtering rules:
-- With `account_mode="kis_mock"`, holdings collection is KIS-only. Upbit,
-  Toss API, and manual collectors are not called, and non-KIS account or crypto
-  selectors fail closed instead of returning a mixed-provenance response.
-- If `include_current_price=False`, `minimum_value` filtering is skipped
-- When `minimum_value=None`, per-currency thresholds are automatically applied based on `instrument_type`: `equity_kr` and `crypto` use 5000, `equity_us` uses 10
-- When `minimum_value` is a number, that uniform threshold is applied to all positions
-- KIS US balance snapshots are not treated as current-price truth even when
-  `current_price > 0`, `evaluation_amount > 0`, and `profit_loss` /
-  `profit_rate` are parseable: the balance response has no trustworthy
-  per-symbol as-of and can lag the live quote materially.
-- With `include_current_price=True`, every US position is refreshed through the
-  same venue-aware KIS overseas current-price path as `get_quote`, with Yahoo as
-  fallback. `evaluation_amount`, `profit_loss`, and `profit_rate` are
-  recalculated from that refreshed price. KIS KR holdings retain their complete
-  bulk balance snapshot to avoid the domestic per-symbol N+1.
+- Toss is the KR/US equity account source; Upbit is the crypto source.
+- `account_mode="kis_live"` and `"kis_mock"` are historical selectors only and
+  fail closed for operational holdings collection.
+- If `include_current_price=False`, `minimum_value` filtering is skipped.
+- Current equity prices use the Toss market-data boundary. Provider failure is
+  explicit and no KIS/Yahoo value is synthesized as Toss evidence.
+- Manual holdings remain owner-scoped and do not acquire broker sellability.
 - Upbit crypto current prices are fetched via batch ticker request (`/v1/ticker?markets=...`)
 - During Upbit holdings collection, coins that raise `UpbitSymbolNotRegisteredError` or `UpbitSymbolInactiveError` on name lookup are silently skipped (not added to `errors`).
 - Before batch ticker request, tradable markets are loaded from `upbit_symbol_universe` and only valid holdings symbols are included in the batch
@@ -2023,39 +1898,38 @@ Response contract additions:
 - `errors`: includes per-symbol price lookup failures for holdings price refresh (example fields: `source`, `market`, `symbol`, `stage`, `error`)
 - Refreshed US positions expose `price_source`, nullable `price_asof`,
   `data_state`, and `profit_rate_price_source`; provider metadata such as
-  `session`, `venue`, and `delayed` is included when available. If both live
-  quote sources fail, the retained KIS balance snapshot is marked
-  `data_state="stale"` with
-  `data_state_reason="live_price_refresh_failed"` rather than silently reading
-  as current.
+  `session`, `venue`, and `delayed` is included when available. If the Toss
+  refresh fails, retained valuation evidence is marked `data_state="stale"`
+  with `data_state_reason="live_price_refresh_failed"` rather than silently
+  reading as current.
 - `filters.minimum_value`: when `minimum_value=None` in the request, this field contains the per-currency threshold dict that was applied
 - When `TOSS_API_ENABLED=true`, Toss Open API holdings are emitted with `broker="toss"`, `source="toss_api"`. `order_routable` (and `get_cash_balance` `orderable`, `/invest` home `isTradeable`) remain gated on `TOSS_LIVE_ORDER_MUTATIONS_ENABLED` (ROB-549). General holdings/home/briefing reads omit `sellable_quantity` or return `sellableQuantity=null`; they never fan out to Toss `/api/v1/sellable-quantity`. Toss live order tools revalidate sellability directly at the broker immediately before a live sell mutation. Every live sell placement requires an explicit, finite, positive `quantity`: an orderAmount-only live sell is rejected with `error_code="sell_quantity_required"` before any broker mutation, because Toss's orderAmount shape carries no broker-authoritative quantity and one is never synthesized from holdings, snapshots, or sellable caches. Successful live sell place/modify responses publish the authorizing evidence as `fresh_sellable_quantity` and `sellable_quantity_source="toss_broker_preflight"`.
-- The composed KIS/Upbit/manual/Toss portfolio read model used by general holdings, home, briefing, and calendar held-key reads uses a short-lived process-shared Redis snapshot with a Redis distributed singleflight (ROB-1310). A live owner renews its lock lease; corrupt entries re-enter the same singleflight recovery path, while Redis outages/owner death retain bounded direct read-only recovery and never fabricate sellable data. Calendar held-key reads never fall back to full live readers: a cold/invalid snapshot returns an explicit `portfolio_snapshot_unavailable` 503 with availability metadata. The narrower Toss holdings/cash snapshot remains available for its direct broker reader; the older per-symbol sellable cache remains invalidated after successful sell mutations but is not a sizing or general-read source. `need_sellable=false` paths skip Toss sellable reads entirely.
-- The Home-to-MCP snapshot projection preserves the legacy MCP contract: KIS/Upbit/Toss/manual account IDs use canonical groups, crypto symbols use the `KRW-` market prefix, US P/L remains in native currency, and Home ratio fields are exposed as percentage points. Snapshot serialization excludes sellable and pending-sell quantities.
-- When Toss API holdings succeed, duplicate Toss `manual_holdings` rows for the same market/symbol are hidden from normal output. KIS and Toss holdings for the same symbol are not deduplicated because they are separate broker subaccounts.
+- The composed Upbit/manual/Toss portfolio read model used by general holdings, home, briefing, and calendar held-key reads uses a short-lived process-shared Redis snapshot with a Redis distributed singleflight (ROB-1310). A live owner renews its lock lease; corrupt entries re-enter the same singleflight recovery path, while Redis outages/owner death retain bounded direct read-only recovery and never fabricate sellable data. Calendar held-key reads never fall back to full live readers: a cold/invalid snapshot returns an explicit `portfolio_snapshot_unavailable` 503 with availability metadata.
+- The Home-to-MCP snapshot projection preserves the MCP contract: Upbit/Toss/manual account IDs use canonical groups, crypto symbols use the `KRW-` market prefix, US P/L remains in native currency, and Home ratio fields are exposed as percentage points. Snapshot serialization excludes sellable and pending-sell quantities.
+- When Toss API holdings succeed, duplicate Toss `manual_holdings` rows for the same market/symbol are hidden from normal output.
 - When Toss API holdings fail, existing Toss `manual_holdings` rows remain visible as fallback and the response includes a partial `source="toss_api"` error.
 
 Market routing:
-- `market` can override routing: `crypto|upbit`, `kr|kis|krx|kospi|kosdaq`, `us|yahoo|nasdaq|nyse`
+- `market` can override routing: `crypto|upbit`, `kr|toss|krx|kospi|kosdaq`, `us|toss|nasdaq|nyse`
 - If `market` is omitted, routing is heuristic: KRW-/USDT- prefix -> crypto, 6-digit code -> KR equity, otherwise -> US equity
 - Crypto symbols must include `KRW-` or `USDT-` prefix
 
 ### `get_portfolio_allocation` spec
 
 Parameters:
-- `account`: optional account filter matching `get_holdings` and `get_cash_balance` (`kis`, `upbit`, `toss`, `samsung_pension`, `isa`, `paper`, `paper:<name>`)
+- `account`: optional account filter matching `get_holdings` and `get_cash_balance` (`upbit`, `toss`, `samsung_pension`, `isa`, `paper`, `paper:<name>`)
 - `market`: optional holdings market filter (`kr`, `us`, `crypto`); cash is still included when `include_cash=true` unless `account` excludes the cash account
 - `include_cash`: include cash balances in the allocation denominator, default `true`
 - `include_positions`: include per-position normalized rows, default `false`
 - `target_weights`: optional mapping from asset class to target percent; when omitted, no over/underweight flags are emitted
 - `drift_threshold_pct`: threshold for `overweight` / `underweight` labels when `target_weights` is provided, default `5.0`
-- `account_mode`: same routing selector as `get_holdings` (`db_simulated`, `kis_mock`, `kis_live`)
+- `account_mode`: same routing selector as `get_holdings` (`db_simulated`, `toss_live`); KIS modes reject as non-operational
 
 Behavior:
 - Read-only only. The tool performs no order preview, order placement, mutation, reconciliation, or live approval action.
 - Converts USD holdings and USD cash to KRW using the same exchange-rate service used by portfolio cash tools.
 - Aggregates direct US equity as `us_equity`, KR equity as `kr_equity`, Upbit holdings as `crypto`, and cash as `cash`.
-- Looks through KR-listed ETFs when KRX ETF metadata is available. KR ETFs classified as `미국주식` by `app.services.krx.classify_etf_category()` are counted as effective `us_equity`, while their surface account remains KR/KIS/Toss.
+- Looks through KR-listed ETFs when KRX ETF metadata is available. KR ETFs classified as `미국주식` by `app.services.krx.classify_etf_category()` are counted as effective `us_equity`, while their surface account remains KR/Toss.
 - Non-US foreign, commodity, bond, and unclear ETF categories are counted as `other` rather than Korean equity.
 - If KRX ETF metadata lookup fails, the tool records a degraded `krx_etf` error and keeps KR ETF positions in their surface `kr_equity` bucket.
 - Positions whose valuation is unavailable are excluded from the denominator and listed in `warnings` with `reason="position_value_unavailable"`.
@@ -2419,16 +2293,15 @@ The `MCP_PROFILE` env var selects which tool subset is registered at startup.
 
 | Profile | Value | Order surface |
 |---|---|---|
-| Default | `default` (or unset) | Legacy `place_order`/`cancel_order`/`modify_order`/`get_order_history` + typed `kis_live_*` + typed `kis_mock_*`; typed `kiwoom_mock_*` is added only by the existing `KIWOOM_MOCK_ENABLED=true` ROB-601 gate; Alpaca/us-dual paper tools are absent |
-| Paper/mock-only | `hermes-paper-kis` | Typed `kis_mock_*` only — live surface **physically absent** |
-| Crypto | `crypto` | Default read-only/research surface plus crypto-only tools (`get_crypto_fear_greed`, `get_crypto_market_regime`, `get_upbit_index`, ...) **plus** the generic `place_order`/`cancel_order`/`modify_order`/`get_order_history` (crypto live entry point) and `live_reconcile_orders`; typed `kis_live_*`/`kis_mock_*` are absent |
-| US paper | `us-paper` | Default read-only/research surface plus Alpaca paper and `us_dual_paper_*` tools; no KIS/generic order tools |
-| DB paper simulator | `db-paper` | Default read-only/research surface plus internal `paper.paper_*` simulator account, analytics, and journal bridge tools; no KIS/generic order tools |
-| Kiwoom mock | `kiwoom` | Default read-only/research surface plus **both** typed Kiwoom mock namespaces (no KIS/generic order tools): the eight KR `kiwoom_mock_*` tools and — unconditionally, unlike DEFAULT's `KIWOOM_MOCK_US_ENABLED` gate — the seven US `kiwoom_mock_us_*` tools, four of which are mutations. Prefer `kiwoom_kr` for a KR-only session (ROB-1159). |
-| Kiwoom mock KR-only | `kiwoom_kr` | ROB-1159/1173 least-privilege split of `kiwoom`: default read-only/research surface plus **exactly** the eight KR `kiwoom_mock_*` tools (`kiwoom_mock_get_order_detail` included). The whole profile runs through an independent closed-world exact-set registration proxy (118 base names plus explicitly gated optional sets), and the KR registrar has a nested eight-name proxy. Thus the `kiwoom_mock_us_*` namespace, `kis_mock_mirror_execute_report`, and even a new alias missing from central mutation-name lists are physically absent. Requires `MCP_AUTH_TOKEN` on network transports, and (when `KIWOOM_MOCK_ENABLED=true`) complete mock credentials plus the exact `https://mockapi.kiwoom.com` base URL at startup. |
-| Analysis readonly | `analysis_readonly` | Codex/headless read/analysis allowlist only: `get_operating_briefing`, `route_request`, `get_trading_policy`, selected quote/fundamental/analysis tools, `suggest_order_account`, `get_holdings`, `toss_get_positions`, and explicitly labeled analysis persistence. No order/cancel/modify/reconcile/preview/settings/watch/admin/manual-holdings mutation tools are registered. |
-| Account read | `account_read` | TradingCodex account adapter allowlist only: existing KIS/Toss account reads plus `kiwoom_mock_get_positions`, `kiwoom_mock_get_orderable_cash`, and `kiwoom_mock_get_order_history`. Kiwoom and all other mutations remain physically absent. |
-| TradingCodex execution | `tradingcodex_execution` | Reviewed TradingCodex BrokerAdapter allowlist: existing account/advisory/learning/execution tools plus the seven mock-pinned typed `kiwoom_mock_*` tools. Requires a dedicated auth token and required approval-hash modes; no Kiwoom live or generic unscoped Kiwoom order surface is registered. |
+| Default | `default` (or unset) | Toss KR/US equity and Upbit crypto surfaces; typed `kis_live_*`/`kis_mock_*` tools are absent. Typed `kiwoom_mock_*` remains controlled by its existing gate. |
+| Crypto | `crypto` | Read-only/research plus Upbit crypto order/history/reconcile tools; no equity or KIS order surface. |
+| US paper | `us-paper` | Read-only/research plus Alpaca paper and `us_dual_paper_*` tools; no live equity order surface. |
+| DB paper simulator | `db-paper` | Read-only/research plus internal `paper.paper_*` simulator, analytics, and journal bridge tools. |
+| Kiwoom mock | `kiwoom` | Read-only/research plus both typed Kiwoom mock namespaces. Prefer `kiwoom_kr` for a KR-only session. |
+| Kiwoom mock KR-only | `kiwoom_kr` | Read-only/research plus exactly the eight KR `kiwoom_mock_*` tools; US and KIS namespaces are absent. |
+| Analysis readonly | `analysis_readonly` | Codex/headless read/analysis allowlist only; no order, preview, reconcile, or KIS provider tool. |
+| Account read | `account_read` | TradingCodex account adapter allowlist for Toss plus separately gated Kiwoom mock reads; no KIS provider read. |
+| TradingCodex execution | `tradingcodex_execution` | Reviewed Toss/Upbit execution and gated Kiwoom mock allowlist. Requires dedicated auth and approval-hash modes; no KIS tools. |
 | Canonical paper execution | `paper_execution` | ROB-845 façade + ROB-848 validation + ROB-849 operator kill switch. Default-off and auth-required; no generic, venue-native, or live tools. |
 
 Generic `live_reconcile_orders` is evidence-first: `none` returns
@@ -2482,16 +2355,6 @@ Until that composition is installed, capability reads work but every experiment
 operation fails closed with `provenance_verifier_unavailable` before adapter,
 native-ledger, client, or broker activity.
 
-### Profile: `hermes-paper-kis`
-
-Set `MCP_PROFILE=hermes-paper-kis` on paper-only deployments (e.g., where `KIS_MOCK_ENABLED=true`).
-
-- `kis_live_place_order`, `kis_live_cancel_order`, `kis_live_modify_order`, `kis_live_get_order_history` are **not registered**.
-- The legacy ambiguous `place_order`, `cancel_order`, `modify_order`, `get_order_history` are **not registered**.
-- Only `kis_mock_*` typed order tools are registered.
-- Shared read-only research and portfolio tools remain available; split-profile-only tools such as Alpaca paper, crypto-only, and Kiwoom are absent.
-
-**Operator validation:** after deploying with `hermes-paper-kis`, check the MCP `/mcp` listing and confirm that none of `kis_live_*` or the legacy ambiguous order tools appear.
 
 ### Profile: `analysis_readonly` (ROB-745)
 
@@ -2512,10 +2375,8 @@ Allowed tools:
 - `get_top_stocks`
 - `get_news`
 - `get_fx_rate`
-- `suggest_order_account`
 - `get_holdings`
 - `toss_get_positions`
-- `get_intraday_investor_flow`
 - `analysis_artifact_save`
 - `analysis_artifact_get`
 - `analysis_bundle_get` (only when `ANALYSIS_SNAPSHOT_BUNDLES_MCP_ENABLED=true`)
@@ -2563,7 +2424,6 @@ Allowed tools:
 - `get_cash_balance`
 - `toss_get_orderable_cash`
 - `get_order_history`
-- `kis_live_get_order_history`
 - `toss_get_order_history`
 - `kiwoom_mock_get_positions`
 - `kiwoom_mock_get_orderable_cash`
@@ -2602,12 +2462,10 @@ Allowed read/advisory tools:
 - `get_cash_balance`
 - `toss_get_orderable_cash`
 - `get_order_history`
-- `kis_live_get_order_history`
 - `toss_get_order_history`
 - `kiwoom_mock_get_positions`
 - `kiwoom_mock_get_orderable_cash`
 - `kiwoom_mock_get_order_history`
-- `suggest_order_account`
 - `get_fx_rate`
 - `route_request`
 - `get_trading_policy`
@@ -2620,8 +2478,6 @@ Allowed read/advisory tools:
 Allowed write/order tools:
 - `place_order`
 - `cancel_order`
-- `kis_live_place_order`
-- `kis_live_cancel_order`
 - `toss_preview_order`
 - `toss_place_order`
 - `toss_cancel_order`
@@ -2776,39 +2632,14 @@ terminal forecast ID and retain the old row in quarantine. See
 for source-basis limits, the legacy-row procedure, read-only dry-run settings,
 and the ROB-1041/1042/1043 split.
 
-### Typed KIS order tools
+### Inactive historical KIS adapters
 
-The `default` and `hermes-paper-kis` profiles provide explicitly-named KIS
-typed variants:
-
-**Mock (KIS official mock / paper):**
-- `kis_mock_place_order` — hard-pinned `is_mock=True`; fails closed if KIS mock config missing
-- `kis_mock_cancel_order`
-- `kis_mock_modify_order`
-- `kis_mock_get_order_history`
-
-**Live (real-money):**
-- `kis_live_place_order` — hard-pinned `is_mock=False`
-- `kis_live_cancel_order`
-- `kis_live_modify_order`
-- `kis_live_get_order_history`
-
-Each typed tool rejects any `account_mode` value other than its own pinned mode.
-
-### Fail-closed behavior
-
-`kis_mock_*` tools return a structured error (without delegating) when KIS mock config is incomplete:
-
-```json
-{
-  "success": false,
-  "error": "KIS mock account is disabled or missing required configuration: KIS_MOCK_ENABLED, KIS_MOCK_APP_KEY",
-  "source": "kis",
-  "account_mode": "kis_mock"
-}
-```
-
-With all mock vars missing, the `hermes-paper-kis` profile is effectively read-only KIS — the safe state for a misconfigured paper deployment.
+No deployed MCP profile registers `kis_live_*`, `kis_mock_*`, KIS reconcile, or
+KIS mirror tools. `account_mode="kis_live"` and `"kis_mock"` are retained only
+where historical ledger rows require their original provenance; operational
+dispatch fails closed and never falls back to Toss. Dormant transport adapters
+may remain importable for historical compatibility, but operators must not
+configure or activate them in production.
 
 ### Binance Demo scalping auto-order lane (removed, ROB-1147)
 

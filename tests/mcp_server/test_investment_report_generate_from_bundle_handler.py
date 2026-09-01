@@ -32,7 +32,7 @@ def _enabled(monkeypatch: pytest.MonkeyPatch):
 def _kwargs(**overrides):
     base = {
         "market": "us",
-        "account_scope": "kis_live",
+        "account_scope": "toss_live",
         "title": "t",
         "summary": "s",
         "kst_date": "2026-05-29",
@@ -56,8 +56,22 @@ async def test_unsupported_account_scope_fails_closed(_enabled):
     )
     assert res["success"] is False
     assert res["error"] == "unsupported_account_scope"
-    assert "kis_live" in str(res["supported_pairs"])
+    assert "toss_live" in str(res["supported_pairs"])
     assert "hermes" in res["hint"].lower()
+
+
+@pytest.mark.asyncio
+async def test_explicit_kis_scope_is_provider_unsupported_before_any_work():
+    res = await h.investment_report_generate_from_bundle_impl(
+        **_kwargs(account_scope="kis_live")
+    )
+    assert res == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "market": "us",
+        "account_scope": "kis_live",
+    }
 
 
 @pytest.mark.asyncio
@@ -163,7 +177,7 @@ def test_tool_description_documents_contract():
     )
 
     desc = GENERATE_FROM_BUNDLE_DESCRIPTION
-    assert "kis_live" in desc
+    assert "toss_live" in desc
     assert "client_item_key" in desc
     assert "overwrite_existing" in desc
     assert "market_session" in desc

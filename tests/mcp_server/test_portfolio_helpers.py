@@ -130,18 +130,17 @@ class TestPositionToOutput:
         position.update(overrides)
         return position
 
-    def test_kis_source_routable_true(self) -> None:
-        # ROB-541: per-position order_routable + account_mode mirror get_holdings.
+    def test_kis_source_remains_non_routable_historical_provenance(self) -> None:
         output = position_to_output(self._base_position(source="kis_api", broker="kis"))
-        assert output["order_routable"] is True
+        assert output["order_routable"] is False
         assert output["account_mode"] == "kis_live"
 
-    def test_toss_api_source_routable_false(self) -> None:
+    def test_toss_api_source_uses_toss_live_provenance(self) -> None:
         output = position_to_output(
             self._base_position(source="toss_api", broker="toss")
         )
         assert output["order_routable"] is False
-        assert output["account_mode"] == "toss_api"
+        assert output["account_mode"] == "toss_live"
 
     def test_manual_source_routable_false(self) -> None:
         output = position_to_output(
@@ -158,9 +157,7 @@ class TestPositionToOutput:
         assert output["order_routable"] is True
         assert output["account_mode"] == "upbit_live"
 
-    def test_routing_mode_respected_for_kis_mock(self) -> None:
-        # When the position carries routing_mode (stamped by get_holdings),
-        # the per-position account_mode matches the GROUP label exactly.
+    def test_routing_mode_is_preserved_for_historical_kis_mock(self) -> None:
         output = position_to_output(
             self._base_position(source="kis_api", broker="kis", routing_mode="kis_mock")
         )

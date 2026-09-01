@@ -43,7 +43,7 @@ def test_penny_candidate_demoted_to_watch_with_reason():
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
     )
     item = next(i for i in items if i.symbol == "PENNY")
@@ -74,7 +74,7 @@ def test_non_common_candidate_rejected():
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
     )
     item = next(i for i in items if i.symbol == "ETF1")
@@ -98,7 +98,7 @@ def test_clean_candidate_stays_buy_review():
             "portfolio",
             {
                 "buying_power": {"usd": 1000.0, "krw": 0.0},
-                "primary_source": "kis",
+                "primary_source": "toss",
                 "holdings": [],
             },
         ),
@@ -112,7 +112,7 @@ def test_clean_candidate_stays_buy_review():
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
     )
     item = next(i for i in items if i.symbol == "GOOD")
@@ -143,7 +143,7 @@ def test_quality_flag_priority_order_penny_over_illiquid():
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
     )
     item = next(i for i in items if i.symbol == "PI")
@@ -169,7 +169,7 @@ def test_quality_reason_wins_over_budget_when_both_apply():
             "portfolio",
             {
                 "buying_power": {"usd": 0, "krw": 0},
-                "primary_source": "kis",
+                "primary_source": "toss",
                 "holdings": [],
             },
         ),
@@ -183,7 +183,7 @@ def test_quality_reason_wins_over_budget_when_both_apply():
     items = EvidenceAutoEmitter().propose(
         snapshots=snaps,
         request_market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         now=dt.datetime(2026, 6, 9),
     )
     item = next(i for i in items if i.symbol == "PB")

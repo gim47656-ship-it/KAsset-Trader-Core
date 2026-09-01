@@ -1283,14 +1283,11 @@ classify the broker's response after a real submit attempt (network
 exception, ambiguous status, missing `broker_order_id` — see
 `revalidation.py`'s `_classify_submit`). By design this is a **holding**
 state, not terminal, and nothing in this feature auto-voids it. To investigate,
-run the existing broker-evidence reconcile tools —
-`kis_live_reconcile_orders` (KR) or `live_reconcile_orders` (US/crypto,
-see `docs/runbooks/kis-live-order-reconcile.md` /
-`docs/runbooks/live-order-reconcile.md`) — against the rung's
-`correlation_id`/`broker_order_id` (from the DB Verification query or the
-Evidence Template above) to pull real order-status evidence and determine
-whether it actually got submitted, filled, or rejected. For Toss use targeted
+run the broker-evidence reconciler for the rung's actual operational provider.
+For Toss use targeted
 `toss_reconcile_orders(order_id=<broker-order-id>, dry_run=False)`; it projects
 confirmed partial/fill/cancel evidence through `record_fill_evidence` and
-retries terminal-row projection drift. Pending/unknown evidence never infers a
-terminal proposal state.
+retries terminal-row projection drift. Use the existing Upbit evidence path for
+crypto. A historical KIS intent remains `unverified` for manual review and is
+never reinterpreted or resubmitted through Toss.
+Pending/unknown evidence never infers a terminal proposal state.

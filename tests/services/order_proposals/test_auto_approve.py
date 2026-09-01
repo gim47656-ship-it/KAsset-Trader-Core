@@ -34,8 +34,8 @@ from app.services.order_proposals.service import RungInput
 
 def _group(**overrides):
     values = {
-        "market": "equity_kr",
-        "account_mode": "kis_live",
+        "market": "crypto",
+        "account_mode": "upbit",
         "broker_account_id": "acct-1",
         "order_type": "limit",
         "action": "place",
@@ -1679,7 +1679,7 @@ async def test_daily_notional_uses_auto_approval_time_not_create_time(db_session
         await service.create_proposal(
             symbol="005930",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             broker_account_id=account_id,
             side="buy",
             order_type="limit",
@@ -1697,7 +1697,7 @@ async def test_daily_notional_uses_auto_approval_time_not_create_time(db_session
     await service.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=account_id,
         side="buy",
         order_type="limit",
@@ -1716,7 +1716,7 @@ async def test_daily_notional_uses_auto_approval_time_not_create_time(db_session
     probe = await service.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=account_id,
         side="buy",
         order_type="limit",
@@ -1750,7 +1750,7 @@ async def test_daily_notional_reuses_durable_execution_price_cap_observation(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=account_id,
         side="sell",
         order_type="limit",
@@ -1787,7 +1787,7 @@ async def test_daily_notional_reuses_durable_execution_price_cap_observation(
     probe = await service.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=account_id,
         side="buy",
         order_type="limit",

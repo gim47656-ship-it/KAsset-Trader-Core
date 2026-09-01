@@ -37,12 +37,12 @@ def _unique_symbol() -> str:
 def _patch_resolvers(
     monkeypatch,
     *,
-    kis: list[dict[str, Any]],
+    toss: list[dict[str, Any]],
     manual: list[Any],
     watch: list[str],
 ) -> None:
-    async def fake_kis(market: str) -> list[Any]:
-        return list(kis)
+    async def fake_toss(market: str) -> list[Any]:
+        return list(toss)
 
     async def fake_manual(market: str, user_id: int) -> list[Any]:
         return list(manual)
@@ -50,7 +50,7 @@ def _patch_resolvers(
     async def fake_watch(market: str) -> list[str]:
         return list(watch)
 
-    monkeypatch.setattr(snapshot_job, "_fetch_kis_holdings", fake_kis)
+    monkeypatch.setattr(snapshot_job, "_fetch_toss_holdings", fake_toss)
     monkeypatch.setattr(snapshot_job, "_fetch_manual_holdings", fake_manual)
     monkeypatch.setattr(snapshot_job, "_fetch_active_watch_symbols", fake_watch)
 
@@ -75,7 +75,7 @@ async def test_resolve_symbols_override_normalized_with_to_db_symbol() -> None:
 async def test_resolve_symbols_kr_holdings_union_watch(monkeypatch) -> None:
     _patch_resolvers(
         monkeypatch,
-        kis=[{"pdno": "005930"}, {"pdno": "000660"}],
+        toss=[{"symbol": "005930"}, {"symbol": "000660"}],
         manual=[SimpleNamespace(ticker="035420")],
         # "5930" normalizes to 005930 → duplicate collapses into the union.
         watch=["005380", "5930"],
@@ -89,7 +89,7 @@ async def test_resolve_symbols_kr_holdings_union_watch(monkeypatch) -> None:
 async def test_resolve_symbols_us_holdings_union_watch(monkeypatch) -> None:
     _patch_resolvers(
         monkeypatch,
-        kis=[{"ovrs_pdno": "BRK/B"}],
+        toss=[{"symbol": "BRK/B"}],
         manual=[SimpleNamespace(ticker="aapl")],
         watch=["TSLA", "BRK-B"],
     )
@@ -102,7 +102,7 @@ async def test_resolve_symbols_us_holdings_union_watch(monkeypatch) -> None:
 async def test_resolve_symbols_limit_caps_resolved_set(monkeypatch) -> None:
     _patch_resolvers(
         monkeypatch,
-        kis=[{"pdno": "005930"}, {"pdno": "000660"}],
+        toss=[{"symbol": "005930"}, {"symbol": "000660"}],
         manual=[],
         watch=["035420"],
     )

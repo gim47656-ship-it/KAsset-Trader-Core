@@ -17,10 +17,9 @@ Lockdown invariants:
 * Buy candidates are emitted only when the per-symbol quote evidence
   reports ``status="ok"`` with non-zero best bid + best ask + depth.
   Missing or unavailable quote evidence → no buy candidate.
-* Sell candidates are emitted only when the portfolio snapshot has
-  ``primary_source="kis"`` and the held row reports a positive
-  ``sellable_quantity``. Manual/reference holdings never produce sell
-  candidates here.
+* Toss portfolio에 양수 ``quantity``로 확인된 보유 종목만 sell 검토 후보로
+  낸다. 실제 주문 가능 수량은 주문 직전 Toss preflight에서 다시 확인하며,
+  manual/reference holdings는 여기서 sell 후보로 승격하지 않는다.
 * Watch candidates are emitted when candidate/news/quote evidence
   exists but action grounds are insufficient — these surface as review
   items so the operator can validate the thesis.
@@ -213,12 +212,11 @@ def _quote_is_actionable(quote: dict[str, Any]) -> bool:
     return best_bid > 0 and best_ask > 0 and (bid_depth > 0 or ask_depth > 0)
 
 
-def _held_kis_symbols(
+def _held_toss_symbols(
     portfolio_payload: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Return KIS-primary held holdings keyed by ticker. Empty dict when
-    primary_source is not 'kis' — manual rows are never promoted here."""
-    if portfolio_payload.get("primary_source") != "kis":
+    """Toss-primary 보유 종목을 ticker 기준으로 반환한다."""
+    if portfolio_payload.get("primary_source") not in {"toss", "toss_live"}:
         return {}
     holdings = portfolio_payload.get("holdings") or []
     out: dict[str, dict[str, Any]] = {}
@@ -456,15 +454,15 @@ class EvidenceAutoEmitter:
             "krw": _to_float(buying_power.get("krw")),
         }
 
-        held = _held_kis_symbols(portfolio_payload)
+        held = _held_toss_symbols(portfolio_payload)
         candidate_actionable = candidate_usefulness == "useful"
 
         items: list[IngestReportItem] = []
 
-        # Sell candidates — held + sellable + quote evidence supports liquidity.
+        # Toss 보유 수량과 quote 근거가 모두 있을 때만 sell 검토 후보를 낸다.
         for ticker, holding in held.items():
-            sellable = holding.get("sellable_quantity") or 0
-            if sellable <= 0:
+            held_quantity = holding.get("quantity") or 0
+            if held_quantity <= 0:
                 continue
             symbol_pair = symbol_quotes.get(ticker)
             if symbol_pair is None:
@@ -476,7 +474,7 @@ class EvidenceAutoEmitter:
                 symbol_snapshot,
                 extra={
                     "portfolio_snapshot_uuid": _snapshot_uuid(portfolio_snapshot),
-                    "sellable_quantity": sellable,
+                    "held_quantity": held_quantity,
                     "quote_status": quote.get("status"),
                     "best_bid": quote.get("best_bid"),
                     "best_ask": quote.get("best_ask"),
@@ -492,7 +490,7 @@ class EvidenceAutoEmitter:
                     side="sell",
                     intent="sell_review",
                     rationale=(
-                        f"보유 종목 {ticker} sell 검토 — sellable {sellable}, "
+                        f"보유 종목 {ticker} sell 검토 — quantity {held_quantity}, "
                         f"best_bid {quote.get('best_bid')}, "
                         f"spread_bps {quote.get('spread_bps')}"
                     ),
@@ -535,8 +533,8 @@ class EvidenceAutoEmitter:
                 base_verdict, quality_flags
             )
             # ROB-347 — budget demotion (buy_review only; never fabricates USD).
-            # Applies only to US market under kis_live account scope.
-            if request_market == "us" and account_scope == "kis_live":
+            # Toss 미국 주식 운영 scope에만 예산 demotion을 적용한다.
+            if request_market == "us" and account_scope == "toss_live":
                 verdict, budget_reasons = demote_for_budget(verdict, budget_state)
                 if budget_reasons and reject_or_wait_reason is None:
                     reject_or_wait_reason = budget_reasons[0]
@@ -691,9 +689,8 @@ class EvidenceAutoEmitter:
                 )
             )
 
-        # ROB-335 — intraday floor: classify EVERY held KIS symbol (not just
-        # sellable+actionable) so held_actions is never empty, and surface an
-        # explicit no-new-buy reason when the screener universe is not useful.
+        # intraday floor는 아직 분류되지 않은 모든 Toss 보유 종목을 다뤄
+        # held_actions가 비지 않게 하고, quote 부재는 data_gap으로 드러낸다.
         if self._intraday_floor:
             already = {i.symbol for i in items if i.symbol}
             for ticker, holding in held.items():
@@ -719,8 +716,8 @@ class EvidenceAutoEmitter:
                                 else "rebalance_review"
                             ),
                             rationale=(
-                                f"보유 종목 {ticker} {verdict} — sellable "
-                                f"{holding.get('sellable_quantity')}, "
+                                f"보유 종목 {ticker} {verdict} — quantity "
+                                f"{holding.get('quantity')}, "
                                 f"quote {quote.get('status') if quote else 'none'}"
                             ),
                             operation="review",
@@ -731,9 +728,7 @@ class EvidenceAutoEmitter:
                                     "portfolio_snapshot_uuid": _snapshot_uuid(
                                         portfolio_snapshot
                                     ),
-                                    "sellable_quantity": holding.get(
-                                        "sellable_quantity"
-                                    ),
+                                    "held_quantity": holding.get("quantity"),
                                     "quote_status": quote.get("status")
                                     if quote
                                     else "no_snapshot",

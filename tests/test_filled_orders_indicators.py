@@ -420,6 +420,53 @@ class TestFilledOrderSchema:
         assert item.indicators is not None
         assert item.indicators.rsi_14 == pytest.approx(42.3)
 
+    def test_account_descriptions_use_operational_providers_without_narrowing_values(
+        self,
+    ):
+        from app.schemas.n8n.filled_orders import N8nFilledOrderItem
+        from app.schemas.n8n.trade_review import N8nTradeReviewItem
+
+        expected = "운영 계좌 식별자: toss 또는 upbit"
+        assert (
+            N8nFilledOrderItem.model_json_schema()["properties"]["account"][
+                "description"
+            ]
+            == expected
+        )
+        assert (
+            N8nTradeReviewItem.model_json_schema()["properties"]["account"][
+                "description"
+            ]
+            == expected
+        )
+
+        historical_filled = N8nFilledOrderItem(
+            symbol="005930",
+            raw_symbol="005930",
+            instrument_type="equity_kr",
+            side="sell",
+            price=70000,
+            quantity=1,
+            total_amount=70000,
+            currency="KRW",
+            account="kis",
+            order_id="historical-order",
+            filled_at="2026-03-22T10:00:00+09:00",
+        )
+        historical_review = N8nTradeReviewItem(
+            order_id="historical-order",
+            account="kis",
+            symbol="005930",
+            instrument_type="equity_kr",
+            side="sell",
+            price=70000,
+            quantity=1,
+            total_amount=70000,
+            filled_at="2026-03-22T10:00:00+09:00",
+            verdict="neutral",
+        )
+        assert historical_filled.account == historical_review.account == "kis"
+
 
 @pytest.mark.unit
 class TestFetchFilledOrdersWithIndicators:
@@ -447,12 +494,7 @@ class TestFetchFilledOrdersWithIndicators:
                 return_value=(mock_orders, []),
             ),
             patch(
-                "app.services.filled_orders_service._fetch_kis_domestic_filled",
-                new_callable=AsyncMock,
-                return_value=([], []),
-            ),
-            patch(
-                "app.services.filled_orders_service._fetch_kis_overseas_filled",
+                "app.services.filled_orders_service._fetch_toss_filled",
                 new_callable=AsyncMock,
                 return_value=([], []),
             ),
@@ -490,12 +532,7 @@ class TestFetchFilledOrdersWithIndicators:
                 return_value=(mock_orders, []),
             ),
             patch(
-                "app.services.filled_orders_service._fetch_kis_domestic_filled",
-                new_callable=AsyncMock,
-                return_value=([], []),
-            ),
-            patch(
-                "app.services.filled_orders_service._fetch_kis_overseas_filled",
+                "app.services.filled_orders_service._fetch_toss_filled",
                 new_callable=AsyncMock,
                 return_value=([], []),
             ),

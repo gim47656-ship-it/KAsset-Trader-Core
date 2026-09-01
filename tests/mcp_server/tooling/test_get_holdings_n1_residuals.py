@@ -182,7 +182,7 @@ def _kr_refresh_position(symbol: str = "005930") -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_kr_price_enrichment_db_hit_matches_legacy_result_and_skips_kis(
+async def test_kr_price_enrichment_db_hit_skips_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_frame = pd.DataFrame(
@@ -197,9 +197,9 @@ async def test_kr_price_enrichment_db_hit_matches_legacy_result_and_skips_kis(
         }
     )
     db_read = AsyncMock(return_value=db_frame)
-    kis_quote = AsyncMock(return_value={"price": 62_000.0})
+    kr_quote = AsyncMock(return_value={"price": 62_000.0})
     monkeypatch.setattr(portfolio_holdings, "cache_first_kr", db_read)
-    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kis_quote)
+    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kr_quote)
 
     actual = await portfolio_holdings._fetch_price_map_for_positions(
         [_kr_refresh_position()]
@@ -212,7 +212,7 @@ async def test_kr_price_enrichment_db_hit_matches_legacy_result_and_skips_kis(
         {},
     )
     db_read.assert_awaited_once_with("005930", 2)
-    kis_quote.assert_not_awaited()
+    kr_quote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -220,31 +220,25 @@ async def test_kr_price_enrichment_db_hit_matches_legacy_result_and_skips_kis(
     "cached",
     [None, pd.DataFrame(), pd.DataFrame({"close": [None]})],
 )
-async def test_kr_price_enrichment_db_miss_falls_back_to_legacy_kis_result(
+async def test_kr_price_enrichment_db_miss_falls_back_to_provider(
     monkeypatch: pytest.MonkeyPatch,
     cached: pd.DataFrame | None,
 ) -> None:
     db_read = AsyncMock(return_value=cached)
-    kis_quote = AsyncMock(return_value={"price": 62_000.0})
+    kr_quote = AsyncMock(return_value={"price": 62_000.0})
     monkeypatch.setattr(portfolio_holdings, "cache_first_kr", db_read)
-    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kis_quote)
+    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kr_quote)
 
     actual = await portfolio_holdings._fetch_price_map_for_positions(
         [_kr_refresh_position()]
     )
 
     assert actual == ({("equity_kr", "005930"): 62_000.0}, [], {}, {})
-    kis_quote.assert_awaited_once_with("005930")
+    kr_quote.assert_awaited_once_with("005930")
 
 
-def _kr_kis_snapshot_position(symbol: str = "005930") -> dict[str, object]:
-    """A KIS-account KR holding whose balance snapshot is numerically complete.
-
-    ``_collect_kis_positions`` fills these four fields in one bulk balance call
-    (``prpr`` / ``evlu_amt`` / ``evlu_pfls_amt`` / ``evlu_pfls_rt``). ROB-902:
-    such a KR holding must NOT trigger the per-symbol itemchartprice refresh.
-    ROB-1095 intentionally removed the corresponding US snapshot exemption.
-    """
+def _historical_kis_snapshot_position(symbol: str = "005930") -> dict[str, object]:
+    """과거 KIS 출처 행도 현재가 갱신의 특별 예외가 되지 않는다."""
     return {
         "instrument_type": "equity_kr",
         "symbol": symbol,
@@ -257,51 +251,45 @@ def _kr_kis_snapshot_position(symbol: str = "005930") -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_kr_kis_snapshot_skips_price_refresh_and_makes_zero_kis_http(
+async def test_historical_kis_snapshot_uses_current_kr_price_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ROB-902: valid KIS-account KR snapshot fans out 0 DB reads and 0 KIS HTTP."""
     db_read = AsyncMock(return_value=None)
-    kis_quote = AsyncMock(return_value={"price": 61_000.0})
+    kr_quote = AsyncMock(return_value={"price": 61_000.0})
     monkeypatch.setattr(portfolio_holdings, "cache_first_kr", db_read)
-    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kis_quote)
+    monkeypatch.setattr(portfolio_holdings, "_fetch_quote_equity_kr", kr_quote)
 
     actual = await portfolio_holdings._fetch_price_map_for_positions(
-        [_kr_kis_snapshot_position()]
+        [_historical_kis_snapshot_position()]
     )
 
-    # No equity pair enqueued -> empty price map, no errors.
-    assert actual == ({}, [], {}, {})
-    db_read.assert_not_awaited()
-    kis_quote.assert_not_awaited()
+    assert actual == ({("equity_kr", "005930"): 61_000.0}, [], {}, {})
+    db_read.assert_awaited_once_with("005930", 2)
+    kr_quote.assert_awaited_once_with("005930")
 
 
-def test_kr_kis_snapshot_is_exempt_from_refresh() -> None:
-    """ROB-902: the refresh predicate exempts a complete KIS-account KR snapshot."""
+def test_historical_kis_snapshot_is_not_refresh_exempt() -> None:
     assert (
         portfolio_holdings._position_needs_current_price_refresh(
-            _kr_kis_snapshot_position()
+            _historical_kis_snapshot_position()
         )
-        is False
+        is True
     )
 
 
-def test_kr_kis_incomplete_snapshot_still_refreshes() -> None:
-    """A KIS-account KR holding with a zero/absent price still needs a refresh."""
-    incomplete = _kr_kis_snapshot_position()
+def test_incomplete_historical_kis_snapshot_refreshes() -> None:
+    incomplete = _historical_kis_snapshot_position()
     incomplete["current_price"] = None
     assert portfolio_holdings._position_needs_current_price_refresh(incomplete) is True
 
 
-def test_kr_non_kis_snapshot_still_refreshes() -> None:
-    """A manual/Toss KR holding (source != kis_api) is never exempt."""
-    manual = _kr_kis_snapshot_position()
+def test_manual_kr_snapshot_refreshes() -> None:
+    manual = _historical_kis_snapshot_position()
     manual["source"] = "manual"
     assert portfolio_holdings._position_needs_current_price_refresh(manual) is True
 
 
-def test_us_kis_snapshot_always_refreshes() -> None:
-    """ROB-1095: a complete US balance snapshot still needs a live quote."""
-    us = _kr_kis_snapshot_position("AAPL")
+def test_us_historical_kis_snapshot_refreshes() -> None:
+    us = _historical_kis_snapshot_position("AAPL")
     us["instrument_type"] = "equity_us"
     assert portfolio_holdings._position_needs_current_price_refresh(us) is True

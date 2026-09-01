@@ -52,6 +52,9 @@ def _known_market_session(monkeypatch):
     monkeypatch.setattr(
         revalidation_module, "evaluate_approval_window", allow_known_session
     )
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ORDER_PROPOSALS_TOSS_LIVE_VETO_ENABLED", True)
 
 
 @pytest.mark.asyncio
@@ -233,7 +236,7 @@ async def _seed_proposal(
     *,
     source_asof=None,
     market="equity_kr",
-    account_mode="kis_live",
+    account_mode="toss_live",
     action=None,
     target_broker_order_id=None,
     target_order_snapshot=None,
@@ -720,7 +723,7 @@ async def test_dispatch_auto_eligible_buy_or_sell_rests_without_approval(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side=side,
         order_type="limit",
         proposer="p",
@@ -831,7 +834,7 @@ async def test_dispatch_auto_eligible_qqq_records_cap_observation(
     group = await service.create_proposal(
         symbol="QQQ",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="cap-observation-fixture",
@@ -1226,7 +1229,6 @@ async def test_dispatch_records_toss_freeze_without_entering_revalidation(
     "account_mode,market",
     [
         ("toss_live", "equity_kr"),
-        ("kis_live", "equity_kr"),
         ("upbit", "crypto"),
     ],
 )
@@ -1391,7 +1393,7 @@ def _real_revalidate(**broker_fns):
 @pytest.mark.parametrize(
     "account_mode,market,symbol",
     [
-        ("kis_live", "equity_kr", "005930"),
+        ("toss_live", "equity_kr", "005930"),
         ("upbit", "crypto", "KRW-AVAX"),
     ],
 )
@@ -1527,7 +1529,7 @@ async def test_s156_marketable_take_profit_replace_cancels_then_places_the_new_r
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1658,7 +1660,7 @@ async def test_s141_replace_failing_a_place_gate_never_touches_the_broker(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1752,7 +1754,7 @@ async def test_s141_cancel_of_an_order_this_account_cannot_read_is_not_auto_appr
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1824,7 +1826,7 @@ async def test_s141_auto_approved_cancel_consumes_no_daily_budget(
     cancel_group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1838,7 +1840,7 @@ async def test_s141_auto_approved_cancel_consumes_no_daily_budget(
     place_group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -1920,7 +1922,7 @@ async def test_auto_notify_failure_compensates_by_cancelling_live_order(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=f"notify-failure-{uuid.uuid4()}",
         side="buy",
         order_type="limit",

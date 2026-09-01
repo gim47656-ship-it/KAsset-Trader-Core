@@ -945,7 +945,7 @@ async def test_batch_threads_refresh_to_pipeline(monkeypatch):
 
     async def stub(sym, market, include_peers, refresh=False):
         seen.append(refresh)
-        return {"symbol": sym, "market_type": "equity_kr", "source": "kis"}
+        return {"symbol": sym, "market_type": "equity_kr", "source": "toss"}
 
     monkeypatch.setattr(handlers.analysis_screening, "_analyze_stock_impl", stub)
 
@@ -985,7 +985,7 @@ async def test_batch_default_keeps_legacy_three_arg_stub_contract(monkeypatch):
     monkeypatched stubs of _analyze_stock_impl must keep working."""
 
     def stub(sym, market, include_peers):
-        return {"symbol": sym, "market_type": "equity_kr", "source": "kis"}
+        return {"symbol": sym, "market_type": "equity_kr", "source": "toss"}
 
     monkeypatch.setattr(handlers.analysis_screening, "_analyze_stock_impl", stub)
 
@@ -1002,7 +1002,7 @@ async def test_batch_propagates_fetch_cache_metadata_to_summary(monkeypatch):
         return {
             "symbol": sym,
             "market_type": "equity_kr",
-            "source": "kis",
+            "source": "toss",
             "quote": {"price": 70000},
             "cache_hit": True,
             "derived_as_of": "2026-07-02T10:00:00+09:00",
@@ -1058,14 +1058,14 @@ async def test_batch_error_row_carries_cache_metadata(monkeypatch):
     assert row["provider_provenance"] == []
 
 
-def test_summarize_surfaces_nxt_price_provenance():
+def test_summarize_rejects_legacy_nxt_price_provenance():
     from app.mcp_server.tooling.analysis_tool_handlers import (
         _summarize_analysis_result,
     )
 
     analysis = {
         "market_type": "equity_kr",
-        "source": "kis",
+        "source": "toss",
         "quote": {
             "price": 173500.0,
             "price_source": "nxt_expected_price",
@@ -1078,11 +1078,11 @@ def test_summarize_surfaces_nxt_price_provenance():
 
     summary = _summarize_analysis_result("192820", analysis)
 
-    assert summary["current_price"] == 173500.0
-    assert summary["price_source"] == "nxt_expected_price"
-    assert summary["session"] == "nxt_premarket"
-    assert summary["data_state"] == "fresh"
-    assert summary["venue"] == "nxt"
+    assert summary["current_price"] is None
+    assert "price_source" not in summary
+    assert "session" not in summary
+    assert "data_state" not in summary
+    assert "venue" not in summary
 
 
 def test_summarize_omits_price_provenance_when_absent():
@@ -1092,7 +1092,7 @@ def test_summarize_omits_price_provenance_when_absent():
 
     analysis = {
         "market_type": "equity_kr",
-        "source": "kis",
+        "source": "toss",
         "quote": {"price": 168300.0},
         "support_resistance": {"supports": [], "resistances": []},
     }
@@ -1104,7 +1104,7 @@ def test_summarize_omits_price_provenance_when_absent():
     assert "session" not in summary
 
 
-def test_intraday_sr_reanchors_on_nxt_overlay_price():
+def test_intraday_sr_ignores_legacy_nxt_overlay_price():
     from app.mcp_server.tooling.analysis_analyze import (
         _recompute_intraday_support_resistance,
     )
@@ -1112,7 +1112,6 @@ def test_intraday_sr_reanchors_on_nxt_overlay_price():
     analysis = {
         "quote": {"price": 173500.0, "price_source": "nxt_expected_price"},
         "support_resistance": {
-            # EOD levels computed against the stale 168300 close
             "supports": [{"price": 170000.0, "distance_pct": 1.01}],
             "resistances": [{"price": 171387.0, "distance_pct": 1.83}],
         },
@@ -1121,9 +1120,7 @@ def test_intraday_sr_reanchors_on_nxt_overlay_price():
     _recompute_intraday_support_resistance(analysis, "equity_kr")
 
     sr = analysis["support_resistance"]
-    assert sr["distance_basis_price"] == 173500.0
-    assert sr["distance_basis"] == "live_quote"
-    # 170000 and 171387 are BELOW the 173500 NXT price → both become supports
-    support_prices = {s["price"] for s in sr["supports"]}
-    assert support_prices == {170000.0, 171387.0}
-    assert sr["resistances"] == []
+    assert "distance_basis_price" not in sr
+    assert "distance_basis" not in sr
+    assert sr["supports"] == [{"price": 170000.0, "distance_pct": 1.01}]
+    assert sr["resistances"] == [{"price": 171387.0, "distance_pct": 1.83}]

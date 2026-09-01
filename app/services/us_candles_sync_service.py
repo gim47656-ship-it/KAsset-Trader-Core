@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from typing import Protocol, cast
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal
 from app.core.symbol import to_db_symbol
 from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.candles_sync_common import (
     SyncTableConfig,
     build_cursor_sql,
@@ -27,6 +26,8 @@ from app.services.candles_sync_common import (
     read_cursor_utc,
 )
 from app.services.manual_holdings_service import ManualHoldingsService
+from app.services.market_data.toss_ohlcv import fetch_us_intraday_toss_frame
+from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 from app.services.us_symbol_universe_service import (
     USSymbolInactiveError,
     USSymbolNotRegisteredError,
@@ -37,7 +38,6 @@ from app.services.us_symbol_universe_service import (
 
 _NY = ZoneInfo("America/New_York")
 _OVERLAP_MINUTES = 5
-_PAGE_SIZE = 120
 _UNRESOLVED_SYMBOL_SKIP_REASON = "unresolved_symbol_after_refresh"
 _US_UNIVERSE_EMPTY_MESSAGE = (
     "us_symbol_universe is empty. "
@@ -49,24 +49,8 @@ logger = logging.getLogger(__name__)
 type TimestampLike = datetime | pd.Timestamp | str
 
 
-class MinuteChartPage(Protocol):
-    frame: pd.DataFrame
-    has_more: bool
-    next_keyb: str | None
-
-
-class _RowcountResult(Protocol):
+class _RowcountResult:
     rowcount: int | None
-
-
-class MinuteChartSource(Protocol):
-    async def inquire_overseas_minute_chart(
-        self,
-        symbol: str,
-        exchange_code: str = "NASD",
-        n: int = 120,
-        keyb: str = "",
-    ) -> MinuteChartPage: ...
 
 
 _TABLE_CFG = SyncTableConfig(table_name="us_candles_1m", partition_col="exchange")
@@ -112,22 +96,6 @@ class ResolvedSymbolPairs:
     symbol_pairs: list[tuple[str, str]]
     skipped_symbols: list[str]
     lookup_refresh_attempted: bool
-
-
-class OverseasMinuteChartPageProtocol(Protocol):
-    frame: pd.DataFrame
-    has_more: bool
-    next_keyb: str | None
-
-
-class OverseasMinuteChartClientProtocol(Protocol):
-    async def inquire_overseas_minute_chart(
-        self,
-        symbol: str,
-        exchange_code: str = "NASD",
-        n: int = 120,
-        keyb: str = "",
-    ) -> OverseasMinuteChartPageProtocol: ...
 
 
 @lru_cache(maxsize=1)
@@ -306,39 +274,6 @@ def _normalize_minute_page(
     return [deduped[key] for key in sorted(deduped)]
 
 
-def _extract_earliest_utc(frame: pd.DataFrame) -> datetime | None:
-    if frame.empty or "datetime" not in frame:
-        return None
-
-    parsed_values = pd.to_datetime(frame["datetime"], errors="coerce")
-    cleaned = [value for value in parsed_values.tolist() if not pd.isna(value)]
-    if not cleaned:
-        return None
-
-    earliest = min(pd.Timestamp(value) for value in cleaned)
-    if earliest.tzinfo is None:
-        earliest = earliest.tz_localize(_NY)
-    else:
-        earliest = earliest.tz_convert(_NY)
-    return (
-        earliest.tz_convert(UTC)
-        .to_pydatetime()
-        .astimezone(UTC)
-        .replace(second=0, microsecond=0)
-    )
-
-
-def _parse_keyb_to_utc(keyb: str) -> datetime | None:
-    cleaned = str(keyb).strip()
-    if not cleaned:
-        return None
-    parsed = pd.to_datetime(cleaned, format="%Y%m%d%H%M%S", errors="coerce")
-    if pd.isna(parsed):
-        return None
-    timestamp = pd.Timestamp(parsed).tz_localize(_NY).tz_convert(UTC)
-    return timestamp.to_pydatetime().astimezone(UTC).replace(second=0, microsecond=0)
-
-
 async def _upsert_rows(session: AsyncSession, rows: list[MinuteCandleRow]) -> int:
     if not rows:
         return 0
@@ -407,50 +342,29 @@ async def _upsert_rows(session: AsyncSession, rows: list[MinuteCandleRow]) -> in
 
 async def _collect_window_rows(
     *,
-    kis: OverseasMinuteChartClientProtocol,
     symbol: str,
     exchange: str,
     lower_bound_utc: datetime,
     upper_bound_utc: datetime,
 ) -> tuple[list[MinuteCandleRow], int]:
-    merged: dict[datetime, MinuteCandleRow] = {}
-    page_calls = 0
-    current_keyb = upper_bound_utc.astimezone(_NY).strftime("%Y%m%d%H%M%S")
-
-    while True:
-        page_calls += 1
-        page = await kis.inquire_overseas_minute_chart(
-            symbol,
-            exchange_code=exchange,
-            n=_PAGE_SIZE,
-            keyb=current_keyb,
-        )
-
-        if page.frame.empty:
-            break
-
-        for row in _normalize_minute_page(
-            frame=page.frame,
-            symbol=symbol,
-            exchange=exchange,
-            lower_bound_utc=lower_bound_utc,
-            upper_bound_utc=upper_bound_utc,
-        ):
-            merged[row.time_utc] = row
-
-        earliest_utc = _extract_earliest_utc(page.frame)
-        if earliest_utc is not None and earliest_utc <= lower_bound_utc:
-            break
-
-        next_keyb = str(page.next_keyb or "").strip()
-        if not page.has_more or not next_keyb or next_keyb == current_keyb:
-            break
-        next_keyb_utc = _parse_keyb_to_utc(next_keyb)
-        if next_keyb_utc is not None and next_keyb_utc < lower_bound_utc:
-            break
-        current_keyb = next_keyb
-
-    return [merged[key] for key in sorted(merged)], page_calls
+    minute_count = max(
+        int((upper_bound_utc - lower_bound_utc).total_seconds() // 60) + 1,
+        1,
+    )
+    frame = await fetch_us_intraday_toss_frame(
+        symbol=symbol,
+        period="1m",
+        count=minute_count,
+        end_date=upper_bound_utc.astimezone(_NY),
+    )
+    rows = _normalize_minute_page(
+        frame=frame,
+        symbol=symbol,
+        exchange=exchange,
+        lower_bound_utc=lower_bound_utc,
+        upper_bound_utc=upper_bound_utc,
+    )
+    return rows, 1
 
 
 async def sync_us_candles(
@@ -463,20 +377,29 @@ async def sync_us_candles(
     session_count = max(int(sessions), 1)
     now_utc = _utc_now_floor_minute().to_pydatetime().astimezone(UTC)
     calendar = _get_xnys_calendar()
-    kis = KISClient()
 
     session = cast(AsyncSession, cast(object, AsyncSessionLocal()))
     try:
+        # 전역 Toss 자격증명은 이 user_id의 단일 운영자 계좌와 같다는 배포 계약이다.
+        # 다중 사용자 계좌 매핑이 생기면 명시적 계정 스코프로 교체해야 한다.
+        snapshot = await fetch_toss_portfolio_snapshot(
+            need_sellable=False,
+            need_cash=False,
+        )
+        toss_positions = [
+            position
+            for position in snapshot.positions
+            if position.instrument_type == "equity_us"
+        ]
         manual_service = ManualHoldingsService(session)
-        kis_holdings = await kis.fetch_my_us_stocks()
         manual_holdings = await manual_service.get_holdings_by_user(
             user_id=user_id,
             market_type=MarketType.US,
         )
         target_symbols = build_symbol_union(
-            kis_holdings,
+            toss_positions,
             manual_holdings,
-            holdings_field="ovrs_pdno",
+            holdings_field="symbol",
             normalize_fn=_normalize_symbol,
         )
         if not target_symbols:
@@ -540,7 +463,8 @@ async def sync_us_candles(
                     open_utc=session_open_utc,
                     close_utc=session_close_utc,
                     last_minute_utc=min(
-                        session_close_utc - timedelta(minutes=1), now_utc
+                        session_close_utc - timedelta(minutes=1),
+                        now_utc - timedelta(minutes=1),
                     ),
                 )
             ]
@@ -572,7 +496,6 @@ async def sync_us_candles(
                     continue
 
                 rows, page_calls = await _collect_window_rows(
-                    kis=kis,
                     symbol=symbol,
                     exchange=exchange,
                     lower_bound_utc=lower_bound_utc,

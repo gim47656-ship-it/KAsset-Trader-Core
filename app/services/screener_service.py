@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SCREENER_LIVE_ORDER_UNAVAILABLE = (
+    "live order submission is not available on this endpoint"
+)
+
 ScreenMarket = Literal["kr", "us", "crypto"]
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 #: 종료 시 취소한 보고서 task를 회수하는 유한 대기. 취소를 계속 삼키는 코루틴은
@@ -142,13 +146,6 @@ async def screen_stocks_impl(**kwargs: Any) -> dict[str, Any]:
     can import ScreenerService without loading the full MCP registry/order stack.
     """
     from app.mcp_server.tooling.analysis_tool_handlers import screen_stocks_impl as impl
-
-    return await impl(**kwargs)
-
-
-async def _place_order_impl(**kwargs: Any) -> dict[str, Any]:
-    """Lazy wrapper for order execution; only order paths should invoke it."""
-    from app.mcp_server.tooling.order_execution import _place_order_impl as impl
 
     return await impl(**kwargs)
 
@@ -1183,16 +1180,32 @@ class ScreenerService:
         confirm: bool = False,
         reason: str = "",
     ) -> dict[str, Any]:
+        """Return a request preview and physically reject live submission."""
+
         normalized_market = self._normalize_market(market)
         normalized_symbol = self._normalize_symbol(normalized_market, symbol)
-        return await _place_order_impl(
-            symbol=normalized_symbol,
-            market=normalized_market,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            amount=amount,
-            dry_run=not confirm,
-            reason=reason,
-        )
+        preview = {
+            "dry_run": True,
+            "preview_only": True,
+            "market": normalized_market,
+            "symbol": normalized_symbol,
+            "side": side,
+            "order_type": order_type,
+            "quantity": quantity,
+            "price": price,
+            "amount": amount,
+            "reason": reason,
+        }
+        if confirm:
+            return {
+                "success": False,
+                **preview,
+                "error": SCREENER_LIVE_ORDER_UNAVAILABLE,
+                "error_code": "live_order_submission_unavailable",
+                "message": SCREENER_LIVE_ORDER_UNAVAILABLE,
+            }
+        return {
+            "success": True,
+            **preview,
+            "message": "Order request preview only",
+        }

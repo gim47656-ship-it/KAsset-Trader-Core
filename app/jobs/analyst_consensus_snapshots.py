@@ -92,14 +92,21 @@ def _normalize_us_holding_symbol(value: object) -> str | None:
     return normalized or None
 
 
-async def _fetch_kis_holdings(market: str) -> list[object]:
-    """Live KIS holdings read (kr/us_candles_sync sibling pattern)."""
-    from app.services.brokers.kis.client import KISClient
+async def _fetch_toss_holdings(market: str) -> list[object]:
+    """Toss 보유 포지션 중 요청 시장의 심볼만 반환한다."""
+    from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 
-    kis = KISClient()
-    if market == "kr":
-        return list(await kis.fetch_my_stocks())
-    return list(await kis.fetch_my_us_stocks())
+    # Toss 계정 설정은 단일 운영자 계정이며 수동 보유만 user_id로 범위를 제한한다.
+    snapshot = await fetch_toss_portfolio_snapshot(
+        need_sellable=False,
+        need_cash=False,
+    )
+    instrument_type = "equity_kr" if market == "kr" else "equity_us"
+    return [
+        {"symbol": position.symbol}
+        for position in snapshot.positions
+        if position.instrument_type == instrument_type
+    ]
 
 
 async def _fetch_manual_holdings(market: str, user_id: int) -> list[object]:
@@ -136,24 +143,16 @@ async def _fetch_active_watch_symbols(market: str) -> list[str]:
 async def _resolve_holdings_and_watch_symbols(
     market: str, *, user_id: int = _DEFAULT_USER_ID
 ) -> set[str]:
-    """Default snapshot scope: holdings ∪ active watch (ROB-641).
-
-    Holdings = live KIS holdings ∪ manual holdings (candles-sync sibling
-    pattern); watch = active ``investment_watch_alerts`` asset symbols. The
-    alphabetical top-N universe scan (and the full-universe option) was
-    removed: consensus fetches are ~12 HTTP requests per symbol, so scope is
-    restricted to symbols the operator actually holds or watches.
-    """
+    """기본 범위는 Toss 보유 ∪ 소유자 수동 보유 ∪ 활성 watch다."""
     normalize = (
         _normalize_kr_holding_symbol if market == "kr" else _normalize_us_holding_symbol
     )
-    holdings_field = "pdno" if market == "kr" else "ovrs_pdno"
-    kis_holdings = await _fetch_kis_holdings(market)
+    toss_holdings = await _fetch_toss_holdings(market)
     manual_holdings = await _fetch_manual_holdings(market, user_id)
     symbols = build_symbol_union(
-        kis_holdings,
+        toss_holdings,
         manual_holdings,
-        holdings_field=holdings_field,
+        holdings_field="symbol",
         normalize_fn=normalize,
     )
     for raw_symbol in await _fetch_active_watch_symbols(market):

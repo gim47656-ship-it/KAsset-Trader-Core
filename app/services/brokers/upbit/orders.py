@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 import app.services.brokers.upbit.client as _client
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
+from app.services.brokers.pre_send import PreSendFreshnessError
 
 logger = logging.getLogger(__name__)
 

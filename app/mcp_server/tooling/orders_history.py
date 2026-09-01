@@ -2,24 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 import app.services.brokers.upbit.client as upbit_service
-from app.mcp_server.tooling.kis_mock_ledger import (
-    KIS_MOCK_SHADOW_PENDING_WARNING,
-    _list_kis_mock_shadow_pending_orders,
-)
-from app.mcp_server.tooling.order_execution import (
-    _calculate_date_range,
-    _normalize_market_type_to_external,
-)
-from app.mcp_server.tooling.orders_modify_cancel import (
-    _extract_kis_order_number,
-    _get_kis_field,
-    _normalize_kis_domestic_order,
-    _normalize_kis_overseas_order,
-    _normalize_upbit_order,
-)
+from app.mcp_server.tooling import orders_toss_variants
+from app.mcp_server.tooling.order_execution import _normalize_market_type_to_external
+from app.mcp_server.tooling.orders_modify_cancel import _normalize_upbit_order
 from app.mcp_server.tooling.shared import (
     logger,
 )
@@ -29,8 +19,6 @@ from app.mcp_server.tooling.shared import (
 from app.mcp_server.tooling.shared import (
     resolve_market_type as _resolve_market_type,
 )
-from app.services.brokers.kis.client import KISClient
-from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 # ROB-466: status='all' without a symbol returns the symbol-free subset (open
 # orders across all markets). Broker fill/cancel history is keyed by symbol, so
@@ -40,18 +28,6 @@ ALL_SYMBOLS_CLOSED_HISTORY_WARNING = (
     "only; filled/cancelled history is broker-symbol-keyed — pass a symbol to "
     "include it."
 )
-
-
-def _create_kis_client(*, is_mock: bool) -> KISClient:
-    if is_mock:
-        return KISClient(is_mock=True)
-    return KISClient()
-
-
-async def _call_kis(method: Any, *args: Any, is_mock: bool, **kwargs: Any) -> Any:
-    if is_mock:
-        return await method(*args, **kwargs, is_mock=True)
-    return await method(*args, **kwargs)
 
 
 def _calculate_order_summary(orders: list[dict[str, Any]]) -> dict[str, Any]:
@@ -129,9 +105,9 @@ def _validate_history_inputs(
         market_types = [market_type]
     elif market_hint:
         norm = _normalize_market(market_hint)
-        if norm:
-            market_types = [norm]
-
+        if norm is None:
+            raise ValueError(f"Unsupported market: {market_hint}")
+        market_types = [norm]
     if not market_types and status in ("pending", "all", "expired"):
         # ROB-665 item 3: expired (dead day orders) surface via the live
         # KR/US inquiries just like pending, so scan all markets when unscoped.
@@ -179,135 +155,129 @@ async def _fetch_crypto_orders(
     return fetched
 
 
-async def _fetch_kr_orders(
+_TOSS_STATUS_MAP = {
+    "PENDING": "pending",
+    "PENDING_CANCEL": "pending",
+    "PENDING_REPLACE": "pending",
+    "CANCEL_REJECTED": "pending",
+    "REPLACE_REJECTED": "pending",
+    "PARTIAL_FILLED": "partial",
+    "PARTIALLY_FILLED": "partial",
+    "FILLED": "filled",
+    "CANCELED": "cancelled",
+    "CANCELLED": "cancelled",
+    "REPLACED": "cancelled",
+    "REJECTED": "expired",
+    "EXPIRED": "expired",
+}
+
+
+def _remaining_quantity(
+    quantity: Any,
+    filled_quantity: Any,
+) -> str | None:
+    if quantity is None or filled_quantity is None:
+        return None
+    try:
+        return str(
+            max(Decimal(str(quantity)) - Decimal(str(filled_quantity)), Decimal(0))
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _normalize_toss_order(order: dict[str, Any]) -> dict[str, Any] | None:
+    symbol = str(order.get("symbol") or "").strip()
+    if not symbol:
+        return None
+    try:
+        market_type, normalized_symbol = _resolve_market_type(symbol, None)
+    except ValueError:
+        return None
+    if market_type not in {"equity_kr", "equity_us"}:
+        return None
+
+    execution = order.get("execution")
+    if not isinstance(execution, dict):
+        execution = {}
+    filled_quantity = execution.get("filledQuantity")
+    raw_status = str(order.get("status") or "").strip().upper()
+    status = _TOSS_STATUS_MAP.get(raw_status, raw_status.lower())
+    return {
+        "order_id": str(order.get("order_id") or ""),
+        "symbol": normalized_symbol,
+        "side": str(order.get("side") or "").lower(),
+        "order_type": str(order.get("order_type") or "").lower(),
+        "status": status,
+        "is_live": status in {"pending", "partial"},
+        "ordered_qty": order.get("quantity"),
+        "filled_qty": filled_quantity,
+        "remaining_qty": _remaining_quantity(
+            order.get("quantity"),
+            filled_quantity,
+        ),
+        "ordered_price": order.get("price"),
+        "filled_avg_price": execution.get("averageFilledPrice"),
+        "ordered_at": order.get("ordered_at"),
+        "cancelled_at": order.get("canceled_at"),
+        "currency": order.get("currency"),
+        "source": "toss",
+        "_market_type": market_type,
+    }
+
+
+async def _fetch_toss_orders(
     normalized_symbol: str | None,
     status: str,
     effective_days: int | None,
-    is_mock: bool = False,
+    limit_val: float,
 ) -> list[dict[str, Any]]:
-    """Fetch and normalize KIS domestic (Korean equity) orders."""
+    """Toss 주식 주문을 조회해 공통 주문 이력 형식으로 정규화한다."""
+    requested_statuses = ["open"]
+    if status in {"filled", "cancelled", "expired"}:
+        requested_statuses = ["closed"]
+    elif status == "all" and normalized_symbol is not None:
+        requested_statuses.append("closed")
+
+    from_date = None
+    to_date = None
+    if effective_days is not None:
+        today = date.today()
+        from_date = (today - timedelta(days=effective_days)).isoformat()
+        to_date = today.isoformat()
+
     fetched: list[dict[str, Any]] = []
-    kis = _create_kis_client(is_mock=is_mock)
-
-    if status in ("all", "pending", "expired"):
-        logger.debug("Fetching KR pending orders, symbol=%s", normalized_symbol)
-        try:
-            open_ops = await _call_kis(kis.inquire_korea_orders, is_mock=is_mock)
-        except Exception as exc:
-            if not is_mock:
-                raise
-            logger.warning(
-                "KIS mock broker pending-orders inquiry unavailable; using DB shadow pending ledger: %s",
-                exc,
+    api_limit = None if limit_val == float("inf") else max(int(limit_val), 1)
+    for requested_status in requested_statuses:
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            response = await orders_toss_variants.toss_get_order_history(
+                status=requested_status,
+                symbol=normalized_symbol,
+                from_date=from_date,
+                to_date=to_date,
+                cursor=cursor,
+                limit=api_limit,
+                account_mode="toss_live",
             )
-            open_ops = []
-        if open_ops:
-            logger.debug("Raw API response keys: %s", list(open_ops[0].keys()))
-        for o in open_ops:
-            o_sym = str(_get_kis_field(o, "pdno", "PDNO"))
-            if normalized_symbol and o_sym != normalized_symbol:
-                continue
-            fetched.append(_normalize_kis_domestic_order(o))
-        if is_mock:
-            shadow_orders = await _list_kis_mock_shadow_pending_orders(
-                normalized_symbol=normalized_symbol,
-                market_type="equity_kr",
-            )
-            fetched.extend(shadow_orders)
-
-    if status in ("all", "filled", "cancelled", "expired") and normalized_symbol:
-        lookup_days = effective_days if effective_days is not None else 30
-        start_dt, end_dt = _calculate_date_range(lookup_days)
-        hist_ops = await _call_kis(
-            kis.inquire_daily_order_domestic,
-            start_date=start_dt,
-            end_date=end_dt,
-            stock_code=normalized_symbol,
-            side="00",
-            is_mock=is_mock,
-            # ROB-903: display-only fast pagination. rate limiter paces requests
-            # (drop the redundant inter-page sleep) and halt on the KIS
-            # duplicate-cursor runaway. Reconcile/fill-evidence paths keep the
-            # broker defaults (exhaustive, 0.1s spacing) — untouched.
-            inter_page_delay=0.0,
-            stop_when_no_new_rows=True,
-        )
-        fetched.extend([_normalize_kis_domestic_order(o) for o in hist_ops])
-
-    return fetched
-
-
-async def _fetch_us_orders(
-    normalized_symbol: str | None,
-    status: str,
-    effective_days: int | None,
-    is_mock: bool = False,
-) -> list[dict[str, Any]]:
-    """Fetch and normalize KIS overseas (US equity) orders."""
-    fetched: list[dict[str, Any]] = []
-    kis = _create_kis_client(is_mock=is_mock)
-
-    if status in ("all", "pending", "expired"):
-        target_exchanges = ["NASD", "NYSE", "AMEX"]
-        if normalized_symbol:
-            target_exchanges = [await get_us_exchange_by_symbol(normalized_symbol)]
-
-        seen_oids: set[str] = set()
-        for ex in target_exchanges:
-            try:
-                ops = await _call_kis(
-                    kis.inquire_overseas_orders,
-                    ex,
-                    is_mock=is_mock,
+            if not response.get("success"):
+                raise RuntimeError(
+                    str(response.get("error") or "Toss order history request failed")
                 )
-                for o in ops:
-                    oid = _extract_kis_order_number(o)
-                    if oid in seen_oids:
-                        continue
-                    seen_oids.add(oid)
-
-                    o_sym = str(_get_kis_field(o, "pdno", "PDNO"))
-                    if normalized_symbol and o_sym != normalized_symbol:
-                        continue
-                    fetched.append(_normalize_kis_overseas_order(o))
-            except Exception as exc:
-                if is_mock and "mock" in str(exc).lower():
-                    logger.warning(
-                        "kis_mock: overseas pending-orders inquiry unavailable; using DB shadow pending ledger: %s",
-                        exc,
-                    )
-                    break
-                logger.warning(
-                    "US pending-orders inquiry failed for exchange=%s: %s",
-                    ex,
-                    exc,
-                )
-        if is_mock:
-            shadow_orders = await _list_kis_mock_shadow_pending_orders(
-                normalized_symbol=normalized_symbol,
-                market_type="equity_us",
-            )
-            fetched.extend(shadow_orders)
-
-    if status in ("all", "filled", "cancelled", "expired") and normalized_symbol:
-        lookup_days = effective_days if effective_days is not None else 30
-        start_dt, end_dt = _calculate_date_range(lookup_days)
-        ex = await get_us_exchange_by_symbol(normalized_symbol)
-        hist_ops = await _call_kis(
-            kis.inquire_daily_order_overseas,
-            start_date=start_dt,
-            end_date=end_dt,
-            symbol=normalized_symbol,
-            exchange_code=ex,
-            side="00",
-            is_mock=is_mock,
-            # ROB-903: display-only fast pagination (see _fetch_kr_orders).
-            # Reconcile/fill-evidence paths keep the broker defaults.
-            inter_page_delay=0.0,
-            stop_when_no_new_rows=True,
-        )
-        fetched.extend([_normalize_kis_overseas_order(o) for o in hist_ops])
-
+            for row in response.get("orders") or []:
+                if not isinstance(row, dict):
+                    continue
+                normalized = _normalize_toss_order(row)
+                if normalized is not None:
+                    fetched.append(normalized)
+            next_cursor = response.get("next_cursor")
+            if not response.get("has_next") or not next_cursor:
+                break
+            cursor = str(next_cursor)
+            if cursor in seen_cursors:
+                raise RuntimeError("Toss order history returned a repeated cursor")
+            seen_cursors.add(cursor)
     return fetched
 
 
@@ -420,8 +390,6 @@ def _build_history_response(
     summary = _calculate_order_summary(response_orders)
 
     warnings: list[str] = []
-    if any(o.get("source") == "kis_mock_ledger_shadow" for o in response_orders):
-        warnings.append(KIS_MOCK_SHADOW_PENDING_WARNING)
     if status == "all" and normalized_symbol is None:
         warnings.append(ALL_SYMBOLS_CLOSED_HISTORY_WARNING)
 
@@ -465,6 +433,20 @@ async def get_order_history_impl(
     limit: int | None = 50,
     is_mock: bool = False,
 ) -> dict[str, Any]:
+    if is_mock:
+        return {
+            "success": False,
+            "account_mode": "kis_mock",
+            "error": "provider kis is not operational",
+            "orders": [],
+            "errors": [
+                {
+                    "market": market or "mixed",
+                    "error": "provider kis is not operational",
+                }
+            ],
+        }
+
     (
         symbol,
         order_id,
@@ -476,36 +458,47 @@ async def get_order_history_impl(
         normalized_symbol,
     ) = _validate_history_inputs(symbol, status, order_id, market, side, days, limit)
 
-    _broker_fetchers = {
-        "crypto": lambda: _fetch_crypto_orders(
-            normalized_symbol, status, limit_val, limit or 50
-        ),
-        "equity_kr": lambda: _fetch_kr_orders(
-            normalized_symbol, status, effective_days, is_mock=is_mock
-        ),
-        "equity_us": lambda: _fetch_us_orders(
-            normalized_symbol, status, effective_days, is_mock=is_mock
-        ),
-    }
-
     orders: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for m_type in market_types:
+    if "crypto" in market_types:
         try:
-            fetcher = _broker_fetchers.get(m_type)
-            if fetcher is None:
-                continue
-            fetched = await fetcher()
-            source_market = _normalize_market_type_to_external(m_type)
-            for f in fetched:
-                f["_source_market"] = source_market
+            fetched = await _fetch_crypto_orders(
+                normalized_symbol if market_types == ["crypto"] else None,
+                status,
+                limit_val,
+                limit or 50,
+            )
+            for order in fetched:
+                order["_source_market"] = "crypto"
             orders.extend(fetched)
-        except Exception as e:
-            err_entry: dict[str, Any] = {"market": m_type, "error": str(e)}
-            if is_mock and "mock" in str(e).lower():
-                err_entry["mock_unsupported"] = True
-            errors.append(err_entry)
+        except Exception as exc:
+            errors.append({"market": "crypto", "error": str(exc)})
+
+    equity_market_types = {
+        market_type
+        for market_type in market_types
+        if market_type in {"equity_kr", "equity_us"}
+    }
+    if equity_market_types:
+        try:
+            fetched = await _fetch_toss_orders(
+                normalized_symbol if len(market_types) == 1 else None,
+                status,
+                effective_days,
+                limit_val,
+            )
+            for order in fetched:
+                market_type = order.pop("_market_type", None)
+                if market_type not in equity_market_types:
+                    continue
+                order["_source_market"] = _normalize_market_type_to_external(
+                    market_type
+                )
+                orders.append(order)
+        except Exception as exc:
+            for market_type in sorted(equity_market_types):
+                errors.append({"market": market_type, "error": str(exc)})
 
     orders = _dedupe_orders(orders)
     response_orders, total_available, truncated = _filter_and_sort_orders(

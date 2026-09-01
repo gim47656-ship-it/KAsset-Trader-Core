@@ -53,7 +53,7 @@ from tests.services.order_proposals.window_fakes import allow_known_session
 def _group(
     *,
     market: str = "equity_us",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     symbol: str = "VOO",
     valid_until: object,
     exit_intent: str | None = None,
@@ -874,7 +874,7 @@ class _FakeRevalidationService:
             source_asof={},
             action=action,
             order_type="limit",
-            account_mode="kis_live",
+            account_mode="toss_live",
             market="equity_us",
             symbol="VOO",
             side="sell",
@@ -2359,7 +2359,7 @@ async def test_expired_later_rung_preserves_prior_broker_backed_rung():
 
 @pytest.mark.asyncio
 async def test_upbit_place_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit import orders as upbit_orders
 
     wrapper_calls = 0
@@ -2397,7 +2397,7 @@ async def test_upbit_place_adapter_threads_transport_hook(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_upbit_cancel_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.brokers.upbit import orders as upbit_orders
 
     wrapper_calls = 0
@@ -2436,7 +2436,7 @@ async def test_kis_cancel_adapter_threads_transport_hook(monkeypatch, market):
     from unittest.mock import AsyncMock
 
     from app.services.brokers.kis import domestic_orders, overseas_orders
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
 
     provider_calls = 0
 
@@ -2498,7 +2498,7 @@ async def test_kis_cancel_adapter_threads_transport_hook(monkeypatch, market):
 @pytest.mark.asyncio
 async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
     from app.mcp_server.tooling import orders_toss_variants as toss
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.order_proposals.revalidation import _default_place_order_fn
 
     transport_calls = 0
@@ -2535,16 +2535,14 @@ async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "account_mode,market", [("kis_live", "equity_us"), ("upbit", "crypto")]
-)
+@pytest.mark.parametrize("account_mode,market", [("upbit", "crypto")])
 async def test_default_execution_adapter_threads_transport_hook(
     monkeypatch,
     account_mode,
     market,
 ):
     from app.mcp_server.tooling import order_execution
-    from app.services.brokers.kis.pre_send import PreSendFreshnessError
+    from app.services.brokers.pre_send import PreSendFreshnessError
     from app.services.order_proposals.revalidation import _default_place_order_fn
 
     transport_calls = 0

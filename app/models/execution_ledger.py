@@ -107,7 +107,7 @@ class ExecutionLedgerReconcileRun(Base):
     __tablename__ = "execution_ledger_reconcile_runs"
     __table_args__ = (
         CheckConstraint(
-            "broker IN ('kis','upbit')", name="execution_ledger_runs_broker"
+            "broker IN ('kis','upbit','toss')", name="execution_ledger_runs_broker"
         ),
         Index("ix_execution_ledger_runs_broker_window", "broker", "window_start"),
         Index("ix_execution_ledger_runs_started_at", STARTED_AT_DESC),

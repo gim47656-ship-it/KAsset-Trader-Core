@@ -36,37 +36,15 @@ def test_account_routing_tool_names_register():
     assert set(mcp.tools) == {"suggest_order_account"}
 
 
-# ROB-697 M1 — shadow-replay early-returns before the "Always" block that
-# registers suggest_order_account, so it is deliberately excluded here (its
-# validity guard is that it carries ONLY the frozen-context read + policy +
-# route_request tools; see tests/mcp_server/test_shadow_replay_profile.py).
-#
-# ROB-760 — account_read is also a physical allowlist profile: it must expose
-# exactly the account-sync read surface pinned in tests/test_mcp_profiles.py,
-# without route/advisory tools.
-#
-# ROB-1782 R2 — alpaca-paper-clean is also a closed-world physical-account
-# surface; it contains only its pinned Alpaca read/preview/ledger tools.
-_READ_PROFILES = [
-    p
-    for p in McpProfile
-    if p
-    not in (
-        McpProfile.SHADOW_REPLAY,
-        McpProfile.ACCOUNT_READ,
-        McpProfile.PAPER_EXECUTION,
-        McpProfile.ALPACA_PAPER_CLEAN,
-    )
-]
-
-
-@pytest.mark.parametrize("profile", _READ_PROFILES)
-def test_suggest_order_account_registered_on_all_read_profiles(profile):
+# Broker cutover: the dormant adviser implementation stays directly testable,
+# but no production MCP profile registers the account-routing surface.
+@pytest.mark.parametrize("profile", list(McpProfile))
+def test_suggest_order_account_is_not_registered_on_active_profiles(profile):
     mcp = DummyMCP()
 
     register_all_tools(mcp, profile=profile)  # type: ignore[arg-type]
 
-    assert "suggest_order_account" in mcp.tools
+    assert "suggest_order_account" not in mcp.tools
 
 
 @pytest.mark.asyncio
@@ -170,10 +148,9 @@ async def test_suggest_order_account_impl_uses_snapshots_and_user_costs(monkeypa
     )
 
     assert result["success"] is True
-    assert result["recommended_account"] == "kis_domestic"
-    assert result["position_consolidation"]["foregone_savings_krw"] == pytest.approx(
-        1102.5
-    )
+    assert result["recommended_account"] == "toss"
+    assert set(result["cost_comparison"]) == {"toss"}
+    assert result["position_consolidation"]["existing_accounts"] == []
     assert result["cost_comparison"]["toss"]["total_cost_krw"] == pytest.approx(0)
     assert result["advisory_only"] is True
     assert result["price_source"] == "input"
@@ -383,5 +360,5 @@ async def test_suggest_order_account_impl_fetches_us_fx_when_missing(monkeypatch
     )
 
     assert result["notional"]["usd_krw"] == pytest.approx(1500.0)
-    assert set(result["cost_comparison"]) == {"kis_overseas", "toss"}
+    assert set(result["cost_comparison"]) == {"toss"}
     assert result["data_quality"] == ["using_default_account_costs_review_required"]

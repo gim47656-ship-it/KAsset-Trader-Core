@@ -173,7 +173,7 @@ async def test_place_still_allows_multiple_rungs_and_persists_normalized_action(
     group = await OrderProposalsService(db_session).create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -246,7 +246,7 @@ async def test_place_rejects_target_broker_evidence(db_session):
         await OrderProposalsService(db_session).create_proposal(
             symbol="005930",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="buy",
             order_type="limit",
             proposer="p",
@@ -311,8 +311,7 @@ async def test_target_action_rejection_message_matches_capability_set(
         )
     assert str(exc_info.value) == (
         f"unsupported account_mode/market/action: kis_mock/crypto/{action} "
-        "(allowed: kis_live×equity_kr|equity_us, "
-        "toss_live×equity_kr|equity_us, upbit×crypto; "
+        "(allowed: toss_live×equity_kr|equity_us, upbit×crypto; "
         "market aliases kr→equity_kr, us→equity_us)"
     )
 
@@ -394,7 +393,7 @@ async def _create_single_rung(
     db_session,
     *,
     symbol: str = "A",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     market: str = "equity_kr",
 ):
     service = OrderProposalsService(db_session)
@@ -462,7 +461,7 @@ def _loss_cut_create_kwargs(*, now: datetime):
     return {
         "symbol": "005930",
         "market": "equity_kr",
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "side": "sell",
         "order_type": "limit",
         "proposer": "p",
@@ -482,7 +481,7 @@ async def test_create_defaults_valid_until_to_next_kst_midnight(db_session):
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -501,7 +500,7 @@ async def test_loss_cut_requires_all_group_fields_without_paperclip_lookup(
         await service.create_proposal(
             symbol="005930",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="sell",
             order_type="limit",
             proposer="p",
@@ -830,7 +829,7 @@ async def test_defensive_trim_exit_intent_is_rejected_pending_execution_support(
         await OrderProposalsService(db_session).create_proposal(
             symbol="AAPL",
             market="equity_us",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="sell",
             order_type="limit",
             proposer="p",
@@ -850,7 +849,7 @@ async def test_general_proposal_valid_until_is_not_floored_by_approval_window(
     group = await OrderProposalsService(db_session).create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -869,7 +868,7 @@ async def test_create_and_get_multi_rung(db_session):
     group = await svc.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="operator:sess-1",
@@ -904,7 +903,7 @@ async def test_rung_transition_enforces_state_machine(db_session):
     group = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -937,7 +936,7 @@ async def test_resolve_proposal_prefix_checks_all_lifecycle_states(
             await svc.create_proposal(
                 symbol=symbol,
                 market="equity_kr",
-                account_mode="kis_live",
+                account_mode="toss_live",
                 side="buy",
                 order_type="limit",
                 proposer="p",
@@ -959,7 +958,7 @@ async def test_replacement_lineage_supersedes_original(db_session):
     original = await svc.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -970,7 +969,7 @@ async def test_replacement_lineage_supersedes_original(db_session):
     replacement = await svc.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -994,7 +993,7 @@ async def test_supersede_leaves_submitted_rung_unchanged(db_session):
     original = await svc.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1013,7 +1012,7 @@ async def test_supersede_leaves_submitted_rung_unchanged(db_session):
     replacement = await svc.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -1034,7 +1033,7 @@ async def test_superseded_group_blocks_both_approval_nonce_consumers(db_session)
     replacement = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -1526,7 +1525,7 @@ async def test_void_multi_rung_sets_audit_and_invalidates_nonce(db_session):
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -2153,7 +2152,7 @@ async def test_sweep_local_stale_only_voids_evidence_absent(db_session):
         group = await service.create_proposal(
             symbol=symbol,
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="buy",
             order_type="limit",
             proposer="p",
@@ -2166,7 +2165,7 @@ async def test_sweep_local_stale_only_voids_evidence_absent(db_session):
     with_broker = await service.create_proposal(
         symbol="HAS_BROKER",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -2185,7 +2184,7 @@ async def test_sweep_local_stale_only_voids_evidence_absent(db_session):
     not_pending = await service.create_proposal(
         symbol="REVALIDATING",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -2247,7 +2246,7 @@ async def test_record_approval_dispatch_merges_source_asof(db_session):
     group = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -2295,37 +2294,61 @@ async def test_record_approval_dispatch_missing_proposal_raises(db_session):
 
 
 @pytest.mark.asyncio
-async def test_create_proposal_allows_kis_live_equity_kr(db_session):
+async def test_create_proposal_allows_toss_live_equity_kr(db_session):
     service = OrderProposalsService(db_session)
     group = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
         rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
     )
     await db_session.commit()
-    assert group.account_mode == "kis_live"
+    assert group.account_mode == "toss_live"
     assert group.market == "equity_kr"
 
 
 @pytest.mark.asyncio
-async def test_create_proposal_allows_kis_live_equity_us(db_session):
+async def test_create_proposal_allows_toss_live_equity_us(db_session):
     service = OrderProposalsService(db_session)
     group = await service.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
         rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
     )
     await db_session.commit()
-    assert group.account_mode == "kis_live"
+    assert group.account_mode == "toss_live"
     assert group.market == "equity_us"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("account_mode", "market", "symbol"),
+    [
+        ("kis_live", "equity_kr", "005930"),
+        ("kis_live", "equity_us", "AAPL"),
+        ("kis_mock", "equity_kr", "005930"),
+    ],
+)
+async def test_create_proposal_rejects_non_operational_kis_modes(
+    db_session, account_mode, market, symbol
+):
+    with pytest.raises(OrderProposalError, match="unsupported account_mode/market"):
+        await OrderProposalsService(db_session).create_proposal(
+            symbol=symbol,
+            market=market,
+            account_mode=account_mode,
+            side="buy",
+            order_type="limit",
+            proposer="p",
+            rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
+        )
 
 
 @pytest.mark.asyncio
@@ -2456,7 +2479,7 @@ async def _create_batch_candidate(
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="batch-test",
@@ -3101,7 +3124,7 @@ async def _create_defensive_rung(
     *,
     symbol: str,
     market: str = "equity_us",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
 ):
     """Create the only defensive exit_intent actually creatable today: loss_cut.
 
@@ -3197,7 +3220,7 @@ async def test_expired_defensive_handoff_includes_voided_loss_cut(
     group = await service.create_proposal(
         symbol="HANDOFF_VOID",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -3272,7 +3295,7 @@ async def test_expired_defensive_handoff_excludes_symbol_side_with_active_reprop
     await service.create_proposal(
         symbol="HANDOFF_ACTIVE",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",

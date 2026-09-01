@@ -14,7 +14,6 @@ from scripts.check_native_mcp_profile_registry import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "deploy-native.sh"
 SOURCE_PLISTS = REPO_ROOT / "ops" / "native" / "plists"
-PAPER_WRAPPER = REPO_ROOT / "ops" / "native" / "scripts" / "run-mcp-paper_001.sh"
 
 
 def _extract_array_values(body: str, name: str) -> list[str]:
@@ -136,25 +135,6 @@ def test_installed_literal_wrapper_port_is_compared(tmp_path: Path) -> None:
     assert any("installed port mismatch" in error for error in result.errors)
 
 
-def test_interrupted_wrapper_sync_remains_redeployable_with_old_plist(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source"
-    installed = tmp_path / "installed"
-    label = "com.robinco.auto-trader.mcp-paper_001"
-    _write_plist(source, label=label, port=8771)
-    _write_plist(installed, label=label, port=None, wrapper=PAPER_WRAPPER)
-
-    result = validate_registry(
-        source_plist_dir=source,
-        installed_plist_dir=installed,
-        single_active_labels=[label],
-        profile_port_entries=[f"{label}:8771"],
-    )
-
-    assert not result.errors, "\n".join(result.errors)
-
-
 def test_single_active_fixed_profile_without_source_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -179,7 +159,7 @@ def test_installed_rollback_shadow_does_not_block_canonical_inventory(
 ) -> None:
     source = tmp_path / "source"
     installed = tmp_path / "installed"
-    label = "com.robinco.auto-trader.mcp-paper_001"
+    label = "com.robinco.auto-trader.mcp-profile-example"
     _write_plist(source, label=label, port=8771)
     _write_plist(installed, label=label, port=8771)
     _write_plist(
@@ -203,7 +183,7 @@ def test_installed_rollback_shadow_does_not_block_canonical_inventory(
 def test_lone_misnamed_rollback_plist_still_fails_closed(tmp_path: Path) -> None:
     source = tmp_path / "source"
     installed = tmp_path / "installed"
-    label = "com.robinco.auto-trader.mcp-paper_001"
+    label = "com.robinco.auto-trader.mcp-profile-example"
     _write_plist(source, label=label, port=8771)
     _write_plist(
         installed,

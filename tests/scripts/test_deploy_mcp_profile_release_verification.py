@@ -33,7 +33,6 @@ EXPECTED_PROFILE_PORTS = {
     "com.robinco.auto-trader.mcp-analysis-readonly": "8768",
     "com.robinco.auto-trader.mcp-account-read": "8769",
     "com.robinco.auto-trader.mcp-tradingcodex-execution": "8770",
-    "com.robinco.auto-trader.mcp-paper_001": "8771",
 }
 
 
@@ -57,6 +56,28 @@ def test_mcp_profile_labels_are_a_subset_of_single_active_labels() -> None:
     body = DEPLOY.read_text()
     for label in EXPECTED_PROFILE_PORTS:
         assert f'"{label}"' in body
+
+
+def test_removed_kis_services_are_retired_before_registry_preflight() -> None:
+    body = DEPLOY.read_text()
+    retired = _extract_array(body, "RETIRED_SINGLE_ACTIVE_LABELS")
+    active = _extract_array(body, "SINGLE_ACTIVE_LABELS")
+    profile_ports = _extract_array(body, "MCP_PROFILE_PORTS")
+
+    for label in (
+        "com.robinco.auto-trader.kis-websocket",
+        "com.robinco.auto-trader.mcp-paper_001",
+    ):
+        assert label in retired
+        assert label not in active
+        assert label not in profile_ports
+
+    retire_call = body.index(
+        "retire_removed_single_active_services\n",
+        body.index('log "Retiring removed KIS launchd/runtime entrypoints"'),
+    )
+    preflight_call = body.index("verify_mcp_profile_registry\n", retire_call)
+    assert retire_call < preflight_call
 
 
 def test_verify_function_called_after_restart_and_before_healthcheck() -> None:

@@ -28,6 +28,37 @@ UPBIT_FILL_STATES: frozenset[str] = frozenset({"done", "cancel"})
 # stay inside that range or classify/upsert lookups fail before any commit.
 MAX_SQL_INT32 = 2_147_483_647
 
+_OPERATIONAL_BROKER_BY_ACCOUNT = {
+    "toss": "toss",
+    "upbit": "upbit",
+}
+
+
+def _resolve_operational_broker(
+    normalized: dict[str, Any],
+    *,
+    broker: str | None,
+) -> str:
+    explicit_broker: str | None = None
+    if broker is not None:
+        explicit_broker = str(broker).strip().lower()
+        if explicit_broker == "kis":
+            raise ValueError("provider kis is not operational")
+        if explicit_broker not in {"toss", "upbit"}:
+            raise ValueError("broker must be toss or upbit")
+
+    account = str(normalized.get("account") or "").strip().lower()
+    if account == "kis" or account.startswith("kis_"):
+        raise ValueError("provider kis is not operational")
+    inferred_broker = _OPERATIONAL_BROKER_BY_ACCOUNT.get(account)
+    if inferred_broker is None:
+        raise ValueError(f"unsupported normalized account: {account or '<missing>'}")
+    if explicit_broker is not None and explicit_broker != inferred_broker:
+        raise ValueError(
+            f"broker/account mismatch: broker={explicit_broker} account={account}"
+        )
+    return explicit_broker or inferred_broker
+
 
 def _stable_int32_hash(seed: str) -> int:
     return int(hashlib.sha256(str(seed).encode()).hexdigest()[:8], 16) & MAX_SQL_INT32
@@ -358,11 +389,9 @@ def to_execution_ledger_upsert(
     correlation_id: str | None = None,
     source_run_id: uuid.UUID | None = None,
 ) -> ExecutionLedgerUpsert:
-    broker_value = broker or (
-        "upbit" if normalized.get("account") == "upbit" else "kis"
-    )
+    broker_value = _resolve_operational_broker(normalized, broker=broker)
     venue = str(
-        normalized.get("venue") or ("upbit_krw" if broker_value == "upbit" else "krx")
+        normalized.get("venue") or ("upbit_krw" if broker_value == "upbit" else "toss")
     )
     return ExecutionLedgerUpsert(
         broker=broker_value,

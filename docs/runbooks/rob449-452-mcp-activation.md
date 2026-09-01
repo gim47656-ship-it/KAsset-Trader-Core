@@ -210,10 +210,10 @@ uv run pytest -p no:xdist tests/test_mcp_cost_basis_distribution.py -v
 #   기대: 4 passed
 ```
 
-**라이브 스모크 — operator-only (외부 네트워크, KIS/Yahoo/Upbit 의존, 프로덕션 런타임에서 실행):**
+**라이브 스모크 — operator-only (외부 네트워크, Toss/Yahoo/Upbit 의존, 프로덕션 런타임에서 실행):**
 
 ```bash
-# KR equity (KIS) / US (Yahoo) / crypto (Upbit) — handler impl 직접 프로브
+# KR equity (Toss) / US daily (Yahoo) / crypto (Upbit) — handler impl 직접 프로브
 uv run python -c "
 import asyncio
 from app.mcp_server.tooling.fundamentals._cost_basis_distribution import get_cost_basis_distribution_impl
@@ -222,7 +222,7 @@ for sym, mkt in [('005930','kr'), ('AAPL','us'), ('KRW-BTC', None)]:
     print(sym, '->', {k: r.get(k) for k in ('instrument_type','source','estimate','method','vwap_estimate','pct_holders_underwater','pct_holders_in_profit')})
 "
 #   기대: estimate=True, method='vpvr_self_ohlcv';
-#         005930→source='kis'/instrument_type='equity_kr', AAPL→source='yahoo'/'equity_us',
+#         005930→source='toss'/instrument_type='equity_kr', AAPL→source='yahoo'/'equity_us',
 #         KRW-BTC→source='upbit'/'crypto'; pct_holders_underwater + pct_holders_in_profit ≈ 100.
 ```
 
@@ -389,8 +389,8 @@ ROB-449 (get_retail_sentiment):
 
 ROB-450 (get_cost_basis_distribution):
 [ ] 배포 즉시 라이브 (게이트 플립 불필요)
-[ ] 라이브 스모크: get_cost_basis_distribution_impl('005930','kr',10) → estimate=True, method='vpvr_self_ohlcv', source='kis', underwater+in_profit≈100
-[ ] (확인) get_execution_strength는 ROB-462로 DEFERRED — 이 활성화 범위 아님
+[ ] 라이브 스모크: get_cost_basis_distribution_impl('005930','kr',10) → estimate=True, method='vpvr_self_ohlcv', source='toss', underwater+in_profit≈100
+[ ] `get_execution_strength`는 KIS 전용 지표이므로 MCP에 등록하지 않음
 
 ROB-452 (crypto 4-tool + Prefect flow):
 [ ] 4개 MCP 도구는 배포 즉시 라이브 (게이트 플립 불필요)

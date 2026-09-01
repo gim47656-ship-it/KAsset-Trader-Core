@@ -364,12 +364,14 @@ async def test_toss_projection_never_matches_another_broker_by_order_id(db_sessi
     group = await service.create_proposal(
         symbol="AAPL",
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="collision-test",
         rungs=[RungInput(0, "buy", Decimal("2"), Decimal("190"), None)],
     )
+    # 운영 생성 경로를 우회해 전환 전의 KIS 역사 행을 재현한다.
+    group.account_mode = "kis_live"
     for state in ("revalidating", "approved", "submitting"):
         await service.transition_rung(group.proposal_id, 0, new_state=state)
     await service.record_resting(

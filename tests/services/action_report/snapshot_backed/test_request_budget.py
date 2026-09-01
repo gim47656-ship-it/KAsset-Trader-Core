@@ -6,7 +6,7 @@ from app.services.action_report.snapshot_backed.request import ReportGenerationR
 def _base(**kw):
     return ReportGenerationRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         created_by_profile="p",
         title="t",
         summary="s",

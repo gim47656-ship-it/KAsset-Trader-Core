@@ -928,29 +928,24 @@ async def test_callback_payload_mismatch_marks_failed_and_clears_inflight() -> N
 
 
 @pytest.mark.asyncio
-async def test_place_order_confirm_maps_to_dry_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_place_order_is_preview_only_and_confirm_fails_closed() -> None:
+    from app.services import screener_service as module
     from app.services.screener_service import ScreenerService
 
-    fake_redis = _FakeRedis()
-    mock_place = AsyncMock(return_value={"success": True})
-    monkeypatch.setattr("app.services.screener_service._place_order_impl", mock_place)
+    service = ScreenerService(redis_client=cast(Any, _FakeRedis()))
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis))
-
-    await service.place_order(
+    preview = await service.place_order(
         market="us",
-        symbol="AAPL",
+        symbol="aapl",
         side="buy",
         order_type="limit",
         quantity=1,
         price=100,
         confirm=False,
     )
-    await service.place_order(
+    rejected = await service.place_order(
         market="us",
-        symbol="AAPL",
+        symbol="aapl",
         side="buy",
         order_type="limit",
         quantity=1,
@@ -958,12 +953,16 @@ async def test_place_order_confirm_maps_to_dry_run(
         confirm=True,
     )
 
-    first_kwargs = mock_place.await_args_list[0].kwargs
-    second_kwargs = mock_place.await_args_list[1].kwargs
-    assert first_kwargs["dry_run"] is True
-    assert second_kwargs["dry_run"] is False
-    assert first_kwargs["market"] == "us"
-    assert second_kwargs["market"] == "us"
+    assert not hasattr(module, "_place_order_impl")
+    assert preview["success"] is True
+    assert preview["request"]["preview_only"] is True
+    assert preview["request"]["dry_run"] is True
+    assert preview["request"]["symbol"] == "AAPL"
+    assert rejected["success"] is False
+    assert rejected["error_code"] == "live_order_submission_unavailable"
+    assert (
+        rejected["error"] == "live order submission is not available on this endpoint"
+    )
 
 
 @pytest.mark.asyncio

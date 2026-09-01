@@ -1,5 +1,6 @@
 """ROB-117 — Candidate screening service tests."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -78,3 +79,42 @@ async def test_passes_filters_through(monkeypatch) -> None:
     assert kwargs["limit"] == 20
     assert kwargs["max_per"] == pytest.approx(15.0)
     assert kwargs["adv_krw_min"] == 1_000_000_000
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_load_held_symbols_uses_toss_merged_quantity_and_owner_scope(
+    monkeypatch,
+) -> None:
+    from app.services.merged_portfolio_service import MergedPortfolioService
+
+    domestic = AsyncMock(
+        return_value=[
+            SimpleNamespace(ticker="005930", total_quantity=3),
+            SimpleNamespace(ticker="000660", total_quantity=0),
+        ]
+    )
+    overseas = AsyncMock(
+        return_value=[SimpleNamespace(ticker="aapl", total_quantity=2)]
+    )
+    monkeypatch.setattr(
+        MergedPortfolioService, "get_merged_portfolio_domestic", domestic
+    )
+    monkeypatch.setattr(
+        MergedPortfolioService, "get_merged_portfolio_overseas", overseas
+    )
+    fetch_crypto = AsyncMock(
+        return_value=[SimpleNamespace(ticker="KRW-BTC", quantity=1)]
+    )
+    monkeypatch.setattr(
+        "app.services.upbit_holdings_service.fetch_upbit_holdings_for_user",
+        fetch_crypto,
+    )
+
+    service = CandidateScreeningService(MagicMock())
+    held = await service._load_held_symbols(user_id=42, market="all")
+
+    assert held == {"005930", "AAPL", "KRW-BTC"}
+    domestic.assert_awaited_once_with(42)
+    overseas.assert_awaited_once_with(42)
+    fetch_crypto.assert_awaited_once_with(service.db, 42)

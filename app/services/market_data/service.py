@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from dataclasses import dataclass
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
 
 from app.core.async_rate_limiter import RateLimitExceededError
-from app.core.log_sanitize import safe_log_value
-from app.core.timezone import KST, now_kst
-from app.services import naver_finance
-from app.services.brokers.kis.client import KISClient
+from app.core.timezone import KST
+from app.extensions.kasset.api.orderbook_store import get_orderbook_store
+from app.extensions.kasset.api.toss_market_data import toss_market_data
 from app.services.brokers.upbit.client import fetch_multiple_current_prices
 from app.services.brokers.upbit.client import fetch_ohlcv as fetch_upbit_ohlcv
-from app.services.brokers.yahoo.client import fetch_fast_info
-from app.services.brokers.yahoo.client import fetch_ohlcv as fetch_yahoo_ohlcv
 from app.services.daily_candles.read_service import (
     cache_first_kr,
     cache_first_us,
@@ -29,11 +26,9 @@ from app.services.domain_errors import (
     UpstreamUnavailableError,
     ValidationError,
 )
-from app.services.kr_hourly_candles_read_service import read_kr_intraday_candles
 from app.services.market_data.constants import (
     KR_BENCHMARK_INDEX_SYMBOLS,
     KR_INTRADAY_OHLCV_PERIODS,
-    ORDERBOOK_ASOF_MAX_AGE_S148_N5,
     US_INTRADAY_OHLCV_PERIODS,
     validate_ohlcv_period,
 )
@@ -45,16 +40,30 @@ from app.services.market_data.contracts import (
 )
 from app.services.market_data.toss_ohlcv import (
     fetch_daily_toss_frame,
+    fetch_kr_index_daily_toss_frame,
     fetch_kr_index_intraday_toss_frame,
     fetch_kr_intraday_toss_frame,
+    fetch_resampled_daily_toss_frame,
     fetch_us_intraday_toss_frame,
 )
 from app.services.upbit_orderbook import fetch_orderbook
 from app.services.upbit_symbol_universe_service import UpbitSymbolUniverseLookupError
-from app.services.us_intraday_candles_read_service import read_us_intraday_candles
-from app.services.us_symbol_universe_service import USSymbolUniverseLookupError
+from app.services.us_symbol_universe_service import (
+    USSymbolUniverseLookupError,
+    get_us_exchange_by_symbol,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderUnsupportedError(UpstreamUnavailableError):
+    """현재 provider가 지원하지 않는 시장 데이터 계약."""
+
+
+_MARKET_TIMEZONES = {
+    "equity_kr": ZoneInfo("Asia/Seoul"),
+    "equity_us": ZoneInfo("America/New_York"),
+}
 
 
 def _normalize_market(market: str) -> str:
@@ -93,6 +102,14 @@ def _normalize_period(period: str, market: str) -> str:
     return validate_ohlcv_period(period, market, error_type=ValidationError)
 
 
+def _to_contract_timestamp(value: object, market: str) -> dt.datetime:
+    timestamp = pd.Timestamp(value)
+    timezone = _MARKET_TIMEZONES.get(market)
+    if timezone is not None and timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert(timezone).tz_localize(None)
+    return timestamp.to_pydatetime()
+
+
 def _to_candle_rows(
     frame: pd.DataFrame,
     *,
@@ -112,7 +129,7 @@ def _to_candle_rows(
             if date_raw is None:
                 raise ValidationError("candle row must include datetime or date")
             timestamp_raw = pd.Timestamp(date_raw)
-        timestamp = pd.Timestamp(timestamp_raw).to_pydatetime()
+        timestamp = _to_contract_timestamp(timestamp_raw, market)
         value_raw = row.get("value")
         rows.append(
             Candle(
@@ -169,24 +186,6 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _to_int(value: Any, default: int = 0) -> int:
-    try:
-        if value in (None, ""):
-            return default
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _to_optional_int(value: Any) -> int | None:
-    try:
-        if value in (None, ""):
-            return None
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
-
-
 def _validate_crypto_orderbook_symbol(symbol: str) -> str:
     value = str(symbol or "").strip().upper()
     if not value:
@@ -194,135 +193,6 @@ def _validate_crypto_orderbook_symbol(symbol: str) -> str:
     if not value.startswith("KRW-"):
         raise ValueError("crypto orderbook only supports KRW-* symbols")
     return value
-
-
-def _current_kst_datetime() -> dt.datetime:
-    return now_kst()
-
-
-@dataclass(frozen=True)
-class KrOrderbookVenue:
-    venue: str
-    kis_market_code: str
-    venue_label: str
-
-
-_KR_VENUE_MAP: dict[str, KrOrderbookVenue] = {
-    "krx": KrOrderbookVenue("krx", "J", "KRX"),
-    "regular": KrOrderbookVenue("krx", "J", "KRX"),
-    "j": KrOrderbookVenue("krx", "J", "KRX"),
-    "nxt": KrOrderbookVenue("nxt", "NX", "NXT"),
-    "ntx": KrOrderbookVenue("nxt", "NX", "NXT"),
-    "nx": KrOrderbookVenue("nxt", "NX", "NXT"),
-    "afterhours": KrOrderbookVenue("nxt", "NX", "NXT"),
-    "extended": KrOrderbookVenue("nxt", "NX", "NXT"),
-    "unified": KrOrderbookVenue("unified", "UN", "통합"),
-    "combined": KrOrderbookVenue("unified", "UN", "통합"),
-    "integrated": KrOrderbookVenue("unified", "UN", "통합"),
-    "all": KrOrderbookVenue("unified", "UN", "통합"),
-    "un": KrOrderbookVenue("unified", "UN", "통합"),
-    "통합": KrOrderbookVenue("unified", "UN", "통합"),
-    "통합시장": KrOrderbookVenue("unified", "UN", "통합"),
-}
-
-_KR_DEFAULT_VENUE = KrOrderbookVenue("krx", "J", "KRX")
-
-_KR_ORDERBOOK_ENDPOINT = (
-    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
-)
-_KR_ORDERBOOK_TR_ID = "FHKST01010200"
-
-
-def _normalize_kr_orderbook_venue(venue: str | None) -> KrOrderbookVenue:
-    if not venue or not venue.strip():
-        return _KR_DEFAULT_VENUE
-    normalized = venue.strip().lower()
-    result = _KR_VENUE_MAP.get(normalized)
-    if result is None:
-        raise ValueError(f"unsupported KR orderbook venue: {venue!r}")
-    return result
-
-
-def _get_orderbook_session_hint(now_kst: dt.datetime | None = None) -> str:
-    current = now_kst or _current_kst_datetime()
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=KST)
-    else:
-        current = current.astimezone(KST)
-    current_time = current.timetz().replace(tzinfo=None)
-    if dt.time(9, 0) <= current_time < dt.time(15, 30):
-        return "regular"
-    if dt.time(16, 0) <= current_time < dt.time(20, 0):
-        return "nxt"
-    return "other"
-
-
-def _extract_expected_match_metadata(
-    symbol: str,
-    output2: dict[str, Any] | None,
-) -> tuple[int | None, int | None]:
-    if output2 is None:
-        logger.info(
-            "Orderbook expected_qty unavailable: symbol=%s session_hint=%s antc_cnpr=%r antc_cnqn=%r output2_keys=%s",
-            safe_log_value(symbol),
-            _get_orderbook_session_hint(),
-            None,
-            None,
-            [],
-        )
-        return None, None
-
-    raw_expected_price = output2.get("antc_cnpr")
-    raw_expected_qty = output2.get("antc_cnqn")
-    expected_price = _to_optional_int(raw_expected_price)
-    expected_qty = _to_optional_int(raw_expected_qty)
-
-    if raw_expected_qty in (None, ""):
-        logger.info(
-            "Orderbook expected_qty unavailable: symbol=%s session_hint=%s antc_cnpr=%r antc_cnqn=%r output2_keys=%s",
-            safe_log_value(symbol),
-            _get_orderbook_session_hint(),
-            raw_expected_price,
-            raw_expected_qty,
-            sorted(output2),
-        )
-
-    return expected_price, expected_qty
-
-
-def _to_optional_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _format_kis_date(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if len(text) == 8 and text.isdigit():
-        formatted = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
-        try:
-            return dt.date.fromisoformat(formatted).isoformat()
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_orderbook_levels(
-    output: dict[str, Any], prefix: str
-) -> list[OrderbookLevel]:
-    levels: list[OrderbookLevel] = []
-    for idx in range(1, 11):
-        price = _to_int(output.get(f"{prefix}p{idx}"))
-        if price <= 0:
-            continue
-        quantity = output.get(f"{prefix}p_rsqn{idx}")
-        if quantity is None:
-            quantity = output.get(f"{prefix}p{idx}_rsqn")
-        levels.append(OrderbookLevel(price=price, quantity=_to_int(quantity)))
-    return levels
 
 
 def _parse_upbit_orderbook_levels(
@@ -345,92 +215,27 @@ def _parse_upbit_orderbook_levels(
     return levels
 
 
-def _parse_orderbook_as_of_details(
-    output1: dict[str, Any],
-    output2: dict[str, Any] | None,
-    received_at: dt.datetime,
-) -> tuple[dt.datetime | None, str | None]:
-    """Resolve an orderbook timestamp at the broker/transport boundary.
-
-    KIS FHKST01010200 exposes ``aspr_acpt_hour`` (quote acceptance time), but
-    not a date.  Never synthesize a date from the transport clock (ROB-1121).
-    When a valid broker time has no broker date, the transport receive instant
-    is the honest complete timestamp only when the broker clock is within the
-    same N=5-minute bound used by the downstream freshness gate.  The comparison
-    is circular over 24 hours so a legitimate 23:59 → 00:01 boundary is accepted.
-    Missing, malformed, or contradictory broker time stays unavailable so
-    freshness consumers fail closed.
-    """
-    provider_time = (
-        output1.get("aspr_acpt_hour")
-        or output1.get("stck_cntg_hour")
-        or output1.get("stck_cntg_time")
-    )
-    provider_date = output1.get("stck_bsop_date")
-    if provider_date in (None, "") and output2 is not None:
-        provider_date = output2.get("stck_bsop_date")
-
-    parsed_time: dt.time | None = None
-    if isinstance(provider_time, dt.time):
-        parsed_time = provider_time
-    elif provider_time not in (None, ""):
-        try:
-            parsed_time = dt.datetime.strptime(
-                str(provider_time).strip(), "%H%M%S"
-            ).time()
-        except (TypeError, ValueError):
-            parsed_time = None
-
-    parsed_date: dt.date | None = None
-    provider_date_present = provider_date not in (None, "")
-    if provider_date_present:
-        try:
-            parsed_date = dt.datetime.strptime(
-                str(provider_date).strip(), "%Y%m%d"
-            ).date()
-        except (TypeError, ValueError):
-            parsed_date = None
-
-    if parsed_time is None:
-        return None, None
-    if provider_date_present and parsed_date is None:
-        return None, None
-
-    received_kst = (
-        received_at.replace(tzinfo=KST)
-        if received_at.tzinfo is None
-        else received_at.astimezone(KST)
-    )
-    provider_seconds = (
-        parsed_time.hour * 3600 + parsed_time.minute * 60 + parsed_time.second
-    )
-    received_seconds = (
-        received_kst.hour * 3600 + received_kst.minute * 60 + received_kst.second
-    )
-    clock_delta = abs(provider_seconds - received_seconds)
-    circular_delta = min(clock_delta, 24 * 60 * 60 - clock_delta)
-    if circular_delta > ORDERBOOK_ASOF_MAX_AGE_S148_N5.total_seconds():
-        return None, None
-
-    if parsed_date is None:
-        return received_kst, "transport"
-    return dt.datetime.combine(parsed_date, parsed_time, tzinfo=KST), "broker"
-
-
-def _parse_orderbook_as_of(
-    output1: dict[str, Any],
-    output2: dict[str, Any] | None,
-    received_at: dt.datetime,
-) -> dt.datetime | None:
-    """Return the validated orderbook timestamp without its provenance tag."""
-    as_of, _ = _parse_orderbook_as_of_details(output1, output2, received_at)
-    return as_of
+def _parse_nh_orderbook_levels(
+    levels: object,
+) -> list[OrderbookLevel]:
+    if not isinstance(levels, list):
+        return []
+    parsed: list[OrderbookLevel] = []
+    for raw in levels:
+        if not isinstance(raw, dict):
+            continue
+        price = _to_float(raw.get("price"))
+        quantity = _to_float(raw.get("volume"))
+        if price <= 0 or quantity < 0:
+            continue
+        parsed.append(OrderbookLevel(price=price, quantity=quantity))
+    return parsed
 
 
 def _parse_upbit_orderbook_as_of(
     raw_timestamp: Any,
 ) -> dt.datetime | None:
-    """Parse Upbit's timestamp; missing provider time remains unavailable."""
+    """Upbit provider 시각을 해석하며, 시각이 없으면 그대로 unavailable로 둔다."""
     try:
         timestamp = float(raw_timestamp)
         if timestamp <= 0:
@@ -444,12 +249,9 @@ def _parse_upbit_orderbook_as_of(
 
 
 async def get_kr_volume_rank() -> list[dict[str, Any]]:
-    try:
-        kis = KISClient()
-        rows = await kis.volume_rank()
-        return list(rows)
-    except Exception as exc:
-        raise _map_error(exc) from exc
+    raise ProviderUnsupportedError(
+        "provider_unsupported: KR volume ranking is unavailable from Toss/NH PLUG"
+    )
 
 
 async def get_quote(symbol: str, market: str) -> Quote:
@@ -470,64 +272,64 @@ async def get_quote(symbol: str, market: str) -> Quote:
             )
 
         if resolved_market == "equity_us":
-            fast_info = await fetch_fast_info(resolved_symbol)
-            close = fast_info.get("close")
-            if close is None:
-                raise SymbolNotFoundError(f"Symbol '{resolved_symbol}' not found")
-            return Quote(
-                symbol=resolved_symbol,
-                market=resolved_market,
-                price=float(close),
-                source="yahoo",
-                previous_close=(
-                    float(fast_info["previous_close"])
-                    if fast_info.get("previous_close") is not None
-                    else None
-                ),
-                open=(
-                    float(fast_info["open"])
-                    if fast_info.get("open") is not None
-                    else None
-                ),
-                high=(
-                    float(fast_info["high"])
-                    if fast_info.get("high") is not None
-                    else None
-                ),
-                low=(
-                    float(fast_info["low"])
-                    if fast_info.get("low") is not None
-                    else None
-                ),
-                volume=(
-                    int(float(fast_info["volume"]))
-                    if fast_info.get("volume") is not None
-                    else None
-                ),
-            )
+            await get_us_exchange_by_symbol(resolved_symbol)
 
-        kis = KISClient()
-        frame = await kis.inquire_daily_itemchartprice(
-            code=resolved_symbol,
-            market="J",
-            n=1,
-            period="D",
-        )
-        if frame.empty:
+        daily_error: Exception | None = None
+        try:
+            frame = await fetch_daily_toss_frame(
+                symbol=resolved_symbol,
+                count=2,
+            )
+        except Exception as exc:
+            daily_error = exc
+            frame = pd.DataFrame()
+        points = await toss_market_data.prices([resolved_symbol])
+        point = points.get(resolved_symbol)
+        last = frame.iloc[-1] if not frame.empty else None
+        fallback_close = _to_float(last.get("close")) if last is not None else 0.0
+        price = float(point.price) if point is not None else fallback_close
+        if price <= 0:
+            if daily_error is not None:
+                raise daily_error
             raise SymbolNotFoundError(f"Symbol '{resolved_symbol}' not found")
-        last = frame.iloc[-1]
+
+        previous_close: float | None = None
+        if len(frame) >= 2:
+            raw_previous = frame.iloc[-2].get("close")
+            if raw_previous not in (None, "") and not pd.isna(raw_previous):
+                previous_close = float(raw_previous)
+
         return Quote(
             symbol=resolved_symbol,
             market=resolved_market,
-            price=float(last.get("close") or 0.0),
-            source="kis",
-            open=(float(last["open"]) if last.get("open") is not None else None),
-            high=(float(last["high"]) if last.get("high") is not None else None),
-            low=(float(last["low"]) if last.get("low") is not None else None),
-            volume=(
-                int(float(last["volume"])) if last.get("volume") is not None else None
+            price=price,
+            source="toss",
+            previous_close=previous_close,
+            open=(
+                float(last["open"])
+                if last is not None and last.get("open") is not None
+                else None
             ),
-            value=(float(last["value"]) if last.get("value") is not None else None),
+            high=(
+                float(last["high"])
+                if last is not None and last.get("high") is not None
+                else None
+            ),
+            low=(
+                float(last["low"])
+                if last is not None and last.get("low") is not None
+                else None
+            ),
+            volume=(
+                int(float(last["volume"]))
+                if last is not None and last.get("volume") is not None
+                else None
+            ),
+            value=(
+                float(last["value"])
+                if last is not None and last.get("value") is not None
+                else None
+            ),
         )
     except Exception as exc:
         raise _map_error(exc) from exc
@@ -570,8 +372,6 @@ async def get_orderbook(
                 ),
                 as_of=as_of,
                 price_as_of_source="broker" if as_of is not None else None,
-                expected_price=None,
-                expected_qty=None,
             )
         except Exception as exc:
             raise _map_error(exc) from exc
@@ -579,34 +379,43 @@ async def get_orderbook(
     if resolved_market != "equity_kr":
         raise ValueError("get_orderbook only supports KR equity and KRW crypto markets")
 
-    venue_info = _normalize_kr_orderbook_venue(venue)
-    resolved_symbol = _normalize_symbol(symbol, resolved_market)
+    requested_venue = str(venue or "krx").strip().lower()
+    if requested_venue in {
+        "nxt",
+        "ntx",
+        "nx",
+        "afterhours",
+        "extended",
+        "unified",
+        "combined",
+        "integrated",
+        "all",
+        "un",
+        "통합",
+        "통합시장",
+    }:
+        raise ProviderUnsupportedError(
+            "provider_unsupported: NH PLUG orderbook supports KRX only"
+        )
+    if requested_venue not in {"krx", "regular", "j"}:
+        raise ValueError(f"unsupported KR orderbook venue: {venue!r}")
 
+    resolved_symbol = _normalize_symbol(symbol, resolved_market)
     try:
-        kis = KISClient()
-        output1, output2 = await kis.inquire_orderbook_snapshot(
-            code=resolved_symbol,
-            market=venue_info.kis_market_code,
+        raw = await get_orderbook_store().get_snapshot(
+            market="KRX",
+            symbol=resolved_symbol,
         )
-        received_at = now_kst()
-        expected_price, expected_qty = _extract_expected_match_metadata(
-            resolved_symbol,
-            output2,
-        )
-        total_ask_qty = _to_int(output1.get("total_askp_rsqn"))
-        total_bid_qty = _to_int(output1.get("total_bidp_rsqn"))
-        asks = _parse_orderbook_levels(output1, "ask")
-        bids = _parse_orderbook_levels(output1, "bid")
-        is_empty_book = not asks and not bids
-        requires_final_recheck = is_empty_book
-        empty_reason = "empty_kis_orderbook" if is_empty_book else None
-        as_of, as_of_source = _parse_orderbook_as_of_details(
-            output1, output2, received_at
-        )
+        asks = _parse_nh_orderbook_levels(raw.get("asks"))
+        bids = _parse_nh_orderbook_levels(raw.get("bids"))
+        total_ask_qty = _to_float(raw.get("totalAskVolume"))
+        total_bid_qty = _to_float(raw.get("totalBidVolume"))
+        # NH store의 ``asOf``는 수신 시각이므로 provider 시각 증거로 전달하지 않는다.
+        is_empty_book = not bool(raw.get("ready")) or not asks or not bids
         return OrderbookSnapshot(
             symbol=resolved_symbol,
             instrument_type="equity_kr",
-            source="kis",
+            source="nhplug",
             asks=asks,
             bids=bids,
             total_ask_qty=total_ask_qty,
@@ -614,87 +423,22 @@ async def get_orderbook(
             bid_ask_ratio=(
                 round(total_bid_qty / total_ask_qty, 2) if total_ask_qty > 0 else None
             ),
-            as_of=as_of,
-            price_as_of_source=as_of_source,
-            expected_price=expected_price,
-            expected_qty=expected_qty,
-            venue=venue_info.venue,
-            venue_label=venue_info.venue_label,
-            kis_market_code=venue_info.kis_market_code,
-            source_endpoint=_KR_ORDERBOOK_ENDPOINT,
-            source_tr_id=_KR_ORDERBOOK_TR_ID,
+            venue="krx",
+            venue_label="KRX",
             is_empty_book=is_empty_book,
-            requires_final_recheck=requires_final_recheck,
-            empty_reason=empty_reason,
+            requires_final_recheck=is_empty_book,
+            empty_reason="empty_nh_orderbook" if is_empty_book else None,
         )
     except Exception as exc:
         raise _map_error(exc) from exc
 
 
 async def get_short_interest(symbol: str, days: int = 20) -> dict[str, object]:
-    resolved_symbol = _normalize_symbol(symbol, "equity_kr")
-    capped_days = min(max(days, 1), 60)
-    end_date = dt.date.today()
-    start_date = end_date - dt.timedelta(days=capped_days * 2)
-
-    try:
-        kis = KISClient()
-        output1, output2 = await kis.inquire_short_selling(
-            code=resolved_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            market="J",
-        )
-        name = (
-            output1.get("hts_kor_isnm")
-            or output1.get("prdt_name")
-            or output1.get("name")
-            or None
-        )
-        if not name:
-            try:
-                info = await naver_finance.fetch_company_profile(resolved_symbol)
-                name = info.get("name") or None
-            except Exception:
-                name = None
-
-        short_data: list[dict[str, object]] = []
-        for row in output2:
-            date = _format_kis_date(row.get("stck_bsop_date"))
-            if date is None:
-                continue
-            short_data.append(
-                {
-                    "date": date,
-                    "short_volume": _to_optional_int(row.get("ssts_cntg_qty")),
-                    "short_amount": _to_optional_int(row.get("ssts_tr_pbmn")),
-                    "short_ratio": _to_optional_float(row.get("ssts_vol_rlim")),
-                    "total_volume": _to_optional_int(row.get("acml_vol")),
-                    "total_amount": _to_optional_int(row.get("acml_tr_pbmn")),
-                }
-            )
-
-        short_data = sorted(short_data, key=lambda row: str(row["date"]), reverse=True)[
-            :capped_days
-        ]
-
-        valid_ratios: list[float] = []
-        for row in short_data:
-            ratio = row["short_ratio"]
-            if isinstance(ratio, int | float):
-                valid_ratios.append(float(ratio))
-        avg_short_ratio = (
-            round(sum(valid_ratios) / len(valid_ratios), 2) if valid_ratios else None
-        )
-
-        return {
-            "symbol": resolved_symbol,
-            "name": name,
-            "short_data": short_data,
-            "avg_short_ratio": avg_short_ratio,
-        }
-    except Exception as exc:
-        raise _map_error(exc) from exc
+    _normalize_symbol(symbol, "equity_kr")
+    _ = days
+    raise ProviderUnsupportedError(
+        "provider_unsupported: short-interest data is unavailable from Toss/NH PLUG"
+    )
 
 
 async def get_ohlcv(
@@ -707,7 +451,6 @@ async def get_ohlcv(
     resolved_market = _normalize_market(market)
     resolved_symbol = _normalize_symbol(symbol, resolved_market)
     resolved_period = _normalize_period(period, resolved_market)
-
     if count <= 0:
         raise ValidationError("count must be > 0")
 
@@ -727,101 +470,44 @@ async def get_ohlcv(
                 period=resolved_period,
             )
 
+        capped_count = min(count, 200)
         if resolved_market == "equity_us":
+            exchange = await get_us_exchange_by_symbol(resolved_symbol)
             if resolved_period in US_INTRADAY_OHLCV_PERIODS:
-                capped_count = min(count, 200)
-                try:
-                    frame = await read_us_intraday_candles(
-                        symbol=resolved_symbol,
-                        period=resolved_period,
-                        count=capped_count,
-                        end_date=end,
-                    )
-                except Exception as kis_exc:
-                    logger.info(
-                        "KIS/DB US intraday OHLCV failed; Toss fallback symbol=%s period=%s error_type=%s",
-                        safe_log_value(resolved_symbol),
-                        resolved_period,
-                        type(kis_exc).__name__,
-                    )
-                else:
-                    if frame is not None and not frame.empty:
-                        return _to_candle_rows(
-                            frame,
-                            symbol=resolved_symbol,
-                            market=resolved_market,
-                            source="kis",
-                            period=resolved_period,
-                        )
                 frame = await fetch_us_intraday_toss_frame(
                     symbol=resolved_symbol,
                     period=resolved_period,
                     count=capped_count,
                     end_date=end,
                 )
-                return _to_candle_rows(
-                    frame,
-                    symbol=resolved_symbol,
-                    market=resolved_market,
-                    source="toss",
-                    period=resolved_period,
-                )
-            # ROB-639: day → DB-first read-through (kr/us_candles_1d). Falls
-            # back to Yahoo → Toss on miss/stale. week/month stay live (v1).
-            capped_count = min(count, 200)
-            if resolved_period == "day":
-                db_frame = await cache_first_us(resolved_symbol, capped_count, end)
-                if db_frame is not None and not db_frame.empty:
+            elif resolved_period == "day":
+                frame = await cache_first_us(resolved_symbol, capped_count, end)
+                if frame is not None and not frame.empty:
                     return _to_candle_rows(
-                        db_frame,
+                        frame,
                         symbol=resolved_symbol,
                         market=resolved_market,
                         source="db",
                         period=resolved_period,
                     )
-            try:
-                frame = await fetch_yahoo_ohlcv(
-                    ticker=resolved_symbol,
-                    days=capped_count,
-                    period=resolved_period,
-                    end_date=end,
-                )
-                source = "yahoo"
-            except Exception:
-                if resolved_period != "day":
-                    raise
                 frame = await fetch_daily_toss_frame(
                     symbol=resolved_symbol,
                     count=capped_count,
                     end_date=end,
                 )
-                source = "toss"
-            if resolved_period == "day":
-                await write_back_us(frame, symbol=resolved_symbol, source=source)
-            return _to_candle_rows(
-                frame,
-                symbol=resolved_symbol,
-                market=resolved_market,
-                source=source,
-                period=resolved_period,
-            )
-
-        if (
-            resolved_symbol in KR_BENCHMARK_INDEX_SYMBOLS
-            and resolved_period in KR_INTRADAY_OHLCV_PERIODS
-            and resolved_period != "1h"
-        ):
-            # KOSPI/KOSDAQ are Toss market indicators, not equity symbols.
-            # Provider failure stays unavailable: routing an index identifier
-            # through the stock KIS/DB fallback would not prove index bars.
-            frame = await fetch_kr_index_intraday_toss_frame(
-                symbol=resolved_symbol,
-                period=resolved_period,
-                count=min(count, 200),
-                end_date=end,
-            )
-            if frame is None or len(frame) == 0:
-                raise ValueError("Toss returned an empty KR index intraday frame")
+                await write_back_us(
+                    frame,
+                    symbol=resolved_symbol,
+                    partition=exchange,
+                    source="toss",
+                )
+            else:
+                frame = await fetch_resampled_daily_toss_frame(
+                    symbol=resolved_symbol,
+                    period=resolved_period,
+                    count=capped_count,
+                    end_date=end,
+                )
             return _to_candle_rows(
                 frame,
                 symbol=resolved_symbol,
@@ -830,120 +516,64 @@ async def get_ohlcv(
                 period=resolved_period,
             )
 
-        kis = KISClient()
-        if resolved_period in {"day", "week", "month"}:
-            period_map = {"day": "D", "week": "W", "month": "M"}
-            capped_count = min(count, 200)
-            # ROB-639: day → DB-first read-through (kr_candles_1d). week/month
-            # stay on the live path (v1 scope).
-            if resolved_period == "day":
-                db_frame = await cache_first_kr(resolved_symbol, capped_count, end)
-                if db_frame is not None and not db_frame.empty:
-                    return _to_candle_rows(
-                        db_frame,
-                        symbol=resolved_symbol,
-                        market=resolved_market,
-                        source="db",
-                        period=resolved_period,
-                    )
-            try:
-                frame = await kis.inquire_daily_itemchartprice(
-                    code=resolved_symbol,
-                    market="J",
-                    n=capped_count,
-                    period=period_map[resolved_period],
-                    end_date=(pd.Timestamp(end.date()) if end is not None else None),
-                )
-                source = "kis"
-            except Exception as kis_exc:
-                # ROB-706: KIS is the authoritative adjusted KR daily source but a
-                # single point of failure on cache miss (2026-07-04 maintenance
-                # blanked /invest). Only `day` has a Toss 1d equivalent; week/month
-                # re-raise (same UpstreamUnavailableError as today). Toss 1d is
-                # adjusted=True — matches KIS adj=True already stored as source="kis".
-                if resolved_period != "day":
-                    raise
-                logger.warning(
-                    "KIS KR daily failed symbol=%s; Toss 1d fallback: %s",
-                    safe_log_value(resolved_symbol),
-                    kis_exc,
-                )
-                frame = await fetch_daily_toss_frame(
-                    symbol=resolved_symbol,
-                    count=capped_count,
-                    end_date=end,
-                )
-                source = "toss"
-            if resolved_period == "day":
-                if source == "toss":
-                    await write_back_kr(frame, symbol=resolved_symbol, source="toss")
-                else:
-                    await write_back_kr(frame, symbol=resolved_symbol)
-            return _to_candle_rows(
-                frame,
-                symbol=resolved_symbol,
-                market=resolved_market,
-                source=source,
-                period=resolved_period,
-            )
-
-        if resolved_period in KR_INTRADAY_OHLCV_PERIODS:
-            capped_count = min(count, 200)
-            if resolved_period == "1h":
-                # ROB-548: 1h uses the DB hourly aggregate (matches the MCP
-                # get_ohlcv surface). Aggregating 1h from 60x Toss 1m candles is
-                # heavy (many pages) and shallow, so 1h is not Toss-routed.
-                frame = await read_kr_intraday_candles(
+        if resolved_symbol in KR_BENCHMARK_INDEX_SYMBOLS:
+            if resolved_period in KR_INTRADAY_OHLCV_PERIODS:
+                frame = await fetch_kr_index_intraday_toss_frame(
                     symbol=resolved_symbol,
                     period=resolved_period,
                     count=capped_count,
                     end_date=end,
                 )
             else:
-                try:
-                    frame = await fetch_kr_intraday_toss_frame(
-                        symbol=resolved_symbol,
-                        period=resolved_period,
-                        count=capped_count,
-                        end_date=end,
-                    )
-                    # ROB-548: an empty Toss frame must fall through to the
-                    # KIS/DB reader, not be returned as an empty source="toss".
-                    if frame is None or len(frame) == 0:
-                        raise ValueError("Toss returned an empty intraday frame")
-                    return _to_candle_rows(
-                        frame,
-                        symbol=resolved_symbol,
-                        market=resolved_market,
-                        source="toss",
-                        period=resolved_period,
-                    )
-                except Exception as toss_exc:
-                    logger.info(
-                        "Toss KR intraday OHLCV fallback to KIS symbol=%s period=%s error=%s",
-                        safe_log_value(resolved_symbol),
-                        resolved_period,
-                        toss_exc,
-                    )
-                    frame = await read_kr_intraday_candles(
-                        symbol=resolved_symbol,
-                        period=resolved_period,
-                        count=capped_count,
-                        end_date=end,
-                    )
+                frame = await fetch_kr_index_daily_toss_frame(
+                    symbol=resolved_symbol,
+                    period=resolved_period,
+                    count=capped_count,
+                    end_date=end,
+                )
+            return _to_candle_rows(
+                frame,
+                symbol=resolved_symbol,
+                market=resolved_market,
+                source="toss",
+                period=resolved_period,
+            )
+
+        if resolved_period in KR_INTRADAY_OHLCV_PERIODS:
+            frame = await fetch_kr_intraday_toss_frame(
+                symbol=resolved_symbol,
+                period=resolved_period,
+                count=capped_count,
+                end_date=end,
+            )
+        elif resolved_period == "day":
+            frame = await cache_first_kr(resolved_symbol, capped_count, end)
+            if frame is not None and not frame.empty:
+                return _to_candle_rows(
+                    frame,
+                    symbol=resolved_symbol,
+                    market=resolved_market,
+                    source="db",
+                    period=resolved_period,
+                )
+            frame = await fetch_daily_toss_frame(
+                symbol=resolved_symbol,
+                count=capped_count,
+                end_date=end,
+            )
+            await write_back_kr(frame, symbol=resolved_symbol, source="toss")
         else:
-            frame = await kis.inquire_minute_chart(
-                code=resolved_symbol,
-                market="J",
-                time_unit=60,
-                n=min(count, 200),
-                end_date=(pd.Timestamp(end.date()) if end is not None else None),
+            frame = await fetch_resampled_daily_toss_frame(
+                symbol=resolved_symbol,
+                period=resolved_period,
+                count=capped_count,
+                end_date=end,
             )
         return _to_candle_rows(
             frame,
             symbol=resolved_symbol,
             market=resolved_market,
-            source="kis",
+            source="toss",
             period=resolved_period,
         )
     except Exception as exc:
@@ -956,6 +586,7 @@ __all__ = [
     "get_short_interest",
     "get_ohlcv",
     "get_kr_volume_rank",
+    "ProviderUnsupportedError",
     "Quote",
     "Candle",
     "OrderbookLevel",

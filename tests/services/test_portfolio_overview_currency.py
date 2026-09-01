@@ -9,15 +9,15 @@ class TestUSPortfolioCurrencyConversion:
 
     @pytest.fixture
     def mock_components_mixed_currency(self):
-        """Mock components with KIS in USD and manual holdings in KRW."""
+        """Mock components with Toss live USD and manual KRW holdings."""
         return [
             {
                 "market_type": _MARKET_US,
                 "symbol": "AAPL",
                 "name": "Apple Inc",
-                "account_key": "live:kis",
-                "broker": "kis",
-                "account_name": "KIS 실계좌",
+                "account_key": "live:toss",
+                "broker": "toss",
+                "account_name": "Toss 실계좌",
                 "source": "live",
                 "quantity": 10.0,
                 "avg_price": 150.0,  # USD
@@ -98,9 +98,9 @@ class TestUSPortfolioCurrencyConversion:
                 "market_type": _MARKET_US,
                 "symbol": "AAPL",
                 "name": "Apple Inc",
-                "account_key": "live:kis",
-                "broker": "kis",
-                "account_name": "KIS",
+                "account_key": "live:toss",
+                "broker": "toss",
+                "account_name": "Toss",
                 "source": "live",
                 "quantity": 10.0,
                 "avg_price": 150.0,
@@ -130,9 +130,9 @@ class TestUSPortfolioCurrencyConversion:
                 "market_type": "KR",
                 "symbol": "005930",
                 "name": "삼성전자",
-                "account_key": "live:kis",
-                "broker": "kis",
-                "account_name": "KIS",
+                "account_key": "live:toss",
+                "broker": "toss",
+                "account_name": "Toss",
                 "source": "live",
                 "quantity": 10.0,
                 "avg_price": 70000.0,

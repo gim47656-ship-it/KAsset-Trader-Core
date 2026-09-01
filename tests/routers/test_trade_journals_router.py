@@ -1,4 +1,5 @@
 # tests/routers/test_trade_journals_router.py
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,8 +15,9 @@ from app.routers.trade_journals import router
 def mock_external_clients():
     with (
         patch(
-            "app.services.merged_portfolio_service.KISClient", autospec=True
-        ) as mock_kis,
+            "app.services.merged_portfolio_service.fetch_toss_portfolio_snapshot",
+            AsyncMock(return_value=SimpleNamespace(positions=[], errors=[])),
+        ) as mock_toss,
         patch(
             "app.services.trade_journal_coverage_service.upbit_client", autospec=True
         ) as mock_upbit,
@@ -24,11 +26,10 @@ def mock_external_clients():
             AsyncMock(return_value=1350.0),
         ),
     ):
-        mock_kis.return_value.fetch_my_stocks = AsyncMock(return_value=[])
-        mock_kis.return_value.fetch_my_overseas_stocks = AsyncMock(return_value=[])
+        mock_toss.return_value = SimpleNamespace(positions=[], errors=[])
         mock_upbit.fetch_my_coins = AsyncMock(return_value=[])
         mock_upbit.fetch_multiple_current_prices = AsyncMock(return_value={})
-        yield mock_kis, mock_upbit
+        yield mock_toss, mock_upbit
 
 
 @pytest.fixture

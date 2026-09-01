@@ -97,6 +97,32 @@ def _require_enabled() -> None:
         raise _gate_off_503()
 
 
+_DEFAULT_OPERATIONAL_ACCOUNT_SCOPE = {
+    "kr": "toss_live",
+    "us": "toss_live",
+    "crypto": "upbit_live",
+}
+
+
+def _operational_account_scope(market: str, account_scope: str | None) -> str | None:
+    """새 Hermes write 요청의 account scope를 운영 provider로 제한한다."""
+    if isinstance(account_scope, str) and account_scope.startswith("kis_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "provider kis is not operational",
+                "provider_unsupported": True,
+                "account_scope": account_scope,
+            },
+        )
+    return account_scope or _DEFAULT_OPERATIONAL_ACCOUNT_SCOPE.get(market)
+
+
+def _reject_kis_scope(account_scope: str | None) -> None:
+    if isinstance(account_scope, str) and account_scope.startswith("kis_"):
+        _operational_account_scope("", account_scope)
+
+
 # ---------------------------------------------------------------------------
 # Request body schemas (HTTP layer)
 #
@@ -162,12 +188,13 @@ async def prepare_bundle(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
     _require_enabled()
+    account_scope = _operational_account_scope(body.market, body.account_scope)
 
     try:
         ensure_request = EnsureBundleRequest(
             purpose=body.purpose,
             market=body.market,  # type: ignore[arg-type]
-            account_scope=body.account_scope,  # type: ignore[arg-type]
+            account_scope=account_scope,  # type: ignore[arg-type]
             policy_version=body.policy_version,
             mode=body.mode,  # type: ignore[arg-type]
             symbols=body.symbols,
@@ -240,6 +267,7 @@ async def stage_artifacts_ingest(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
     _require_enabled()
+    _reject_kis_scope(body.run_envelope.account_scope)
 
     svc = HermesStageArtifactsIngestService(db)
     try:
@@ -281,6 +309,7 @@ async def composition_ingest(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
     _require_enabled()
+    account_scope = _operational_account_scope(body.market, body.account_scope)
 
     try:
         ingest_request = HermesCompositionIngestRequest(
@@ -288,7 +317,7 @@ async def composition_ingest(
             kst_date=body.kst_date,
             market=body.market,
             market_session=body.market_session,
-            account_scope=body.account_scope,
+            account_scope=account_scope,
             report_type=body.report_type,
             generator_version=body.generator_version,
             policy_version=body.policy_version,
@@ -342,6 +371,7 @@ async def symbol_reports_ingest(
     ingest token is unset, 401 if wrong) and the enable gate both apply.
     """
     _require_enabled()
+    _reject_kis_scope(body.run_envelope.account_scope)
 
     svc = SymbolIntermediateReportIngestService(db)
     try:
@@ -386,6 +416,7 @@ async def dimension_reports_ingest(
     AuthMiddleware token branch (403 unset / 401 wrong) + enable gate apply.
     """
     _require_enabled()
+    _reject_kis_scope(body.run_envelope.account_scope)
 
     svc = DimensionReportIngestService(db)
     try:

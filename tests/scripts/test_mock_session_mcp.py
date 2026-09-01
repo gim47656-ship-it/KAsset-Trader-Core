@@ -64,7 +64,10 @@ def _assert_kiwoom_kr_connected_surface(names: set[str]) -> None:
     assert names & DIRECT_BROKER_MUTATION_TOOLS == allowed_direct
 
 
-@pytest.mark.parametrize("profile", ["", "unknown", "default", "kiwoom"])
+@pytest.mark.parametrize(
+    "profile",
+    ["", "unknown", "default", "kiwoom", "hermes-paper-kis"],
+)
 def test_unknown_and_legacy_profiles_fail_closed(profile: str) -> None:
     with pytest.raises(MockSessionMcpError, match="refused before spawn"):
         validate_mock_profile(profile)
@@ -377,23 +380,22 @@ def test_closed_world_rejects_unclassified_broker_alias() -> None:
 @pytest.mark.integration
 def test_concurrent_profiles_do_not_cross_contaminate() -> None:
     async def _gather() -> tuple[set[str], set[str]]:
-        kiwoom, kis = await asyncio.gather(
+        kiwoom, us_paper = await asyncio.gather(
             connected_tool_names(
                 profile="kiwoom_kr",
                 session_id="concurrent-kiwoom-kr",
             ),
             connected_tool_names(
-                profile="hermes-paper-kis",
-                session_id="concurrent-hermes-kis",
+                profile="us-paper",
+                session_id="concurrent-us-paper",
             ),
         )
-        return set(kiwoom), set(kis)
+        return set(kiwoom), set(us_paper)
 
-    kiwoom_names, kis_names = asyncio.run(_gather())
+    kiwoom_names, us_paper_names = asyncio.run(_gather())
     assert EXPECTED_KIWOOM_KR_TOOLS <= kiwoom_names
-    assert EXPECTED_KIWOOM_KR_TOOLS.isdisjoint(kis_names)
-    assert "kis_mock_place_order" in kis_names
-    assert "kis_mock_place_order" not in kiwoom_names
+    assert EXPECTED_KIWOOM_KR_TOOLS.isdisjoint(us_paper_names)
+    assert not any(name.startswith("kis_") for name in kiwoom_names | us_paper_names)
 
 
 def _process_census() -> dict[int, tuple[int, str]]:

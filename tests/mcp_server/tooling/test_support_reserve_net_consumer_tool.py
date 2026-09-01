@@ -35,7 +35,7 @@ def _candidate(
     return {
         "normalized_symbol": symbol,
         "market": "equity_kr",
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "broker_account_id": broker_account_id,
         "beneficial_owner_id": beneficial_owner_id,
         "intent": "new",
@@ -62,7 +62,7 @@ def _request(*candidates: dict[str, Any]) -> dict[str, Any]:
         "candidates": list(candidates or (_candidate(),)),
         "cash_snapshots": [
             {
-                "account_mode": "kis_live",
+                "account_mode": "toss_live",
                 "broker_account_id": "acct-exact-1",
                 "currency": "KRW",
                 "fresh_broker_orderable_cash": "500000",
@@ -94,7 +94,7 @@ def _attribution(
         "normalized_symbol": symbol,
         "market": "equity_kr",
         "beneficial_owner_id": beneficial_owner_id,
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "broker_account_id": "acct-exact-1",
         "state": state,
         "strategy": strategy,
@@ -112,7 +112,7 @@ def _self_unfilled_order(
         "normalized_symbol": symbol,
         "market": "equity_kr",
         "beneficial_owner_id": beneficial_owner_id,
-        "account_mode": "kis_live",
+        "account_mode": "toss_live",
         "broker_account_id": "acct-exact-1",
         "side": side,
     }
@@ -1049,7 +1049,7 @@ async def test_selected_candidate_create_failure_rolls_back_whole_transaction(
     inspection = await service.inspect_watch_to_order_scope(
         symbol=first["normalized_symbol"],
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id="acct-exact-1",
         action="place",
     )

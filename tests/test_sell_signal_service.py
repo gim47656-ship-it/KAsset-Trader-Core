@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -55,25 +56,27 @@ def _make_large_ohlcv(
 class TestFetchCurrentPrice:
     @pytest.mark.asyncio
     async def test_returns_price_on_success(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame({"close": [1_150_000.0]})
-        price, err = await _fetch_current_price(kis, "000660")
+        toss = AsyncMock()
+        toss.prices.return_value = [
+            SimpleNamespace(symbol="000660", last_price=1_150_000.0)
+        ]
+        price, err = await _fetch_current_price(toss, "000660")
         assert price == pytest.approx(1_150_000.0)
         assert err is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_empty_df(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame()
-        price, err = await _fetch_current_price(kis, "000660")
+    async def test_returns_none_when_symbol_missing(self):
+        toss = AsyncMock()
+        toss.prices.return_value = []
+        price, err = await _fetch_current_price(toss, "000660")
         assert price is None
         assert err is None
 
     @pytest.mark.asyncio
     async def test_returns_error_on_exception(self):
-        kis = AsyncMock()
-        kis.inquire_price.side_effect = RuntimeError("API down")
-        price, err = await _fetch_current_price(kis, "000660")
+        toss = AsyncMock()
+        toss.prices.side_effect = RuntimeError("API down")
+        price, err = await _fetch_current_price(toss, "000660")
         assert price is None
         assert err == "API down"
 
@@ -86,16 +89,16 @@ class TestFetchCurrentPrice:
 class TestFetchStockName:
     @pytest.mark.asyncio
     async def test_returns_name(self):
-        kis = AsyncMock()
-        kis.fetch_fundamental_info.return_value = {"종목명": "SK하이닉스"}
-        name = await _fetch_stock_name(kis, "000660")
+        toss = AsyncMock()
+        toss.stocks.return_value = [SimpleNamespace(symbol="000660", name="SK하이닉스")]
+        name = await _fetch_stock_name(toss, "000660")
         assert name == "SK하이닉스"
 
     @pytest.mark.asyncio
     async def test_falls_back_to_symbol(self):
-        kis = AsyncMock()
-        kis.fetch_fundamental_info.side_effect = RuntimeError("fail")
-        name = await _fetch_stock_name(kis, "000660")
+        toss = AsyncMock()
+        toss.stocks.side_effect = RuntimeError("fail")
+        name = await _fetch_stock_name(toss, "000660")
         assert name == "000660"
 
 
@@ -105,11 +108,21 @@ class TestFetchStockName:
 
 
 class TestCheckTrailingStop:
+    @staticmethod
+    def _client(price: float | None) -> AsyncMock:
+        toss = AsyncMock()
+        toss.prices.return_value = (
+            [SimpleNamespace(symbol="000660", last_price=price)]
+            if price is not None
+            else []
+        )
+        return toss
+
     @pytest.mark.asyncio
     async def test_met_when_price_below_threshold(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame({"close": [1_100_000.0]})
-        cond, price, errors = await _check_trailing_stop(kis, "000660", 1_150_000)
+        cond, price, errors = await _check_trailing_stop(
+            self._client(1_100_000.0), "000660", 1_150_000
+        )
         assert cond.name == "trailing_stop"
         assert cond.met is True
         assert price == pytest.approx(1_100_000.0)
@@ -117,34 +130,34 @@ class TestCheckTrailingStop:
 
     @pytest.mark.asyncio
     async def test_met_when_price_equals_threshold(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame({"close": [1_150_000.0]})
-        cond, price, errors = await _check_trailing_stop(kis, "000660", 1_150_000)
+        cond, _, _ = await _check_trailing_stop(
+            self._client(1_150_000.0), "000660", 1_150_000
+        )
         assert cond.met is True
 
     @pytest.mark.asyncio
     async def test_not_met_when_price_above_threshold(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame({"close": [1_200_000.0]})
-        cond, price, errors = await _check_trailing_stop(kis, "000660", 1_150_000)
+        cond, price, _ = await _check_trailing_stop(
+            self._client(1_200_000.0), "000660", 1_150_000
+        )
         assert cond.met is False
         assert price == pytest.approx(1_200_000.0)
 
     @pytest.mark.asyncio
     async def test_not_met_when_price_unavailable(self):
-        kis = AsyncMock()
-        kis.inquire_price.return_value = pd.DataFrame()
-        cond, price, errors = await _check_trailing_stop(kis, "000660", 1_150_000)
+        cond, price, _ = await _check_trailing_stop(
+            self._client(None), "000660", 1_150_000
+        )
         assert cond.met is False
         assert price is None
 
     @pytest.mark.asyncio
     async def test_error_recorded_on_api_failure(self):
-        kis = AsyncMock()
-        kis.inquire_price.side_effect = RuntimeError("timeout")
-        cond, price, errors = await _check_trailing_stop(kis, "000660", 1_150_000)
+        toss = AsyncMock()
+        toss.prices.side_effect = RuntimeError("timeout")
+        cond, price, errors = await _check_trailing_stop(toss, "000660", 1_150_000)
         assert cond.met is False
-        assert len(errors) == 1
+        assert price is None
         assert errors[0]["condition"] == "trailing_stop"
 
 
@@ -228,67 +241,19 @@ class TestCheckStochRsi:
 
 class TestCheckForeignSelling:
     @pytest.mark.asyncio
-    async def test_met_with_consecutive_sell_days(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = [
-            {"frgn_ntby_qty": "-5000"},
-            {"frgn_ntby_qty": "-3000"},
-        ]
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
+    async def test_is_explicitly_provider_unsupported(self):
+        cond, errors = await _check_foreign_selling("000660", 2)
+
         assert cond.name == "foreign_selling"
-        assert cond.met is True
-        assert "2일 연속 순매도" in cond.detail
-
-    @pytest.mark.asyncio
-    async def test_not_met_with_mixed_days(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = [
-            {"frgn_ntby_qty": "-5000"},
-            {"frgn_ntby_qty": "3000"},
+        assert cond.met is False
+        assert cond.value is None
+        assert cond.detail == "provider_unsupported: investor flow is unavailable"
+        assert errors == [
+            {
+                "condition": "foreign_selling",
+                "error": "provider_unsupported: investor flow is unavailable",
+            }
         ]
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
-        assert cond.met is False
-
-    @pytest.mark.asyncio
-    async def test_not_met_with_buy_days(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = [
-            {"frgn_ntby_qty": "5000"},
-            {"frgn_ntby_qty": "3000"},
-        ]
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
-        assert cond.met is False
-
-    @pytest.mark.asyncio
-    async def test_insufficient_data(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = [{"frgn_ntby_qty": "-5000"}]
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
-        assert cond.met is False
-        assert "부족" in cond.detail
-
-    @pytest.mark.asyncio
-    async def test_empty_rows(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = []
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
-        assert cond.met is False
-
-    @pytest.mark.asyncio
-    async def test_exception_returns_error(self):
-        kis = AsyncMock()
-        kis.inquire_investor.side_effect = RuntimeError("API error")
-        cond, errors = await _check_foreign_selling(kis, "000660", 2)
-        assert cond.met is False
-        assert len(errors) == 1
-        assert errors[0]["condition"] == "foreign_selling"
-
-    @pytest.mark.asyncio
-    async def test_single_day_consecutive(self):
-        kis = AsyncMock()
-        kis.inquire_investor.return_value = [{"frgn_ntby_qty": "-1000"}]
-        cond, errors = await _check_foreign_selling(kis, "000660", 1)
-        assert cond.met is True
 
 
 # ---------------------------------------------------------------------------
@@ -628,21 +593,20 @@ class TestEvaluateSellSignal:
         bb_upper: float = 1_150_000.0,
         stock_name: str = "SK하이닉스",
     ):
-        if foreign_rows is None:
-            foreign_rows = [
-                {"frgn_ntby_qty": "-5000"},
-                {"frgn_ntby_qty": "-3000"},
-            ]
+        _ = foreign_rows
         if rsi_state is None:
             rsi_state = {"was_above_high": True, "rsi": 72.0}
 
-        kis_mock = AsyncMock()
-        if price is not None:
-            kis_mock.inquire_price.return_value = pd.DataFrame({"close": [price]})
-        else:
-            kis_mock.inquire_price.return_value = pd.DataFrame()
-        kis_mock.fetch_fundamental_info.return_value = {"종목명": stock_name}
-        kis_mock.inquire_investor.return_value = foreign_rows
+        toss_mock = AsyncMock()
+        toss_mock.prices.return_value = (
+            [SimpleNamespace(symbol="000660", last_price=price)]
+            if price is not None
+            else []
+        )
+        toss_mock.stocks.return_value = [
+            SimpleNamespace(symbol="000660", name=stock_name)
+        ]
+        toss_mock.aclose.return_value = None
 
         df = _make_large_ohlcv(200)
 
@@ -652,7 +616,10 @@ class TestEvaluateSellSignal:
         mock_r.aclose.return_value = None
 
         return (
-            patch("app.services.sell_signal_service.KISClient", return_value=kis_mock),
+            patch(
+                "app.services.sell_signal_service._default_toss_client",
+                return_value=toss_mock,
+            ),
             patch(
                 "app.services.sell_signal_service._fetch_ohlcv_for_indicators",
                 return_value=df,
@@ -678,10 +645,7 @@ class TestEvaluateSellSignal:
 
     @pytest.mark.asyncio
     async def test_triggered_when_two_or_more_conditions_met(self):
-        # trailing_stop met (price 1.1M <= threshold 1.152M)
-        # stoch_rsi met (k=25 < 80)
-        # foreign met (2 consecutive sell days)
-        # rsi_momentum met (was_above_high + rsi 63 <= 65)
+        # trailing_stop, stoch_rsi, rsi_momentum 조건이 충족된다.
         patches = self._patch_all(price=1_100_000.0, stoch_k=25.0, rsi_val=63.0)
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             result = await evaluate_sell_signal("000660")
@@ -693,10 +657,7 @@ class TestEvaluateSellSignal:
 
     @pytest.mark.asyncio
     async def test_not_triggered_when_one_condition_met(self):
-        # Only trailing_stop met (price below threshold)
-        # stoch_rsi not met (k=85 >= 80)
-        # foreign not met (buy days)
-        # rsi not met (never above high)
+        # trailing_stop만 충족되고 investor flow는 provider_unsupported다.
         patches = self._patch_all(
             price=1_100_000.0,
             stoch_k=85.0,
@@ -747,13 +708,18 @@ class TestEvaluateSellSignal:
 
     @pytest.mark.asyncio
     async def test_errors_collected_from_evaluators(self):
-        kis_mock = AsyncMock()
-        kis_mock.inquire_price.side_effect = RuntimeError("price fail")
-        kis_mock.fetch_fundamental_info.return_value = {"종목명": "테스트"}
-        kis_mock.inquire_investor.side_effect = RuntimeError("investor fail")
+        toss_mock = AsyncMock()
+        toss_mock.prices.side_effect = RuntimeError("price fail")
+        toss_mock.stocks.return_value = [
+            SimpleNamespace(symbol="000660", name="테스트")
+        ]
+        toss_mock.aclose.return_value = None
 
         with (
-            patch("app.services.sell_signal_service.KISClient", return_value=kis_mock),
+            patch(
+                "app.services.sell_signal_service._default_toss_client",
+                return_value=toss_mock,
+            ),
             patch(
                 "app.services.sell_signal_service._fetch_ohlcv_for_indicators",
                 side_effect=RuntimeError("ohlcv fail"),

@@ -16,7 +16,7 @@ def test_lint_passes_on_fresh_complete():
         report_text="삼성전자 매수 검토",
         bundle_status="complete",
         freshness_summary={"overall": "fresh", "portfolio": {"status": "fresh"}},
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is True
     assert result.violations == []
@@ -30,7 +30,7 @@ def test_lint_blocks_buy_verb_on_hard_stale():
             "overall": "hard_stale",
             "portfolio": {"status": "hard_stale"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
     assert any(v.matched_verb == "매수" for v in result.violations)
@@ -44,7 +44,7 @@ def test_lint_blocks_sell_verb_on_partial_when_portfolio_missing():
             "overall": "partial",
             "portfolio": {"status": "unavailable"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
     matched = {v.matched_verb for v in result.violations}
@@ -60,7 +60,7 @@ def test_lint_allows_soft_language_on_stale():
             "overall": "hard_stale",
             "portfolio": {"status": "hard_stale"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is True
     assert result.violations == []
@@ -71,7 +71,7 @@ def test_lint_blocks_english_verb_on_failed():
         report_text="consider adding to the position",
         bundle_status="failed",
         freshness_summary={"overall": "failed"},
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
     # ``adding`` is matched as the lemma ``add`` (stem with ing suffix).
@@ -86,21 +86,21 @@ def test_lint_passes_legacy_report_no_bundle():
         report_text="삼성전자 매수",
         bundle_status=None,
         freshness_summary=None,
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is True
     assert result.violations == []
 
 
-def test_lint_blocks_when_account_scope_kis_live_and_portfolio_hard_stale():
-    """Even with bundle_status='partial', a hard_stale portfolio + live
-    account scope must block — caller's executable action language cannot
-    be trusted when the live portfolio snapshot is too old."""
+def test_lint_blocks_when_account_scope_toss_live_and_portfolio_hard_stale():
+    """bundle_status가 partial이어도 Toss portfolio가 hard_stale이면
+    실행성 action language를 차단한다.
+    """
     result = lint_action_language(
         report_text="매수 추천",
         bundle_status="partial",
         freshness_summary={"overall": "partial", "portfolio": {"status": "hard_stale"}},
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
     assert any(v.matched_verb == "매수" for v in result.violations)
@@ -147,7 +147,7 @@ def test_lint_allows_action_language_when_only_optional_news_unavailable():
             "market": {"status": "fresh"},
             "news": {"status": "unavailable"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is True
     assert result.violations == []
@@ -167,7 +167,7 @@ def test_lint_allows_action_language_when_only_optional_naver_toss_unavailable()
             "naver_remote_debug": {"status": "unavailable"},
             "toss_remote_debug": {"status": "unavailable"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is True
 
@@ -185,7 +185,7 @@ def test_lint_still_blocks_when_critical_kind_hard_stale_even_with_optional_fres
             "market": {"status": "fresh"},
             "news": {"status": "fresh"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
     assert any(v.matched_verb == "매수" for v in result.violations)
@@ -203,7 +203,7 @@ def test_lint_critical_kind_failed_blocks_even_with_overall_partial():
             "watch_context": {"status": "fresh"},
             "market": {"status": "fresh"},
         },
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     assert result.ok is False
 

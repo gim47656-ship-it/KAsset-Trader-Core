@@ -1,16 +1,8 @@
-"""ROB-265 — Pydantic v2 request schemas for the investment_* service layer.
+"""ROB-265 투자 보고서 서비스 계층의 Pydantic v2 요청 스키마.
 
-These mirror the locked product decisions:
-
-* Advisory-only invariants: ``kis_live`` account + ``nxt`` session both
-  force ``execution_mode='advisory_only'``.
-* Watch items: ``watch_condition`` and ``valid_until`` are both required
-  when ``item_kind='watch'``.
-* Schema validators run BEFORE we hit the DB, so callers get a clean
-  Pydantic ValidationError instead of an IntegrityError.
-
-Defense in depth — the DB CHECK constraints from Plan 1 are the
-authoritative enforcement; these are early rejection for cleaner errors.
+DB CHECK가 최종 권위이며 이 스키마는 동일 제약을 DB 접근 전에 검증한다.
+신규 운영 주식 보고서는 ``toss_live``를 사용한다. ``kis_*`` 값은 과거 저장
+보고서 역직렬화와 조회 호환성을 위해 남기되 신규 MCP 작성 경로에서 거부한다.
 """
 
 from __future__ import annotations
@@ -37,7 +29,9 @@ from app.schemas.investment_snapshots import (
 # alembic/versions/20260518_rob265_add_investment_reports.py exactly.
 MarketLiteral = Literal["kr", "us", "crypto"]
 MarketSessionLiteral = Literal["regular", "nxt", "pre", "post", "24x7"]
-AccountScopeLiteral = Literal["kis_live", "kis_mock", "alpaca_paper", "upbit_live"]
+AccountScopeLiteral = Literal[
+    "toss_live", "upbit_live", "alpaca_paper", "kis_live", "kis_mock"
+]
 ExecutionModeLiteral = Literal["advisory_only", "mock_preview"]
 ReportStatusLiteral = Literal["draft", "published", "decided", "expired", "superseded"]
 # ROB-455 — the lifecycle targets an operator may transition a report TO. draft /
@@ -517,10 +511,12 @@ class IngestReportRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_advisory_only(self) -> IngestReportRequest:
-        # Defense in depth — DB CHECK already enforces this.
-        if self.account_scope == "kis_live" and self.execution_mode != "advisory_only":
+        if self.account_scope in {"kis_live", "toss_live"} and (
+            self.execution_mode != "advisory_only"
+        ):
             raise ValueError(
-                "account_scope='kis_live' requires execution_mode='advisory_only'"
+                f"account_scope={self.account_scope!r} requires "
+                "execution_mode='advisory_only'"
             )
         if self.market_session == "nxt" and self.execution_mode != "advisory_only":
             raise ValueError(

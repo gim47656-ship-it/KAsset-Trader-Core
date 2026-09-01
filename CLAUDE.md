@@ -185,63 +185,23 @@ scans `app/**/*.py` for forbidden provider imports and deleted provider files.
   demo-scalping 봇과 동일 자격증명 공유 시 계정단 상태 충돌 가능)
 - **스케줄러 등록 없음** — CLI 수동 가동만, `--loop`도 operator 소유 foreground 프로세스
 
-### KIS WebSocket Mock Smoke (ROB-104)
+### KIS cutover와 역사 ledger 보존
 
-`scripts/kis_websocket_mock_smoke.py` — KIS 모의 WebSocket 핸드셰이크 검증 (주문/체결/Redis publish 없음).
+KIS live/mock 주문, 계좌, 시장데이터, WebSocket, reconcile, probe, smoke 실행
+표면은 운영에서 제거되었다. 기존 `scripts/kis_*`와 관련 직접 실행 도구는
+`scripts/_archive_kis/`의 fail-closed 묘비로 이동했으며 재활성화하지 않는다.
 
-- **CLI**: `uv run python -m scripts.kis_websocket_mock_smoke`
-- **런북**: `docs/runbooks/kis-websocket-mock-smoke.md`
-- **이벤트 태깅**: `app/services/kis_websocket_internal/events.py::build_lifecycle_event` (ROB-100 `OrderLifecycleEvent`)
-
-### kis_mock 귀속 사슬 — pre-submit 강제
-
-`kis_mock` 주문은 **브로커 전송 전에** 귀속이 확정돼야 한다. 확정 못 하면 주문이 나가지 않는다(fail-closed).
-
-- **모델**: `app/models/review.KISMockSignalLedger` (`review.kis_mock_signal_ledger`) — `correlation_id`/`strategy`/`signal_source` **NOT NULL + 공백거부 CHECK**
-- **서비스**: `app/services/kis_mock_attribution.py` — `resolve_attribution`(순수, 실패 시 `MissingAttribution`) / `record_signal` / `mark_signal_outcome`
-- **조회**: `app/services/kis_mock_attribution_chain.py::load_attribution_chain` — gap 코드 `signal_missing`/`order_missing`/`order_unattributed`/`reconcile_missing`
-- **게이트 위치**: `order_execution._execute_and_record` 최상단 (브로커 read 보다도 앞)
-- **런북**: `docs/runbooks/kis-mock-attribution-chain.md`
-
-**호출자 계약(파괴적)**: `place_order(is_mock=True)` 는 이제 `strategy` 필수 — 없으면 `error_code="attribution_required"`. `mirror_cohort="mock_counterfactual"` 은 레인 라벨 자동 판정. `thesis` 는 여전히 불필요.
-
-**주의**: `kis_mock_order_ledger.correlation_id`/`strategy` 는 과거 NULL 행 때문에 nullable 유지 — DB 제약은 pre-submit 신호 테이블에 걸려 있다. 원장 백필은 별건.
-
-### KIS Live Order Fill-Evidence Gate (ROB-395)
-
-`kis_live_place_order(dry_run=False)` (KR domestic) records **accepted-only** to
-`review.kis_live_order_ledger` — no fill/journal/realized_pnl at send. Fills are
-booked only by `kis_live_reconcile_orders` from order-id-keyed
-`inquire_daily_order_domestic` evidence (reuses `classify_fill_evidence`).
-
-- **모델**: `app/models/review.KISLiveOrderLedger`
-- **서비스**: `app/mcp_server/tooling/kis_live_ledger.py`
-- **MCP 도구**: `kis_live_reconcile_orders` (dry_run-default)
-- **런북**: `docs/runbooks/kis-live-order-reconcile.md`
-- **스코프**: KR live only; US/crypto live unchanged (follow-up)
-
-### KIS Day-Order Expiry by Accept-Session × Side (ROB-671)
-
-`kis_live_place_order` 응답의 `expected_expiry`/`expiry_reason` 및
-`kis_live_get_order_history` 행의 `expiry_reason` 은 **접수 세션 × 매매구분**으로
-결정된다. 순수 offline 분류기(`app/services/brokers/kis/live_order_expiry.py` —
-stdlib only, 브로커/DB/네트워크/캘린더 import 없음, 주문 hot path 무네트워크 보장):
-
-- 세션 창(KST, 마감 배타): premarket 08:00–08:50 / regular 09:00–15:30 /
-  nxt_after 16:00–20:00 / 그 외 off.
-- **정규장 SELL 은 NXT 로 연장**되어 20:00 KST 까지 유효(SOR 현금매도 NXT carry).
-  → "내 매도주문이 죽었나?" 오판 금지. reason=`nxt_carry`.
-- 정규장 BUY 는 **보수적 기본값 20:00 KST** (오늘 동작 유지), reason=
-  `regular_buy_conservative_20_00`. ROB-657 이 관측한 정규장 매수 15:30 사멸은
-  세션 만료가 아니라 **D+2 미결제(현금) 취소**(ROB-625 KRW variant)일 수 있어
-  **원인 미확정**. 공격적 `15:30` 다운그레이드(reason=`regular_buy_unsettled_15_30`)
-  는 구현되어 있으나 `KIS_REGULAR_BUY_UNSETTLED_EXPIRY_1530=true` (기본 off)
-  게이트 뒤에 있으며, **라이브 측정으로 원인 확정 후에만** 활성화한다.
-- premarket/nxt_after → 20:00(`nxt_carry`). off 창 접수 → 20:00(`unknown_session`).
-- US(해외) 주문 history 행의 `expiry_reason` 은 `us_day_order` placeholder(NXT 없음).
-
-reconcile 종료 분류(`classify_day_order_expiry`)는 변경 없음 — 여전히
-evidence-first / fail-closed.
+- `KISLiveOrderLedger`, `KISMockOrderLedger`, signal/provenance 모델과 과거 행은
+  감사·조회 목적으로 보존한다.
+- 과거 KIS intent를 Toss로 자동 변환하거나 기존 approval hash/idempotency
+  namespace를 재사용하지 않는다.
+- equity 계좌·주문·시장데이터 provider는 Toss다.
+- NH PLUG는 KR mock read-only이며 US 또는 주문 기능을 제공하지 않는다.
+- production WebSocket monitor는 Upbit 전용이다.
+- Toss accepted 주문의 fill evidence는 최대 2분 간격의
+  `toss_live.poll_fills_periodic` 또는 주문 직후 대상 reconcile로 수집한다.
+- dormant KIS adapter 구현은 active registrar/task/router/script/deployment에서
+  참조하지 않는다.
 
 
 ### US & Crypto Live Order Fill-Evidence Gate (ROB-407)
@@ -328,7 +288,7 @@ Kiwoom **모의투자** 전용 MCP order/account lifecycle. KR 7개 도구는 `a
 - **데이터 소스**: 환율 `exchange_rate_service`(토스 primary+폴백, midRate), 종목 마스터+시총 `toss_symbol_master_service`(gap-fill only — 기존 source 있으면 skip), warnings 가드 `warnings_guard`(LIQUIDATION 매수만 차단·매도 면제), 캔들 `market_data/toss_ohlcv`(1m/5m/15m/30m toss-first 페이지네이션, 1h는 DB hourly), 캘린더 `brokers/toss/market_calendar`(NXT/데이마켓)
 - **CLI/런북**: `scripts/toss_live_smoke.py`(preflight/order-test/confirm), `docs/runbooks/toss-live-smoke.md`, `toss-live-order-reconcile.md`, `toss-symbol-master-sync.md`
 - **ROB-651 (P6-A)**: `toss_preview_order`가 정규화(tick-snap) 이후 `approval_hash`(self-contained 토큰, TTL 5분) + `approval_expires_at`를 반환. `toss_place_order(approval_hash=...)`는 자기 파라미터로 canonical을 재계산해 불일치/만료 시 fail-closed(`error_code` + `diff`). 롤아웃 `TOSS_APPROVAL_HASH_MODE ∈ {off,optional,warn,required}`(기본 `optional`, 백컴팻). `clientOrderId`는 uuid4 → 결정적 `tossp6-<sha16>(canonical|거래일salt|rung)` 멱등키(KR=KST/US=ET 거래일; 같은 거래일 동일주문 dedupe, 익일 신규). 같은 날 진짜 동일 두 번째 주문은 `rung` discriminator로 분리. 컬럼: `review.toss_live_order_ledger.approval_hash`(digest). 공유경로(KIS/Upbit)는 ROB-653 P6-B.
-- **ROB-653 (P6-B)**: `place_order` (KIS/Upbit 공통) 및 `kis_live_place_order` 에 `approval_hash` + `rung` 가드를 적용. KIS 주문은 실서버 전송 전 `review.order_send_intents` 테이블에 `idempotency_key`를 선점(reserve)하여 로컬 double-send 중복을 fail-closed로 차단(crypto/Upbit은 Upbit `identifier` 파라미터로 broker-side 멱등 처리). 롤아웃 `ORDER_APPROVAL_HASH_MODE ∈ {off,optional,warn,required}` (기본 `optional`). 컬럼: `review.kis_live_order_ledger` 및 `review.live_order_ledger` 에 `approval_hash` 및 `idempotency_key` 추가.
+- **ROB-653 역사 필드**: 과거 KIS ledger의 `approval_hash`/`idempotency_key`와 `order_send_intents` 행은 원래 provenance로 보존한다. 현재 generic 주문은 Toss/Upbit만 명시 라우팅하며 KIS intent/hash/namespace를 Toss에 재사용하지 않는다.
 
 **안전 경계 / env 게이트 (모두 default off)**:
 - `TOSS_API_ENABLED` — 마스터 게이트. 미설정 시 read 클라이언트도 `TossApiDisabled`
@@ -951,11 +911,7 @@ uv run alembic downgrade -1
 **필수 환경 변수 (.env 파일):**
 
 ```bash
-
-# 한국투자증권 (KIS)
-KIS_APP_KEY=xxx
-KIS_APP_SECRET=xxx
-KIS_ACCOUNT_NO=12345678-01            # 선택사항
+# KIS credential은 운영하지 않으며 환경 파일에 추가하지 않는다.
 
 # Upbit
 UPBIT_ACCESS_KEY=xxx
@@ -1033,10 +989,9 @@ pytest tests/ -v -m "not slow"               # 느린 테스트 제외
 
 ## 문제 해결
 
-### KIS 분봉 API 문제
-- **증상:** `time_unit` 파라미터가 제대로 작동하지 않아 모든 시간대에서 동일한 데이터 반환
-- **해결:** 현재 KIS API 자체의 문제로 향후 업데이트 대기 중
-- **대응:** 분봉 수집 실패 시에도 일봉 데이터로 분석 진행
+### Equity provider 문제
+- Toss provider 오류는 snapshot으로 성공처럼 합성하지 않고 명시 오류로 처리한다.
+- NH PLUG는 KR mock read-only 범위 밖의 US·주문 기능으로 대체하지 않는다.
 
 ### Redis 연결 실패
 - Docker Compose로 Redis 실행: `docker compose up -d redis`

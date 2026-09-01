@@ -1,21 +1,5 @@
-# KR lean `--once` shadow runner
+# KIS lean-once shadow runner — 운영 종료
 
-This is a manual, KR-only vertical slice. It is not registered with TaskIQ,
-cron, Prefect, or any supervisor. The current strategy is synthetic and always
-returns `NO_ORDER`.
+KIS cutover로 이 수동 shadow runner 진입점은 운영 경로에서 제거되었다. 보관 묘비는 provider를 import하지 않은 채 종료 코드 2로 fail-close한다.
 
-```bash
-uv run python scripts/kis_lean_once.py --symbol 005930 --events /tmp/kr-lean-events.jsonl
-```
-
-The command emits JSONL for decision, order intent, KIS pre-submit, fill,
-position/reconcile, and Discord. The pre-submit stage is structurally
-shadow-only: it has inspection but no broker client or submit operation, and
-blocks until account ownership is confirmed. It also records the existing
-`watch_auto_execute_mock` surface as a competing writer concern; this runner
-does not import, call, or modify that surface.
-
-Discord output is represented by an observable event sink in this slice. Both
-successful shadow completion and failure/stop paths set `must_notify=true`.
-Actual webhook delivery belongs to the operational shell contract and is not
-added here.
+과거 shadow event·ledger는 감사 자료로 남길 수 있지만 새 KIS intent 또는 실행 경로를 만들지 않는다.

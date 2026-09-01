@@ -241,8 +241,8 @@ def register_analysis_tools(
         name="get_correlation",
         description=(
             "Calculate Pearson correlation matrix between multiple assets. "
-            "Supports Korean stocks (KIS), US stocks (yfinance), and crypto (Upbit). "
-            "Uses daily closing prices over specified period."
+            "Supports Korean and US equities through Toss-backed daily data, "
+            "and crypto through Upbit. Uses daily closing prices over the requested period."
         ),
     )
     async def get_correlation(
@@ -421,7 +421,7 @@ def register_analysis_tools(
             "get_momentum_candidates for KR intraday 급등 scoring. Snapshot-backed "
             "screener: run one or more /invest/screener presets over "
             "their base snapshots (Discovery Workflow, ROB-515). "
-            "Unlike screen_stocks (generic tvscreener/KIS path), this serves persisted "
+            "Unlike screen_stocks (generic live screening path), this serves persisted "
             "screener snapshot data. preset can be a single ID or a comma-separated "
             "list (e.g. 'consecutive_gainers,double_buy'); presets can also be a "
             "list for multi-preset sweeps with symbol deduplication and "
@@ -437,7 +437,7 @@ def register_analysis_tools(
             "filters=[{field, operator(gte|lte|eq), value}] tune the preset's "
             "thresholds (threaded for consecutive_gainers and crypto). "
             "exclude_held is NOT supported here (ROB-1309: it would require a "
-            "live KIS holdings call, which this DB-only tool never makes) — "
+            "live holdings call, which this DB-only tool never makes) — "
             "passing it returns the same fail-closed redirectTool= "
             "screen_stocks_enrich error as min_analyst_count/min_analyst_buy_count; "
             "isHeld is always false on every returned row. exclude_watched is "
@@ -457,7 +457,7 @@ def register_analysis_tools(
             "the separate screen_stocks_enrich tool on this tool's returned page "
             "for KR/US analyst consensus (buy/hold/sell counts + target prices, "
             "both cached per symbol in Redis with a call-time-fresh target-upside "
-            "recompute), sector labels, RSI14, exclude_held/isHeld (live KIS "
+            "recompute), sector labels, RSI14, exclude_held/isHeld (live Toss "
             "holdings), and min_analyst_* filtering. "
             "priceLabel, changePctLabel, and metricValueLabel are values at the "
             "snapshot time and may be stale by up to one session; before confirming "
@@ -516,7 +516,7 @@ def register_analysis_tools(
             "intraday-current; sector labels are lazy-filled (KR Naver / "
             "US yfinance) and persisted for future calls; RSI14 is computed "
             "from the persisted snapshot closes; exclude_held/isHeld marking "
-            "makes the one live KIS holdings call that screen_stocks_snapshot "
+            "makes the one live Toss holdings call that screen_stocks_snapshot "
             "no longer makes. min_analyst_count (coverage) "
             "and min_analyst_buy_count (buy-count) filter on resolved consensus "
             "counts BEFORE pagination (capped at 200 merged rows before "

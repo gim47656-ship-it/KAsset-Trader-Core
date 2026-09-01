@@ -150,25 +150,29 @@ async def test_idempotency_key_is_unique(session: AsyncSession) -> None:
     )
 
 
+@pytest.mark.parametrize("account_scope", ["kis_live", "toss_live"])
 @pytest.mark.asyncio
 async def test_advisory_only_invariant_blocks_live_with_mock_preview(
     session: AsyncSession,
+    account_scope: str,
 ) -> None:
-    """kis_live account scope MUST pair with execution_mode='advisory_only'."""
+    """KIS historical 및 Toss 운영 scope는 advisory_only만 허용한다."""
     await assert_integrity_error(
         session,
         InvestmentReport(
-            **_base_payload(account_scope="kis_live", execution_mode="mock_preview")
+            **_base_payload(account_scope=account_scope, execution_mode="mock_preview")
         ),
     )
 
 
+@pytest.mark.parametrize("account_scope", ["kis_live", "toss_live"])
 @pytest.mark.asyncio
 async def test_advisory_only_invariant_allows_live_with_advisory_only(
     session: AsyncSession,
+    account_scope: str,
 ) -> None:
     row = InvestmentReport(
-        **_base_payload(account_scope="kis_live", execution_mode="advisory_only")
+        **_base_payload(account_scope=account_scope, execution_mode="advisory_only")
     )
     session.add(row)
     await session.commit()

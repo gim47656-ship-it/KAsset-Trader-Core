@@ -224,7 +224,7 @@ async def _seed_proposal(db_session, *, nonce="nonce-abc123", symbol="A", rungs=
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -254,7 +254,7 @@ async def _seed_auto_resting(
     db_session,
     *,
     nonce="veto-nonce",
-    account_mode="kis_live",
+    account_mode="toss_live",
     market="equity_kr",
 ):
     service = OrderProposalsService(db_session)
@@ -1669,7 +1669,7 @@ async def test_superseded_old_button_is_explicitly_blocked_and_replacement_appro
     replacement = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",

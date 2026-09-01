@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,9 +16,9 @@ from app.services.execution_ledger.opening_lots import (
 
 def _candidate(**overrides) -> OpeningLotCandidate:  # noqa: ANN003
     data = {
-        "broker": "kis",
+        "broker": "toss",
         "account_mode": "live",
-        "venue": "krx",
+        "venue": "toss_kr",
         "instrument_type": "equity_kr",
         "symbol": "005930",
         "raw_symbol": "005930",
@@ -34,7 +36,7 @@ def test_opening_lot_quantity_subtracts_ledger_net_since_cutover() -> None:
     plan = build_opening_lot_plan(
         candidates=[_candidate()],
         ledger_net_by_key={
-            ("kis", "live", "krx", "equity_kr", "005930", "KRW"): Decimal("3")
+            ("toss", "live", "toss_kr", "equity_kr", "005930", "KRW"): Decimal("3")
         },
         cutover=cutover,
     )
@@ -46,14 +48,14 @@ def test_opening_lot_quantity_subtracts_ledger_net_since_cutover() -> None:
     assert upsert.filled_qty == Decimal("7")
     assert upsert.filled_price == Decimal("70000")
     assert upsert.filled_at == cutover
-    assert upsert.broker_order_id == "SEED-20260510-kis-krx-005930"
+    assert upsert.broker_order_id == "SEED-20260510-toss-toss_kr-005930"
 
 
 def test_opening_lot_skips_when_ledger_net_covers_current_position() -> None:
     plan = build_opening_lot_plan(
         candidates=[_candidate(current_qty=Decimal("10"))],
         ledger_net_by_key={
-            ("kis", "live", "krx", "equity_kr", "005930", "KRW"): Decimal("10")
+            ("toss", "live", "toss_kr", "equity_kr", "005930", "KRW"): Decimal("10")
         },
         cutover=datetime(2026, 5, 10, tzinfo=UTC),
     )
@@ -91,6 +93,54 @@ def test_opening_lot_skips_zero_average_price() -> None:
 
     assert plan.upserts == []
     assert plan.skipped[0].reason == "non_positive_avg_price"
+
+
+@pytest.mark.asyncio
+async def test_toss_candidates_use_typed_general_snapshot(monkeypatch) -> None:
+    from app.services.execution_ledger.opening_lots import (
+        load_toss_opening_lot_candidates,
+    )
+
+    fetcher = AsyncMock(
+        return_value=SimpleNamespace(
+            positions=[
+                SimpleNamespace(
+                    instrument_type="equity_kr",
+                    symbol="005930",
+                    quantity=Decimal("10"),
+                    avg_buy_price=Decimal("70000"),
+                ),
+                SimpleNamespace(
+                    instrument_type="equity_us",
+                    symbol="AAPL",
+                    quantity=Decimal("2"),
+                    avg_buy_price=Decimal("180"),
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "app.services.toss_portfolio_service.fetch_toss_portfolio_snapshot",
+        fetcher,
+    )
+
+    candidates = await load_toss_opening_lot_candidates()
+
+    assert [(row.broker, row.venue) for row in candidates] == [
+        ("toss", "toss_kr"),
+        ("toss", "toss_us"),
+    ]
+    fetcher.assert_awaited_once_with(need_sellable=False, need_cash=False)
+
+
+@pytest.mark.asyncio
+async def test_kis_candidate_request_is_rejected_without_provider_call() -> None:
+    from app.services.execution_ledger.opening_lots import (
+        load_opening_lot_candidates,
+    )
+
+    with pytest.raises(ValueError, match="provider kis is not operational"):
+        await load_opening_lot_candidates(["kis"])
 
 
 @pytest.mark.asyncio

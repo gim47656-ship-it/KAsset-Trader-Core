@@ -40,7 +40,7 @@ async def test_symbol_reports_survive_without_final_report(db_session):
         snapshot_bundle_uuid=bundle_uuid,
         market="kr",
         market_session="regular",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
 
     snapshots = AsyncMock()
@@ -57,7 +57,7 @@ async def test_symbol_reports_survive_without_final_report(db_session):
             snapshot_bundle_uuid=bundle_uuid,
             market="kr",
             market_session="regular",
-            account_scope="kis_live",
+            account_scope="toss_live",
         ),
         symbol_reports=[
             HermesSymbolReductionResult.model_validate(

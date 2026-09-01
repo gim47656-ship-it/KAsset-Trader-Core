@@ -30,12 +30,11 @@ from dotenv import dotenv_values
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAFE_MOCK_PROFILES = frozenset(
     {
-        "hermes-paper-kis",
         "kiwoom_kr",
         "us-paper",
     }
 )
-LEGACY_MOCK_PROFILES = frozenset({"default", "kiwoom"})
+LEGACY_MOCK_PROFILES = frozenset({"default", "kiwoom", "hermes-paper-kis"})
 SUPPORTED_CLIENT = "claude"
 UNSUPPORTED_MOCK_CLIENTS = frozenset({"codex", "kiro"})
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -51,7 +50,6 @@ _MANAGED_CLIENT_SIGNALS = (
     signal.SIGINT,
 )
 _PROFILE_ALLOWED_BROKER_SCOPES: dict[str, frozenset[str]] = {
-    "hermes-paper-kis": frozenset({"kis_mock"}),
     "kiwoom_kr": frozenset({"kiwoom_kr"}),
     "us-paper": frozenset({"alpaca_paper"}),
 }
@@ -68,14 +66,10 @@ _BROKER_ENV_SCOPES: tuple[tuple[str, str], ...] = (
     ("TOSS_", "toss"),
     ("UPBIT_", "upbit"),
 )
-# These legacy Settings fields are required at model construction even when the
-# selected MCP profile cannot register their broker order surfaces. Empty,
-# launcher-owned placeholders satisfy schema construction without inheriting
-# the real foreign credentials.
+# Settings fields that remain required at model construction receive empty,
+# launcher-owned placeholders rather than inheriting foreign credentials.
 _REQUIRED_FOREIGN_SETTINGS_PLACEHOLDERS = frozenset(
     {
-        "KIS_APP_KEY",
-        "KIS_APP_SECRET",
         "UPBIT_ACCESS_KEY",
         "UPBIT_SECRET_KEY",
     }

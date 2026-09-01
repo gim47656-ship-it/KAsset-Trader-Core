@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Seed manual_import opening lots into execution_ledger."
     )
-    parser.add_argument("--broker", choices=["kis", "upbit"], action="append")
+    parser.add_argument("--broker", choices=["toss", "upbit"], action="append")
     parser.add_argument("--cutover", required=True, help="UTC cutover date YYYY-MM-DD")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", default=True)
@@ -115,7 +115,7 @@ async def _run(*, brokers: list[str], cutover: datetime, dry_run: bool) -> int:
 
 def main() -> int:
     args = parse_args()
-    brokers = args.broker or ["kis", "upbit"]
+    brokers = args.broker or ["toss", "upbit"]
     return asyncio.run(
         _run(
             brokers=brokers,

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pandas as pd
 
 import app.services.brokers.upbit.client as upbit_service
-from app.core.config import settings, validate_kis_mock_config
+from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.mcp_server.env_utils import _env_int
 from app.mcp_server.tooling.account_modes import (
@@ -97,7 +97,6 @@ from app.mcp_server.tooling.shared import (
 from app.mcp_server.tooling.shared import (
     to_optional_float as _to_optional_float,
 )
-from app.services.brokers.kis.client import KISClient
 from app.services.crypto_voting_signals import CryptoVotingSignals, VotingResult
 from app.services.daily_candles.read_service import cache_first_kr
 from app.services.daily_candles.repository import DailyCandlesRepository
@@ -141,13 +140,9 @@ PORTFOLIO_TOOL_NAMES: set[str] = {
 CRYPTO_STOP_LOSS_PCT = -4.5
 CRYPTO_MEAN_REVERSION_RSI_EXIT = 46.0
 
-# ROB-357/ROB-532 provenance labels for non-KIS live holdings. The MCP
-# ``account_mode`` selector vocabulary ({db_simulated, kis_mock, kis_live}) is a
-# KIS/paper routing selector, so non-KIS live rows must not inherit the
-# ``kis_live`` default and mislabel the source. These descriptive provenance
-# values never participate in order routing.
+# 보유 행의 실제 공급자 출처를 표시하는 값이며 주문 라우팅 선택자가 아니다.
 UPBIT_LIVE_PROVENANCE = "upbit_live"
-TOSS_API_PROVENANCE = "toss_api"
+TOSS_API_PROVENANCE = "toss_live"
 
 # ROB-469 PR2: bound per-call fan-out concurrency so a large portfolio can't explode
 # the task count and stall the MCP event loop.
@@ -158,31 +153,23 @@ _EQUITY_PRICE_CONCURRENCY = 5
 def _provenance_account_mode(
     *, broker: str | None, source: str | None, routing_mode: str
 ) -> str:
-    """Derive a per-account holdings provenance label (ROB-357).
-
-    Upbit and Toss API holdings must surface their live source rather than
-    inheriting the KIS-defaulted routing selector. KIS / paper / manual groups
-    keep the resolved routing mode unchanged.
-    """
+    """계정별 보유 출처를 account_mode 표시값으로 변환한다."""
     if broker == "upbit" or source == "upbit_api":
         return UPBIT_LIVE_PROVENANCE
     if broker == "toss" and source == "toss_api":
         return TOSS_API_PROVENANCE
+    if broker == "kis" or str(source or "").startswith("kis"):
+        # 과거 KIS 출처를 Toss로 재분류하지 않고 비운영 계정 모드로 유지한다.
+        return routing_mode if routing_mode.startswith("kis_") else "kis_live"
     return routing_mode
 
 
 def _account_order_routable(*, source: str | None, broker: str | None = None) -> bool:
-    """Whether an account group's holdings are routable by an automated order tool.
+    """자동 주문 경로가 해당 보유 출처를 사용할 수 있는지 반환한다.
 
-    Manual holdings (toss/samsung/수동 입력, ``source="manual"``) are always
-    reference-only. ROB-532 Toss API holdings were reference-only until the Toss
-    order tools existed; ROB-549 gates them on
-    ``TOSS_LIVE_ORDER_MUTATIONS_ENABLED`` so the sellability signal matches the
-    registered toss_live order tools once mutations are armed. KIS / Upbit /
-    paper sources sell via their own channels.
-
-    ROB-562: If Toss API is enabled and mutations are enabled, Toss manual
-    fallback holdings are ALSO routable to allow recovery from API outages.
+    수동 보유는 기본적으로 참고 전용이다. Toss 수동 복구 행은 Toss API와 주문
+    변이 게이트가 모두 켜진 경우에만 후보가 되며, 실제 매도는 Toss 도구의 최신
+    sellable preflight를 다시 거친다.
     """
     if source == "toss_api":
         return toss_live_mutations_enabled()
@@ -190,6 +177,8 @@ def _account_order_routable(*, source: str | None, broker: str | None = None) ->
         return bool(getattr(settings, "toss_api_enabled", False)) and bool(
             toss_live_mutations_enabled()
         )
+    if str(source or "").startswith("kis"):
+        return False
     return source not in {"manual"}
 
 
@@ -333,113 +322,6 @@ async def _compute_crypto_signals_for_position(
     voting = voting_evaluator.evaluate(df)
 
     return rsi, voting
-
-
-async def _collect_kis_positions(
-    market_filter: str | None,
-    *,
-    is_mock: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if market_filter == "crypto":
-        return [], []
-
-    positions: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    kis = KISClient(is_mock=True) if is_mock else KISClient()
-
-    if market_filter in (None, "equity_kr"):
-        try:
-            if is_mock:
-                kr_stocks = await kis.fetch_my_stocks(is_mock=True)
-            else:
-                kr_stocks = await kis.fetch_my_stocks()
-            for stock in kr_stocks:
-                quantity = _to_float(stock.get("hldg_qty"))
-                if quantity <= 0:
-                    continue
-
-                positions.append(
-                    {
-                        "account": "kis",
-                        "account_name": "기본 계좌",
-                        "broker": "kis",
-                        "source": "kis_api",
-                        "instrument_type": "equity_kr",
-                        "market": "kr",
-                        "symbol": _normalize_position_symbol(
-                            str(stock.get("pdno", "")),
-                            "equity_kr",
-                        ),
-                        "name": stock.get("prdt_name") or stock.get("pdno"),
-                        "quantity": quantity,
-                        "avg_buy_price": _to_float(stock.get("pchs_avg_pric")),
-                        "current_price": _to_float(stock.get("prpr"), default=0.0)
-                        or None,
-                        "evaluation_amount": _to_float(stock.get("evlu_amt")),
-                        "profit_loss": _to_float(stock.get("evlu_pfls_amt")),
-                        "profit_rate": _to_float(stock.get("evlu_pfls_rt")),
-                    }
-                )
-        except Exception as exc:
-            errors.append({"source": "kis", "market": "kr", "error": str(exc)})
-
-    if market_filter in (None, "equity_us"):
-        try:
-            if is_mock:
-                us_stocks = await kis.fetch_my_us_stocks(is_mock=True)
-            else:
-                us_stocks = await kis.fetch_my_us_stocks()
-            for stock in us_stocks:
-                quantity = _to_float(stock.get("ovrs_cblc_qty"))
-                if quantity <= 0:
-                    continue
-
-                current_price_raw = stock.get("now_pric2")
-                evaluation_amount_raw = stock.get("ovrs_stck_evlu_amt")
-                profit_loss_raw = stock.get("frcr_evlu_pfls_amt")
-                profit_rate_raw = stock.get("evlu_pfls_rt")
-                current_price = _to_optional_float(current_price_raw)
-                evaluation_amount = _to_optional_float(evaluation_amount_raw)
-                profit_loss = _to_optional_float(profit_loss_raw)
-                profit_rate = _to_optional_float(profit_rate_raw)
-
-                positions.append(
-                    {
-                        "account": "kis",
-                        "account_name": "기본 계좌",
-                        "broker": "kis",
-                        "source": "kis_api",
-                        "instrument_type": "equity_us",
-                        "market": "us",
-                        "symbol": _normalize_position_symbol(
-                            str(stock.get("ovrs_pdno", "")),
-                            "equity_us",
-                        ),
-                        "name": stock.get("ovrs_item_name") or stock.get("ovrs_pdno"),
-                        "quantity": quantity,
-                        "avg_buy_price": _to_float(stock.get("pchs_avg_pric")),
-                        "current_price": (
-                            current_price
-                            if current_price is not None and current_price > 0
-                            else None
-                        ),
-                        "evaluation_amount": evaluation_amount,
-                        "profit_loss": profit_loss,
-                        "profit_rate": profit_rate,
-                        # KIS overseas balance rows do not carry a trustworthy
-                        # per-symbol quote timestamp.  This snapshot provenance
-                        # is replaced by the live quote refresh below when
-                        # include_current_price=True.
-                        "price_source": "kis_holdings_snapshot",
-                        "price_asof": None,
-                        "data_state": "unverified",
-                        "profit_rate_price_source": "kis_holdings_snapshot",
-                    }
-                )
-        except Exception as exc:
-            errors.append({"source": "kis", "market": "us", "error": str(exc)})
-
-    return positions, errors
 
 
 async def _collect_upbit_positions(
@@ -638,49 +520,8 @@ async def _collect_toss_api_positions(
     return positions, snapshot.errors, True
 
 
-def _has_valid_kis_kr_snapshot(position: dict[str, Any]) -> bool:
-    """KIS-account KR equity whose broker balance snapshot is complete.
-
-    When True, get_holdings keeps the KIS-provided snapshot values
-    (``current_price`` / ``evaluation_amount`` / ``profit_loss`` /
-    ``profit_rate``) and skips the per-symbol live current-price refresh.
-
-    ROB-902 established this for ``equity_kr``: the KIS domestic balance
-    (``fetch_my_stocks``) already returns 현재가(``prpr``) / 평가금액 / 평가손익
-    for every holding in ONE bulk call, so the per-symbol
-    ``inquire-daily-itemchartprice`` refresh was a redundant N+1 (~41 KR HTTP
-    calls per get_holdings invocation).
-
-    ROB-1095 deliberately excludes ``equity_us``. KIS overseas balance rows
-    have no usable per-symbol as-of timestamp, and production measurement found
-    a numerically complete WDC snapshot lagging the live quote by 3.13%.
-    """
-    if position.get("source") != "kis_api":
-        return False
-
-    if str(position.get("instrument_type") or "") != "equity_kr":
-        return False
-
-    current_price = _to_optional_float(position.get("current_price"))
-    evaluation_amount = _to_optional_float(position.get("evaluation_amount"))
-    profit_loss = _to_optional_float(position.get("profit_loss"))
-    profit_rate = _to_optional_float(position.get("profit_rate"))
-
-    return (
-        current_price is not None
-        and current_price > 0
-        and evaluation_amount is not None
-        and evaluation_amount > 0
-        and profit_loss is not None
-        and profit_rate is not None
-    )
-
-
 def _position_needs_current_price_refresh(position: dict[str, Any]) -> bool:
     instrument_type = str(position.get("instrument_type") or "")
-    if _has_valid_kis_kr_snapshot(position):
-        return False
-
     return instrument_type in {"equity_kr", "equity_us", "crypto"}
 
 
@@ -700,17 +541,8 @@ def _apply_price_refresh(
 
 
 def _mark_price_refresh_failed(position: dict[str, Any], error: str) -> None:
-    """Surface that a retained KIS US balance snapshot could not be verified."""
+    """현재가 갱신 실패를 보유 포지션에 명시한다."""
     position["price_error"] = error
-    if (
-        position.get("source") == "kis_api"
-        and position.get("instrument_type") == "equity_us"
-    ):
-        position["price_source"] = "kis_holdings_snapshot"
-        position["price_asof"] = None
-        position["data_state"] = "stale"
-        position["data_state_reason"] = "live_price_refresh_failed"
-        position["profit_rate_price_source"] = "kis_holdings_snapshot"
 
 
 async def _fetch_price_map_for_positions(
@@ -838,7 +670,7 @@ async def _fetch_price_map_for_positions(
                         )
             except Exception:
                 logger.debug(
-                    "KR daily DB enrichment failed for %s; falling back to KIS",
+                    "KR daily DB enrichment failed for %s; falling back to Toss",
                     symbol,
                     exc_info=True,
                 )
@@ -850,7 +682,7 @@ async def _fetch_price_map_for_positions(
                     symbol,
                     float(price) if price is not None else None,
                     None,
-                    "kis",
+                    "toss",
                     None,
                 )
             except Exception as exc:
@@ -858,12 +690,10 @@ async def _fetch_price_map_for_positions(
                 logger.debug(
                     "Failed to fetch equity price for %s: %s", symbol, error_msg
                 )
-                return instrument_type, symbol, None, error_msg, "kis", None
+                return instrument_type, symbol, None, error_msg, "toss", None
 
-        # ROB-1095: overseas balance ``now_pric2`` has no per-symbol as-of and
-        # can lag the regular-session quote by several percent while remaining
-        # numerically valid. Use the same venue-aware KIS-current -> Yahoo
-        # fallback path as get_quote, then recalculate every price-derived field.
+        # 미국 주식 현재가는 공통 시세 경계의 Toss 응답으로 갱신하고 가격 파생
+        # 필드를 함께 다시 계산한다.
         try:
             quote = await _fetch_quote_equity_us(symbol)
             price = _to_optional_float(quote.get("price"))
@@ -885,7 +715,7 @@ async def _fetch_price_map_for_positions(
                 symbol,
                 price,
                 None,
-                str(quote.get("source") or "kis+yahoo"),
+                str(quote.get("source") or "toss"),
                 metadata,
             )
         except Exception as exc:
@@ -896,7 +726,7 @@ async def _fetch_price_map_for_positions(
                 symbol,
                 None,
                 error_msg,
-                "kis+yahoo",
+                "toss",
                 None,
             )
 
@@ -927,8 +757,7 @@ async def _fetch_price_map_for_positions(
                 error_map[(instrument_type, symbol)] = error
                 price_errors.append(
                     {
-                        "source": source
-                        or ("yahoo" if instrument_type == "equity_us" else "kis"),
+                        "source": source or "toss",
                         "market": "us" if instrument_type == "equity_us" else "kr",
                         "symbol": symbol,
                         "stage": "current_price",
@@ -1009,16 +838,8 @@ async def _collect_portfolio_positions(
 
     market_filter = _parse_holdings_market_filter(market)
     account_filter = _normalize_account_filter(account)
-    if is_mock:
-        if account_filter not in (None, "kis"):
-            raise ValueError(
-                f"account={account_filter!r} is incompatible with "
-                "account_mode='kis_mock'"
-            )
-        if market_filter == "crypto":
-            raise ValueError(
-                "market='crypto' is incompatible with account_mode='kis_mock'"
-            )
+    if is_mock or (account_filter is not None and account_filter.startswith("kis")):
+        raise ValueError("provider kis is not operational")
 
     if is_paper_account_token(account):
         selector = parse_paper_account_token(account)
@@ -1076,7 +897,7 @@ async def _collect_portfolio_positions(
     errors: list[dict[str, Any]] = []
     whole_snapshot_used = False
     snapshot_cache = get_shared_portfolio_snapshot_cache()
-    if not is_mock and not need_sellable and snapshot_cache.usable:
+    if not need_sellable and snapshot_cache.usable:
         positions, errors = await _collect_whole_portfolio_positions(
             cache=snapshot_cache,
             user_id=user_id,
@@ -1085,17 +906,11 @@ async def _collect_portfolio_positions(
 
     if not whole_snapshot_used:
         tasks: list[Any] = []
-        if market_filter != "crypto":
-            if is_mock:
-                tasks.append(_collect_kis_positions(market_filter, is_mock=True))
-            else:
-                tasks.append(_collect_kis_positions(market_filter))
-        if not is_mock:
-            if market_filter in (None, "crypto"):
-                tasks.append(_collect_upbit_positions(market_filter))
-            tasks.append(
-                _collect_manual_positions(user_id=user_id, market_filter=market_filter)
-            )
+        if market_filter in (None, "crypto"):
+            tasks.append(_collect_upbit_positions(market_filter))
+        tasks.append(
+            _collect_manual_positions(user_id=user_id, market_filter=market_filter)
+        )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
@@ -1113,11 +928,7 @@ async def _collect_portfolio_positions(
 
     toss_api_positions: list[dict[str, Any]] = []
     toss_api_succeeded = False
-    if (
-        not whole_snapshot_used
-        and not is_mock
-        and bool(getattr(settings, "toss_api_enabled", False))
-    ):
+    if not whole_snapshot_used and bool(getattr(settings, "toss_api_enabled", False)):
         (
             toss_api_positions,
             toss_api_errors,
@@ -1223,7 +1034,7 @@ async def _get_indicators_impl(
         raise ValueError("indicators list is required and cannot be empty")
 
     market_type, symbol = _resolve_market_type(symbol, market)
-    source_map = {"crypto": "upbit", "equity_kr": "kis", "equity_us": "yahoo"}
+    source_map = {"crypto": "upbit", "equity_kr": "toss", "equity_us": "toss"}
     source = source_map[market_type]
 
     try:
@@ -1252,7 +1063,7 @@ async def _get_indicators_impl(
             live = await fetch_us_live_last_price(symbol)
             if live is not None:
                 current_price = live
-                current_price_source = "yahoo_live"
+                current_price_source = "toss_live"
 
         indicator_results = _compute_indicators(df, indicators)
 
@@ -1272,7 +1083,7 @@ async def _get_indicators_impl(
         }
         if market_type == "equity_us":
             result["current_price_source"] = current_price_source
-            result["current_price_stale"] = current_price_source != "yahoo_live"
+            result["current_price_stale"] = current_price_source != "toss_live"
         return result
     except Exception as exc:
         return {
@@ -1291,10 +1102,20 @@ async def _get_holdings_impl(
     minimum_value: float | None = None,
     account_name: str | None = None,
     is_mock: bool = False,
-    routing_account_mode: str = "kis_live",
+    routing_account_mode: str = "toss_live",
     fresh_sellable: bool = False,
 ) -> dict[str, Any]:
     """Implementation for get_holdings tool."""
+    if is_mock or routing_account_mode.startswith("kis"):
+        return {
+            "success": False,
+            "account_mode": routing_account_mode,
+            "error": "provider kis is not operational",
+            "accounts": [],
+            "total_accounts": 0,
+            "total_positions": 0,
+            "errors": [],
+        }
     if minimum_value is not None and minimum_value < 0:
         raise ValueError("minimum_value must be >= 0")
 
@@ -1483,9 +1304,7 @@ async def _get_holdings_impl(
                 "positions": [],
             },
         )
-        # ROB-541 — stamp the resolved routing mode so the per-position
-        # account_mode (added by position_to_output) matches the GROUP label
-        # exactly, including kis_mock scopes.
+        # 계정별 실제 공급자 출처가 최상위 기본 라우팅보다 우선한다.
         position.setdefault("routing_mode", routing_account_mode)
         grouped["positions"].append(_position_to_output(position))
 
@@ -1543,7 +1362,7 @@ async def _get_portfolio_summary_impl(
     account_name: str | None = None,
     user_id: int = _MCP_USER_ID,
     is_mock: bool = False,
-    routing_account_mode: str = "kis_live",
+    routing_account_mode: str = "toss_live",
 ) -> dict[str, Any]:
     """Return bounded holdings metadata for briefing/calendar consumers.
 
@@ -1551,6 +1370,17 @@ async def _get_portfolio_summary_impl(
     read model intentionally never performs per-symbol quote enrichment. The
     broker balance snapshot's own metrics are retained when available.
     """
+    if is_mock or routing_account_mode.startswith("kis"):
+        return {
+            "success": False,
+            "account_mode": routing_account_mode,
+            "error": "provider kis is not operational",
+            "accounts": [],
+            "held_pairs": [],
+            "total_accounts": 0,
+            "total_positions": 0,
+            "errors": [],
+        }
     del include_current_price
     (
         positions,
@@ -1635,6 +1465,15 @@ async def _get_position_impl(
         account_mode=account_mode,
         account_type=account_type,
     )
+    if routing.is_kis_live or routing.is_kis_mock:
+        return {
+            "success": False,
+            "account_mode": routing.account_mode,
+            "error": "provider kis is not operational",
+            "symbol": symbol,
+            "has_position": False,
+            "positions": [],
+        }
 
     parsed_market = _parse_holdings_market_filter(market)
     if parsed_market == "equity_us":
@@ -1655,13 +1494,6 @@ async def _get_position_impl(
             need_sellable=False,
         )
     else:
-        if routing.is_kis_mock:
-            missing = validate_kis_mock_config()
-            if missing:
-                raise RuntimeError(
-                    "KIS mock account is disabled or missing required "
-                    "configuration: " + ", ".join(missing)
-                )
         positions, errors, _, _ = await _collect_portfolio_positions(
             account=None,
             market=market,
@@ -1772,21 +1604,9 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_holdings",
         description=(
-            "Get holdings grouped by account. Supports account filter "
-            "(kis/upbit/toss/samsung_pension/isa/paper/paper:<이름>) and market "
-            "filter (kr/us/crypto). Cash balances are excluded. minimum_value "
-            "filters out low-value positions when include_current_price=True. "
-            "When minimum_value is None (default), per-currency thresholds are "
-            "applied: KRW=5000, USD=10. Explicit number uses uniform threshold. "
-            "Response includes filtered_count, filter_reason, per-symbol "
-            "price lookup errors, and broker-level API errors (potentially "
-            "marked degraded=true during outages). "
-            "Use account_mode={'db_simulated','kis_mock','kis_live'} "
-            "(preferred); account_type aliases are deprecated and emit warnings. "
-            "General holdings reads omit sellable_quantity; the deprecated "
-            "fresh_sellable flag is retained for compatibility and does not "
-            "enable broker sellable fanout. Live order tools perform their own "
-            "fresh broker preflight. "
+            "계정별 보유 포지션을 조회합니다. Toss, Upbit, 수동 보유와 PAPER "
+            "계정을 지원하며 일반 조회에서는 sellable_quantity를 반환하지 않습니다. "
+            "KIS account_mode/account 필터는 운영 경로가 아니므로 거부합니다."
         ),
     )
     async def get_holdings(
@@ -1803,15 +1623,27 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
             account_mode=account_mode,
             account_type=account_type,
         )
+        if routing.is_kis_live or routing.is_kis_mock:
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "accounts": [],
+                },
+                routing,
+            )
+        account_filter = _normalize_account_filter(account)
+        if account_filter is not None and account_filter.startswith("kis"):
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "accounts": [],
+                },
+                routing,
+            )
         if routing.is_db_simulated and account is None:
             account = "paper"
-        if routing.is_kis_mock:
-            missing = validate_kis_mock_config()
-            if missing:
-                raise RuntimeError(
-                    "KIS mock account is disabled or missing required "
-                    "configuration: " + ", ".join(missing)
-                )
         response = apply_account_routing_metadata(
             await _get_holdings_impl(
                 account=account,
@@ -1825,10 +1657,7 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
             ),
             routing,
         )
-        # ROB-357 — a crypto/Upbit-scoped read carries no meaningful KIS routing
-        # selector. When the caller did not explicitly choose a KIS/paper mode,
-        # surface the Upbit-live provenance at the top level instead of echoing
-        # the ``kis_live`` default. Order routing is untouched.
+        # 명시적 선택자가 없는 암호화폐 범위는 Upbit 출처를 표시한다.
         explicit_selector = account_mode is not None or account_type is not None
         crypto_scoped = (
             _parse_holdings_market_filter(market) == "crypto"
@@ -1848,13 +1677,8 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_position",
         description=(
-            "Check whether a symbol is currently held and return detailed "
-            "positions across all accounts. account_type='real' (default) scans "
-            "live brokerage and manual holdings; account_type='paper' scans "
-            "paper trading accounts, optionally scoped by paper_account. "
-            "Use account_mode={'db_simulated','kis_mock','kis_live'} "
-            "(preferred); account_type aliases are deprecated and emit warnings. "
-            "Returns status='미보유' when no position exists."
+            "심볼의 보유 여부를 Toss, Upbit, 수동 보유 또는 PAPER 계정에서 "
+            "조회합니다. KIS account_mode는 명시적으로 거부합니다."
         ),
     )
     async def get_position(
@@ -1895,12 +1719,8 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_cash_balance",
         description=(
-            "Query available cash balances from all accounts. "
-            "Supports Upbit (KRW), KIS domestic (KRW), KIS overseas (USD), "
-            "and paper trading accounts (account='paper' or 'paper:<name>'). "
-            "Returns detailed balance information including orderable amounts. "
-            "Use account_mode={'db_simulated','kis_mock','kis_live'} "
-            "(preferred); account_type aliases are deprecated and emit warnings."
+            "Toss, Upbit, 수동 현금 및 PAPER 계정의 현금 잔액을 조회합니다. "
+            "KIS account_mode/account 필터는 명시적으로 거부합니다."
         ),
     )
     async def get_cash_balance(
@@ -1912,15 +1732,27 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
             account_mode=account_mode,
             account_type=account_type,
         )
+        if routing.is_kis_live or routing.is_kis_mock:
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "balances": [],
+                },
+                routing,
+            )
+        account_filter = _normalize_account_filter(account)
+        if account_filter is not None and account_filter.startswith("kis"):
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "balances": [],
+                },
+                routing,
+            )
         if routing.is_db_simulated and account is None:
             account = "paper"
-        if routing.is_kis_mock:
-            missing = validate_kis_mock_config()
-            if missing:
-                raise RuntimeError(
-                    "KIS mock account is disabled or missing required "
-                    "configuration: " + ", ".join(missing)
-                )
         return apply_account_routing_metadata(
             await _get_cash_balance_impl(
                 account=account,
@@ -1932,17 +1764,8 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_available_capital",
         description=(
-            "Query orderable capital across KIS, Upbit, manual cash, and "
-            "paper trading accounts (account='paper' or 'paper:<name>'). "
-            "Converts USD orderable cash to KRW and can optionally exclude "
-            "manual cash. Manual cash is stored via set_user_setting/"
-            "get_user_setting with key='manual_cash'; it is not added for "
-            "paper account queries. Stale manual cash (older than 3 days) is "
-            "flagged stale_warning=true, marked included_in_total=false, and "
-            "excluded from summary.total_orderable_krw (its amount is surfaced "
-            "as summary.manual_cash_excluded_krw); refresh it to count again. "
-            "Use account_mode={'db_simulated','kis_mock','kis_live'} "
-            "(preferred); account_type aliases are deprecated and emit warnings."
+            "Toss, Upbit, 수동 현금 및 PAPER 계정의 주문 가능 자금을 조회합니다. "
+            "KIS account_mode/account 필터는 명시적으로 거부합니다."
         ),
     )
     async def get_available_capital(
@@ -1955,15 +1778,27 @@ def _register_portfolio_tools_impl(mcp: FastMCP) -> None:
             account_mode=account_mode,
             account_type=account_type,
         )
+        if routing.is_kis_live or routing.is_kis_mock:
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "accounts": [],
+                },
+                routing,
+            )
+        account_filter = _normalize_account_filter(account)
+        if account_filter is not None and account_filter.startswith("kis"):
+            return apply_account_routing_metadata(
+                {
+                    "success": False,
+                    "error": "provider kis is not operational",
+                    "accounts": [],
+                },
+                routing,
+            )
         if routing.is_db_simulated and account is None:
             account = "paper"
-        if routing.is_kis_mock:
-            missing = validate_kis_mock_config()
-            if missing:
-                raise RuntimeError(
-                    "KIS mock account is disabled or missing required "
-                    "configuration: " + ", ".join(missing)
-                )
         return apply_account_routing_metadata(
             await _get_available_capital_impl(
                 account=account,

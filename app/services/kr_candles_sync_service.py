@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal
 from app.models.kr_symbol_universe import KRSymbolUniverse
 from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.candles_sync_common import (
     SyncTableConfig,
     build_cursor_sql,
@@ -29,21 +28,16 @@ from app.services.market_events.session_calendar import (
     is_trading_session,
     trading_sessions_in_range,
 )
+from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 
 logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
 _OVERLAP_MINUTES = 5
 _DEFAULT_BOOTSTRAP_SESSIONS = 10
-_MAX_PAGE_CALLS_PER_DAY = 30
-
-
-@dataclass(frozen=True, slots=True)
-class VenueConfig:
-    venue: str
-    market_code: str
-    session_start: time
-    session_end: time
+_TABLE_CFG = SyncTableConfig(table_name="kr_candles_1m", partition_col="venue")
+_CURSOR_SQL = build_cursor_sql(_TABLE_CFG)
+_UPSERT_SQL = build_upsert_sql(_TABLE_CFG)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,26 +52,6 @@ class MinuteCandleRow:
     close: float
     volume: float
     value: float
-
-
-_VENUE_CONFIG: dict[str, VenueConfig] = {
-    "KRX": VenueConfig(
-        venue="KRX",
-        market_code="J",
-        session_start=time(9, 0, 0),
-        session_end=time(15, 30, 0),
-    ),
-    "NTX": VenueConfig(
-        venue="NTX",
-        market_code="NX",
-        session_start=time(8, 0, 0),
-        session_end=time(20, 0, 0),
-    ),
-}
-
-_TABLE_CFG = SyncTableConfig(table_name="kr_candles_1m", partition_col="venue")
-_CURSOR_SQL = build_cursor_sql(_TABLE_CFG)
-_UPSERT_SQL = build_upsert_sql(_TABLE_CFG)
 
 
 def _normalize_symbol(value: object) -> str | None:
@@ -99,16 +73,14 @@ def _validate_universe_rows(
 ) -> dict[str, KRSymbolUniverse]:
     if not table_has_rows:
         raise ValueError("kr_symbol_universe is empty")
-
     rows_by_symbol = {row.symbol: row for row in universe_rows}
     missing = sorted(target_symbols - set(rows_by_symbol))
     if missing:
         preview = ", ".join(missing[:10])
         raise ValueError(
-            f"KR symbol is not registered in kr_symbol_universe: "
+            "KR symbol is not registered in kr_symbol_universe: "
             f"count={len(missing)} symbols=[{preview}]"
         )
-
     inactive = sorted(
         symbol
         for symbol in target_symbols
@@ -117,68 +89,10 @@ def _validate_universe_rows(
     if inactive:
         preview = ", ".join(inactive[:10])
         raise ValueError(
-            f"KR symbol is inactive in kr_symbol_universe: "
+            "KR symbol is inactive in kr_symbol_universe: "
             f"count={len(inactive)} symbols=[{preview}]"
         )
-
     return {symbol: rows_by_symbol[symbol] for symbol in target_symbols}
-
-
-def _build_venue_plan(
-    rows_by_symbol: dict[str, KRSymbolUniverse],
-) -> dict[str, list[VenueConfig]]:
-    plan: dict[str, list[VenueConfig]] = {}
-    for symbol in sorted(rows_by_symbol):
-        row = rows_by_symbol[symbol]
-        if row.nxt_eligible:
-            plan[symbol] = [_VENUE_CONFIG["KRX"], _VENUE_CONFIG["NTX"]]
-        else:
-            plan[symbol] = [_VENUE_CONFIG["KRX"]]
-    return plan
-
-
-def _is_session_day_kst(target_day: date) -> bool:
-    return is_trading_session("kr", target_day)
-
-
-def _should_process_venue(
-    *,
-    mode: Literal["incremental", "backfill"],
-    now_kst: datetime,
-    is_session_day: bool,
-    venue: VenueConfig,
-) -> tuple[bool, str | None]:
-    if mode == "backfill":
-        return True, None
-
-    if not is_session_day:
-        return False, "holiday"
-
-    now_clock = time(now_kst.hour, now_kst.minute, now_kst.second)
-    if now_clock < venue.session_start or now_clock > venue.session_end:
-        return False, "outside_session"
-
-    return True, None
-
-
-def _compute_incremental_cutoff_kst(cursor_utc: datetime | None) -> datetime | None:
-    if cursor_utc is None:
-        return None
-
-    if cursor_utc.tzinfo is None:
-        normalized_cursor = cursor_utc.replace(tzinfo=UTC)
-    else:
-        normalized_cursor = cursor_utc.astimezone(UTC)
-
-    return normalized_cursor.astimezone(_KST) - timedelta(minutes=_OVERLAP_MINUTES)
-
-
-def _convert_kis_datetime_to_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        localized = value.replace(tzinfo=_KST)
-    else:
-        localized = value.astimezone(_KST)
-    return localized.astimezone(UTC)
 
 
 def _recent_session_days(
@@ -198,102 +112,83 @@ def _recent_session_days(
     return days[-sessions:]
 
 
-def _day_before_cutoff(
-    *,
-    target_day: date,
-    venue: VenueConfig,
-    cutoff_kst: datetime | None,
-) -> bool:
-    if cutoff_kst is None:
-        return False
-    day_end = datetime.combine(target_day, venue.session_end, tzinfo=_KST)
-    return day_end < cutoff_kst
+def _partition_for_minute(local_dt: datetime, *, nxt_eligible: bool) -> str:
+    if not nxt_eligible:
+        return "KRX"
+    clock = local_dt.time()
+    if clock < time(9, 0) or clock >= time(15, 30):
+        return "NTX"
+    return "KRX"
 
 
-def _initial_end_time(now_kst: datetime, target_day: date, venue: VenueConfig) -> str:
-    close_hhmmss = venue.session_end.strftime("%H%M%S")
-    if target_day < now_kst.date():
-        return close_hhmmss
-    now_hhmmss = now_kst.strftime("%H%M%S")
-    return min(now_hhmmss, close_hhmmss)
-
-
-def _normalize_intraday_rows(
+def _normalize_toss_rows(
     *,
     frame: pd.DataFrame,
     symbol: str,
-    venue: VenueConfig,
-    target_day: date,
+    nxt_eligible: bool,
+    allowed_days: set[date],
+    cutoff_kst: datetime,
+    now_kst: datetime,
 ) -> list[MinuteCandleRow]:
     if frame.empty:
         return []
-
-    rows: list[MinuteCandleRow] = []
+    rows: dict[tuple[datetime, str], MinuteCandleRow] = {}
     for item in frame.to_dict("records"):
         raw_datetime = item.get("datetime")
         if raw_datetime is None:
             continue
-
-        parsed = pd.to_datetime(str(raw_datetime), errors="coerce")
+        parsed = pd.to_datetime(raw_datetime, errors="coerce")
         if pd.isna(parsed):
             continue
-
         parsed_dt = parsed.to_pydatetime()
-        if parsed_dt.tzinfo is None:
-            local_dt = parsed_dt.replace(tzinfo=_KST)
-        else:
-            local_dt = parsed_dt.astimezone(_KST)
-        local_dt = local_dt.replace(second=0, microsecond=0)
-
-        if local_dt.date() != target_day:
+        local_dt = (
+            parsed_dt.replace(tzinfo=_KST)
+            if parsed_dt.tzinfo is None
+            else parsed_dt.astimezone(_KST)
+        ).replace(second=0, microsecond=0)
+        if local_dt.date() not in allowed_days or local_dt < cutoff_kst:
             continue
-
-        local_clock = time(local_dt.hour, local_dt.minute, local_dt.second)
-        if local_clock < venue.session_start or local_clock > venue.session_end:
+        clock = local_dt.time()
+        if nxt_eligible:
+            if clock < time(8, 0) or clock >= time(20, 0):
+                continue
+        elif clock < time(9, 0) or clock >= time(15, 30):
             continue
-
-        open_value = parse_float(item.get("open"))
-        high_value = parse_float(item.get("high"))
-        low_value = parse_float(item.get("low"))
-        close_value = parse_float(item.get("close"))
-        volume_value = parse_float(item.get("volume"))
-        value_value = parse_float(item.get("value"))
-
         if (
-            open_value is None
-            or high_value is None
-            or low_value is None
-            or close_value is None
-            or volume_value is None
-            or value_value is None
+            local_dt.date() == now_kst.date()
+            and local_dt + timedelta(minutes=1) > now_kst
         ):
             continue
 
-        rows.append(
-            MinuteCandleRow(
-                time_utc=_convert_kis_datetime_to_utc(local_dt),
-                local_time=local_dt,
-                symbol=symbol,
-                venue=venue.venue,
-                open=float(open_value),
-                high=float(high_value),
-                low=float(low_value),
-                close=float(close_value),
-                volume=float(volume_value),
-                value=float(value_value),
-            )
+        values = [
+            parse_float(item.get(key))
+            for key in ("open", "high", "low", "close", "volume", "value")
+        ]
+        if any(value is None for value in values):
+            continue
+        open_value, high_value, low_value, close_value, volume_value, value_value = (
+            cast(list[float], values)
         )
-
-    deduped: dict[datetime, MinuteCandleRow] = {}
-    for row in rows:
-        deduped[row.time_utc] = row
-    return [deduped[key] for key in sorted(deduped)]
+        venue = _partition_for_minute(local_dt, nxt_eligible=nxt_eligible)
+        time_utc = local_dt.astimezone(UTC)
+        rows[(time_utc, venue)] = MinuteCandleRow(
+            time_utc=time_utc,
+            local_time=local_dt,
+            symbol=symbol,
+            venue=venue,
+            open=float(open_value),
+            high=float(high_value),
+            low=float(low_value),
+            close=float(close_value),
+            volume=float(volume_value),
+            value=float(value_value),
+        )
+    return [rows[key] for key in sorted(rows)]
 
 
 async def _upsert_rows(session: AsyncSession, rows: list[MinuteCandleRow]) -> int:
     if not rows:
         return 0
-
     payload = [
         {
             "time": row.time_utc,
@@ -308,184 +203,8 @@ async def _upsert_rows(session: AsyncSession, rows: list[MinuteCandleRow]) -> in
         }
         for row in rows
     ]
-    _ = await session.execute(_UPSERT_SQL, payload)
+    await session.execute(_UPSERT_SQL, payload)
     return len(payload)
-
-
-async def _collect_day_rows(
-    *,
-    kis: KISClient,
-    symbol: str,
-    venue: VenueConfig,
-    target_day: date,
-    initial_end_time: str,
-    cutoff_kst: datetime | None,
-) -> tuple[list[MinuteCandleRow], int, bool, bool]:
-    merged: dict[datetime, MinuteCandleRow] = {}
-    end_time = initial_end_time
-    page_calls = 0
-    reached_cutoff = False
-
-    for _ in range(_MAX_PAGE_CALLS_PER_DAY):
-        page_calls += 1
-        frame = await kis.inquire_time_dailychartprice(
-            code=symbol,
-            market=venue.market_code,
-            n=200,
-            end_date=target_day,
-            end_time=end_time,
-        )
-        if frame.empty:
-            ordered = [merged[key] for key in sorted(merged)]
-            return ordered, page_calls, reached_cutoff, True
-
-        page_rows = _normalize_intraday_rows(
-            frame=frame,
-            symbol=symbol,
-            venue=venue,
-            target_day=target_day,
-        )
-        if not page_rows:
-            ordered = [merged[key] for key in sorted(merged)]
-            return ordered, page_calls, reached_cutoff, True
-
-        earliest_local = min(row.local_time for row in page_rows)
-
-        for row in page_rows:
-            if cutoff_kst is not None and row.local_time < cutoff_kst:
-                reached_cutoff = True
-                continue
-            merged[row.time_utc] = row
-
-        next_cursor = earliest_local - timedelta(minutes=1)
-        if cutoff_kst is not None and next_cursor < cutoff_kst:
-            reached_cutoff = True
-
-        if reached_cutoff:
-            break
-
-        if next_cursor.date() != target_day:
-            break
-
-        next_clock = time(next_cursor.hour, next_cursor.minute, next_cursor.second)
-        if next_clock < venue.session_start:
-            break
-
-        next_end_time = next_cursor.strftime("%H%M%S")
-        if next_end_time == end_time:
-            break
-        end_time = next_end_time
-
-    ordered = [merged[key] for key in sorted(merged)]
-    return ordered, page_calls, reached_cutoff, False
-
-
-async def _sync_symbol_venue(
-    *,
-    session: AsyncSession,
-    kis: KISClient,
-    symbol: str,
-    venue: VenueConfig,
-    mode: Literal["incremental", "backfill"],
-    now_kst: datetime,
-    backfill_days: list[date] | None,
-) -> dict[str, int | bool | str]:
-    cursor_utc = await read_cursor_utc(
-        session, _CURSOR_SQL, {"symbol": symbol, "venue": venue.venue}
-    )
-    cutoff_kst = _compute_incremental_cutoff_kst(cursor_utc)
-
-    if mode == "backfill":
-        if not backfill_days:
-            return {
-                "rows_upserted": 0,
-                "days_processed": 0,
-                "pages_fetched": 0,
-                "empty_response": True,
-            }
-        earliest_day = backfill_days[0]
-        cutoff_kst = datetime.combine(earliest_day, venue.session_start, tzinfo=_KST)
-        allowed_days: set[date] | None = set(backfill_days)
-    else:
-        if cutoff_kst is None:
-            bootstrap_days = _recent_session_days(
-                now_kst,
-                _DEFAULT_BOOTSTRAP_SESSIONS,
-                include_today=True,
-            )
-            if bootstrap_days:
-                cutoff_kst = datetime.combine(
-                    bootstrap_days[0],
-                    venue.session_start,
-                    tzinfo=_KST,
-                )
-        allowed_days = None
-
-    if cutoff_kst is not None and cutoff_kst > now_kst:
-        cutoff_kst = now_kst
-
-    rows_upserted = 0
-    pages_fetched = 0
-    days_processed = 0
-    saw_empty_response = False
-    current_day = now_kst.date()
-
-    while True:
-        if _day_before_cutoff(
-            target_day=current_day, venue=venue, cutoff_kst=cutoff_kst
-        ):
-            break
-
-        if allowed_days is not None:
-            if current_day < min(allowed_days):
-                break
-            if current_day not in allowed_days:
-                current_day = current_day - timedelta(days=1)
-                continue
-
-        if not _is_session_day_kst(current_day):
-            current_day = current_day - timedelta(days=1)
-            continue
-
-        initial_end_time = _initial_end_time(now_kst, current_day, venue)
-        day_rows, page_calls, reached_cutoff, empty_response = await _collect_day_rows(
-            kis=kis,
-            symbol=symbol,
-            venue=venue,
-            target_day=current_day,
-            initial_end_time=initial_end_time,
-            cutoff_kst=cutoff_kst,
-        )
-        pages_fetched += page_calls
-        days_processed += 1
-
-        if day_rows:
-            rows_upserted += await _upsert_rows(session, day_rows)
-        elif empty_response:
-            saw_empty_response = True
-            logger.warning(
-                "KR candles sync empty response symbol=%s venue=%s day=%s end_time=%s",
-                symbol,
-                venue.venue,
-                current_day.isoformat(),
-                initial_end_time,
-            )
-
-        if reached_cutoff:
-            break
-
-        if empty_response:
-            current_day = current_day - timedelta(days=1)
-            continue
-
-        current_day = current_day - timedelta(days=1)
-
-    return {
-        "rows_upserted": rows_upserted,
-        "days_processed": days_processed,
-        "pages_fetched": pages_fetched,
-        "empty_response": saw_empty_response,
-    }
 
 
 async def _load_universe_context(
@@ -494,15 +213,121 @@ async def _load_universe_context(
 ) -> tuple[list[KRSymbolUniverse], bool]:
     has_rows_result = await session.execute(select(KRSymbolUniverse.symbol).limit(1))
     table_has_rows = has_rows_result.scalar_one_or_none() is not None
-
     if not target_symbols:
         return [], table_has_rows
-
     result = await session.execute(
         select(KRSymbolUniverse).where(KRSymbolUniverse.symbol.in_(target_symbols))
     )
-    rows = list(result.scalars().all())
-    return rows, table_has_rows
+    return list(result.scalars().all()), table_has_rows
+
+
+def _symbol_session_open(now_kst: datetime, *, nxt_eligible: bool) -> bool:
+    if not is_trading_session("kr", now_kst.date()):
+        return False
+    clock = now_kst.time()
+    if nxt_eligible:
+        return time(8, 0) <= clock < time(20, 0)
+    return time(9, 0) <= clock < time(15, 30)
+
+
+async def _cursor_cutoff(
+    session: AsyncSession,
+    *,
+    symbol: str,
+    nxt_eligible: bool,
+) -> datetime | None:
+    venues = ("KRX", "NTX") if nxt_eligible else ("KRX",)
+    cursors = [
+        await read_cursor_utc(
+            session,
+            _CURSOR_SQL,
+            {"symbol": symbol, "venue": venue},
+        )
+        for venue in venues
+    ]
+    if any(cursor is None for cursor in cursors):
+        return None
+    normalized = [
+        cursor.replace(tzinfo=UTC) if cursor.tzinfo is None else cursor.astimezone(UTC)
+        for cursor in cast(list[datetime], cursors)
+    ]
+    return min(normalized).astimezone(_KST) - timedelta(minutes=_OVERLAP_MINUTES)
+
+
+async def _sync_symbol(
+    *,
+    session: AsyncSession,
+    symbol: str,
+    nxt_eligible: bool,
+    mode: Literal["incremental", "backfill"],
+    session_count: int,
+    now_kst: datetime,
+) -> tuple[int, int]:
+    session_end = time(20, 0) if nxt_eligible else time(15, 30)
+    if mode == "backfill":
+        allowed_days = _recent_session_days(
+            now_kst,
+            session_count,
+            include_today=now_kst.time() >= session_end,
+        )
+        if not allowed_days:
+            return 0, 0
+        cutoff_kst = datetime.combine(
+            allowed_days[0],
+            time(8, 0) if nxt_eligible else time(9, 0),
+            tzinfo=_KST,
+        )
+        provider_end = datetime.combine(
+            allowed_days[-1],
+            session_end,
+            tzinfo=_KST,
+        )
+    else:
+        cutoff_kst = await _cursor_cutoff(
+            session,
+            symbol=symbol,
+            nxt_eligible=nxt_eligible,
+        )
+        if cutoff_kst is None:
+            allowed_days = _recent_session_days(
+                now_kst,
+                _DEFAULT_BOOTSTRAP_SESSIONS,
+                include_today=True,
+            )
+            if not allowed_days:
+                return 0, 0
+            cutoff_kst = datetime.combine(
+                allowed_days[0],
+                time(8, 0) if nxt_eligible else time(9, 0),
+                tzinfo=_KST,
+            )
+        else:
+            allowed_days = trading_sessions_in_range(
+                "kr",
+                cutoff_kst.date(),
+                now_kst.date(),
+            )
+        provider_end = now_kst
+
+    request_count = max(
+        len(allowed_days) * (720 if nxt_eligible else 390) + _OVERLAP_MINUTES,
+        60,
+    )
+    frame = await fetch_kr_intraday_toss_frame(
+        symbol=symbol,
+        period="1m",
+        count=request_count,
+        end_date=provider_end,
+    )
+    rows = _normalize_toss_rows(
+        frame=frame,
+        symbol=symbol,
+        nxt_eligible=nxt_eligible,
+        allowed_days=set(allowed_days),
+        cutoff_kst=cutoff_kst,
+        now_kst=now_kst,
+    )
+    return await _upsert_rows(session, rows), 1
 
 
 async def sync_kr_candles(
@@ -510,38 +335,45 @@ async def sync_kr_candles(
     mode: str,
     sessions: int = 10,
     user_id: int = 1,
-    source: str = "kis",
+    source: str = "toss",
 ) -> dict[str, object]:
     normalized_mode = normalize_mode(mode)
     session_count = max(int(sessions), 1)
+    normalized_source = str(source or "toss").strip().lower()
+    if normalized_source != "toss":
+        raise ValueError("source is non-operational; source must be 'toss'")
     now_kst = datetime.now(_KST)
-    session_day_today = _is_session_day_kst(now_kst.date())
-
-    normalized_source = str(source or "kis").strip().lower()
-    if normalized_source not in {"kis", "toss"}:
-        raise ValueError("source must be 'kis' or 'toss'")
-
-    kis = KISClient()
 
     session = cast(AsyncSession, cast(object, AsyncSessionLocal()))
     try:
-        # KIS 자격이 없거나 무효인 서버(PAPER 전용 운영)에서 태스크 전체가
-        # 죽지 않도록 보유 조회 실패는 빈 목록으로 강등한다. 대상 심볼은
-        # 수동 보유·관심종목 유니버스가 계속 공급한다.
+        # 전역 Toss 자격증명은 이 user_id의 단일 운영자 계좌와 같다는 배포 계약이다.
+        # 다중 사용자 계좌 매핑이 생기면 이 전제를 제거하고 명시적 계정 스코프가 필요하다.
         try:
-            kis_holdings = await kis.fetch_my_stocks()
-        except Exception as exc:  # noqa: BLE001 - 브로커 응답 형상 다양
-            logger.warning("KIS holdings scan skipped: %s", exc)
-            kis_holdings = []
-        manual_service = ManualHoldingsService(session)
-        manual_holdings = await manual_service.get_holdings_by_user(
+            snapshot = await fetch_toss_portfolio_snapshot(
+                need_sellable=False,
+                need_cash=False,
+            )
+            toss_positions = [
+                position
+                for position in snapshot.positions
+                if position.instrument_type == "equity_kr"
+            ]
+            if snapshot.errors:
+                logger.warning(
+                    "Toss holdings snapshot reported errors: %s", snapshot.errors
+                )
+        except Exception as exc:
+            logger.warning("Toss holdings scan skipped: %s", exc)
+            toss_positions = []
+
+        manual_holdings = await ManualHoldingsService(session).get_holdings_by_user(
             user_id=user_id,
             market_type=MarketType.KR,
         )
         target_symbols = build_symbol_union(
-            kis_holdings,
+            toss_positions,
             manual_holdings,
-            holdings_field="pdno",
+            holdings_field="symbol",
             normalize_fn=_normalize_symbol,
         )
         if not target_symbols:
@@ -556,7 +388,7 @@ async def sync_kr_candles(
                 "pairs_skipped": 0,
                 "rows_upserted": 0,
                 "pages_fetched": 0,
-                "source": normalized_source,
+                "source": "toss",
             }
 
         universe_rows, table_has_rows = await _load_universe_context(
@@ -569,151 +401,56 @@ async def sync_kr_candles(
             table_has_rows=table_has_rows,
         )
 
-        if normalized_source == "toss":
-            rows_upserted = 0
-            for symbol in sorted(target_symbols):
-                try:
-                    toss_frame = await fetch_kr_intraday_toss_frame(
-                        symbol=symbol,
-                        period="1m",
-                        count=200,
-                        end_date=None,
-                    )
-                    if toss_frame.empty:
-                        continue
-
-                    day_rows = []
-                    for item in toss_frame.to_dict("records"):
-                        raw_dt = item.get("datetime")
-                        if raw_dt is None:
-                            continue
-                        parsed = pd.to_datetime(raw_dt)
-                        if pd.isna(parsed):
-                            continue
-                        parsed_dt = parsed.to_pydatetime()
-
-                        open_val = float(item["open"])
-                        high_val = float(item["high"])
-                        low_val = float(item["low"])
-                        close_val = float(item["close"])
-                        volume_val = float(item["volume"])
-                        value_val = float(item["value"])
-
-                        if parsed_dt.tzinfo is None:
-                            local_dt = parsed_dt.replace(tzinfo=_KST)
-                        else:
-                            local_dt = parsed_dt.astimezone(_KST)
-                        local_dt = local_dt.replace(second=0, microsecond=0)
-
-                        day_rows.append(
-                            MinuteCandleRow(
-                                time_utc=_convert_kis_datetime_to_utc(local_dt),
-                                local_time=local_dt,
-                                symbol=symbol,
-                                venue="KRX",
-                                open=open_val,
-                                high=high_val,
-                                low=low_val,
-                                close=close_val,
-                                volume=volume_val,
-                                value=value_val,
-                            )
-                        )
-
-                    if day_rows:
-                        rows_upserted += await _upsert_rows(session, day_rows)
-                        await session.commit()
-                except Exception as exc:
-                    await session.rollback()
-                    logger.error(
-                        "Failed to sync Toss candles for symbol=%s: %s",
-                        symbol,
-                        exc,
-                        exc_info=True,
-                    )
-
-            return {
-                "mode": normalized_mode,
-                "sessions": session_count,
-                "skipped": rows_upserted == 0,
-                "symbols_total": len(target_symbols),
-                "symbol_venues_total": len(target_symbols),
-                "pairs_processed": len(target_symbols),
-                "pairs_skipped": 0,
-                "rows_upserted": rows_upserted,
-                "pages_fetched": len(target_symbols),
-                "source": "toss",
-                "warnings": [
-                    "Toss minute candles are stored under venue='KRX' because kr_candles_1m has no provider source column; do not treat venue as provider provenance for source='toss'."
-                ],
-            }
-
-        venue_plan = _build_venue_plan(rows_by_symbol)
-
-        backfill_days: list[date] | None = None
-        if normalized_mode == "backfill":
-            include_today = now_kst.time() >= _VENUE_CONFIG["KRX"].session_end
-            backfill_days = _recent_session_days(
-                now_kst,
-                session_count,
-                include_today=include_today,
-            )
-
-        pairs_total = sum(len(venues) for venues in venue_plan.values())
+        rows_upserted = 0
+        requests_fetched = 0
         pairs_processed = 0
         pairs_skipped = 0
-        rows_upserted = 0
-        pages_fetched = 0
         skipped_reasons: dict[str, int] = {}
-
-        for symbol, venues in venue_plan.items():
-            for venue in venues:
-                should_process, skip_reason = _should_process_venue(
-                    mode=normalized_mode,
-                    now_kst=now_kst,
-                    is_session_day=session_day_today,
-                    venue=venue,
+        for symbol in sorted(rows_by_symbol):
+            universe = rows_by_symbol[symbol]
+            if normalized_mode == "incremental" and not _symbol_session_open(
+                now_kst,
+                nxt_eligible=universe.nxt_eligible,
+            ):
+                pairs_skipped += 1
+                skipped_reasons["outside_session"] = (
+                    skipped_reasons.get("outside_session", 0) + 1
                 )
-                if not should_process:
-                    pairs_skipped += 1
-                    if skip_reason is not None:
-                        skipped_reasons[skip_reason] = (
-                            skipped_reasons.get(skip_reason, 0) + 1
-                        )
-                    continue
+                continue
+            try:
+                row_count, request_count = await _sync_symbol(
+                    session=session,
+                    symbol=symbol,
+                    nxt_eligible=universe.nxt_eligible,
+                    mode=normalized_mode,
+                    session_count=session_count,
+                    now_kst=now_kst,
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            rows_upserted += row_count
+            requests_fetched += request_count
+            pairs_processed += 1
 
-                try:
-                    stats = await _sync_symbol_venue(
-                        session=session,
-                        kis=kis,
-                        symbol=symbol,
-                        venue=venue,
-                        mode=normalized_mode,
-                        now_kst=now_kst,
-                        backfill_days=backfill_days,
-                    )
-                    await session.commit()
-                except Exception:
-                    await session.rollback()
-                    raise
-
-                pairs_processed += 1
-                rows_upserted += int(stats["rows_upserted"])
-                pages_fetched += int(stats["pages_fetched"])
-
-        skipped = pairs_processed == 0
         return {
             "mode": normalized_mode,
             "sessions": session_count,
-            "skipped": skipped,
+            "skipped": pairs_processed == 0,
             "skip_reasons": skipped_reasons,
             "symbols_total": len(target_symbols),
-            "symbol_venues_total": pairs_total,
+            "symbol_venues_total": sum(
+                2 if row.nxt_eligible else 1 for row in rows_by_symbol.values()
+            ),
             "pairs_processed": pairs_processed,
             "pairs_skipped": pairs_skipped,
             "rows_upserted": rows_upserted,
-            "pages_fetched": pages_fetched,
-            "source": normalized_source,
+            "pages_fetched": requests_fetched,
+            "source": "toss",
+            "warnings": [
+                "Toss 통합 캔들의 venue='KRX'/'NTX' 값은 세션별 호환 파티션이며 공급자 venue 근거가 아닙니다."
+            ],
         }
     finally:
         await session.close()

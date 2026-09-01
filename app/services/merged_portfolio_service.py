@@ -1,8 +1,4 @@
-"""
-Merged Portfolio Service
-
-KIS 보유 종목과 수동 등록 종목을 통합하여 포트폴리오 제공
-"""
+"""Toss 실계좌와 사용자 수동 보유분을 합성하는 read-only 포트폴리오."""
 
 import logging
 from dataclasses import dataclass, field
@@ -11,34 +7,14 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.exchange_rate_service import get_usd_krw_rate
 from app.services.manual_holdings_service import ManualHoldingsService
+from app.services.toss_portfolio_service import (
+    TossPortfolioPosition,
+    fetch_toss_portfolio_snapshot,
+)
 
 logger = logging.getLogger(__name__)
-
-KIS_FIELD_CONFIG = {
-    MarketType.KR: {
-        "ticker": "pdno",
-        "name": "prdt_name",
-        "quantity": lambda stock: int(stock.get("hldg_qty", 0)),
-        "avg_price": lambda stock: float(stock.get("pchs_avg_pric", 0)),
-        "current_price": lambda stock: float(stock.get("prpr", 0)),
-        "evaluation": lambda stock: float(stock.get("evlu_amt", 0)),
-        "profit_loss": lambda stock: float(stock.get("evlu_pfls_amt", 0)),
-        "profit_rate": lambda stock: float(stock.get("evlu_pfls_rt", 0)) / 100.0,
-    },
-    MarketType.US: {
-        "ticker": "ovrs_pdno",
-        "name": "ovrs_item_name",
-        "quantity": lambda stock: int(float(stock.get("ovrs_cblc_qty", 0))),
-        "avg_price": lambda stock: float(stock.get("pchs_avg_pric", 0)),
-        "current_price": lambda stock: float(stock.get("now_pric2", 0)),
-        "evaluation": lambda stock: float(stock.get("ovrs_stck_evlu_amt", 0)),
-        "profit_loss": lambda stock: float(stock.get("frcr_evlu_pfls_amt", 0)),
-        "profit_rate": lambda stock: float(stock.get("evlu_pfls_rt", 0)) / 100.0,
-    },
-}
 
 
 @dataclass
@@ -187,51 +163,65 @@ class MergedPortfolioService:
 
         return merged[ticker]
 
-    async def _fetch_kis_holdings(
-        self, kis_client: KISClient, market_type: MarketType
-    ) -> list[dict[str, Any]]:
+    async def _fetch_toss_holdings(
+        self, market_type: MarketType
+    ) -> list[TossPortfolioPosition]:
+        """단일 운영자 Toss 계좌의 일반 스냅샷을 조회한다."""
+
         try:
-            if market_type == MarketType.KR:
-                return await kis_client.fetch_my_stocks()
-            return await kis_client.fetch_my_overseas_stocks()
+            snapshot = await fetch_toss_portfolio_snapshot(
+                need_sellable=False,
+                need_cash=False,
+            )
         except Exception as exc:
-            logger.error("Failed to fetch KIS %s stocks: %s", market_type.value, exc)
+            logger.error("Failed to fetch Toss %s stocks: %s", market_type.value, exc)
             return []
 
-    def _apply_kis_holdings(
+        instrument_type = "equity_kr" if market_type == MarketType.KR else "equity_us"
+        return [
+            position
+            for position in snapshot.positions
+            if position.instrument_type == instrument_type
+        ]
+
+    def _apply_toss_holdings(
         self,
         merged: dict[str, MergedHolding],
-        stocks: list[dict[str, Any]],
+        positions: list[TossPortfolioPosition],
         market_type: MarketType,
     ) -> None:
-        mapping = KIS_FIELD_CONFIG.get(market_type)
-        if not mapping:
-            return
-
-        for stock in stocks:
-            ticker = stock.get(mapping["ticker"], "")
-            if not ticker:
+        for position in positions:
+            ticker = str(position.symbol).strip().upper()
+            quantity = int(position.quantity)
+            if not ticker or quantity <= 0:
                 continue
 
-            name = stock.get(mapping["name"], ticker)
-            qty = mapping["quantity"](stock)
-            avg_price = mapping["avg_price"](stock)
-            current_price = mapping["current_price"](stock)
-            evaluation = mapping["evaluation"](stock)
-            profit_loss = mapping["profit_loss"](stock)
-            profit_rate = mapping["profit_rate"](stock)
-
+            avg_price = float(position.avg_buy_price)
+            current_price = float(position.current_price)
             holding = self._get_or_create_holding(
-                merged, ticker, name, market_type, current_price
+                merged,
+                ticker,
+                position.name or ticker,
+                market_type,
+                current_price,
             )
-            holding.kis_quantity = qty
-            holding.kis_avg_price = avg_price
+            previous_quantity = holding.toss_quantity
+            total_quantity = previous_quantity + quantity
+            if total_quantity > 0:
+                holding.toss_avg_price = (
+                    (holding.toss_avg_price * previous_quantity)
+                    + (avg_price * quantity)
+                ) / total_quantity
+            holding.toss_quantity = total_quantity
             holding.current_price = current_price
-            holding.evaluation = evaluation
-            holding.profit_loss = profit_loss
-            holding.profit_rate = profit_rate
+            if position.evaluation_amount is not None:
+                holding.evaluation = float(position.evaluation_amount)
+            if position.profit_loss is not None:
+                holding.profit_loss = float(position.profit_loss)
+            if position.profit_rate is not None:
+                holding.profit_rate = float(position.profit_rate)
             holding.holdings.append(
-                HoldingInfo(broker="kis", quantity=qty, avg_price=avg_price)
+                HoldingInfo(broker="toss", quantity=quantity, avg_price=avg_price)
             )
 
     async def _apply_manual_holdings(
@@ -244,14 +234,23 @@ class MergedPortfolioService:
             user_id, market_type=market_type
         )
 
+        live_toss_symbols = {
+            ticker
+            for ticker, item in merged.items()
+            if any(source.broker == "toss" for source in item.holdings)
+        }
         for holding in manual_holdings:
-            ticker = holding.ticker
+            ticker = str(holding.ticker).strip().upper()
             broker_type = self._resolve_broker_type(holding.broker_account.broker_type)
             qty = int(holding.quantity)
             avg_price = float(holding.avg_price)
             name = holding.display_name or ticker
 
             merged_holding = merged.get(ticker)
+            if broker_type == "toss" and ticker in live_toss_symbols:
+                # InvestHomeService와 같은 규칙: 실계좌 Toss 보유분이 있으면
+                # 같은 종목의 Toss 수동 행은 중복 참조값이므로 게시하지 않는다.
+                continue
             if not merged_holding:
                 merged_holding = self._get_or_create_holding(
                     merged, ticker, name, market_type
@@ -271,31 +270,22 @@ class MergedPortfolioService:
         self,
         merged: dict[str, MergedHolding],
         market_type: MarketType,
-        kis_client: KISClient,
     ) -> None:
-        """현재가가 없는 종목들의 현재가를 KIS API로 조회"""
-        tickers_without_price = [
-            ticker
-            for ticker, holding in merged.items()
-            if holding.current_price == 0 and holding.total_quantity > 0
-        ]
+        """현재가가 없는 수동 종목을 shared market-data 경로로 보강한다."""
 
-        if not tickers_without_price:
-            return
+        from app.services.market_data.service import get_quote
 
-        for ticker in tickers_without_price:
+        market = "kr" if market_type == MarketType.KR else "us"
+        for ticker, holding in merged.items():
+            if holding.current_price > 0 or holding.total_quantity <= 0:
+                continue
             try:
-                if market_type == MarketType.KR:
-                    df = await kis_client.inquire_price(ticker)
-                    if not df.empty:
-                        merged[ticker].current_price = float(df.iloc[0]["close"])
-                else:
-                    # 해외주식 현재가 조회
-                    df = await kis_client.inquire_overseas_price(ticker)
-                    if not df.empty:
-                        merged[ticker].current_price = float(df.iloc[0]["close"])
+                quote = await get_quote(ticker, market)
             except Exception as exc:
                 logger.warning("Failed to fetch price for %s: %s", ticker, exc)
+                continue
+            if quote.price > 0:
+                holding.current_price = float(quote.price)
 
     def _finalize_holdings(
         self, merged: dict[str, MergedHolding], *, usd_krw: float | None = None
@@ -309,8 +299,7 @@ class MergedPortfolioService:
             ):
                 for h in holding.holdings:
                     if (
-                        h.broker != "kis"
-                        and h.avg_price > 1000
+                        h.avg_price > 1000
                         and (h.avg_price / holding.current_price) > 100
                     ):
                         h.avg_price = h.avg_price / usd_krw
@@ -377,25 +366,27 @@ class MergedPortfolioService:
         self,
         user_id: int,
         market_type: MarketType,
-        kis_client: KISClient,
+        *,
+        attach_metadata: bool = True,
     ) -> list[MergedHolding]:
         merged: dict[str, MergedHolding] = {}
 
-        kis_stocks = await self._fetch_kis_holdings(kis_client, market_type)
-        self._apply_kis_holdings(merged, kis_stocks, market_type)
+        toss_positions = await self._fetch_toss_holdings(market_type)
+        self._apply_toss_holdings(merged, toss_positions, market_type)
         await self._apply_manual_holdings(merged, user_id, market_type)
 
-        # 수동 등록 종목만 있는 경우 (KIS에 없는 종목) 현재가 조회
-        # total_quantity를 먼저 계산해야 함
         for holding in merged.values():
             holding.total_quantity = sum(
                 int(item.quantity) for item in holding.holdings
             )
-        await self._fetch_missing_prices(merged, market_type, kis_client)
+        await self._fetch_missing_prices(merged, market_type)
 
-        usd_krw_rate = await get_usd_krw_rate()
+        usd_krw_rate = (
+            await get_usd_krw_rate() if market_type == MarketType.US else None
+        )
         self._finalize_holdings(merged, usd_krw=usd_krw_rate)
-        await self._attach_analysis_and_settings(merged)
+        if attach_metadata:
+            await self._attach_analysis_and_settings(merged)
 
         return list(merged.values())
 
@@ -404,98 +395,41 @@ class MergedPortfolioService:
         user_id: int,
         ticker: str,
         market_type: MarketType,
-        kis_holdings: dict[str, Any] | None = None,
-        kis_client: KISClient | None = None,
+        _legacy_holdings: dict[str, Any] | None = None,
     ) -> ReferencePrices:
-        """특정 종목의 참조 평단가 정보 조회"""
-        ref = ReferencePrices()
-        holdings_list: list[HoldingInfo] = []
+        """특정 종목의 Toss·수동 통합 참조 평단가를 조회한다."""
 
-        # 1. KIS 보유 정보 (전달받았으면 사용, 아니면 API 호출)
-        if kis_holdings:
-            kis_qty = float(kis_holdings.get("quantity", 0))
-            kis_avg = float(kis_holdings.get("avg_price", 0))
-            if kis_qty > 0:
-                ref.kis_quantity = int(kis_qty)
-                ref.kis_avg = kis_avg
-                holdings_list.append(
-                    HoldingInfo(broker="kis", quantity=kis_qty, avg_price=kis_avg)
-                )
-
-        # 2. 수동 등록 보유 종목
-        manual_holdings = (
-            await self.manual_holdings_service.get_holdings_by_ticker_all_accounts(
-                user_id, ticker, market_type
-            )
+        rows = await self._build_merged_portfolio(
+            user_id,
+            market_type,
+            attach_metadata=False,
         )
-
-        for holding in manual_holdings:
-            broker_type = self._resolve_broker_type(holding.broker_account.broker_type)
-            qty = float(holding.quantity)
-            avg = float(holding.avg_price)
-
-            if broker_type == "toss":
-                ref.toss_quantity = int(qty)
-                ref.toss_avg = avg
-            # 다른 브로커가 추가되면 여기에 처리
-
-            holdings_list.append(
-                HoldingInfo(broker=broker_type, quantity=qty, avg_price=avg)
-            )
-
-        # 3. Currency normalization for US stocks
-        if market_type == MarketType.US and holdings_list:
-            # We need a reference price to detect KRW.
-            # If KIS exists, use its current price. If not, fetch it.
-            ref_price = 0.0
-            if kis_holdings and kis_holdings.get("current_price"):
-                ref_price = float(kis_holdings["current_price"])
-
-            if ref_price == 0:
-                try:
-                    if kis_client is None:
-                        kis_client = KISClient()
-                    df = await kis_client.inquire_overseas_price(ticker)
-                    if not df.empty:
-                        ref_price = float(df.iloc[0]["close"])
-                except Exception:
-                    pass
-
-            if ref_price > 0:
-                usd_krw = await get_usd_krw_rate()
-                for h in holdings_list:
-                    if (
-                        h.broker != "kis"
-                        and h.avg_price > 1000
-                        and (h.avg_price / ref_price) > 100
-                    ):
-                        h.avg_price = h.avg_price / usd_krw
-                        if h.broker == "toss":
-                            ref.toss_avg = h.avg_price
-
-        # 4. 통합 평단가 계산
-        if holdings_list:
-            ref.combined_avg = self.calculate_combined_avg(holdings_list)
-            ref.total_quantity = sum(int(h.quantity) for h in holdings_list)
-
-        return ref
+        normalized_ticker = str(ticker).strip().upper()
+        holding = next(
+            (row for row in rows if row.ticker.strip().upper() == normalized_ticker),
+            None,
+        )
+        if holding is None:
+            return ReferencePrices()
+        return ReferencePrices(
+            toss_avg=(holding.toss_avg_price if holding.toss_quantity > 0 else None),
+            toss_quantity=holding.toss_quantity,
+            combined_avg=holding.combined_avg_price,
+            total_quantity=holding.total_quantity,
+        )
 
     async def get_merged_portfolio_domestic(
         self,
         user_id: int,
-        kis_client: KISClient | None = None,
     ) -> list[MergedHolding]:
-        """국내주식 통합 포트폴리오 조회"""
-        if kis_client is None:
-            kis_client = KISClient()
-        return await self._build_merged_portfolio(user_id, MarketType.KR, kis_client)
+        """국내주식 Toss·수동 통합 포트폴리오 조회."""
+
+        return await self._build_merged_portfolio(user_id, MarketType.KR)
 
     async def get_merged_portfolio_overseas(
         self,
         user_id: int,
-        kis_client: KISClient | None = None,
     ) -> list[MergedHolding]:
-        """해외주식 통합 포트폴리오 조회"""
-        if kis_client is None:
-            kis_client = KISClient()
-        return await self._build_merged_portfolio(user_id, MarketType.US, kis_client)
+        """해외주식 Toss·수동 통합 포트폴리오 조회."""
+
+        return await self._build_merged_portfolio(user_id, MarketType.US)

@@ -21,7 +21,6 @@ from app.core.config import settings
 from app.core.exceptions import describe_exception
 from app.core.timezone import KST, now_kst
 from app.mcp_server.caller_identity import get_caller_source
-from app.mcp_server.tick_size import adjust_tick_size_kr, get_tick_size_kr
 from app.mcp_server.tooling import order_approval
 from app.mcp_server.tooling import order_validation as ov
 from app.mcp_server.tooling.order_journal import (
@@ -55,12 +54,7 @@ from app.mcp_server.tooling.shared import (
 from app.mcp_server.tooling.shared import (
     to_float as _to_float,
 )
-from app.services.brokers.kis import KISClient
-from app.services.brokers.kis.pre_send import PreSendFreshnessError
-from app.services.brokers.kis.send_outcome import (
-    OrderSendDisposition,
-    OrderSendOutcomeTracker,
-)
+from app.services.brokers.pre_send import PreSendFreshnessError
 from app.services.crypto_trade_cooldown_service import CryptoTradeCooldownService
 from app.services.kis_mock_attribution import (
     KisMockAttribution,
@@ -74,7 +68,6 @@ from app.services.order_send_intent_service import (
     DuplicateOrderIntent,
     OrderSendIntentService,
 )
-from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 
 def _coerce_report_item_uuid(value: str | None) -> uuid.UUID | None:
@@ -97,19 +90,6 @@ _MOCK_CRYPTO_ERROR = "crypto has no mock venue"
 
 # Crypto trade cooldown service singleton
 _order_cooldown_service: CryptoTradeCooldownService | None = None
-
-
-def _create_kis_client(*, is_mock: bool) -> KISClient:
-    if is_mock:
-        return KISClient(is_mock=True)
-    return KISClient()
-
-
-async def _call_kis(method: Any, *args: Any, is_mock: bool, **kwargs: Any) -> Any:
-    kwargs.pop("is_mock", None)
-    if is_mock:
-        return await method(*args, **kwargs, is_mock=True)
-    return await method(*args, **kwargs)
 
 
 def _get_crypto_trade_cooldown_service() -> CryptoTradeCooldownService:
@@ -153,33 +133,22 @@ async def _execute_order(
     is_mock: bool = False,
     identifier: str | None = None,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
-    send_outcome: OrderSendOutcomeTracker | None = None,
+    send_outcome: Any | None = None,
 ) -> dict[str, Any]:
-    if market_type == "crypto":
-        if is_mock:
-            raise ValueError(_MOCK_CRYPTO_ERROR)
-        return await _execute_crypto_order(
-            symbol,
-            side,
-            order_type,
-            quantity,
-            price,
-            identifier=identifier,
-            pre_send_hook=pre_send_hook,
-        )
-    if market_type == "equity_kr":
-        return await _execute_kr_order(
-            symbol,
-            side,
-            order_type,
-            quantity,
-            price,
-            is_mock=is_mock,
-            pre_send_hook=pre_send_hook,
-            send_outcome=send_outcome,
-        )
-    return await _execute_us_order(
-        symbol, side, quantity, price, is_mock=is_mock, pre_send_hook=pre_send_hook
+    """Upbit crypto 주문만 전송하며 equity KIS 경로는 닫혀 있다."""
+    _ = send_outcome
+    if market_type != "crypto":
+        raise ValueError("provider kis is not operational")
+    if is_mock:
+        raise ValueError(_MOCK_CRYPTO_ERROR)
+    return await _execute_crypto_order(
+        symbol,
+        side,
+        order_type,
+        quantity,
+        price,
+        identifier=identifier,
+        pre_send_hook=pre_send_hook,
     )
 
 
@@ -233,111 +202,6 @@ async def _execute_crypto_order(
         f"{adjusted_price}",
         identifier=identifier,
         pre_send_hook=pre_send_hook,
-    )
-
-
-async def _execute_kr_order(
-    symbol: str,
-    side: str,
-    order_type: str,
-    quantity: float | None,
-    price: float | None,
-    is_mock: bool = False,
-    pre_send_hook: Callable[[], Awaitable[None]] | None = None,
-    send_outcome: OrderSendOutcomeTracker | None = None,
-) -> dict[str, Any]:
-    kis = _create_kis_client(is_mock=is_mock)
-    stock_code = symbol
-    order_quantity = int(quantity) if quantity else 0
-    order_price = int(price) if price else 0
-
-    original_price = order_price if order_price else None
-    if order_type == "limit" and order_price > 0:
-        tick_size = get_tick_size_kr(float(order_price))
-        order_price = adjust_tick_size_kr(float(order_price), side)
-
-        if original_price is not None and order_price != original_price:
-            logger.info(
-                "KR limit order tick adjusted: symbol=%s side=%s original_price=%s tick_size=%s adjusted_price=%s",
-                symbol,
-                side,
-                original_price,
-                tick_size,
-                order_price,
-            )
-        else:
-            logger.debug(
-                "KR limit order tick valid: symbol=%s side=%s price=%s tick_size=%s tick_adjusted=false",
-                symbol,
-                side,
-                original_price,
-                tick_size,
-            )
-
-    # ROB-843 P1: only thread the hook when present (mock scalping). The live /
-    # normal path passes no callback at all → byte-for-byte identical behavior.
-    hook_kw = {"pre_send_hook": pre_send_hook} if pre_send_hook is not None else {}
-    if send_outcome is not None:
-        hook_kw["send_outcome"] = send_outcome
-    if side == "buy":
-        result = await _call_kis(
-            kis.order_korea_stock,
-            stock_code=stock_code,
-            order_type="buy",
-            quantity=order_quantity,
-            price=order_price,
-            is_mock=is_mock,
-            **hook_kw,
-        )
-    else:
-        result = await _call_kis(
-            kis.order_korea_stock,
-            stock_code=stock_code,
-            order_type="sell",
-            quantity=order_quantity,
-            price=order_price,
-            is_mock=is_mock,
-            **hook_kw,
-        )
-
-    if original_price is not None and order_price != original_price:
-        result["original_price"] = original_price
-        result["adjusted_price"] = order_price
-        result["tick_adjusted"] = True
-    return result
-
-
-async def _execute_us_order(
-    symbol: str,
-    side: str,
-    quantity: float | None,
-    price: float | None,
-    is_mock: bool = False,
-    pre_send_hook: Callable[[], Awaitable[None]] | None = None,
-) -> dict[str, Any]:
-    kis = _create_kis_client(is_mock=is_mock)
-    exchange_code = await get_us_exchange_by_symbol(symbol)
-
-    # ROB-843 P1: pass the hook only when present (live/normal path unchanged).
-    hook_kw = {"pre_send_hook": pre_send_hook} if pre_send_hook is not None else {}
-    if side == "buy":
-        return await _call_kis(
-            kis.buy_overseas_stock,
-            symbol=symbol,
-            exchange_code=exchange_code,
-            quantity=int(quantity) if quantity else 0,
-            price=price if price else 0.0,
-            is_mock=is_mock,
-            **hook_kw,
-        )
-    return await _call_kis(
-        kis.sell_overseas_stock,
-        symbol=symbol,
-        exchange_code=exchange_code,
-        quantity=int(quantity) if quantity else 0,
-        price=price if price else 0.0,
-        is_mock=is_mock,
-        **hook_kw,
     )
 
 
@@ -785,7 +649,7 @@ async def _execute_and_record(
     mirror_cohort: str | None = None,
     mirror_source_bucket: str | None = None,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
-    send_outcome: OrderSendOutcomeTracker | None = None,
+    send_outcome: Any | None = None,
 ) -> dict[str, Any]:
     """Execute a live order, record history, fills, and journals."""
     # Pre-submit attribution gate (kis_mock). Deliberately the FIRST thing in
@@ -1079,9 +943,10 @@ async def _execute_and_record(
         # "release on proven not-sent" idea is a live-side change owned by
         # ROB-1279 and is deliberately absent here.
         await _release_reserved_intent_after_send_failure(send_exc)
+        disposition = getattr(send_outcome, "disposition", None)
         if (
             send_outcome is not None
-            and send_outcome.disposition is OrderSendDisposition.NOT_CREATED
+            and getattr(disposition, "value", disposition) == "not_created"
         ):
             logger.error(
                 "execute_order failed before dispatch: market_type=%s, "
@@ -1525,7 +1390,7 @@ async def _place_order_impl(
     mirror_source_bucket: str | None = None,
     client_order_id: str | None = None,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
-    send_outcome: OrderSendOutcomeTracker | None = None,
+    send_outcome: Any | None = None,
 ) -> dict[str, Any]:
     symbol, side_lower, order_type_lower = _validate_inputs(
         symbol,
@@ -1537,8 +1402,19 @@ async def _place_order_impl(
     )
 
     market_type, normalized_symbol = _resolve_market_type(symbol, market)
-    source_map = {"crypto": "upbit", "equity_kr": "kis", "equity_us": "kis"}
-    source = source_map[market_type]
+    # 이 레거시 구현은 Upbit 전용이다. 주식 호출은 Toss 경계를 우회하지 않도록
+    # 공급자 접근, 가격 조회, 원장 기록보다 먼저 닫는다.
+    if market_type != "crypto":
+        return {
+            "success": False,
+            "error": "provider kis is not operational",
+            "provider_unsupported": True,
+            "source": "kis",
+            "symbol": normalized_symbol,
+            "instrument_type": market_type,
+            "mutation_sent": False,
+        }
+    source = "upbit"
 
     def _order_error(message: str) -> dict[str, Any]:
         return _build_order_error(message, source, normalized_symbol, market_type)

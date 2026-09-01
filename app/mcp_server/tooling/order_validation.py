@@ -8,42 +8,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import app.services.brokers.upbit.client as upbit_service
-import app.services.market_data as market_data_service
 from app.core.config import settings
 from app.mcp_server.caller_identity import get_caller_agent_id, get_caller_source
-from app.mcp_server.tooling.kis_mock_ledger import _get_kis_mock_shadow_exposure
 from app.mcp_server.tooling.market_data_quotes import (
     _fetch_quote_equity_kr,
     _fetch_quote_equity_us,
 )
-from app.mcp_server.tooling.market_session import (
-    DATA_STATE_PREMARKET_UNAVAILABLE,
-    kr_market_data_state,
-)
-from app.mcp_server.tooling.portfolio_cash import (
-    get_cash_balance_impl,
-)
 from app.mcp_server.tooling.shared import logger
 from app.mcp_server.tooling.shared import to_float as _to_float
-from app.services.brokers.kis import (
-    KISClient,
-)
 from app.services.brokers.upbit.client import (
     parse_upbit_account_row as _parse_upbit_account_row,
 )
-
-
-def _create_kis_client(*, is_mock: bool) -> KISClient:
-    if is_mock:
-        return KISClient(is_mock=True)
-    return KISClient()
-
-
-async def _call_kis(method: Any, *args: Any, is_mock: bool, **kwargs: Any) -> Any:
-    if is_mock:
-        return await method(*args, **kwargs, is_mock=True)
-    return await method(*args, **kwargs)
-
 
 _TRADER_AGENT_ID_DEFAULT = "6b2192cc-14fa-4335-b572-2fe1e0cb54a7"
 
@@ -600,34 +575,6 @@ def _resolve_scalping_exit_context(
     return ScalpingExitContext(strategy_id=strategy_id, reason=resolved_reason)
 
 
-async def _premarket_nxt_price_for_kr(symbol: str) -> float | None:
-    """ROB-463: live NXT price for a KR equity during pre-market, else None.
-
-    Returns None (so the caller falls back to the KRX quote) when it is not the
-    KR pre-market session, when the symbol has no NXT book, or on any fetch error
-    — the order path must never be blocked by this best-effort price source.
-    Priced as the NXT 예상체결가 (expected_price) when present, else the best
-    bid/ask mid (or whichever single side exists).
-    """
-    if kr_market_data_state() != DATA_STATE_PREMARKET_UNAVAILABLE:
-        return None
-    try:
-        book = await market_data_service.get_orderbook(symbol, "kr", venue="nxt")
-    except Exception as exc:  # best-effort; never block the order on pricing
-        logger.warning("NXT pre-market price fetch failed for %s: %s", symbol, exc)
-        return None
-    if book is None or book.is_empty_book:
-        return None
-    if book.expected_price:
-        return float(book.expected_price)
-    best_ask = book.asks[0].price if book.asks else None
-    best_bid = book.bids[0].price if book.bids else None
-    if best_ask and best_bid:
-        return (best_ask + best_bid) / 2.0
-    single = best_ask or best_bid
-    return float(single) if single else None
-
-
 async def _get_current_price_for_order(symbol: str, market_type: str) -> float | None:
     if market_type == "crypto":
         prices = await upbit_service.fetch_multiple_current_prices(
@@ -635,12 +582,6 @@ async def _get_current_price_for_order(symbol: str, market_type: str) -> float |
         )
         return prices.get(symbol)
     if market_type == "equity_kr":
-        # ROB-463: during KR pre-market, the KRX quote is the prior close — using
-        # it as "current price" falsely rejected valid pre-market buys. Prefer the
-        # live NXT orderbook price when available; otherwise fall back to KRX.
-        nxt_price = await _premarket_nxt_price_for_kr(symbol)
-        if nxt_price is not None:
-            return nxt_price
         quote = await _fetch_quote_equity_kr(symbol)
         return float(quote.get("price")) if quote.get("price") else None
 
@@ -649,29 +590,11 @@ async def _get_current_price_for_order(symbol: str, market_type: str) -> float |
 
 
 def _no_holdings_sell_message(symbol: str, market_type: str, is_mock: bool) -> str:
-    """Disambiguate a sell-side holdings miss (ROB-420).
-
-    For equities the order tools route only to the KIS subaccount, so a miss may
-    mean the symbol is held in another (reference-only) broker subaccount rather
-    than not held at all. Crypto routes to Upbit, so keep an Upbit-specific note.
-    """
+    """매도 가능 보유가 없을 때 활성 공급자에 맞는 오류를 반환한다."""
+    _ = is_mock
     if market_type == "crypto":
         return f"No holdings found for {symbol} on Upbit"
-    channel = "kis_mock" if is_mock else "kis_live"
-    if bool(getattr(settings, "toss_api_enabled", False)):
-        return (
-            f"No sellable holdings for {symbol} in the KIS subaccount that "
-            f"{channel} routes to. Toss API and manual Samsung/legacy holdings "
-            "are reference-only until their own live-order tools are enabled. "
-            "Check get_holdings 'order_routable'/'account_mode'."
-        )
-    else:
-        return (
-            f"No sellable holdings for {symbol} in the KIS subaccount that "
-            f"{channel} routes to. Holdings in other broker subaccounts "
-            f"(e.g. toss/samsung) are reference-only and cannot be sold via this "
-            f"channel — check get_holdings 'order_routable'/'account_mode'."
-        )
+    return "provider kis is not operational"
 
 
 def _order_value_to_krw(
@@ -745,169 +668,41 @@ async def _lookup_symbol_sector_label(
 async def _get_holdings_for_order(
     symbol: str, market_type: str, is_mock: bool = False
 ) -> dict[str, Any] | None:
-    if market_type == "crypto":
-        coins = await upbit_service.fetch_my_coins()
-        currency = symbol.replace("KRW-", "")
-        for coin in coins:
-            if coin.get("currency") == currency:
-                parsed = _parse_upbit_account_row(coin)
-                return {
-                    "quantity": parsed["orderable_quantity"],
-                    "total_quantity": parsed["total_quantity"],
-                    "locked": parsed["locked"],
-                    "avg_price": parsed["avg_buy_price"],
-                    "sellable_observed": True,
-                }
-        return None
+    """레거시 주문 경로에서 Upbit 보유만 조회한다.
 
-    kis = _create_kis_client(is_mock=is_mock)
-    if market_type == "equity_kr":
-        stocks = await _call_kis(kis.fetch_my_stocks, is_mock=is_mock)
-        for stock in stocks:
-            stock_code = str(stock.get("pdno", "")).strip().upper()
-            if stock_code != symbol.upper():
-                continue
-            total_quantity = _to_float(stock.get("hldg_qty"), default=0.0)
-            orderable_raw = stock.get("ord_psbl_qty")
-            orderable_quantity = (
-                total_quantity
-                if orderable_raw in {None, ""}
-                else _to_float(orderable_raw, default=0.0)
-            )
-            return {
-                "quantity": orderable_quantity,
-                "total_quantity": total_quantity,
-                "locked": max(total_quantity - orderable_quantity, 0.0),
-                "avg_price": _to_float(stock.get("pchs_avg_pric"), default=0.0),
-                "sellable_observed": orderable_raw not in {None, ""},
-            }
-        return None
-
-    us_stocks = await _call_kis(kis.fetch_my_us_stocks, is_mock=is_mock)
-    for stock in us_stocks:
-        stock_code = str(stock.get("ovrs_pdno", "")).strip().upper()
-        if stock_code != symbol.upper():
-            continue
-        total_quantity = _to_float(stock.get("ovrs_cblc_qty"), default=0.0)
-        orderable_raw = stock.get("ord_psbl_qty")
-        if orderable_raw in {None, ""}:
-            orderable_raw = stock.get("ovrs_ord_psbl_qty")
-        orderable_quantity = (
-            total_quantity
-            if orderable_raw in {None, ""}
-            else _to_float(orderable_raw, default=0.0)
-        )
-        return {
-            "quantity": orderable_quantity,
-            "total_quantity": total_quantity,
-            "locked": max(total_quantity - orderable_quantity, 0.0),
-            "avg_price": _to_float(stock.get("pchs_avg_pric"), default=0.0),
-            "sellable_observed": orderable_raw not in {None, ""},
-        }
-    return None
-
-
-async def _live_kis_orderable(account_token: str) -> float:
-    """live KIS 주문가능(orderable) — 단일 소스 = get_available_capital의 소스.
-
-    ``account_token``: "kis_domestic" (KRW) | "kis_overseas" (USD).
-    ROB-596 이후 ``get_cash_balance_impl``은 브로커 주문가능 필드(이미 미체결 매수를
-    net한 실시간 값)를 추가 차감 없이 그대로 반환한다(double-count 방지). 따라서
-    precheck가 get_available_capital과 동일한 orderable을 본다.
+    주식 주문 검증은 Toss 전용 도구가 직접 수행한다. 이 레거시 helper의 주식
+    호출은 KIS intent이므로 어떤 공급자도 조회하지 않고 닫는다.
     """
-    result = await get_cash_balance_impl(account=account_token, is_mock=False)
-    for acc in result.get("accounts", []):
-        if acc.get("account") == account_token:
-            return float(acc.get("orderable") or 0.0)
-    raise RuntimeError(f"{account_token} orderable not found in cash balance")
+    _ = is_mock
+    if market_type != "crypto":
+        raise ValueError("provider kis is not operational")
 
-
-async def _live_kis_balance_breakdown(
-    market_type: str, orderable: float
-) -> dict[str, Any] | None:
-    """ROB-625 — 잔액부족 에러 진단용 KIS 필드 breakdown (read-only, graceful).
-
-    cash(현금)와 orderable(주문가능)이 어느 KIS 필드에서 왔는지, 둘 중 무엇이 주문을
-    막았는지 운영자가 에러메시지만으로 판별하게 한다. equity_us 우선 구현(ROB-625
-    재현 케이스). 조회 실패/미지원이면 ``None`` 을 반환해 잔액체크 자체는 절대 막지
-    않는다. 잔액부족 에러 경로에서만 1회 호출되므로 추가 조회 비용은 무시 가능.
-
-    ``orderable`` 은 차단 결정에 이미 쓰인 값을 그대로 받아 breakdown에 노출한다.
-    재조회 스냅샷에서 다시 읽지 않으므로, 한 에러 detail 안에서 결정값(balance)과
-    breakdown의 orderable이 race로 어긋나는 일이 없다.
-    """
-    if market_type != "equity_us":
-        return None
-    try:
-        result = await get_cash_balance_impl(account="kis_overseas", is_mock=False)
-    except Exception as exc:  # graceful: 진단 실패가 주문 가드를 깨면 안 됨
-        logger.warning("balance breakdown 조회 실패 (graceful degrade): %s", exc)
-        return None
-    for acc in result.get("accounts", []):
-        if acc.get("account") == "kis_overseas":
+    coins = await upbit_service.fetch_my_coins()
+    currency = symbol.replace("KRW-", "")
+    for coin in coins:
+        if coin.get("currency") == currency:
+            parsed = _parse_upbit_account_row(coin)
             return {
-                # cash는 frcr_dncl_amt1 우선, 없으면 frcr_dncl_amt_2 폴백이라 값의
-                # 출처를 단정할 수 없으므로 라벨에 두 필드를 모두 명시한다.
-                "cash_balance": acc.get("balance"),
-                "cash_field": "frcr_dncl_amt1/frcr_dncl_amt_2",
-                "orderable": orderable,
-                "orderable_field": "frcr_gnrl_ord_psbl_amt",
-                "source": "kis_overseas.inquire_overseas_margin",
+                "quantity": parsed["orderable_quantity"],
+                "total_quantity": parsed["total_quantity"],
+                "locked": parsed["locked"],
+                "avg_price": parsed["avg_buy_price"],
+                "sellable_observed": True,
             }
     return None
-
-
-def _format_balance_breakdown_suffix(breakdown: dict[str, Any], currency: str) -> str:
-    """ROB-625 — KIS 필드 breakdown을 사람이 읽을 에러 접미사로 변환."""
-    value_fmt = "{:,.2f}" if currency == "USD" else "{:,.0f}"
-
-    def _fmt(value: Any) -> str:
-        return value_fmt.format(value) if isinstance(value, (int, float)) else "unknown"
-
-    return (
-        " KIS field breakdown: "
-        f"cash_balance({breakdown['cash_field']})={_fmt(breakdown.get('cash_balance'))}, "
-        f"orderable({breakdown['orderable_field']})={_fmt(breakdown.get('orderable'))}, "
-        f"source={breakdown['source']}."
-    )
 
 
 async def _get_balance_for_order(market_type: str, is_mock: bool = False) -> float:
-    if market_type == "crypto":
-        coins = await upbit_service.fetch_my_coins()
-        for coin in coins:
-            if coin.get("currency") == "KRW":
-                return float(coin.get("balance", 0))
-        return 0.0
+    """레거시 주문 경로에서 Upbit KRW 잔액만 조회한다."""
+    _ = is_mock
+    if market_type != "crypto":
+        raise ValueError("provider kis is not operational")
 
-    if market_type == "equity_kr":
-        if is_mock:
-            kis = _create_kis_client(is_mock=is_mock)
-            cash_summary = await _call_kis(
-                kis.inquire_domestic_cash_balance,
-                is_mock=is_mock,
-            )
-            return float(cash_summary.get("stck_cash_ord_psbl_amt") or 0)
-        # ROB-419/596 — live: broker orderable via the single source
-        # (== get_available_capital). ROB-596 removed the extra pending-buy
-        # subtraction; the broker field is already net (no double-count).
-        return await _live_kis_orderable("kis_domestic")
-
-    if not is_mock:
-        # ROB-419/596 — live US: broker orderable via the single source
-        # (already net of pending buys; no extra subtraction).
-        return await _live_kis_orderable("kis_overseas")
-
-    # ROB-951: mock US is deliberately isolated from the live path above.
-    # VTTS3007R's ord_psbl_frcr_amt is verified USD orderable cash. Missing or
-    # failed responses raise so _check_balance_and_warn retains its fail-closed
-    # handling; never coerce a failed read to zero.
-    kis = _create_kis_client(is_mock=is_mock)
-    buyable_amount = await kis.inquire_mock_overseas_buyable_amount()
-    orderable = buyable_amount.get("ovrs_ord_psbl_amt")
-    if orderable is None:
-        raise RuntimeError("VTTS3007R response missing verified USD orderable cash")
-    return float(orderable)
+    coins = await upbit_service.fetch_my_coins()
+    for coin in coins:
+        if coin.get("currency") == "KRW":
+            return float(coin.get("balance", 0))
+    return 0.0
 
 
 async def _record_order_history(
@@ -1203,6 +998,12 @@ async def _preview_order(
 
     Delegates to _preview_buy / _preview_sell for clarity.
     """
+    if market_type != "crypto":
+        return {
+            "success": False,
+            "error": "provider kis is not operational",
+            "provider_unsupported": True,
+        }
     if side == "buy":
         return await _preview_buy(
             symbol=symbol,
@@ -1295,6 +1096,12 @@ async def _validate_sell_side(
 
     Returns (order_quantity, avg_price, error_dict_or_None).
     """
+    if market_type != "crypto":
+        return (
+            0.0,
+            0.0,
+            order_error_fn("provider kis is not operational"),
+        )
     holdings = await _get_holdings_for_order(
         normalized_symbol,
         market_type,
@@ -1309,26 +1116,6 @@ async def _validate_sell_side(
 
     available_quantity = _to_float(holdings.get("quantity"), default=0.0)
     locked_quantity = _to_float(holdings.get("locked"), default=0.0)
-
-    if is_mock and market_type in ("equity_kr", "equity_us"):
-        exposure = await _get_kis_mock_shadow_exposure(
-            normalized_symbol=normalized_symbol,
-            market_type=market_type,
-        )
-        if exposure.get("confidence") != "db_shadow_pending":
-            message = (
-                "KIS mock DB shadow pending confidence unknown; cannot verify "
-                "sellable quantity without risking duplicate sell allocation."
-            )
-            if not dry_run:
-                return 0.0, 0.0, order_error_fn(message)
-            logger.warning(
-                "KIS mock sell preview proceeding without shadow exposure: %s", message
-            )
-        reserved_qty = _to_float(exposure.get("sell_reserved_quantity"), default=0.0)
-        if reserved_qty > 0:
-            available_quantity = max(0.0, available_quantity - reserved_qty)
-            locked_quantity += reserved_qty
 
     if quantity is not None and quantity > available_quantity:
         return (
@@ -1419,22 +1206,6 @@ async def _validate_sell_side(
     return order_quantity, avg_price, None
 
 
-def _kis_mock_us_orderable_unsupported() -> bool:
-    """KIS 모의투자가 해외(USD) orderable-cash 서비스를 제공하지 않는지 여부.
-
-    폐기 근거(ROB-951): `inquire_overseas_margin`(OPSQ0002 "없는 서비스 코드",
-    2026-05-27 live smoke)만이 mock US cash 경로였을 때 이 가드가 매수를 차단했다.
-    2026-07-17 probe로 `VTTS3007R`이 mock 호스트에서 USD orderable cash를 반환함이
-    확인되어 `inquire_mock_overseas_buyable_amount()`로 배선됐고, capability_matrix의
-    `kis_mock.account_cash_read`가 True로 flip되면서 이 가드는 완화된 상태다.
-    capability_matrix가 권위 소스이므로 여기 하드코딩된 판단은 없다 — 배선이
-    되돌려지면 matrix flip만으로 가드가 다시 닫힌다.
-    """
-    from app.services.us_dual_paper.capability_matrix import get_capability_matrix
-
-    return get_capability_matrix().get("kis_mock", {}).get("account_cash_read") is False
-
-
 async def _check_balance_and_warn(
     *,
     market_type: str,
@@ -1445,34 +1216,15 @@ async def _check_balance_and_warn(
     order_error_fn: Any,
     is_mock: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Pre-check cash balance for buy orders.
-
-    Returns (warning_message_or_None, error_dict_or_None).
-    If error_dict is not None, the caller should return it immediately.
-    """
-    # ROB-417 — KIS 모의투자는 해외 orderable-cash 서비스가 없어(OPSQ0002) US mock
-    # 매수의 주문가능현금을 검증할 수 없다. capability_matrix 기반으로 KIS 호출 전
-    # 결정적으로 fail-closed 처리하고, 구조적 미지원을 mock_unsupported로 명시한다.
-    if (
-        is_mock
-        and market_type == "equity_us"
-        and side == "buy"
-        and _kis_mock_us_orderable_unsupported()
-    ):
-        message = (
-            "US mock buy unsupported: KIS 모의투자 provides no overseas "
-            "orderable-cash service (OPSQ0002), so orderable cash cannot be "
-            "verified. Use alpaca_paper for US paper buys; kis_mock supports KR."
-        )
-        if dry_run:
-            return f"Preview warning: {message}", None
-        err = order_error_fn(message)
-        err["mock_unsupported"] = True
-        err["capability"] = "kis_mock_us_orderable_cash_unsupported"
-        return None, err
+    """레거시 주문 경로의 Upbit 매수 잔액을 fail-closed로 확인한다."""
+    _ = (dry_run, is_mock)
+    if market_type != "crypto":
+        error = order_error_fn("provider kis is not operational")
+        error["provider_unsupported"] = True
+        return None, error
 
     try:
-        balance = await _get_balance_for_order(market_type, is_mock=is_mock)
+        balance = await _get_balance_for_order(market_type)
     except Exception as balance_exc:
         error_detail = str(balance_exc) or balance_exc.__class__.__name__
         logger.error(
@@ -1482,38 +1234,7 @@ async def _check_balance_and_warn(
             side,
             error_detail,
         )
-        if is_mock and market_type in ("equity_kr", "equity_us"):
-            message = (
-                "KIS mock balance precheck unavailable for "
-                f"{normalized_symbol}: {error_detail}"
-            )
-            if dry_run:
-                return (
-                    "Preview warning: "
-                    f"{message}; dry_run=True so no order was submitted.",
-                    None,
-                )
-            return (
-                None,
-                order_error_fn(
-                    f"{message}; refusing to submit without verified orderable cash."
-                ),
-            )
         raise
-
-    if is_mock and market_type in ("equity_kr", "equity_us"):
-        exposure = await _get_kis_mock_shadow_exposure(market_type=market_type)
-        if exposure.get("confidence") != "db_shadow_pending":
-            message = (
-                "KIS mock DB shadow pending confidence unknown; cannot verify "
-                "orderable cash without risking duplicate buy allocation."
-            )
-            if not dry_run:
-                return None, order_error_fn(message)
-            return f"Preview warning: {message}", None
-        reserved_amount = _to_float(exposure.get("buy_reserved_amount"), default=0.0)
-        if reserved_amount > 0:
-            balance = max(0.0, balance - reserved_amount)
 
     if balance >= order_amount:
         return None, None
@@ -1526,50 +1247,16 @@ async def _check_balance_and_warn(
         balance,
         order_amount,
     )
-
-    # ROB-625 Phase 3 — 진단 가시성: 어떤 KIS 필드가 주문을 막았는지(cash vs orderable)
-    # 노출한다. equity_us 우선, graceful None. live 경로에서만 의미가 있으므로
-    # is_mock 이면 생략한다.
-    breakdown = None
-    if not is_mock:
-        breakdown = await _live_kis_balance_breakdown(market_type, balance)
-
-    currency = {"crypto": "KRW", "equity_kr": "KRW", "equity_us": "USD"}.get(
-        market_type, "USD"
+    message = (
+        f"Insufficient KRW balance: {balance:,.0f} KRW < {order_amount:,.0f} KRW. "
+        "Please deposit KRW from your bank account to Upbit, then retry."
     )
-
-    messages = {
-        "crypto": (
-            f"Insufficient KRW balance: {balance:,.0f} KRW < {order_amount:,.0f} KRW. "
-            "Please deposit KRW from your bank account to Upbit, then retry."
-        ),
-        "equity_kr": (
-            f"Insufficient KRW balance: {balance:,.0f} KRW < {order_amount:,.0f} KRW. "
-            "Please deposit funds to your KIS domestic account, then retry."
-        ),
-        "equity_us": (
-            f"Insufficient USD balance: {balance:,.2f} USD < {order_amount:,.2f} USD. "
-            "Please deposit USD to your KIS overseas account, then retry."
-        ),
-    }
-    message = messages.get(market_type, messages["equity_us"])
-    if breakdown is not None:
-        message += _format_balance_breakdown_suffix(breakdown, currency)
-
-    # ROB-625 Phase 2 — dry_run도 live와 동일하게 잔액부족을 차단한다("dry_run 통과 →
-    # live 거부" 갭 제거). 차단 플래그 + 구조화된 detail을 첨부하고, 호출자
-    # (order_execution)가 dry_run이면 프리뷰 본문을 함께 유지해 운영자가 입금액을
-    # 산정할 수 있게 한다. (mock 미지원/조회불가 등 다른 dry_run 경고 경로는 위에서
-    # 이미 (warning, None)으로 반환되어 이 분기에 도달하지 않는다.)
     error = order_error_fn(message)
     error["insufficient_balance"] = True
-    detail: dict[str, Any] = {
+    error["insufficient_balance_detail"] = {
         "balance": balance,
         "order_amount": order_amount,
-        "currency": currency,
+        "currency": "KRW",
         "shortfall": max(0.0, order_amount - balance),
     }
-    if breakdown is not None:
-        detail["breakdown"] = breakdown
-    error["insufficient_balance_detail"] = detail
     return None, error

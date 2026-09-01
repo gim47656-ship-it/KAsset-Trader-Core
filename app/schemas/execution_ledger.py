@@ -18,8 +18,11 @@ from pydantic import (
 
 from app.core.timezone import trade_day_kst
 
-Broker = Literal["kis", "upbit", "toss"]
-ReconcileRunBroker = Literal["kis", "upbit"]
+# 신규 쓰기 경로는 Toss와 Upbit만 허용한다.
+Broker = Literal["upbit", "toss"]
+ReconcileRunBroker = Broker
+# 저장된 KIS 행을 읽는 모델에서만 사용하는 호환 타입이다.
+StoredExecutionLedgerBroker = Literal["kis", "upbit", "toss"]
 AccountMode = Literal["live", "mock"]
 Side = Literal["buy", "sell"]
 Currency = Literal["KRW", "USD"]
@@ -158,7 +161,7 @@ class ReconcileRunRecord(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     run_id: uuid.UUID
-    broker: ReconcileRunBroker
+    broker: StoredExecutionLedgerBroker
     window_start: datetime
     window_end: datetime
     started_at: datetime | None = None

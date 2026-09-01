@@ -7,8 +7,10 @@
 ## 현재 운영 원칙
 
 - Auto Trader production은 MacBook native 서비스(`launchd`)가 단일 owner입니다.
-- 특히 KIS websocket은 **MacBook native single-owner**로만 운영해야 합니다.
-- Raspberry Pi에서 `docker-compose.prod.yml`로 production stack을 다시 올리면 KIS websocket appkey/session 점유 충돌(`OPSP8996 ALREADY IN USE appkey`)을 재발시킬 수 있습니다.
+- production 실행 체결 WebSocket은 Upbit 전용입니다. 주식 체결 증거는 MacBook
+  worker의 Toss fill poller가 최대 2분 간격으로 수집합니다.
+- KIS runtime/WebSocket은 배포하지 않으며, 남은 어댑터는 과거 레저 조회
+  호환성을 위한 비활성 코드입니다.
 
 ## 사용해야 하는 배포 경로
 
@@ -36,7 +38,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml down --remove-orp
 
 ```bash
 docker ps -a | grep '^auto_trader_' || true
-ps aux | grep -E 'websocket_monitor|kis_websocket|upbit_websocket' | grep -v grep || true
+ps aux | grep -E 'websocket_monitor|upbit_websocket' | grep -v grep || true
 ```
 
 ## 참고

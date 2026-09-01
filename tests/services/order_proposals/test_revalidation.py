@@ -70,7 +70,7 @@ async def _create_proposal(db_session):
     group = await service.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -86,7 +86,7 @@ async def test_unchanged_submits_resting(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -148,7 +148,7 @@ async def test_unchanged_submits_acked(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -185,7 +185,7 @@ async def test_price_change_needs_reconfirm_no_submit(db_session):
     g = await svc.create_proposal(
         symbol="000660",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -255,7 +255,7 @@ async def test_auto_eligibility_multi_rung_degrades_before_any_preview(db_sessio
     group = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -292,7 +292,7 @@ async def test_qty_change_needs_reconfirm_no_submit(db_session):
     g = await svc.create_proposal(
         symbol="067160",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -323,7 +323,7 @@ async def test_guard_block_fail_closed(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -392,8 +392,8 @@ async def test_preview_kis_no_sellable_holdings_is_guard_blocked(db_session):
         return {
             "success": False,
             "error": (
-                "No sellable holdings for A in the KIS subaccount that "
-                "kis_live routes to."
+                "No sellable holdings for A in the Toss account that "
+                "toss_live routes to."
             ),
         }
 
@@ -422,7 +422,7 @@ async def test_loss_cut_bindings_forwarded_to_preview_and_submit(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -493,7 +493,7 @@ async def test_loss_cut_confirmation_preview_is_read_only_and_builds_evidence(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -587,7 +587,7 @@ async def test_loss_cut_confirmation_preview_rejects_quantity_above_sellable(
     group = await service.create_proposal(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="p",
@@ -711,7 +711,7 @@ async def test_submit_rejected_records_rejected(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -740,7 +740,7 @@ async def test_submit_ambiguous_records_unverified(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -769,7 +769,7 @@ async def test_submit_exception_records_unverified(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -804,7 +804,7 @@ async def test_only_pending_approval_rungs_are_revalidated(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -859,9 +859,8 @@ async def test_only_pending_approval_rungs_are_revalidated(db_session):
 
 # ---------------------------------------------------------------------------
 # Finding 1 — `_adapt_live_submit_response` unit tests (no network; adapts a
-# fixture dict shaped like the real `_record_kis_live_order`/
-# `_record_live_order` accepted-only-at-send response into the
-# `{status, broker_order_id}` shape `_classify_submit` expects).
+# 실제 주문 응답을 `{status, broker_order_id}` 형태로 변환하는
+# `_adapt_live_submit_response` 단위 테스트.
 # ---------------------------------------------------------------------------
 
 
@@ -921,6 +920,21 @@ def test_adapt_live_submit_response_unknown_broker_status_passes_through():
     assert adapted == submit
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_mode", ["kis_live", "kis_mock"])
+async def test_default_place_order_rejects_non_operational_kis(account_mode):
+    from app.services.order_proposals.revalidation import _default_place_order_fn
+
+    result = await _default_place_order_fn(account_mode=account_mode)
+
+    assert result == {
+        "success": False,
+        "mutation_sent": False,
+        "account_mode": account_mode,
+        "error": "provider kis is not operational",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Finding 2 — market-order rungs must not be permanently stuck in
 # needs_reconfirm just because the live preview backfills `price` with the
@@ -934,7 +948,7 @@ async def test_market_order_unchanged_quantity_submits(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="market",
         proposer="p",
@@ -976,7 +990,7 @@ async def test_market_order_qty_change_still_needs_reconfirm(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="market",
         proposer="p",
@@ -1019,7 +1033,7 @@ async def test_preview_exception_returns_to_pending_approval(db_session):
     g = await svc.create_proposal(
         symbol="A",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",

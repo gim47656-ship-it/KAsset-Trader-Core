@@ -127,22 +127,31 @@ async def test_load_latest_summary_imports_stock_info_model() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_load_holdings_keeps_crypto_when_kis_unavailable(monkeypatch) -> None:
+async def test_load_holdings_keeps_crypto_when_toss_equities_unavailable(
+    monkeypatch,
+) -> None:
+    from app.services.merged_portfolio_service import MergedPortfolioService
+
     db = MagicMock()
     crypto_holding = MagicMock(ticker="KRW-BTC", quantity=1.0, evaluation=100.0)
     service = PortfolioActionService(db)
     monkeypatch.setattr(
         service, "_load_crypto_holdings", AsyncMock(return_value=[crypto_holding])
     )
-
-    def raise_kis_error():
-        raise RuntimeError("KIS config unavailable")
-
-    monkeypatch.setattr("app.services.brokers.kis.KISClient", raise_kis_error)
+    domestic = AsyncMock(side_effect=RuntimeError("Toss unavailable"))
+    overseas = AsyncMock(side_effect=RuntimeError("Toss unavailable"))
+    monkeypatch.setattr(
+        MergedPortfolioService, "get_merged_portfolio_domestic", domestic
+    )
+    monkeypatch.setattr(
+        MergedPortfolioService, "get_merged_portfolio_overseas", overseas
+    )
 
     holdings, total, warnings = await service._load_holdings(1, None)
 
     assert holdings == [crypto_holding]
     assert total == pytest.approx(100.0)
-    assert any(w.startswith("KR holdings unavailable") for w in warnings)
-    assert any(w.startswith("US holdings unavailable") for w in warnings)
+    assert any(w.startswith("Toss KR holdings unavailable") for w in warnings)
+    assert any(w.startswith("Toss US holdings unavailable") for w in warnings)
+    domestic.assert_awaited_once_with(1)
+    overseas.assert_awaited_once_with(1)

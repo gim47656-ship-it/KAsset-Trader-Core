@@ -209,7 +209,7 @@ async def seed_proposal(
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",
@@ -254,7 +254,7 @@ async def seed_auto_veto_proposal(session, *, nonce: str, symbol: str = "005930"
     group = await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="buy",
         order_type="limit",
         proposer="p",

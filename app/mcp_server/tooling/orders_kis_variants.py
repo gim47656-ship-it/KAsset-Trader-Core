@@ -13,10 +13,12 @@ tools in orders_registration.py are unchanged; these are additive.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
 from app.core.config import validate_kis_mock_config
+from app.core.symbol import to_db_symbol
 from app.mcp_server.tooling import order_execution, orders_history
 from app.mcp_server.tooling.account_modes import (
     ACCOUNT_MODE_KIS_LIVE,
@@ -28,11 +30,18 @@ from app.mcp_server.tooling.orders_modify_cancel import (
     cancel_order_impl,
     modify_order_impl,
 )
+from app.services.brokers.kis.live_order_expiry import (
+    kr_day_order_expiry,
+    parse_kis_ordered_at,
+    row_has_cancel_evidence,
+)
+from app.services.brokers.kis.overseas_orders import _normalize_kis_exchange_code
 from app.services.brokers.toss.client import TossReadClient
 from app.services.brokers.toss.warnings_guard import (
     WarningsGuardResult,
     check_warnings_guard,
 )
+from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -926,11 +935,366 @@ def register_kis_mock_order_tools(mcp: FastMCP) -> None:
         )
 
 
-__all__ = [
-    "KIS_LIVE_ORDER_TOOL_NAMES",
-    "KIS_MOCK_ORDER_TOOL_NAMES",
-    "LIVE_RECONCILE_TOOL_NAMES",
-    "register_kis_live_order_tools",
-    "register_kis_mock_order_tools",
-    "register_live_reconcile_tools",
-]
+def _get_kis_field(order: dict[str, Any], *keys: str, default: Any = "") -> Any:
+    for key in keys:
+        value = order.get(key)
+        if value:
+            return value
+    return default
+
+
+def _extract_kis_order_number(order: dict[str, Any]) -> str:
+    value = _get_kis_field(
+        order,
+        "odno",
+        "ODNO",
+        "ord_no",
+        "ORD_NO",
+        "orgn_odno",
+        "ORGN_ODNO",
+        default="",
+    )
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _build_temp_kr_order_id(
+    *,
+    symbol: str,
+    side: str,
+    ordered_price: int,
+    ordered_qty: int,
+    ordered_at: str,
+) -> str:
+    raw = "|".join(
+        [symbol, side, str(ordered_price), str(ordered_qty), ordered_at.strip()]
+    )
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
+    return f"TEMP_KR_{digest}"
+
+
+def _map_kis_status(
+    ordered: int,
+    filled: int,
+    remaining: int,
+    status_name: str | None,
+    *,
+    cancel_evidence: bool = False,
+) -> str:
+    normalized_name = str(status_name or "").strip()
+
+    # Explicit cancel evidence is authoritative at any point. ROB-665: the real
+    # broker signal is cancel_evidence (cncl_yn / '취소' side name); the legacy
+    # `prcs_stat_name == "주문취소"` key does not exist on live responses.
+    if cancel_evidence or normalized_name == "주문취소":
+        return "cancelled"
+    # ROB-657: nothing filled and nothing left to modify/cancel
+    # (정정취소가능수량 0) means the order is dead (EOD expiry / reject).
+    # KIS ledger truth is "alive iff rmn_qty > 0", so this wins over a
+    # stale '접수' status name that TTTC8036R may still carry.
+    if ordered > 0 and filled == 0 and remaining <= 0:
+        return "expired"
+    if normalized_name in ("접수", "주문접수"):
+        return "pending"
+    if normalized_name == "체결":
+        if filled > 0 and remaining > 0:
+            return "partial"
+        return "filled"
+    if normalized_name == "미체결":
+        return "pending"
+
+    if filled > 0 and remaining <= 0:
+        return "filled"
+    if filled > 0 and remaining > 0:
+        return "partial"
+    return "pending"
+
+
+_US_DAY_ORDER_REASON = "us_day_order"
+
+
+def _kr_history_expiry_reason(*, ordered_at: str, side: str) -> str | None:
+    """Categorical session×side expiry reason for a KR order-history row.
+
+    Read-path classification only (no 15:30 downgrade — that is a live send-path
+    decision). Returns None when ``ordered_at`` cannot be parsed.
+    """
+    accepted_at = parse_kis_ordered_at(ordered_at)
+    if accepted_at is None:
+        return None
+    return kr_day_order_expiry(accepted_at=accepted_at, side=side)[1]
+
+
+def _normalize_kis_domestic_order(order: dict[str, Any]) -> dict[str, Any]:
+    side_code = _get_kis_field(order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
+    side = "buy" if side_code == "02" else "sell"
+
+    ordered = int(float(_get_kis_field(order, "ord_qty", "ORD_QTY", default=0) or 0))
+    filled = int(
+        float(
+            _get_kis_field(
+                order,
+                "ccld_qty",
+                "CCLD_QTY",
+                "tot_ccld_qty",
+                "TOT_CCLD_QTY",
+                default=0,
+            )
+            or 0
+        )
+    )
+
+    remaining = int(
+        float(
+            _get_kis_field(order, "rmn_qty", "RMN_QTY", default=ordered - filled) or 0
+        )
+    )
+
+    ordered_price = int(
+        float(_get_kis_field(order, "ord_unpr", "ORD_UNPR", default=0) or 0)
+    )
+    filled_price = int(
+        float(
+            _get_kis_field(
+                order,
+                "ccld_unpr",
+                "CCLD_UNPR",
+                "avg_prvs",
+                "AVG_PRVS",
+                default=0,
+            )
+            or 0
+        )
+    )
+
+    status = _map_kis_status(
+        ordered,
+        filled,
+        remaining,
+        _get_kis_field(order, "prcs_stat_name", "PRCS_STAT_NAME"),
+        cancel_evidence=row_has_cancel_evidence(order),
+    )
+    symbol = str(_get_kis_field(order, "pdno", "PDNO"))
+    ordered_at = (
+        f"{_get_kis_field(order, 'ord_dt', 'ORD_DT')} "
+        f"{_get_kis_field(order, 'ord_tmd', 'ORD_TMD')}"
+    )
+    order_id = _extract_kis_order_number(order)
+    if not order_id:
+        order_id = _build_temp_kr_order_id(
+            symbol=symbol,
+            side=side,
+            ordered_price=ordered_price,
+            ordered_qty=ordered,
+            ordered_at=ordered_at,
+        )
+        logger.warning(
+            "Missing order_id for KR order (symbol=%s, side=%s, qty=%s, price=%s, ordered_at=%s), generated %s",
+            symbol,
+            side,
+            ordered,
+            ordered_price,
+            ordered_at,
+            order_id,
+        )
+
+    return {
+        "order_id": order_id,
+        "symbol": symbol,
+        "side": side,
+        "status": status,
+        "is_live": status in ("pending", "partial"),
+        "ordered_qty": ordered,
+        "filled_qty": filled,
+        "remaining_qty": remaining,
+        "ordered_price": ordered_price,
+        "filled_avg_price": filled_price,
+        "ordered_at": ordered_at,
+        "filled_at": "",
+        "expiry_reason": _kr_history_expiry_reason(ordered_at=ordered_at, side=side),
+        "currency": "KRW",
+    }
+
+
+_DEFAULT_US_CANCEL_EXCHANGES = ["NASD", "NYSE", "AMEX"]
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    """Remove duplicates while preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+async def _build_us_exchange_candidates(symbol: str | None) -> list[str]:
+    """Build a list of exchange candidates for US cancel lookups.
+
+    Prioritizes DB lookup result if symbol is provided, then adds
+    default exchanges as fallbacks. Results are deduplicated.
+    """
+    candidates: list[str] = []
+    if symbol:
+        try:
+            db_exchange = await get_us_exchange_by_symbol(symbol)
+            candidates.append(_normalize_kis_exchange_code(db_exchange))
+        except Exception as exc:
+            logger.warning(
+                "US exchange lookup failed for cancel: symbol=%s error=%s",
+                symbol,
+                exc,
+            )
+    candidates.extend(_DEFAULT_US_CANCEL_EXCHANGES)
+    return _dedupe_preserve_order(candidates)
+
+
+async def _find_us_open_order_by_id(
+    kis: Any,
+    order_id: str,
+    symbol: str | None,
+) -> tuple[dict[str, Any] | None, str | None, list[str]]:
+    """Find an open order by ID across candidate exchanges.
+
+    Returns:
+        Tuple of (order_dict, order_exchange, exchange_candidates).
+        order_exchange is extracted from the order payload (ovrs_excg_cd)
+        and normalized, falling back to the queried exchange if not present.
+    """
+    exchange_candidates = await _build_us_exchange_candidates(symbol)
+    for exchange in exchange_candidates:
+        try:
+            open_orders = await kis.inquire_overseas_orders(exchange)
+        except Exception as exc:
+            logger.warning(
+                "US open-order lookup failed: order_id=%s symbol=%s exchange=%s error=%s",
+                order_id,
+                symbol,
+                exchange,
+                exc,
+            )
+            continue
+
+        for order in open_orders:
+            if _extract_kis_order_number(order) == order_id:
+                # Prefer order payload's exchange over queried exchange
+                order_exchange = str(
+                    order.get("ovrs_excg_cd") or order.get("OVRS_EXCG_CD") or exchange
+                ).strip()
+                return order, order_exchange, exchange_candidates
+
+    return None, None, exchange_candidates
+
+
+async def _find_us_order_in_recent_history(
+    kis: Any,
+    order_id: str,
+    symbol: str,
+    exchange_candidates: list[str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Find an order in recent daily order history when not in open orders.
+
+    Searches a narrow recent window (last 7 days) across exchange candidates.
+    Post-filters by order_id and symbol since the KIS API's order_number
+    parameter is not supported for overseas orders.
+
+    Returns:
+        Tuple of (order_dict, order_exchange) or (None, None) if not found.
+    """
+    from datetime import datetime, timedelta
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=7)
+
+    start_str = start_date.strftime("%Y%m%d")
+    end_str = end_date.strftime("%Y%m%d")
+
+    for exchange in exchange_candidates:
+        try:
+            history = await kis.inquire_daily_order_overseas(
+                start_date=start_str,
+                end_date=end_str,
+                symbol="%",  # Get all and filter client-side
+                exchange_code=exchange,
+            )
+        except Exception as exc:
+            logger.warning(
+                "US history lookup failed: order_id=%s symbol=%s exchange=%s error=%s",
+                order_id,
+                symbol,
+                exchange,
+                exc,
+            )
+            continue
+
+        for order in history:
+            if _extract_kis_order_number(order) == order_id:
+                # Verify symbol matches to avoid false positives
+                order_symbol = _get_kis_field(order, "pdno", "PDNO", default="")
+                if to_db_symbol(str(order_symbol)) != to_db_symbol(symbol):
+                    continue
+                # Prefer order payload's exchange
+                order_exchange = str(
+                    order.get("ovrs_excg_cd") or order.get("OVRS_EXCG_CD") or exchange
+                ).strip()
+                return order, order_exchange
+
+    return None, None
+
+
+def _normalize_kis_overseas_order(order: dict[str, Any]) -> dict[str, Any]:
+    side_code = _get_kis_field(order, "sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD")
+    side = "buy" if side_code == "02" else "sell"
+
+    ordered = int(
+        float(_get_kis_field(order, "ft_ord_qty", "FT_ORD_QTY", default=0) or 0)
+    )
+    filled = int(
+        float(_get_kis_field(order, "ft_ccld_qty", "FT_CCLD_QTY", default=0) or 0)
+    )
+    # ROB-665 item 4: prefer the broker's 미체결수량 (nccs_qty) — a cancelled
+    # unfilled order reports nccs_qty=0, whereas synthesizing ordered-filled
+    # kept it pending+is_live. Fall back to ordered-filled when absent.
+    nccs_raw = _get_kis_field(order, "nccs_qty", "NCCS_QTY")
+    if nccs_raw is not None and str(nccs_raw).strip() != "":
+        remaining = int(float(nccs_raw))
+    else:
+        remaining = ordered - filled
+
+    ordered_price = float(
+        _get_kis_field(order, "ft_ord_unpr3", "FT_ORD_UNPR3", default=0) or 0
+    )
+    filled_price = float(
+        _get_kis_field(order, "ft_ccld_unpr3", "FT_CCLD_UNPR3", default=0) or 0
+    )
+
+    status = _map_kis_status(
+        ordered,
+        filled,
+        remaining,
+        _get_kis_field(order, "prcs_stat_name", "PRCS_STAT_NAME"),
+        cancel_evidence=row_has_cancel_evidence(order),
+    )
+
+    return {
+        "order_id": _extract_kis_order_number(order),
+        "symbol": _get_kis_field(order, "pdno", "PDNO"),
+        "side": side,
+        "status": status,
+        "is_live": status in ("pending", "partial"),
+        "ordered_qty": ordered,
+        "filled_qty": filled,
+        "remaining_qty": remaining,
+        "ordered_price": ordered_price,
+        "filled_avg_price": filled_price,
+        "ordered_at": (
+            f"{_get_kis_field(order, 'ord_dt', 'ORD_DT')} "
+            f"{_get_kis_field(order, 'ord_tmd', 'ORD_TMD')}"
+        ),
+        "filled_at": "",
+        "expiry_reason": _US_DAY_ORDER_REASON,
+        "currency": "USD",
+    }

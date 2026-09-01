@@ -45,8 +45,8 @@ PROPOSAL_CREATION_CALL_SITE: Final = (
 KR_NEW_MIN_AVAILABLE_CASH: Final = Decimal("400000")
 
 _SUPPORTED_ACCOUNT_MODES: Final[dict[str, frozenset[str]]] = {
-    "equity_kr": frozenset({"kis_live", "toss_live"}),
-    "equity_us": frozenset({"kis_live", "toss_live"}),
+    "equity_kr": frozenset({"toss_live"}),
+    "equity_us": frozenset({"toss_live"}),
     "crypto": frozenset({"upbit"}),
 }
 _CURRENCY_FOR_MARKET: Final[dict[str, str]] = {

@@ -225,9 +225,10 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    # KIS
-    kis_app_key: str
-    kis_app_secret: str
+    # Dormant KIS adapters retain transport configuration for historical reads
+    # and explicit operator-only tooling, but deployed runtimes do not require it.
+    kis_app_key: str | None = None
+    kis_app_secret: str | None = None
     kis_base_url: str = "https://openapi.koreainvestment.com:9443"
     kis_access_token: str | None = None  # 최초엔 비워두고 자동 발급
     kis_account_no: str | None = None  # 계좌번호 (예: "12345678-01")
@@ -247,11 +248,6 @@ class Settings(BaseSettings):
     # at 20:00 KST (conservative). Flip to true ONLY after a live measurement
     # confirms the 15:30 death is session expiry (not a D+2 unsettled-cash cancel).
     kis_regular_buy_unsettled_expiry_1530: bool = False
-
-    # ROB-471: US get_quote 가격 소스 선택. True → KIS 해외 현재가(HHDFS00000300)
-    # primary + Yahoo fast_info fallback. False → Yahoo primary(레거시).
-    # 라이브 파싱 이상 시 operator가 US_QUOTE_KIS_PRIMARY=false 로 즉시 롤백.
-    us_quote_kis_primary: bool = True
 
     # Kiwoom Securities mock account. Disabled by default; mock-only foundation
     # added in ROB-97. Live URL is recorded so the runtime can defensively
@@ -334,18 +330,6 @@ class Settings(BaseSettings):
     portfolio_snapshot_cache_lock_ttl_seconds: float = 10.0
     portfolio_snapshot_cache_wait_seconds: float = 20.0
 
-    # ROB-710: per-market layer-order flip for /invest batch current-price reads.
-    # False (default) => today's KIS → Toss → snapshot order, byte-identical.
-    # True => TOSS batch → KIS per-symbol → snapshot (reserve KIS app-key TPS for
-    # OHLCV/US-intraday/live-orders; Toss MARKET_DATA batch stayed up through the
-    # 2026-07-04 KIS maintenance). Data gate CLEARED 2026-07-06: ROB-709 A/B go bars
-    # passed BOTH markets (KR 0-tick exact; US median 0 bps / max ~1.45 bps) and
-    # ROB-708 (US live-last endpoint) is merged. Remaining discipline is canary
-    # sequencing: flip KR first, observe, then US — both shipped False. Instantly
-    # revertible: set back to False and the next /invest load is KIS-first again.
-    invest_quotes_toss_first_kr: bool = False
-    invest_quotes_toss_first_us: bool = False
-
     # ROB-576 — Toss fill notifications are inert until explicitly enabled by
     # the operator. Toss auto-reconcile gates live with the task flags below.
     toss_fill_notify_enabled: bool = False
@@ -359,19 +343,15 @@ class Settings(BaseSettings):
     # off | optional | warn | required. Default warn-first: preview always warns,
     # place blocks a live send only when set to 'required'.
     toss_nxt_preflight_mode: str = "warn"
+    # Dormant KIS WebSocket parser/client transport defaults. No runtime service
+    # or launcher registers these clients; keeping construction defaults preserves
+    # historical parser tests without providing an activation switch.
+    kis_ws_hts_id: str = ""
+    kis_ws_reconnect_delay_seconds: int = 5
+    kis_ws_max_reconnect_attempts: int = 10
+    kis_ws_ping_interval: int = 30
+    kis_ws_ping_timeout: int = 10
 
-    # KIS WebSocket
-    kis_ws_is_mock: bool = False  # Mock 모드 (테스트용)
-    kis_ws_hts_id: str = ""  # HTS ID (WebSocket 인증용)
-    kis_ws_reconnect_delay_seconds: int = 5  # 재연결 대기 시간 (초)
-    kis_ws_max_reconnect_attempts: int = 10  # 최대 재연결 시도 횟수
-    kis_ws_ping_interval: int = 30  # Ping 전송 간격 (초)
-    kis_ws_ping_timeout: int = 10  # Ping 응답 대기 시간 (초)
-    # ROB-321: read-only quote WS daemon/smoke gate (default off).
-    kis_mock_scalping_ws_enabled: bool = False
-    # ROB-321 PR4b: per-run order-mutation gate for the scalping daemon. Without
-    # it the daemon dry-runs (preview only, no mock order, no ledger write).
-    kis_mock_scalping_ws_confirm: bool = False
     # Master capability gate for the remaining Binance Demo scalping surfaces
     # (ROB-907 read-only ledger status tool; ROB-844 root-reservation
     # reconcile task). The scheduler/executor/LLM-decision auto-order
@@ -849,12 +829,6 @@ class Settings(BaseSettings):
     # ROB-211 execution ledger ships inert; commit/backfill activation is a separate approval-gated ops change.
     EXECUTION_LEDGER_COMMIT_ENABLED: bool = False
 
-    # ROB-404 — kis_mock execution-event consumer + periodic reconcile.
-    # Default off: the consumer runs reconcile in dry-run preflight and the
-    # periodic taskiq task returns paused until an operator flips these.
-    KIS_MOCK_RECONCILE_ON_EXECUTION_ENABLED: bool = False
-    KIS_MOCK_RECONCILE_PERIODIC_ENABLED: bool = False
-
     # ROB-844 — scheduleless Binance Demo abandoned-reservation reconcile.
     # The canonical ``binance_demo_scalping_enabled`` master above and the
     # reconcile gate must both be enabled. Do not duplicate the case-insensitive
@@ -865,22 +839,14 @@ class Settings(BaseSettings):
     BINANCE_DEMO_RESERVATION_RECONCILE_CONFIRM: bool = False
     BINANCE_DEMO_RESERVATION_RECONCILE_MIN_AGE_SECONDS: int = 3600
 
-    # ROB-475 / ROB-574 — paused periodic auto-reconcile for KIS live KR orders.
-    # Default off; operator flips + adds recurrence outside this repo.
-    # ROB-487 adds a second default-off gate: flipping only the legacy flag
-    # is no longer enough — a deployment must carry the fail-closed reconcile
-    # semantics AND pass the safety review before unattended booking runs.
-    KIS_LIVE_AUTO_RECONCILE_ENABLED: bool = False
-    KIS_LIVE_AUTO_RECONCILE_SAFETY_REVIEW_PASSED: bool = False
-
     # ROB-574 — paused periodic auto-reconcile for Toss live KR/US orders.
     # Default off and scheduleless in this repo. Recurrence belongs to the
     # operator automation layer; unattended booking requires both gates.
     TOSS_LIVE_AUTO_RECONCILE_ENABLED: bool = False
     TOSS_LIVE_AUTO_RECONCILE_SAFETY_REVIEW_PASSED: bool = False
 
-    # ROB-1050 — paused periodic auto-reconcile for US (KIS) and Crypto (Upbit) live orders.
-    # Default off and scheduleless in this repo. Operator flips and adds recurrence.
+    # Paused periodic reconcile settings retained for the operational Upbit path.
+    # Default off and scheduleless; operator automation owns recurrence.
     LIVE_AUTO_RECONCILE_ENABLED: bool = False
     LIVE_AUTO_RECONCILE_DRY_RUN: bool = True
 

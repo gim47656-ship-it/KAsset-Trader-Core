@@ -69,7 +69,7 @@ class InvestmentReport(Base):
         ),
         CheckConstraint(
             "account_scope IS NULL OR account_scope IN "
-            "('kis_live','kis_mock','alpaca_paper','upbit_live')",
+            "('kis_live','kis_mock','toss_live','alpaca_paper','upbit_live')",
             name="ck_investment_reports_account_scope",
         ),
         CheckConstraint(
@@ -84,7 +84,7 @@ class InvestmentReport(Base):
         # Advisory-only invariants — locked refinement #6.
         # If account is live, execution_mode MUST be advisory_only.
         CheckConstraint(
-            "account_scope IS DISTINCT FROM 'kis_live' "
+            "account_scope NOT IN ('kis_live','toss_live') "
             "OR execution_mode = 'advisory_only'",
             name="ck_investment_reports_live_advisory_only",
         ),

@@ -18,7 +18,6 @@
 - Celery worker (`auto-trader-worker`)
 - MCP server (`auto-trader-mcp`)
 - Upbit websocket (`auto-trader-upbit-ws`)
-- KIS websocket (`auto-trader-kis-ws`)
 
 ## 환경 변수
 
@@ -43,11 +42,16 @@ uv run celery -A app.core.celery_app.celery_app worker --loglevel=info
 # MCP
 uv run python -m app.mcp_server.main
 
-# WS
+# 실행 체결 WebSocket은 Upbit 전용
 uv run python websocket_monitor.py --mode upbit
-uv run python websocket_monitor.py --mode kis
-uv run python websocket_monitor.py --mode both
 ```
+
+주식 체결은 WebSocket이 아니라 worker의
+`toss_live.poll_fills_periodic`으로 확인합니다. Toss 실주문 운영 시
+`TOSS_FILL_POLL_ENABLED=true`, `TOSS_FILL_POLL_CRON=*/2 * * * *`로 최대
+2분 간격을 유지하고, worker 로그에서 주기 실행과 오류 부재를 확인합니다.
+NH PLUG는 국내주식 모의계좌 조회 전용이므로 체결 모니터링 대상이 아닙니다.
+KIS WebSocket과 KIS 서비스는 운영 대상이 아닙니다.
 
 ## 운영 확인
 
@@ -56,11 +60,11 @@ docker compose -f docker-compose.prod.yml logs -f api
 docker compose -f docker-compose.prod.yml logs -f worker
 docker compose -f docker-compose.prod.yml logs -f mcp
 docker compose -f docker-compose.prod.yml logs -f upbit_websocket
-docker compose -f docker-compose.prod.yml logs -f kis_websocket
 ```
 
 Sentry UI 확인 항목:
 - `service:auto-trader-api` 등 태그 필터로 프로세스 분리 조회
 - release가 현재 배포 커밋 SHA로 표시되는지 확인
-- API/worker/ws/mcp 이벤트 유입 확인
+- API/worker/Upbit WS/MCP 이벤트 유입 확인
+- worker의 `toss_live.poll_fills_periodic` 성공 주기와 마지막 오류 확인
 - 트랜잭션 및 프로파일 생성 확인

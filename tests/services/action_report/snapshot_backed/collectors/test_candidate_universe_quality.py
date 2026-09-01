@@ -43,7 +43,7 @@ async def test_us_candidates_carry_quality_flags_and_priority(db_session):
     collector = CandidateUniverseSnapshotCollector(db_session)
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         candidate_limit=5,
         symbols=None,
         policy_snapshot={},
@@ -87,7 +87,7 @@ async def test_us_candidate_pool_size_and_displayed_count_are_exposed(db_session
     collector = CandidateUniverseSnapshotCollector(db_session)
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         candidate_limit=5,
         symbols=None,
         policy_snapshot={},
@@ -114,7 +114,7 @@ async def test_us_unknown_common_stock_flagged(db_session):
     collector = CandidateUniverseSnapshotCollector(db_session)
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         candidate_limit=5,
         symbols=None,
         policy_snapshot={},

@@ -84,7 +84,6 @@ ANALYSIS_READONLY_TOOL_NAMES: set[str] = {
     "suggest_order_account",
     "get_holdings",
     "toss_get_positions",
-    "get_intraday_investor_flow",
     "analysis_artifact_save",
     "analysis_artifact_get",
     "analysis_bundle_get",

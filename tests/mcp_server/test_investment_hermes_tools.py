@@ -128,6 +128,36 @@ async def test_prepare_bundle_disabled_without_flag(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_bundle_rejects_explicit_kis_before_gate_or_db() -> None:
+    result = await investment_report_prepare_bundle_impl(
+        market="kr",
+        account_scope="kis_live",
+    )
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": "kis_live",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_composition_rejects_explicit_kis_before_validation() -> None:
+    result = await investment_report_create_from_hermes_composition_impl(
+        composition={},
+        kst_date="2026-05-21",
+        market="us",
+        account_scope="kis_mock",
+    )
+    assert result == {
+        "success": False,
+        "error": "provider kis is not operational",
+        "provider_unsupported": True,
+        "account_scope": "kis_mock",
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_hermes_context_disabled_without_flag(monkeypatch) -> None:
     monkeypatch.setattr(
         settings, "SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED", False, raising=False
@@ -362,7 +392,7 @@ async def test_prepare_bundle_injects_production_registry_and_user_id(_flag_on) 
     ):
         result = await investment_report_prepare_bundle_impl(
             market="kr",
-            account_scope="kis_live",
+            account_scope="toss_live",
             symbols=["005930"],
             user_id=7,
         )
@@ -373,7 +403,7 @@ async def test_prepare_bundle_injects_production_registry_and_user_id(_flag_on) 
     called_request = ensure_svc.ensure.call_args.args[0]
     assert called_request.user_id == 7
     assert called_request.market == "kr"
-    assert called_request.account_scope == "kis_live"
+    assert called_request.account_scope == "toss_live"
 
 
 @pytest.mark.asyncio

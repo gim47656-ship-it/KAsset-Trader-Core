@@ -79,7 +79,7 @@ def build_upsert_sql(cfg: SyncTableConfig) -> TextClause:
 
 
 def build_symbol_union(
-    kis_holdings: Sequence[object],
+    provider_positions: Sequence[object],
     manual_holdings: Sequence[object],
     *,
     holdings_field: str,
@@ -87,7 +87,7 @@ def build_symbol_union(
 ) -> set[str]:
     symbols: set[str] = set()
 
-    for item in kis_holdings:
+    for item in provider_positions:
         raw = (
             cast(dict[str, object], item).get(holdings_field)
             if isinstance(item, dict)

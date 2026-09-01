@@ -107,8 +107,6 @@ _POLICY_MARKET = {
 # -- widening one must never silently widen the other.
 _VETO_CAPABLE_ACCOUNT_MARKETS = frozenset(
     {
-        ("kis_live", "equity_kr"),
-        ("kis_live", "equity_us"),
         ("upbit", "crypto"),
         # TOSS-AUTO-FULL: this membership is *not* sufficient by itself.
         # ``_is_veto_capable_account_market`` keeps both Toss surfaces
@@ -169,14 +167,9 @@ _TAG_PATH_KEY_ALLOWLIST = frozenset(
 )
 _MAX_TAG_MATCHES = 24
 
-# Both-leg cost floor in basis points, per market. NOT measured rates: the two
-# veto-capable ledgers (review.kis_live_order_ledger, review.live_order_ledger)
-# carry no commission/tax columns, so this repo holds no realized fee evidence
-# for kis_live or upbit to derive one from. Until it does, these are the
-# conservative maximum of the rates the repo already declares -- see the
-# provenance comment on `order_proposals.auto_approve.round_trip_cost_bps` in
-# config/trading_policy.yaml. The policy value is raised to this floor, so an
-# operator edit can only ever narrow the profit-take test, never widen it.
+# 왕복 비용 하한은 정책값을 보수적으로 제한한다. 접수 전용 주문 원장에는
+# 수수료/세금 실측 컬럼이 없으므로 저장소에 선언된 요율 중 보수적인 값을 쓴다.
+# 운영자가 정책값을 낮춰도 이 하한 아래로 판정 범위가 넓어지지 않는다.
 _ROUND_TRIP_COST_BPS_FLOOR = {
     "equity_kr": Decimal("47.4"),
     "equity_us": Decimal("90"),

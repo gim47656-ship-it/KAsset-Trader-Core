@@ -1,9 +1,7 @@
-"""Yahoo Finance fallback fetcher for US daily candles.
+"""미국 일봉의 Yahoo Finance 조정종가 보강 fetcher.
 
-Used by the daily candle sync when KIS overseas daily returns empty
-for a specific symbol (illiquid names, ETF gaps), and optionally as an
-adj_close enrichment source. This module knows about Yahoo; it does
-NOT know about the database or about KIS.
+명시적인 조정종가 보강 작업에서만 사용한다. 기본 주식 OHLCV는 Toss가
+제공한다. 이 모듈은 Yahoo만 알고 DB나 broker adapter는 알지 못한다.
 """
 
 from __future__ import annotations

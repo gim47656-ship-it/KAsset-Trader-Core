@@ -9,12 +9,10 @@ from typing import Any
 
 import app.services.brokers.upbit.client as upbit_service
 from app.core.timezone import KST, now_kst
-from app.services.brokers.kis.client import KISClient
-from app.services.execution_ledger.normalizers import (
-    _normalize_kis_domestic_filled,
-    _normalize_kis_overseas_filled,
-    normalize_upbit_order,
-)
+from app.services.brokers.toss.client import TossReadClient
+from app.services.brokers.toss.dto import TossOrder
+from app.services.current_orders_service import toss_order_market
+from app.services.execution_ledger.normalizers import normalize_upbit_order
 from app.services.filled_orders_indicators import _enrich_with_indicators
 from app.services.market_data import get_quote
 
@@ -160,70 +158,137 @@ async def _fetch_upbit_filled(
         return [], [{"market": "crypto", "error": str(exc)}]
 
 
-async def _fetch_kis_domestic_filled(
+def _default_toss_read_client() -> TossReadClient:
+    return TossReadClient.from_settings()
+
+
+def _toss_fill_timestamp(order: TossOrder) -> datetime:
+    execution = order.execution or {}
+    raw = (
+        execution.get("filledAt")
+        or execution.get("lastFilledAt")
+        or execution.get("executedAt")
+        or order.ordered_at
+    )
+    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
+
+
+def _json_safe_toss_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe_toss_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_toss_value(item) for item in value]
+    if hasattr(value, "as_tuple"):
+        return str(value)
+    return value
+
+
+def _normalize_toss_filled(order: TossOrder) -> dict[str, Any] | None:
+    execution = order.execution or {}
+    filled_quantity = execution.get("filledQuantity")
+    average_price = execution.get("averageFilledPrice")
+    try:
+        quantity = float(filled_quantity or 0)
+        price = float(average_price or 0)
+    except (TypeError, ValueError):
+        return None
+    if quantity <= 0 or price <= 0:
+        return None
+
+    market = toss_order_market(order.symbol)
+    side_raw = str(order.side or "").strip().lower()
+    side = "buy" if side_raw == "buy" else "sell" if side_raw == "sell" else "unknown"
+    commission = float(execution.get("commission") or 0)
+    tax = float(execution.get("tax") or 0)
+    total_amount = float(execution.get("filledAmount") or price * quantity)
+    filled_at = _toss_fill_timestamp(order).isoformat()
+    return {
+        "symbol": order.symbol.strip().upper(),
+        "raw_symbol": order.symbol,
+        "instrument_type": "equity_kr" if market == "kr" else "equity_us",
+        "side": side,
+        "price": price,
+        "quantity": quantity,
+        "total_amount": total_amount,
+        "fee": commission + tax,
+        "currency": order.currency,
+        "account": "toss",
+        "order_id": str(order.order_id),
+        "filled_at": filled_at,
+        "fill_seq": 0,
+        "venue": "toss",
+        "raw_payload_json": {
+            "status": order.status,
+            "order_type": order.order_type,
+            "time_in_force": order.time_in_force,
+            "client_order_id": order.client_order_id,
+            "execution": _json_safe_toss_value(execution),
+        },
+    }
+
+
+async def _fetch_toss_filled(
     days: int,
+    *,
+    markets: set[str],
     start_at: datetime | None = None,
     end_at: datetime | None = None,
     max_pages: int = 100,
 ) -> tuple[list[dict], list[dict]]:
+    requested_equity = {market for market in markets if market in {"kr", "us"}}
+    client: TossReadClient | None = None
     try:
-        kis = KISClient()
         start_kst, end_kst = _resolve_kst_window(
-            days=days, start_at=start_at, end_at=end_at
+            days=days,
+            start_at=start_at,
+            end_at=end_at,
         )
-        raw_orders = await kis.inquire_daily_order_domestic(
-            start_date=start_kst.strftime("%Y%m%d"),
-            end_date=end_kst.strftime("%Y%m%d"),
-            stock_code="",
-            side="00",
-            max_pages=max_pages,
-        )
-        orders = [
-            n
-            for raw in (raw_orders or [])
-            if (n := _normalize_kis_domestic_filled(raw)) is not None
-        ]
+        client = _default_toss_read_client()
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        orders: list[dict[str, Any]] = []
+        for _ in range(max_pages):
+            page = await client.list_orders(
+                status="CLOSED",
+                from_date=start_kst.date().isoformat(),
+                to_date=end_kst.date().isoformat(),
+                cursor=cursor,
+                limit=100,
+            )
+            for raw in page.orders:
+                normalized = _normalize_toss_filled(raw)
+                if normalized is None:
+                    continue
+                market = "kr" if normalized["instrument_type"] == "equity_kr" else "us"
+                if market not in requested_equity:
+                    continue
+                filled_at = datetime.fromisoformat(normalized["filled_at"])
+                if start_kst <= filled_at <= end_kst:
+                    orders.append(normalized)
+            if not page.has_next or not page.next_cursor:
+                break
+            if page.next_cursor in seen_cursors:
+                logger.warning("Toss CLOSED pagination cursor did not advance")
+                break
+            seen_cursors.add(page.next_cursor)
+            cursor = page.next_cursor
+        else:
+            logger.warning("Toss CLOSED pagination hit max_pages=%d", max_pages)
         return orders, []
     except Exception as exc:
-        logger.warning("KIS domestic filled-orders fetch failed: %s", exc)
-        return [], [{"market": "kr", "error": str(exc)}]
-
-
-async def _fetch_kis_overseas_filled(
-    days: int,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-    max_pages: int = 100,
-) -> tuple[list[dict], list[dict]]:
-    try:
-        kis = KISClient()
-        start_kst, end_kst = _resolve_kst_window(
-            days=days, start_at=start_at, end_at=end_at
-        )
-
-        all_orders: list[dict] = []
-        seen_fill_keys: set[tuple[str, int]] = set()
-
-        raw_orders = await kis.inquire_daily_order_overseas(
-            start_date=start_kst.strftime("%Y%m%d"),
-            end_date=end_kst.strftime("%Y%m%d"),
-            symbol="%",
-            exchange_code="NASD",
-            side="00",
-            max_pages=max_pages,
-        )
-        for raw in raw_orders or []:
-            normalized = _normalize_kis_overseas_filled(raw)
-            if normalized:
-                fill_key = (normalized["order_id"], normalized["fill_seq"])
-                if fill_key not in seen_fill_keys:
-                    seen_fill_keys.add(fill_key)
-                    all_orders.append(normalized)
-
-        return all_orders, []
-    except Exception as exc:
-        logger.warning("KIS overseas filled-orders fetch failed: %s", exc)
-        return [], [{"market": "us", "error": str(exc)}]
+        logger.warning("Toss filled-orders fetch failed: %s", exc)
+        return [], [
+            {"market": market, "error": str(exc)} for market in sorted(requested_equity)
+        ]
+    finally:
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                logger.warning("Toss filled-orders client close failed", exc_info=True)
 
 
 async def _enrich_with_current_prices(
@@ -308,16 +373,15 @@ async def fetch_filled_orders(
                 days, start_at=start_at, end_at=end_at, max_pages=max_pages
             )
         )
-    if "kr" in market_set:
+    equity_markets = market_set & {"kr", "us"}
+    if equity_markets:
         tasks.append(
-            _fetch_kis_domestic_filled(
-                days, start_at=start_at, end_at=end_at, max_pages=max_pages
-            )
-        )
-    if "us" in market_set:
-        tasks.append(
-            _fetch_kis_overseas_filled(
-                days, start_at=start_at, end_at=end_at, max_pages=max_pages
+            _fetch_toss_filled(
+                days,
+                markets=equity_markets,
+                start_at=start_at,
+                end_at=end_at,
+                max_pages=max_pages,
             )
         )
 

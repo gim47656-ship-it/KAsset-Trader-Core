@@ -13,9 +13,8 @@ from app.core.normalizers import to_float as _to_float
 from app.core.symbol import to_db_symbol
 from app.mcp_server.tooling.portfolio_helpers import min_order_krw
 from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.exchange_rate_service import get_usd_krw_rate
-from app.services.manual_holdings_service import ManualHoldingsService
+from app.services.invest_quote_service import InvestQuoteService
 from app.services.portfolio_data_collector import PortfolioDataCollector
 from app.services.upbit_symbol_universe_service import get_active_upbit_markets
 from app.services.us_symbol_universe_service import (
@@ -31,15 +30,6 @@ _MARKET_US = "US"
 _MARKET_CRYPTO = "CRYPTO"
 _MARKET_ORDER = {_MARKET_KR: 0, _MARKET_US: 1, _MARKET_CRYPTO: 2}
 _UPBIT_PRICE_BATCH_SIZE = 50
-
-
-def _kis_percent_to_decimal(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value) / 100.0
-    except (TypeError, ValueError):
-        return None
 
 
 def _normalize_market_type(value: Any) -> str | None:
@@ -69,7 +59,6 @@ def _normalize_symbol(symbol: str, market_type: str) -> str:
 class PortfolioOverviewService:
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.manual_holdings_service = ManualHoldingsService(db)
         self._collector = PortfolioDataCollector(db)
 
     async def get_overview(
@@ -119,12 +108,10 @@ class PortfolioOverviewService:
                 if str(market).strip()
             }
 
-        kis_client = KISClient()
-
-        # Run collectors concurrently with isolated warning lists
+        # Toss 일반 snapshot은 주문 권한용 sellable 근거가 아니다.
         collection_results = await asyncio.gather(
             self._collector._run_collection_task(
-                self._collector._collect_kis_components, kis_client
+                self._collector._collect_toss_components,
             ),
             self._collector._run_collection_task(
                 self._collector._collect_upbit_components,
@@ -161,7 +148,6 @@ class PortfolioOverviewService:
 
         if not skip_missing_prices:
             await self._fill_missing_prices(
-                kis_client,
                 components,
                 warnings,
                 usd_krw=usd_krw_rate,
@@ -268,7 +254,6 @@ class PortfolioOverviewService:
                 "warnings": list(dict.fromkeys(warnings)),
             }
 
-        kis_client = KISClient()
         try:
             usd_krw_rate = await usd_krw_rate_task
         except Exception as exc:
@@ -277,7 +262,6 @@ class PortfolioOverviewService:
             usd_krw_rate = None
 
         await self._fill_missing_prices(
-            kis_client,
             filtered_components,
             warnings,
             usd_krw=usd_krw_rate,
@@ -305,7 +289,6 @@ class PortfolioOverviewService:
 
     async def _fill_missing_prices(
         self,
-        kis_client: KISClient,
         components: list[dict[str, Any]],
         warnings: list[str],
         *,
@@ -324,7 +307,7 @@ class PortfolioOverviewService:
         )
 
         bucket_results = await asyncio.gather(
-            self._fill_missing_kr_prices(kis_client, components, usd_krw=usd_krw),
+            self._fill_missing_kr_prices(components, usd_krw=usd_krw),
             self._fill_missing_us_prices(components, usd_krw=usd_krw),
             self._fill_missing_crypto_prices(
                 components,
@@ -344,39 +327,35 @@ class PortfolioOverviewService:
 
     async def _fill_missing_kr_prices(
         self,
-        kis_client: KISClient,
         components: list[dict[str, Any]],
         *,
         usd_krw: float | None = None,
     ) -> list[str]:
-        warnings: list[str] = []
-        kr_symbols = sorted(
+        symbols = sorted(
             {
                 item["symbol"]
                 for item in components
                 if item["market_type"] == _MARKET_KR and item["current_price"] is None
             }
         )
-        if not kr_symbols:
+        if not symbols:
             return []
-
-        async def fetch_and_apply(symbol: str):
-            try:
-                frame = await kis_client.inquire_price(symbol)
-                if frame.empty:
-                    return
-                price = _to_float(frame.iloc[-1].get("close"), default=0.0)
-                if price <= 0:
-                    return
+        try:
+            prices = await InvestQuoteService(self.db).fetch_kr_prices(symbols)
+        except Exception as exc:
+            logger.warning("Failed to fetch Toss KR prices: %s", exc)
+            return [f"Toss KR price fetch failed: {exc}"]
+        for symbol, price in prices.items():
+            resolved = _to_float(price, default=0.0)
+            if resolved > 0:
                 self._apply_price(
-                    components, _MARKET_KR, symbol, price, usd_krw=usd_krw
+                    components,
+                    _MARKET_KR,
+                    symbol,
+                    resolved,
+                    usd_krw=usd_krw,
                 )
-            except Exception as exc:
-                logger.warning("Failed to fetch KIS KR price for %s: %s", symbol, exc)
-                warnings.append(f"KIS KR price fetch failed for {symbol}: {exc}")
-
-        await asyncio.gather(*(fetch_and_apply(s) for s in kr_symbols))
-        return warnings
+        return []
 
     async def _fill_missing_us_prices(
         self,

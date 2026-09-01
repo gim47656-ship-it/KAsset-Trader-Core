@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Reconcile broker filled orders into the execution ledger."
     )
-    parser.add_argument("--broker", choices=["kis", "upbit"], required=True)
+    parser.add_argument("--broker", choices=["toss", "upbit"], required=True)
     parser.add_argument("--window-hours", type=int, default=24)
     parser.add_argument("--start-date", help="UTC date YYYY-MM-DD or YYYYMMDD")
     parser.add_argument("--end-date", help="UTC date YYYY-MM-DD or YYYYMMDD")

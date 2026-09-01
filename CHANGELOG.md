@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed (KIS production cutover — Toss + NH PLUG operational boundary; migration 0)
+- **Production no longer starts or health-checks a KIS WebSocket.** `docker-compose.prod.yml`, the execution monitor, and its heartbeat contract are Upbit-only; legacy `kis_websocket_monitor.py` now exits fail-closed without importing a KIS client.
+- **KIS configuration is dormant.** Core imports no longer require KIS credentials, KIS-first/task/WebSocket activation fields were removed, and deployment examples contain no KIS credentials or activation instructions. Historical KIS ledger reads and inactive adapter transport definitions remain unchanged.
+- **직접 실행·native KIS 표면도 차단했습니다.** KIS probe/mock/reconcile/consumer/selector 스크립트는 provider import가 없는 `scripts/_archive_kis/` 묘비로 이동했고, KIS WebSocket 및 `mcp-paper_001` launchd plist/wrapper/profile은 배포에서 제거됩니다. Native healthcheck는 Upbit WebSocket만 확인합니다.
+- **Toss fill evidence is polling-based.** Any accepted Toss live order requires a verified `toss_live.poll_fills_periodic` cadence of at most two minutes (`TOSS_FILL_POLL_ENABLED=true`, `TOSS_FILL_POLL_CRON=*/2 * * * *`) or immediate targeted non-dry reconcile. NH PLUG remains domestic mock read-only and supplies no order, fill, or US capability.
+
 ### Added (ROB-1159 — KR-only Kiwoom MCP profile; migration 0)
 - **A KR session no longer has to take the Kiwoom US mutation surface with it.** `MCP_PROFILE=kiwoom` registers both Kiwoom mock namespaces unconditionally — the eight KR `kiwoom_mock_*` tools and the seven US `kiwoom_mock_us_*` tools, four of which are mutations — with no equivalent of the DEFAULT profile's `KIWOOM_MOCK_US_ENABLED` gate. The new `MCP_PROFILE=kiwoom_kr` registers exactly the eight KR tools (`kiwoom_mock_get_order_detail` included) on top of the same shared read-only research surface, so it is a drop-in replacement for a KR-only session.
 - **The exclusion is physical, not documentary.** The KR-only registration path never imports the US module, and it drives the KR registrar through the same allowlist proxy the restricted profiles use, so a future non-KR tool added inside that registrar is dropped at registration time. Regression tests pin the absence by both frozen name set and `kiwoom_mock_us_` prefix, pin set equality in the per-profile order-surface matrix, and pin that the allowlist filter itself is load-bearing.

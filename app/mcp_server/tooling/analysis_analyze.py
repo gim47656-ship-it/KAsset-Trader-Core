@@ -35,15 +35,12 @@ from app.mcp_server.tooling.market_data_indicators import (
 )
 from app.mcp_server.tooling.market_data_quotes import (
     _annotate_kr_price_freshness,
-    _annotate_orderbook_price_freshness,
-    _apply_nxt_quote_overlay,
     _fetch_kr_live_quote,
     _fetch_quote_crypto,
     _fetch_quote_equity_kr,
     _fetch_quote_equity_us,
-    _kr_price_as_of_from_frame,
+    _price_as_of_from_frame,
 )
-from app.mcp_server.tooling.market_session import kr_market_data_state
 from app.mcp_server.tooling.shared import (
     build_recommendation_for_equity as _build_recommendation_for_equity,
 )
@@ -105,7 +102,8 @@ def _build_kr_quote_from_ohlcv(
         "low": last.get("low"),
         "volume": last.get("volume"),
         "value": last.get("value"),
-        "source": "kis",
+        "source": "toss",
+        "price_source": "toss_daily_close",
     }
 
 
@@ -115,32 +113,14 @@ _KST = ZoneInfo("Asia/Seoul")
 async def _resolve_kr_quote(
     symbol: str, ohlcv_df: pd.DataFrame
 ) -> dict[str, Any] | None:
-    """KR analyze quote: 라이브 inquire_price 우선, 실패 시 일봉 종가 fallback.
-    두 경로 모두 price_as_of + is_stale_price 를 정직하게 태그한다."""
+    """KR analyze quote: Toss live price first, daily candle close fallback.
+    Both paths preserve provider timestamp freshness instead of synthesizing it."""
     trading_date = datetime.now(_KST).date()
 
     async def _annotate(quote: dict[str, Any]) -> dict[str, Any]:
         tradability = (await get_kr_nxt_tradability([symbol])).get(symbol)
         if tradability is not None:
             quote.update(tradability.public_fields())
-        # ROB-725: during NXT premarket/after-hours the KRX regular quote is the
-        # prior close — overlay the live NXT price so current_price + S/R
-        # distance_pct track the real market.
-        # Re-apply the NXT orderbook-only date + N=5분 gate at this caller
-        # boundary so custom overlay seams cannot bypass its fail-closed result.
-        had_price_as_of = "price_as_of" in quote
-        previous_price_as_of = quote.pop("price_as_of", None)
-        if await _apply_nxt_quote_overlay(
-            symbol, quote, data_state=kr_market_data_state()
-        ):
-            _annotate_orderbook_price_freshness(
-                quote,
-                quote.get("price_as_of"),
-                trading_date=trading_date,
-                require_trading_date=True,
-            )
-        elif had_price_as_of:
-            quote["price_as_of"] = previous_price_as_of
         return quote
 
     live = await _fetch_kr_live_quote(symbol)
@@ -155,7 +135,7 @@ async def _resolve_kr_quote(
         return None
     _annotate_kr_price_freshness(
         fallback,
-        _kr_price_as_of_from_frame(ohlcv_df),
+        _price_as_of_from_frame(ohlcv_df),
         trading_date=trading_date,
     )
     return await _annotate(fallback)
@@ -185,7 +165,7 @@ async def _get_support_resistance_impl(
 
 
 def _analysis_source(market_type: str) -> str:
-    return {"crypto": "upbit", "equity_kr": "kis", "equity_us": "yahoo"}[market_type]
+    return {"crypto": "upbit", "equity_kr": "toss", "equity_us": "toss"}[market_type]
 
 
 def _build_analysis_payload(
@@ -661,18 +641,11 @@ def _recompute_intraday_support_resistance(
     analysis: dict[str, Any],
     market_type: str,
 ) -> None:
-    """ROB-541: re-sign S/R level distances against the LIVE quote price.
+    """운영 중인 현재가를 기준으로 support/resistance 거리를 다시 계산한다.
 
-    The EOD support_resistance payload computes ``distance_pct`` and the
-    support/resistance split against the daily-close ``current_price``. On an
-    intraday gap, that misclassifies levels relative to where the symbol is
-    actually trading. For KR/crypto (which carry a live ``quote.price``), we
-    recompute each level's ``distance_pct`` AND re-split supports vs resistances
-    against the live price.
-
-    The EOD S/R price LEVELS themselves are left intact — only their distance
-    and bucket are recomputed. ``_support_resistance.py`` (shared with the
-    standalone get_support_resistance tool) is NOT touched.
+    EOD support/resistance의 거리와 분류는 일봉 종가 기준이다. KR/crypto의
+    운영 시세가 있으면 level 자체는 유지한 채 거리와 support/resistance
+    분류만 다시 계산한다. 비운영 KIS/NXT 출처는 현재가 근거로 쓰지 않는다.
     """
     if market_type not in {"equity_kr", "crypto"}:
         return
@@ -680,6 +653,12 @@ def _recompute_intraday_support_resistance(
     if not isinstance(sr, dict) or "error" in sr:
         return
     quote = analysis.get("quote") or {}
+    if market_type == "equity_kr" and quote.get("price_source") not in {
+        None,
+        "toss_price",
+        "toss_daily_close",
+    }:
+        return
     live_price = _to_optional_price(quote.get("price") or quote.get("current_price"))
     if live_price is None:
         return

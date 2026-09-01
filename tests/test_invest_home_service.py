@@ -22,7 +22,7 @@ def _h(**kw) -> Holding:
     base = {
         "holdingId": "x",
         "accountId": "a",
-        "source": "kis",
+        "source": "toss_api",
         "accountKind": "live",
         "symbol": "AAA",
         "market": "KR",
@@ -45,14 +45,12 @@ def _h(**kw) -> Holding:
 
 @pytest.mark.unit
 def test_home_included_sources_is_locked() -> None:
-    assert HOME_INCLUDED_SOURCES == frozenset(
-        {"kis", "upbit", "toss_manual", "toss_api"}
-    )
+    assert HOME_INCLUDED_SOURCES == frozenset({"upbit", "toss_manual", "toss_api"})
 
 
 @pytest.mark.unit
 def test_classify_account_kind_maps_sources() -> None:
-    assert classify_account_kind("kis") == "live"
+    assert classify_account_kind("toss_api") == "live"
     assert classify_account_kind("upbit") == "live"
     assert classify_account_kind("toss_manual") == "manual"
     assert classify_account_kind("pension_manual") == "manual"
@@ -87,9 +85,9 @@ def test_manual_holding_schema_forces_reference_only_defaults() -> None:
 
 @pytest.mark.unit
 def test_grouped_merges_same_market_assettype_currency_symbol() -> None:
-    h_kis = _h(
+    h_live = _h(
         holdingId="1",
-        source="kis",
+        source="toss_api",
         accountId="a1",
         symbol="005930",
         market="KR",
@@ -120,7 +118,7 @@ def test_grouped_merges_same_market_assettype_currency_symbol() -> None:
         pnlKrw=56_000,
         pnlRate=56_000 / 1_376_000,
     )
-    grouped = build_grouped_holdings([h_kis, h_toss])
+    grouped = build_grouped_holdings([h_live, h_toss])
     assert len(grouped) == 1
     g = grouped[0]
     assert g.groupId == "KR:equity:KRW:005930"
@@ -134,17 +132,17 @@ def test_grouped_merges_same_market_assettype_currency_symbol() -> None:
     assert g.costBasis == 2_100_000 + 1_376_000
     assert g.averageCost == pytest.approx((2_100_000 + 1_376_000) / 50)
     assert g.valueKrw == 2_148_000 + 1_432_000
-    assert sorted(g.includedSources) == ["kis", "toss_manual"]
+    assert sorted(g.includedSources) == ["toss_api", "toss_manual"]
     assert {b.holdingId for b in g.sourceBreakdown} == {"1", "2"}
 
-    kis = next(b for b in g.sourceBreakdown if b.source == "kis")
-    assert kis.accountKind == "live"
-    assert kis.sourceOfTruth is True
-    assert kis.isTradeable is True
-    assert kis.manualOnly is False
-    assert kis.sellableQuantity == 25
-    assert kis.pendingSellQuantity == 5
-    assert kis.referenceQuantity == 0
+    live = next(b for b in g.sourceBreakdown if b.source == "toss_api")
+    assert live.accountKind == "live"
+    assert live.sourceOfTruth is True
+    assert live.isTradeable is True
+    assert live.manualOnly is False
+    assert live.sellableQuantity == 25
+    assert live.pendingSellQuantity == 5
+    assert live.referenceQuantity == 0
 
     toss = next(b for b in g.sourceBreakdown if b.source == "toss_manual")
     assert toss.accountKind == "manual"
@@ -184,7 +182,7 @@ def test_unknown_sellable_quantity_stays_null_through_grouping_and_serialization
 def test_grouped_null_costbasis_propagates() -> None:
     a = _h(
         holdingId="1",
-        source="kis",
+        source="toss_api",
         symbol="NVDA",
         market="US",
         currency="USD",
@@ -221,9 +219,9 @@ def test_grouped_null_costbasis_propagates() -> None:
 
 @pytest.mark.unit
 def test_grouped_infers_manual_value_from_live_same_symbol_price() -> None:
-    kis = _h(
-        holdingId="kis-kakao",
-        source="kis",
+    live = _h(
+        holdingId="toss-api-kakao",
+        source="toss_api",
         symbol="035720",
         market="KR",
         currency="KRW",
@@ -251,7 +249,7 @@ def test_grouped_infers_manual_value_from_live_same_symbol_price() -> None:
         pnlRate=None,
     )
 
-    grouped = build_grouped_holdings([kis, toss])
+    grouped = build_grouped_holdings([live, toss])
 
     g = grouped[0]
     assert g.totalQuantity == 10
@@ -314,8 +312,8 @@ def test_home_summary_uses_account_value_sum() -> None:
     accounts = [
         Account(
             accountId="a1",
-            displayName="KIS",
-            source="kis",
+            displayName="Toss",
+            source="toss_api",
             accountKind="live",
             includedInHome=True,
             valueKrw=10_000_000,
@@ -340,8 +338,8 @@ def test_home_summary_uses_account_value_sum() -> None:
         ),
         Account(
             accountId="a3",
-            displayName="Mock",
-            source="kis_mock",
+            displayName="Alpaca Paper",
+            source="alpaca_paper",
             accountKind="paper",
             includedInHome=False,
             valueKrw=999_999_999,
@@ -357,8 +355,8 @@ def test_home_summary_uses_account_value_sum() -> None:
     assert summary.costBasisKrw is None  # 하나라도 null 이면 null
     assert summary.pnlKrw is None
     assert summary.pnlRate is None
-    assert sorted(summary.includedSources) == ["kis", "toss_manual"]
-    assert "kis_mock" in summary.excludedSources
+    assert sorted(summary.includedSources) == ["toss_api", "toss_manual"]
+    assert "alpaca_paper" in summary.excludedSources
 
 
 @pytest.mark.asyncio
@@ -366,8 +364,6 @@ def test_home_summary_uses_account_value_sum() -> None:
 async def test_invest_home_service_synthesizes_toss_manual_account() -> None:
     from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
 
-    kis_reader = AsyncMock()
-    kis_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     upbit_reader = AsyncMock()
     upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
 
@@ -381,7 +377,6 @@ async def test_invest_home_service_synthesizes_toss_manual_account() -> None:
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[h])
 
     service = InvestHomeService(
-        kis_reader=kis_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
     )
@@ -464,9 +459,9 @@ def test_home_summary_does_not_include_cash_balances_or_buying_power() -> None:
 
     accounts = [
         Account(
-            accountId="kis",
-            displayName="KIS",
-            source="kis",
+            accountId="toss_api_account",
+            displayName="Toss",
+            source="toss_api",
             accountKind="live",
             includedInHome=True,
             valueKrw=720_000,
@@ -494,13 +489,13 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
     from app.schemas.invest_home import Account, CashAmounts
     from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
 
-    kis_reader = AsyncMock()
-    kis_reader.fetch.return_value = _SourceFetchResult(
+    toss_reader = AsyncMock()
+    toss_reader.fetch.return_value = _SourceFetchResult(
         accounts=[
             Account(
-                accountId="kis_account",
-                displayName="KIS 실계좌",
-                source="kis",
+                accountId="toss_api_account",
+                displayName="Toss",
+                source="toss_api",
                 accountKind="live",
                 includedInHome=True,
                 valueKrw=10_000_000,
@@ -519,9 +514,9 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
     mock_paper_reader.fetch.return_value = _SourceFetchResult(
         accounts=[
             Account(
-                accountId="kis_mock_account",
-                displayName="KIS 모의투자",
-                source="kis_mock",
+                accountId="alpaca_paper_account",
+                displayName="Alpaca Paper",
+                source="alpaca_paper",
                 accountKind="paper",
                 includedInHome=False,
                 valueKrw=999_000,
@@ -531,9 +526,9 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
         ],
         holdings=[
             _h(
-                holdingId="km:005930",
-                accountId="kis_mock_account",
-                source="kis_mock",
+                holdingId="alpaca:005930",
+                accountId="alpaca_paper_account",
+                source="alpaca_paper",
                 accountKind="paper",
                 symbol="005930",
                 valueKrw=999_000,
@@ -542,7 +537,7 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
     )
 
     service = InvestHomeService(
-        kis_reader=kis_reader,
+        toss_api_reader=toss_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         paper_readers=[mock_paper_reader],
@@ -551,16 +546,16 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
 
     # Both accounts are present
     sources = {a.source for a in response.accounts}
-    assert "kis" in sources
-    assert "kis_mock" in sources
+    assert "toss_api" in sources
+    assert "alpaca_paper" in sources
 
     # Paper is excluded from home summary
     assert response.homeSummary.totalValueKrw == 10_000_000
-    assert "kis_mock" not in response.homeSummary.includedSources
-    assert "kis_mock" in response.homeSummary.excludedSources
+    assert "alpaca_paper" not in response.homeSummary.includedSources
+    assert "alpaca_paper" in response.homeSummary.excludedSources
 
     # Holdings include paper holdings
-    assert any(h.source == "kis_mock" for h in response.holdings)
+    assert any(h.source == "alpaca_paper" for h in response.holdings)
 
 
 @pytest.mark.asyncio
@@ -569,13 +564,13 @@ async def test_paper_reader_partial_failure_does_not_break_live_accounts() -> No
     from app.schemas.invest_home import Account, CashAmounts
     from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
 
-    kis_reader = AsyncMock()
-    kis_reader.fetch.return_value = _SourceFetchResult(
+    toss_reader = AsyncMock()
+    toss_reader.fetch.return_value = _SourceFetchResult(
         accounts=[
             Account(
-                accountId="kis_account",
-                displayName="KIS 실계좌",
-                source="kis",
+                accountId="toss_api_account",
+                displayName="Toss",
+                source="toss_api",
                 accountKind="live",
                 includedInHome=True,
                 valueKrw=5_000_000,
@@ -591,19 +586,19 @@ async def test_paper_reader_partial_failure_does_not_break_live_accounts() -> No
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
 
     broken_reader = AsyncMock()
-    broken_reader.source = "kis_mock"
+    broken_reader.source = "alpaca_paper"
     broken_reader.fetch.side_effect = RuntimeError("paper API unreachable")
 
     service = InvestHomeService(
-        kis_reader=kis_reader,
+        toss_api_reader=toss_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         paper_readers=[broken_reader],
     )
     response = await service.get_home(user_id=1, include_paper=True)
 
-    # Live KIS account still present
-    assert any(a.source == "kis" for a in response.accounts)
+    # Live Toss account still present
+    assert any(a.source == "toss_api" for a in response.accounts)
     assert response.homeSummary.totalValueKrw == 5_000_000
 
     # Warning was recorded for broken paper reader
@@ -616,8 +611,8 @@ async def test_service_without_paper_readers_unchanged() -> None:
     """No paper_readers param is backward-compatible."""
     from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
 
-    kis_reader = AsyncMock()
-    kis_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
+    toss_reader = AsyncMock()
+    toss_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     upbit_reader = AsyncMock()
     upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     manual_reader = AsyncMock()
@@ -625,7 +620,7 @@ async def test_service_without_paper_readers_unchanged() -> None:
 
     # No paper_readers arg — backward-compatible construction
     service = InvestHomeService(
-        kis_reader=kis_reader,
+        toss_api_reader=toss_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
     )
@@ -649,7 +644,7 @@ async def test_get_home_does_not_invoke_paper_readers_when_include_paper_false()
             return _SourceFetchResult(accounts=[], holdings=[])
 
     class _SpyPaperReader:
-        source = "kis_mock"
+        source = "alpaca_paper"
         called = False
 
         async def fetch(self, *, user_id):
@@ -658,7 +653,7 @@ async def test_get_home_does_not_invoke_paper_readers_when_include_paper_false()
 
     spy = _SpyPaperReader()
     service = InvestHomeService(
-        kis_reader=_Stub(),
+        toss_api_reader=_Stub(),
         upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[spy],
@@ -678,8 +673,8 @@ async def test_get_home_invokes_only_requested_paper_sources():
         async def fetch(self, *, user_id):
             return _SourceFetchResult(accounts=[], holdings=[])
 
-    class _SpyKisMock:
-        source = "kis_mock"
+    class _SpyDbSimulated:
+        source = "db_simulated"
         called = False
 
         async def fetch(self, *, user_id):
@@ -695,17 +690,17 @@ async def test_get_home_invokes_only_requested_paper_sources():
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_Stub(),
+        toss_api_reader=_Stub(),
         upbit_reader=_Stub(),
         manual_reader=_Stub(),
-        paper_readers=[_SpyKisMock(), _SpyAlpaca()],
+        paper_readers=[_SpyDbSimulated(), _SpyAlpaca()],
     )
 
     await service.get_home(
-        user_id=1, include_paper=True, paper_sources=frozenset({"kis_mock"})
+        user_id=1, include_paper=True, paper_sources=frozenset({"db_simulated"})
     )
 
-    assert _SpyKisMock.called is True
+    assert _SpyDbSimulated.called is True
     assert _SpyAlpaca.called is False
 
 
@@ -718,8 +713,8 @@ async def test_get_home_invokes_all_paper_readers_when_sources_none():
         async def fetch(self, *, user_id):
             return _SourceFetchResult(accounts=[], holdings=[])
 
-    class _SpyKisMock:
-        source = "kis_mock"
+    class _SpyDbSimulated:
+        source = "db_simulated"
         called = False
 
         async def fetch(self, *, user_id):
@@ -735,15 +730,15 @@ async def test_get_home_invokes_all_paper_readers_when_sources_none():
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_Stub(),
+        toss_api_reader=_Stub(),
         upbit_reader=_Stub(),
         manual_reader=_Stub(),
-        paper_readers=[_SpyKisMock(), _SpyAlpaca()],
+        paper_readers=[_SpyDbSimulated(), _SpyAlpaca()],
     )
 
     await service.get_home(user_id=1, include_paper=True, paper_sources=None)
 
-    assert _SpyKisMock.called is True
+    assert _SpyDbSimulated.called is True
     assert _SpyAlpaca.called is True
 
 
@@ -763,9 +758,9 @@ async def test_paper_reader_exception_does_not_break_live_response():
             return _SourceFetchResult(
                 accounts=[
                     Account(
-                        accountId="kis_real",
-                        displayName="KIS 실계좌",
-                        source="kis",
+                        accountId="toss_api_account",
+                        displayName="Toss",
+                        source="toss_api",
                         accountKind="live",
                         includedInHome=True,
                         valueKrw=1_000_000,
@@ -788,13 +783,13 @@ async def test_paper_reader_exception_does_not_break_live_response():
             return _SourceFetchResult(accounts=[], holdings=[])
 
     class _ExplodingPaperReader:
-        source = "kis_mock"
+        source = "alpaca_paper"
 
         async def fetch(self, *, user_id):
             raise RuntimeError("paper api down")
 
     service = InvestHomeService(
-        kis_reader=_StubLiveReader(),
+        toss_api_reader=_StubLiveReader(),
         upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_ExplodingPaperReader()],
@@ -803,9 +798,9 @@ async def test_paper_reader_exception_does_not_break_live_response():
     resp = await service.get_home(user_id=1, include_paper=True)
 
     assert len(resp.accounts) == 1
-    assert resp.accounts[0].source == "kis"
+    assert resp.accounts[0].source == "toss_api"
     assert resp.accounts[0].valueKrw == 1_000_000
-    assert any(w.source == "kis_mock" for w in resp.meta.warnings)
+    assert any(w.source == "alpaca_paper" for w in resp.meta.warnings)
 
 
 @pytest.mark.asyncio
@@ -824,7 +819,7 @@ async def test_paper_reader_exception_does_not_break_account_panel_view():
             raise RuntimeError("alpaca outage")
 
     service = InvestHomeService(
-        kis_reader=_EmptyReader(),
+        toss_api_reader=_EmptyReader(),
         upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_ExplodingPaperReader()],
@@ -889,31 +884,31 @@ async def test_get_home_creates_reader_spans(monkeypatch):
             return _SourceFetchResult(accounts=[], holdings=[])
 
     class _Paper:
-        source = "kis_mock"
+        source = "alpaca_paper"
 
         async def fetch(self, *, user_id):
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_EmptyReader(),
+        toss_api_reader=_EmptyReader(),
         upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_Paper()],
     )
 
     await service.get_home(
-        user_id=1, include_paper=True, paper_sources=frozenset({"kis_mock"})
+        user_id=1, include_paper=True, paper_sources=frozenset({"alpaca_paper"})
     )
 
     names = [n for n, _ in spans]
-    assert "invest.home.kis" in names
+    assert "invest.home.toss_api" in names
     assert "invest.home.upbit" in names
     assert "invest.home.manual" in names
-    assert "invest.home.kis_mock" in names
+    assert "invest.home.alpaca_paper" in names
 
-    kis_mock_span = next(meta for n, meta in spans if n == "invest.home.kis_mock")
-    assert kis_mock_span["tags"].get("source") == "kis_mock"
-    assert kis_mock_span["tags"].get("include_paper") is True
+    paper_span = next(meta for n, meta in spans if n == "invest.home.alpaca_paper")
+    assert paper_span["tags"].get("source") == "alpaca_paper"
+    assert paper_span["tags"].get("include_paper") is True
 
 
 @pytest.mark.asyncio
@@ -955,7 +950,7 @@ async def test_get_home_default_skips_paper_spans(monkeypatch):
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_Stub(),
+        toss_api_reader=_Stub(),
         upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[_Paper()],
@@ -963,7 +958,6 @@ async def test_get_home_default_skips_paper_spans(monkeypatch):
     await service.get_home(user_id=1)
 
     assert "invest.home.alpaca_paper" not in spans
-    assert "invest.home.kis_mock" not in spans
 
 
 @pytest.mark.asyncio
@@ -990,7 +984,6 @@ async def test_get_home_runs_primary_readers_concurrently() -> None:
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_ConcurrentReader(),
         upbit_reader=_ConcurrentReader(),
         manual_reader=_ManualReader(),
         toss_api_reader=_ConcurrentReader(),
@@ -998,7 +991,7 @@ async def test_get_home_runs_primary_readers_concurrently() -> None:
 
     await service.get_home(user_id=1)
 
-    assert peak_active == 3
+    assert peak_active == 2
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1018,6 @@ async def test_account_panel_view_runs_primary_readers_concurrently() -> None:
             return _SourceFetchResult(accounts=[], holdings=[])
 
     service = InvestHomeService(
-        kis_reader=_ConcurrentReader(),
         upbit_reader=_ConcurrentReader(),
         manual_reader=_ManualReader(),
         toss_api_reader=_ConcurrentReader(),
@@ -1033,7 +1025,7 @@ async def test_account_panel_view_runs_primary_readers_concurrently() -> None:
 
     await service.build_account_panel_view(user_id=1)
 
-    assert peak_active == 3
+    assert peak_active == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1062,7 +1054,6 @@ async def test_get_held_pairs_fails_closed_without_snapshot_or_db_key_reader():
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        kis_reader=_Reader(holdings=[_h(symbol="005930", market="KR")]),
         upbit_reader=_Reader(
             holdings=[
                 _h(
@@ -1141,7 +1132,6 @@ async def test_calendar_held_pairs_reads_snapshot_or_db_keys_without_full_reader
     await cache.put(scope, {"schema_version": 1, "held_pairs": [["us", "AAPL"]]})
     manual_reader = _ManualKeyReader()
     service = InvestHomeService(
-        kis_reader=_ExplodingReader(),
         upbit_reader=_ExplodingReader(),
         manual_reader=manual_reader,
         toss_api_reader=_ExplodingReader(),
@@ -1169,7 +1159,7 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
     PortfolioSnapshotCache = whole_snapshot.PortfolioSnapshotCache
     portfolio_snapshot_scope = whole_snapshot.portfolio_snapshot_scope
 
-    calls = {"kis": 0, "upbit": 0, "toss_api": 0, "manual": 0}
+    calls = {"upbit": 0, "toss_api": 0, "manual": 0}
 
     # ROB-1310 R7: gate the leader on an explicit Event instead of a real
     # 3.2s sleep. The old sleep exceeded the 3s follower wait budget, so the
@@ -1185,14 +1175,13 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
 
         async def fetch(self, *, user_id):
             calls[self.source] += 1
-            if self.source == "kis":
+            if self.source == "toss_api":
                 leader_entered.set()
                 await leader_release.wait()
             return _SourceFetchResult(
                 accounts=[], holdings=[self.holding] if self.holding else []
             )
 
-    kis_reader = _CountingReader("kis", _h(symbol="005930"))
     upbit_reader = _CountingReader(
         "upbit",
         _h(
@@ -1231,14 +1220,12 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
         poll_interval_seconds=0.01,
     )
     service_a = InvestHomeService(
-        kis_reader=kis_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         toss_api_reader=toss_reader,
         snapshot_cache=cache_a,
     )
     service_b = InvestHomeService(
-        kis_reader=kis_reader,
         upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         toss_api_reader=toss_reader,
@@ -1256,7 +1243,7 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
     first, second = await asyncio.gather(leader_task, follower_task)
 
     assert first == second
-    assert calls == {"kis": 1, "upbit": 1, "toss_api": 1, "manual": 1}
+    assert calls == {"upbit": 1, "toss_api": 1, "manual": 1}
     payload = await cache_a.get(
         portfolio_snapshot_scope(user_id=1, include_paper=False, paper_sources=None)
     )
@@ -1326,7 +1313,6 @@ async def test_get_home_uses_toss_api_instead_of_manual_when_toss_api_has_holdin
         ]
     )
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
@@ -1389,7 +1375,6 @@ async def test_get_home_keeps_manual_holding_when_toss_api_does_not_duplicate_sy
         ]
     )
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
@@ -1513,7 +1498,6 @@ async def test_get_home_summary_excludes_manual_value_removed_by_toss_api_dedup(
         holdings=manual_holdings,
     )
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
@@ -1545,7 +1529,6 @@ async def test_get_home_falls_back_to_manual_when_toss_api_returns_warning_only(
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=_Reader(
             holdings=[
@@ -1586,7 +1569,6 @@ async def test_get_home_falls_back_to_manual_when_toss_api_has_cash_only_account
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=_Reader(
             holdings=[
@@ -1696,7 +1678,6 @@ async def test_home_warnings_attribute_manual_failures_to_each_source(
     )
 
     service = InvestHomeService(
-        kis_reader=_Reader(),
         upbit_reader=_Reader(),
         manual_reader=readers.ManualHomeReader(
             db=None,  # type: ignore[arg-type]

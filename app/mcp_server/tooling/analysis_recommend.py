@@ -219,7 +219,6 @@ def _normalize_recommend_market(market: str | None) -> str:
 
     aliases = {
         "kr": "kr",
-        "kis": "kr",
         "krx": "kr",
         "korea": "kr",
         "kospi": "kr",

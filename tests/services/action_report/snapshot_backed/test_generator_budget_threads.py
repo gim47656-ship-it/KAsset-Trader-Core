@@ -39,7 +39,7 @@ async def test_auto_emit_threads_budget(monkeypatch):
 
     request = ReportGenerationRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         created_by_profile="operator",
         title="Test Budget",
         summary="Test",

@@ -50,20 +50,12 @@ class OrderbookSnapshot:
     total_ask_qty: float
     total_bid_qty: float
     bid_ask_ratio: float | None
-    # Provider quote time or the transport receive time when the provider clock
-    # is close enough; contradictory/missing evidence remains unavailable.
-    # Optional keeps pre-existing synthetic/research snapshots source-compatible.
+    # 공급자가 제공한 timezone-aware 시각만 허용한다. 수신 시각으로
+    # 비어 있는 provider 시각을 합성하지 않는다.
     as_of: dt.datetime | None = None
-    # ``broker`` means the provider supplied the timestamp; ``transport`` means
-    # a valid broker clock was close enough to the receive clock but supplied no date.
-    price_as_of_source: Literal["broker", "transport"] | None = None
-    expected_price: int | None = None
-    expected_qty: int | None = None
+    price_as_of_source: Literal["broker"] | None = None
     venue: str | None = None
     venue_label: str | None = None
-    kis_market_code: str | None = None
-    source_endpoint: str | None = None
-    source_tr_id: str | None = None
     is_empty_book: bool | None = None
     requires_final_recheck: bool | None = None
     empty_reason: str | None = None

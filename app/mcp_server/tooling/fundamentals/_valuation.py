@@ -37,7 +37,6 @@ from app.mcp_server.tooling.shared import (
 from app.mcp_server.tooling.shared import (
     normalize_symbol_input as _normalize_symbol_input,
 )
-from app.services import market_data as market_data_service
 
 
 async def handle_get_valuation(
@@ -243,14 +242,12 @@ async def handle_get_short_interest(
             "(6-digit codes like '005930')"
         )
 
-    capped_days = min(max(days, 1), 60)
-
-    try:
-        return await market_data_service.get_short_interest(symbol, capped_days)
-    except Exception as exc:
-        return _error_payload(
-            source="kis",
-            message=str(exc),
-            symbol=symbol,
-            instrument_type="equity_kr",
-        )
+    _ = days
+    return _error_payload(
+        source="unsupported",
+        message=(
+            "provider_unsupported: short-interest data is unavailable from Toss/NH PLUG"
+        ),
+        symbol=symbol,
+        instrument_type="equity_kr",
+    )

@@ -1,6 +1,6 @@
 # tests/mcp_server/test_analyze_stock_pipeline_compat.py
-"""ROB-396: pipeline 플래그가 켜져 있어도 analyze_stock_impl 은 결정적으로
-legacy 경로(source)를 사용하며 판정이 호출마다 뒤집히지 않는다."""
+"""ROB-396: pipeline 플래그와 무관하게 analyze_stock_impl의 Toss source가
+결정적으로 유지되는지 확인한다."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -27,7 +27,7 @@ def mock_ohlcv_df():
 
 @pytest.mark.asyncio
 async def test_pipeline_flags_do_not_flip_source(mock_ohlcv_df):
-    """RESEARCH_PIPELINE 플래그 True 라도 legacy source 로 결정적."""
+    """RESEARCH_PIPELINE 플래그가 켜져도 Toss source를 유지한다."""
 
     with patch("app.core.config.settings") as mock_settings:
         mock_settings.RESEARCH_PIPELINE_ANALYZE_STOCK_ENABLED = True
@@ -46,7 +46,7 @@ async def test_pipeline_flags_do_not_flip_source(mock_ohlcv_df):
                     "price": 105.0,
                     "symbol": "AAPL",
                     "instrument_type": "equity_us",
-                    "source": "yahoo",
+                    "source": "toss",
                 },
             ),
             patch(
@@ -63,7 +63,7 @@ async def test_pipeline_flags_do_not_flip_source(mock_ohlcv_df):
             first = await analyze_stock_impl("AAPL")
             second = await analyze_stock_impl("AAPL")
 
-    assert first["source"] == "yahoo"
+    assert first["source"] == "toss"
     assert first["source"] != "research_pipeline"
     # 결정적: 반복 호출에 source/판정 불변
     assert first["source"] == second["source"]

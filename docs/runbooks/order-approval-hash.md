@@ -1,103 +1,30 @@
-# Runbook: Order Approval Hash & Intent Guard (ROB-653)
+# Order Approval Hash & Intent Guard
 
-## Overview
-This system prevents double-send incidents and ensures order content integrity between the time an order is previewed (dry-run) and when it is executed (live send). It applies to both `kis_live` (KR/US equities) and `upbit_live` (Crypto).
+## 운영 범위
 
----
+현재 주문 표면은 Toss equity와 Upbit crypto만 지원한다. KIS live/mock 도구와 실행 경로는 폐기되었으며 과거 KIS intent의 `approval_hash`, `idempotency_key`, provider provenance는 감사 목적으로만 보존한다. 해당 intent를 Toss로 자동 전환하거나 키 namespace를 재사용하지 않는다.
 
-## 1. How the Approval Hash Guard Works
+## Toss approval hash
 
-1. **Preview/Dry Run (`dry_run=True`)**:
-   - The system generates a canonical payload matching the order parameters (symbol, side, quantity, price, etc.).
-   - It hashes this payload into a secure `approval_hash` token with a **5-minute (300 seconds) Time-To-Live (TTL)**.
-   - It also generates a content-based `idempotency_key`.
-   - The MCP tool returns `approval_hash`, `approval_expires_at`, and `idempotency_key`.
+1. `toss_preview_order`는 정규화된 symbol, side, quantity, price, market, rung와 private client identity를 canonical payload로 묶는다.
+2. 응답의 `approval_hash`와 `approval_expires_at`은 해당 payload와 TTL에 결속된다.
+3. `toss_place_order`는 live send 직전 canonical payload를 다시 계산한다. 불일치, 만료, 누락은 fail-close한다.
+4. `clientOrderId`는 Toss 전용 namespace에서 파생한다. 과거 `review.order_send_intents` KIS 키를 사용하지 않는다.
+5. live sell은 hash 외에도 fresh Toss sellable preflight와 기존 loss/high-value/NXT/hard-risk/kill-switch guard를 모두 통과해야 한다.
 
-2. **Live Order Send (`dry_run=False`)**:
-   - The operator must pass the `approval_hash` parameter.
-   - The system verifies the token's validity, checks that the TTL hasn't expired, and compares the placed order parameters against the previewed canonical payload.
-   - If they match, execution proceeds. If not, it fails closed.
+`TOSS_APPROVAL_HASH_MODE`는 `off|optional|warn|required` 중 하나다. 운영 cutover는 `warn` 로그로 미전환 호출자를 확인한 뒤 `required`를 적용한다. 잘못된 enum 값은 설정 로드에서 거부한다.
 
----
+## Upbit idempotency
 
-## 2. Enforcement Modes (`ORDER_APPROVAL_HASH_MODE`)
-The rollout level of the approval hash guard is controlled by the environment variable `ORDER_APPROVAL_HASH_MODE` (or `settings.order_approval_hash_mode` in Python config).
+Upbit 주문은 content-based idempotency key를 broker `identifier`로 전달한다. 승인 hash 정책과 기존 crypto hard-risk guard를 우회하지 않는다.
 
-- **`off`**: Disables the guard completely.
-- **`optional`** (Default): Verifies the hash **if** one is provided. If no hash is provided, it allows execution without warnings.
-- **`warn`**: Same as `optional`, but logs a warning when a live order is sent without a hash.
-- **`required`**: Blocks any live order execution that does not provide a valid, matching, and unexpired `approval_hash`.
+## Fill evidence
 
-To adjust, update your `.env` or container environment:
-```bash
-ORDER_APPROVAL_HASH_MODE=required
-```
+HTTP acceptance는 fill이 아니다. Toss 주문은 accepted-only ledger에 기록한 뒤 broker order evidence로만 fill/journal/PnL을 book한다. `toss_live.poll_fills_periodic`은 최대 2분 간격으로 실행해야 하며, 해당 cadence를 보장할 수 없으면 accepted send 직후 주문 ID를 대상으로 reconcile한다. Pending/unknown evidence는 terminal state로 추론하지 않는다.
 
----
+## 제거된 표면
 
-## 3. Local Idempotency: KIS Pre-Send Intent Reservation
-Korea Investment & Securities (KIS) API does not support broker-side idempotency keys. To prevent double-send/replay errors locally:
-
-1. Prior to making the HTTP request to KIS, the system attempts to insert a record into the `review.order_send_intents` table.
-2. The table has a `UNIQUE(account_scope, idempotency_key)` constraint.
-3. If a duplicate order is sent on the same trading day (which shares the same salt and content, resulting in the same `idempotency_key`), the database insert raises an `IntegrityError`.
-4. The system catches this, aborts the send, and raises a `DuplicateOrderIntent` error.
-
-### Recovery / Troubleshooting
-- **Replay Blocked**: If a KIS send fails or times out, the `idempotency_key` remains reserved for that trading day. Re-sending will be blocked.
-- **Action**: Do **NOT** delete rows from `review.order_send_intents` during live trading. Reconcile the order status using `kis_live_reconcile_orders` to check if it was accepted by the broker.
-- **Next Day**: The idempotency key includes a date-based salt (KST for KR, ET for US). On the next calendar day, the same order will resolve to a different key and is allowed.
-
----
-
-## 4. Crypto Idempotency: Upbit Content Identifier
-Upbit supports broker-side deduplication via the `identifier` query/body parameter:
-
-- When executing Upbit live orders, the content-based `idempotency_key` is passed directly as the Upbit `identifier`.
-- Upbit will reject any duplicate POST requests with the same identifier, providing broker-side protection.
-
----
-
-## 5. Audit Ledgers
-The fields `approval_hash` (the digest) and `idempotency_key` are persisted on:
-- `review.kis_live_order_ledger`
-- `review.live_order_ledger`
-
-Reconciliation routines are untouched and operate independently from the idempotency records.
-
----
-
-## 6. `required`-Mode Cutover Checklist (ROB-659)
-
-`ORDER_APPROVAL_HASH_MODE` and `TOSS_APPROVAL_HASH_MODE` default to `optional`, so no
-caller is blocked today. Flipping either to `required` is a **rollout gate**: any live
-caller that does not hand back an `approval_hash` fail-closes with
-`error_code="approval_hash_required"`. Config load now rejects an out-of-enum value
-(e.g. a `requird` typo) fail-loud, so the mode can no longer silently degrade.
-
-### Scope of the fail-close
-The `required` fail-close is **scoped to LIVE orders** (`not is_mock`). Mock / automation
-callers are structurally exempt and are safe to leave as-is:
-
-| Caller | Path | is_mock | Exempt? |
-|---|---|---|---|
-| `place_order` / `kis_live_place_order` (MCP operator surface) | live | no | **must pass hash** |
-| `KisMockBroker.submit_buy` / `submit_exit_sell` (mock scalping) | mock | yes | exempt |
-| `watch_auto_execute._default_place_order_fn` (watch auto-execute loop) | mock | yes | exempt |
-| `kis_mock_place_order` / `kis_mock_market_open_pilot` (smoke/pilot) | mock | yes | exempt |
-| **`ScreenerService.place_order`** (`POST /api/screener/order`) | **live** | **no (no plumbing)** | **NOT exempt — blocks** |
-
-### Before flipping to `required`
-1. **Route through `warn` first.** Set `ORDER_APPROVAL_HASH_MODE=warn` (and
-   `TOSS_APPROVAL_HASH_MODE=warn`) for a soak window. `optional` is silent when a hash is
-   absent; `warn` logs every hash-less live send so you can find un-migrated callers
-   before they fail-close. Grep logs for `without approval_hash (mode=warn)`.
-2. **Decide the `ScreenerService` REST path.** `ScreenerService.place_order`
-   (`app/services/screener_service.py`) is a **live** `_place_order_impl` caller with **no
-   `approval_hash` plumbing** — under `required` it fail-closes entirely. Before cutover,
-   either (a) add preview→hash plumbing to that endpoint, (b) disable/guard the endpoint,
-   or (c) accept it as blocked. This is the primary remaining live gate.
-3. **Confirm mock automation is unaffected** — the mock scalping executor and watch
-   auto-execute loop pass `is_mock=True` and are exempt by the scoping above.
-4. Flip `ORDER_APPROVAL_HASH_MODE=required` (and `TOSS_APPROVAL_HASH_MODE=required`; Toss
-   is live-only with no mock path) once (1)–(3) are cleared.
+- `/api/screener/order` live submit은 fail-closed다.
+- `kis_live_*`, `kis_mock_*`, KIS reconcile/mirror 도구는 등록되지 않는다.
+- `account_mode="real"|"live"`는 ambiguous로 거부한다.
+- `account_mode="kis_live"|"kis_mock"`는 historical read provenance 외 operational dispatch에서 거부한다.

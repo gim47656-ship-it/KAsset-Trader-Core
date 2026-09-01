@@ -198,6 +198,12 @@ class TestNormalizeEquityMarket:
         with pytest.raises(ValueError):
             normalize_equity_market("unknown")
 
+    def test_kis_provider_alias_raises_value_error(self):
+        from app.mcp_server.tooling.market_normalization import normalize_equity_market
+
+        with pytest.raises(ValueError):
+            normalize_equity_market("kis")
+
 
 class TestNormalizeMarketWithCrypto:
     def test_crypto_aliases(self):
@@ -229,6 +235,14 @@ class TestNormalizeMarketWithCrypto:
 
         with pytest.raises(ValueError):
             normalize_market_with_crypto("unknown")
+
+    def test_kis_provider_alias_raises_value_error(self):
+        from app.mcp_server.tooling.market_normalization import (
+            normalize_market_with_crypto,
+        )
+
+        with pytest.raises(ValueError):
+            normalize_market_with_crypto("kis")
 
 
 class TestDetectEquityMarket:

@@ -24,9 +24,9 @@ _PARTIAL_MAX_LEN = (
 def today_trading_date(market: str, *, now: dt.datetime | None = None) -> dt.date:
     """Most recent business day in the market's timezone.
 
-    NOTE: First-slice does NOT use exchange holiday calendar. KIS daily candles
-    already collapse Korean public holidays into the previous trading day close,
-    so this approximation is safe for snapshot freshness classification.
+    참고: 이 helper는 주말만 건너뛴다. 공급자 일봉에는 비거래일 행이 없으며,
+    거래소 휴일 정밀도가 필요한 호출자는 아래의 거래소 캘린더 기반 baseline
+    helper를 사용한다.
     """
     tz = _TZ_BY_MARKET.get(market, _TZ_BY_MARKET["kr"])
     now_local = (now or dt.datetime.now(dt.UTC)).astimezone(tz)

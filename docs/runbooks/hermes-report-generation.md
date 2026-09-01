@@ -49,7 +49,7 @@ Order matters: confirm each step before moving on.
 
 1. **Generator flag**: set `SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED=true` on the auto_trader app server and the MCP server. Verify with a single MCP call:
    ```
-   investment_report_prepare_bundle(market="kr", account_scope="kis_live")
+   investment_report_prepare_bundle(market="kr", account_scope="toss_live")
    ```
    Expected: `{"success": true, "bundle_uuid": "...", ...}`. If it returns `success=false / error=snapshot_backed_report_generator_disabled`, the env var did not propagate to the running process.
 2. **HTTP token (auto_trader side)**: place a non-trivial secret in `HERMES_INGEST_TOKEN` on the auto_trader app server. Default header `X-Hermes-Ingest-Token` is fine unless you have a reason to change it.
@@ -244,7 +244,7 @@ check for the Hermes path on US-shaped payloads.
   - The legacy `ReportGenerationRequest` snapshot-backed generator
     (`/trading/api/investment-reports/snapshot-backed`) — its
     request schema still only accepts `market` ∈ `{"kr", "crypto"}`
-    paired with `kis_live` / `upbit_live`. The Hermes-first
+    paired with `toss_live` / `upbit_live`. The Hermes-first
     endpoints take `market` as a plain string and therefore work
     on US bundles without that legacy validator firing.
   - `auto_emit_from_evidence` — same legacy path, US bundles aren't
@@ -361,7 +361,7 @@ separately whether to:
 
 ---
 
-## 9. ROB-314 — production-collector bundle preparation (real KR/kis_live evidence)
+## 9. ROB-314 — production-collector bundle preparation (KR/Toss evidence)
 
 The two report-generation entrypoints now inject `production_collector_registry(session)` and accept a `user_id`:
 
@@ -375,11 +375,12 @@ own request.
 
 **Behaviour change — prepare is no longer DB-only.** With production collectors injected,
 prepare-bundle now performs live, read-only external calls in addition to DB reads:
-KIS quote/orderbook (`SymbolSnapshotCollector`) and KIS/Upbit open-orders
-(`PendingOrdersSnapshotCollector`). No order/watch/order-intent mutation occurs. Live
-read credentials must be present on the host; absent/misconfigured credentials make those
-collectors emit per-source `unavailable` rather than crashing. Expect added latency and
-broker rate-limit sensitivity.
+Toss quote and supported account/open-order evidence plus Upbit crypto evidence.
+KIS-only orderbook or investor-flow fields are reported as provider unsupported,
+never synthesized. No order/watch/order-intent mutation occurs. Toss read
+credentials must be present on the host; absent or misconfigured credentials make
+the affected collectors emit per-source `unavailable` rather than crashing.
+Expect added latency and provider rate-limit sensitivity.
 
 **Operator smoke (read-only, placeholders only — do not paste real secrets):**
 
@@ -390,7 +391,7 @@ export SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED=true
 curl -sS -X POST "$HOST/trading/api/investment-reports/hermes/prepare-bundle" \
   -H "X-Hermes-Ingest-Token: $HERMES_INGEST_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"market":"kr","account_scope":"kis_live","symbols":["<HELD_SYMBOL>","<CANDIDATE>"],"user_id":<USER_ID>}'
+  -d '{"market":"kr","account_scope":"toss_live","symbols":["<HELD_SYMBOL>","<CANDIDATE>"],"user_id":<USER_ID>}'
 ```
 
 Inspect `coverage_summary` / `missing_sources` in the response to confirm portfolio,

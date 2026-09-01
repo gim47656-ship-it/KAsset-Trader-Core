@@ -15,10 +15,9 @@ def register_account_routing_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="suggest_order_account",
         description=(
-            "Read-only advisory: compare KIS/Toss buy-account costs for KR/US "
-            "stocks using commission, FX spread, orderable cash, Toss notional "
-            "limits, and existing-position consolidation. Never submits or "
-            "routes an order automatically; operator final decision required."
+            "KR/US 주식 매수의 Toss 계정 비용·주문가능 현금·notional 한도와 "
+            "기존 Toss 보유 통합 여부를 읽기 전용으로 검토합니다. "
+            "주문을 제출하거나 자동 route하지 않으며 운영자 최종 판단이 필요합니다."
         ),
     )
     async def suggest_order_account(

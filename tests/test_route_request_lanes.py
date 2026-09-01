@@ -284,8 +284,6 @@ _CRYPTO_MUTATION = {
     "buy_ladder_fill_preview",
     "sell_ladder_fill_preview",
     "get_order_history",
-    "live_reconcile_orders",
-    "kis_mock_reconciliation_run",
 }
 _CRYPTO_REGISTERED = set(L.READ_ONLY_ADVISORY_TOOLS) | _CRYPTO_MUTATION
 

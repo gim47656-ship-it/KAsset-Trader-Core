@@ -94,8 +94,8 @@ INVESTMENT_REPORT_TOOL_NAMES: set[str] = {
 # Kept here as a literal so the handler can fail closed BEFORE importing or
 # constructing the generator.
 _SUPPORTED_MARKET_ACCOUNT_PAIRS: dict[str, str] = {
-    "kr": "kis_live",
-    "us": "kis_live",
+    "kr": "toss_live",
+    "us": "toss_live",
     "crypto": "upbit_live",
 }
 
@@ -112,12 +112,12 @@ GENERATE_FROM_BUNDLE_DESCRIPTION = (
     "snapshot metadata. Opt-in: returns {success:false, "
     "error:'snapshot_backed_report_generator_disabled'} unless "
     "SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED is true. "
-    "Supported market/account_scope pairs ONLY: kr/kis_live, us/kis_live, "
-    "crypto/upbit_live — any other pair fails closed with "
-    "error:'unsupported_account_scope' (use the Hermes composition path for "
-    "alpaca_paper). user_id is auto-resolved from MCP_USER_ID when omitted so "
-    "kis_live/upbit_live portfolios are readable; pass user_id to override. "
-    "Optional market_session (regular|nxt|pre|post|24x7) refines US/KR session "
+    "Supported market/account_scope pairs ONLY: kr/toss_live, us/toss_live, "
+    "crypto/upbit_live — explicit kis_* scopes return "
+    "error:'provider kis is not operational'; other pairs fail closed with "
+    "error:'unsupported_account_scope'. user_id is auto-resolved from "
+    "MCP_USER_ID when omitted so toss_live/upbit_live portfolios are readable; "
+    "pass user_id to override. Optional market_session "
     "reporting and is part of the idempotency key. items[] each require: "
     "client_item_key, item_kind (action|watch|risk), intent (buy_review|"
     "sell_review|risk_review|trend_recovery_review|rebalance_review), rationale; "
@@ -141,10 +141,9 @@ CREATE_DESCRIPTION = (
     "created_by_profile is NOT part of the key, so to mint a new row bump "
     "generator_version (recommended) or another keyed field, not "
     "created_by_profile. "
-    "account_scope accepts kis_live | kis_mock | alpaca_paper | upbit_live "
-    "(alpaca_paper IS accepted here; only "
-    "investment_report_generate_from_bundle restricts to the live "
-    "KIS/Upbit pairs and steers paper to the Hermes composition path). "
+    "account_scope accepts toss_live | alpaca_paper | upbit_live. "
+    "Stored kis_live/kis_mock reports remain readable through list/get/context, "
+    "but new create requests using kis_* fail closed as non-operational. "
     "No broker / order submission is performed. "
     "items[] each require: client_item_key, item_kind (action|watch|risk), "
     "intent (buy_review|sell_review|risk_review|trend_recovery_review|"
@@ -240,10 +239,10 @@ CONTEXT_GET_DESCRIPTION = (
 
 
 def _default_generator_user_id() -> int:
-    """ROB-352 — resolve the default operator user_id the same way the
-    portfolio/holdings tools do (``MCP_USER_ID`` env, default 1), so a
-    kis_live/upbit_live report no longer silently degrades to
-    portfolio=unavailable when the caller omits user_id.
+    """ROB-352 — 포트폴리오/보유 도구와 같은 규칙으로 기본 operator
+    ``user_id``를 해석한다(``MCP_USER_ID`` env, 기본값 1). 호출자가
+    ``user_id``를 생략해도 toss_live/upbit_live 보고서가
+    ``portfolio=unavailable``로 조용히 저하되지 않는다.
     """
     from app.mcp_server.tooling.shared import MCP_USER_ID
 
@@ -310,10 +309,8 @@ def _serialise_context(
     )
 
 
-# ROB-274 — default account_scope per market when the caller didn't supply
-# one. The pending_orders collector requires a concrete scope (kis_live /
-# upbit_live) to know which broker to query. Keep this mirroring the
-# collector's own supported pairs in pending_orders.py.
+# 신규 pending-order 수집의 기본 주식 scope는 Toss이며, 호출자가 명시한
+# 과거 KIS scope는 collector에서 provider_unsupported로 처리한다.
 async def _collect_pending_orders_snapshot(
     db: Any,
     *,
@@ -487,6 +484,14 @@ async def investment_report_create_impl(
     published_at: str | None = None,
     generator_version: str = "v1",
 ) -> dict:
+    if str(account_scope or "").startswith("kis"):
+        return {
+            "success": False,
+            "error": "provider kis is not operational",
+            "provider_unsupported": True,
+            "account_scope": account_scope,
+        }
+
     # ROB-458 — validate items with per-item, all-at-once errors BEFORE opening
     # a DB session, so a malformed call never gets a partial write or a raw
     # ValidationError. Mirrors investment_report_generate_from_bundle.
@@ -1290,13 +1295,9 @@ async def investment_report_generate_from_bundle_impl(
     is set on the deployment. The generator never mutates broker /
     order / watch state — see docs for the read-only guarantees.
 
-    ROB-318/ROB-352 — ``user_id`` is forwarded to ``ReportGenerationRequest``
-    so the ``kis_live`` portfolio collector can read live KIS holdings/cash.
-    When omitted it is now resolved to the MCP default (``MCP_USER_ID``, like
-    ``get_holdings``) for the supported live scopes, and the resolved id is
-    returned as ``resolved_user_id`` — pass an explicit ``user_id`` to override.
-    (Previously, omitting it stayed ``None`` and fail-closed the portfolio to
-    ``unavailable``, forcing a misleading no_action.)
+    ``user_id``는 Toss/Upbit 운영 portfolio collector에 전달된다. 생략하면
+    MCP 기본 사용자(``MCP_USER_ID``)를 사용하며, 해석된 값은
+    ``resolved_user_id``로 반환한다.
     """
     from app.core.config import settings
     from app.services.action_report.snapshot_backed.generator import (
@@ -1310,6 +1311,15 @@ async def investment_report_generate_from_bundle_impl(
     from app.services.investment_reports.ingestion import (
         ReportOverwriteBlockedError,
     )
+
+    if str(account_scope or "").startswith("kis"):
+        return {
+            "success": False,
+            "error": "provider kis is not operational",
+            "provider_unsupported": True,
+            "market": market,
+            "account_scope": account_scope,
+        }
 
     if not settings.SNAPSHOT_BACKED_REPORT_GENERATOR_ENABLED:
         return {
@@ -1333,10 +1343,9 @@ async def investment_report_generate_from_bundle_impl(
             "account_scope": account_scope,
             "supported_pairs": _SUPPORTED_MARKET_ACCOUNT_PAIRS,
             "hint": (
-                "This snapshot-backed generator only collects live KIS/Upbit "
-                "data. For alpaca_paper / paper:<name> reports use the Hermes "
-                "composition path (investment_report_create_from_hermes_"
-                "composition)."
+                "This snapshot-backed generator collects Toss equity or Upbit "
+                "crypto data. For alpaca_paper reports use the Hermes composition "
+                "path (investment_report_create_from_hermes_composition)."
             ),
         }
 

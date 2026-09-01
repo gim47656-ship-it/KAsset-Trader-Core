@@ -83,6 +83,7 @@ async def test_builder_cuts_future_bar_and_freezes_one_frame(monkeypatch):
     assert payload.market_cap_source == "naver_finance"
     assert payload.daily_turnover == Decimal("50000000000.0")
     assert payload.support_computed_at == dt.datetime(2026, 7, 20, 12, 1, tzinfo=dt.UTC)
+    assert payload.source == "toss"
     fetch.assert_awaited_once_with("005930", "equity_kr", count=60)
 
 

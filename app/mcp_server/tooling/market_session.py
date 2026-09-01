@@ -1,15 +1,11 @@
-"""ROB-464: KR market-session awareness for MCP read tools.
+"""MCP 읽기 도구의 KR/US 시장 세션 상태 판정.
 
-When the KRX regular session is closed (pre-market, after-hours, weekend,
-holiday) the KIS-backed quote/index/ranking tools otherwise surface the prior
-close as if it were live: ``price == previous_close``, ``change_pct == 0``, and
-all-zero ``get_top_stocks`` rankings sorted alphabetically. These helpers let the
-read tools tag a ``data_state`` and suppress fake-zero values instead of
-presenting stale data as current.
+KRX 정규장이 열리지 않은 시간에는 전일 종가가 실시간 값처럼 보이거나
+``change_pct == 0``인 행이 순위에 노출될 수 있다. 이 모듈은 현재 세션 상태를
+표시해 오래됐거나 사용할 수 없는 데이터를 최신 데이터로 오인하지 않게 한다.
 
-The classification is backed by ``exchange_calendars`` (``XKRX``), so KR holidays
-and the weekend are handled correctly — the same primitive the watch scanners use
-via :func:`app.jobs.watch_market_data.is_market_open`.
+공유 거래소 캘린더 경계를 사용하므로 휴일·주말과 미국 조기 폐장을 같은
+기준으로 처리한다.
 """
 
 from __future__ import annotations
@@ -27,7 +23,7 @@ from app.services.market_events.session_calendar import (
     regular_session_bounds,
 )
 
-# data_state values surfaced to MCP callers.
+# MCP 호출자에게 노출하는 data_state 값.
 DATA_STATE_FRESH = "fresh"
 DATA_STATE_STALE = "stale"
 DATA_STATE_PREMARKET_UNAVAILABLE = "premarket_unavailable"
@@ -45,18 +41,17 @@ _US_AFTER_CLOSE = _time(20, 0)
 
 
 def kr_market_data_state(now: Any = None) -> str:
-    """Classify the freshness of KRX regular-session market data right now.
+    """현재 KRX 정규장 세션 상태를 판정한다.
 
-    Returns one of:
+    반환값:
 
-    - ``DATA_STATE_FRESH`` — XKRX regular session is trading → data is live.
-    - ``DATA_STATE_PREMARKET_UNAVAILABLE`` — a KRX trading day, before the
-      session opens (09:00 KST). NXT may be trading, but the KRX-backed tools
-      only return the prior close, so the value is not yet live.
-    - ``DATA_STATE_MARKET_CLOSED`` — after close, weekend, or holiday.
+    - ``DATA_STATE_FRESH`` — XKRX 정규장 거래 중.
+    - ``DATA_STATE_PREMARKET_UNAVAILABLE`` — XKRX 거래일의 정규장 개장
+      전(09:00 KST).
+    - ``DATA_STATE_MARKET_CLOSED`` — 장 마감 뒤, 주말 또는 휴일.
 
-    ``now`` accepts any pandas-parseable timestamp (defaults to current UTC);
-    naive timestamps are assumed UTC.
+    ``now``는 pandas가 해석할 수 있는 시각이며 기본값은 현재 UTC다.
+    timezone-naive 입력은 UTC로 간주한다.
     """
     ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now("UTC")
     if ts.tz is None:
@@ -74,12 +69,12 @@ def kr_market_data_state(now: Any = None) -> str:
 
 
 def us_market_session(now: Any = None) -> str:
-    """Classify the current US equity quote session using XNYS regular bounds.
+    """XNYS 정규장 경계를 기준으로 현재 미국 equity quote 세션을 판정한다.
 
-    Returns ``premarket`` for 04:00 ET up to the XNYS open, ``regular`` for
-    XNYS regular hours, ``afterhours`` from the XNYS close up to 20:00 ET, and
-    ``closed`` outside those windows or on non-session days. Naive timestamps
-    are treated as UTC. Early closes are honored by ``regular_session_bounds``.
+    04:00 ET부터 XNYS 개장 전까지는 ``premarket``, 정규장 중에는
+    ``regular``, XNYS 폐장부터 20:00 ET 전까지는 ``afterhours``다.
+    그 밖의 시간과 비거래일은 ``closed``다. timezone-naive 입력은 UTC로
+    간주하며 ``regular_session_bounds``의 조기 폐장도 반영한다.
     """
     current = now if now is not None else _dt.datetime.now(_dt.UTC)
     if not isinstance(current, _dt.datetime):
@@ -111,24 +106,17 @@ def us_market_session(now: Any = None) -> str:
 
 
 def is_kr_session_day(date: Any) -> bool:
-    """True when ``date`` (a KST calendar date) is an XKRX trading session."""
+    """``date``가 KST 기준 XKRX 거래일이면 ``True``를 반환한다."""
     return is_trading_session("kr", pd.Timestamp(date).date())
 
 
 def previous_kr_session(date: Any) -> _dt.date:
-    """Return the XKRX trading session strictly before ``date``.
+    """``date``보다 앞선 가장 최근 XKRX 거래일을 반환한다.
 
-    ``date`` is a KST calendar date and need not itself be a session — for a
-    weekend or holiday input the most recent prior session is returned. The
-    result is always strictly earlier than ``date``, so passing a session day
-    yields the session before it (not the same day). This correctly handles the
-    Monday-after-holiday edge: e.g. with 2026-06-06 (현충일) on a Saturday, the
-    session before Monday 2026-06-08 is Friday 2026-06-05, and after a multi-day
-    holiday (Lunar New Year) it walks back to the last session before it.
-
-    Backed by the XKRX calendar's ``date_to_session(..., direction="previous")``
-    applied to the day before ``date`` so the result is never on-or-after
-    ``date``.
+    ``date``는 KST 달력 날짜이며 그 자체가 거래일일 필요는 없다. 주말이나
+    휴일이면 가장 최근 거래일로 되돌아가며, 거래일을 넘겨도 같은 날짜가
+    아니라 그 전 거래일을 반환한다. 따라서 연휴와 월요일 경계에서도 항상
+    입력 날짜보다 앞선 결과를 보장한다.
     """
     target = pd.Timestamp(date).date()
     session = previous_trading_session("kr", target)

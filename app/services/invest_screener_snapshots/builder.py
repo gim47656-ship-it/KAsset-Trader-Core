@@ -90,9 +90,9 @@ def derive_metrics(closes: Sequence[Decimal]) -> DerivedMetrics:
 
 def _market_type_and_source(market: str) -> tuple[str, str]:
     if market == "kr":
-        return "equity_kr", "kis"
+        return "equity_kr", "toss"
     if market == "us":
-        return "equity_us", "yahoo"
+        return "equity_us", "toss"
     raise ValueError(f"unsupported market: {market}")
 
 
@@ -139,12 +139,11 @@ async def build_snapshot_for_symbol(
         return None
     df = df.sort_values("date").reset_index(drop=True) if "date" in df.columns else df
     if "date" in df.columns:
-        # ROB-430 트랙B follow-up: compute the streak on COMPLETED daily closes only
-        # (Toss "종가 기준"). The KIS daily endpoint returns a forming bar for the
-        # current session intraday; including it would let an intraday/down move
-        # prematurely break a streak. expected_baseline_date returns the prior
-        # session before KR close (or today once closed), so an incomplete today-bar
-        # is dropped only when present — a no-op for an end-of-day build.
+        # ROB-430 트랙B 후속: 상승 연속일은 종료된 일봉만으로 계산한다.
+        # Toss의 '종가 기준' 계약에서도 공급자 payload에 오늘 형성 중 봉이
+        # 들어올 수 있다. 이를 포함하면 장중 하락만으로 연속 상승이 일찍
+        # 끊긴다. expected_baseline_date는 KR 장 마감 전에는 직전 세션을,
+        # 마감 뒤에는 오늘을 반환하므로 형성 중 봉이 있을 때만 제거한다.
         completed_through = expected_baseline_date(market, now=now)
         df = df[
             df["date"].map(

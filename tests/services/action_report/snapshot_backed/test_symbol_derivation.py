@@ -120,7 +120,7 @@ def _make_service(
 async def test_seed_symbols_preserved_when_no_derived_sources():
     service = _make_service()
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=["005930"]
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=["005930"]
     )
     assert isinstance(result, SymbolDerivation)
     assert result.symbols == ["005930"]
@@ -137,7 +137,7 @@ async def test_seed_unioned_with_derived_sources():
         candidate=["028260"],
     )
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=["096770"]
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=["096770"]
     )
     assert set(result.symbols) == {
         "005930",
@@ -159,7 +159,7 @@ async def test_seed_unioned_with_derived_sources():
 async def test_derived_when_seed_is_none():
     service = _make_service(manual=["005930"], watch=["035420"])
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     assert set(result.symbols) == {"005930", "035420"}
     assert result.provenance["sources"]["seed"] == []
@@ -174,7 +174,7 @@ async def test_max_symbols_cap_records_dropped():
     candidates = [f"C{i:04d}" for i in range(60)]
     service = _make_service(candidate=candidates, max_symbols=50, top_candidates=60)
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     assert len(result.symbols) == 50
     assert len(result.provenance["dropped_by_cap"]) == 10
@@ -191,7 +191,7 @@ async def test_seed_never_dropped_even_when_over_cap():
     service = _make_service(candidate=candidates, max_symbols=50, top_candidates=40)
     result = await service.derive(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         user_id=42,
         seed_symbols=seeds,
     )
@@ -222,7 +222,7 @@ async def test_top_candidates_bound_is_passed_to_repo():
         top_candidates=15,
     )
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     # Only top 15 candidates requested.
     assert len(result.symbols) == 15
@@ -240,7 +240,7 @@ async def test_duplicate_symbols_across_sources_dedup_with_multi_attribution():
         manual=["005930"], journal=["005930"], watch=[], candidate=[]
     )
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     assert result.symbols == ["005930"]
     assert result.provenance["sources"]["portfolio"] == ["005930"]
@@ -251,7 +251,7 @@ async def test_duplicate_symbols_across_sources_dedup_with_multi_attribution():
 async def test_provenance_exposes_cap_and_counts():
     service = _make_service(manual=["A"], journal=["B"], watch=["C"], candidate=["D"])
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=["E"]
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=["E"]
     )
     assert result.provenance["cap"] == 50
     assert "sources" in result.provenance
@@ -302,10 +302,10 @@ async def test_live_holdings_repo_not_consulted_for_kr():
     live = _FakeLiveHoldingsRepo(["KRW-BTC"])
     service = _make_service(manual=["005930"], live_holdings=live)
     await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
-    # The crypto live-holdings source is crypto-only; KR uses the KIS-live
-    # collector path, not this repo.
+    # live-holdings source는 crypto 전용이며 KR Toss 보유는 portfolio
+    # collector 경로에서 합쳐진다.
     assert live.calls == []
 
 
@@ -328,7 +328,7 @@ async def test_live_holdings_error_is_soft_and_recorded():
 async def test_candidate_empty_reason_recorded_when_no_fresh_universe():
     service = _make_service(manual=["005930"], candidate=[])
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     coverage = result.provenance["source_coverage"]
     assert coverage["candidate"]["count"] == 0
@@ -339,7 +339,7 @@ async def test_candidate_empty_reason_recorded_when_no_fresh_universe():
 async def test_candidate_non_empty_has_count_and_no_empty_reason():
     service = _make_service(manual=["005930"], candidate=["000660", "035420"])
     result = await service.derive(
-        market="kr", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="kr", account_scope="toss_live", user_id=42, seed_symbols=None
     )
     coverage = result.provenance["source_coverage"]
     assert coverage["candidate"]["count"] == 2
@@ -370,12 +370,12 @@ class _CapturingSession:
 
 
 @pytest.mark.asyncio
-async def test_default_journal_repo_filters_us_kis_live_scope():
+async def test_default_journal_repo_filters_us_toss_live_scope():
     session = _CapturingSession(rows=[("AAPL",), ("DKNG",)])
     repo = _DefaultJournalRepo(session)  # type: ignore[arg-type]
 
     symbols = await repo.list_active_journal_symbols(
-        market="us", account_scope="kis_live"
+        market="us", account_scope="toss_live"
     )
 
     assert symbols == ["AAPL", "DKNG"]
@@ -386,8 +386,8 @@ async def test_default_journal_repo_filters_us_kis_live_scope():
     assert "review.trade_journals.status = 'active'" in compiled
     assert "review.trade_journals.account_type = 'live'" in compiled
     assert "review.trade_journals.instrument_type = 'equity_us'" in compiled
-    assert "review.trade_journals.account = 'kis'" in compiled
-    assert "review.trade_journals.account IS NULL" in compiled
+    assert "review.trade_journals.account = 'toss'" in compiled
+    assert "review.trade_journals.account IS NULL" not in compiled
 
 
 @pytest.mark.asyncio
@@ -403,10 +403,10 @@ async def test_derive_passes_account_scope_to_journal_repo():
     )
 
     await service.derive(
-        market="us", account_scope="kis_live", user_id=42, seed_symbols=None
+        market="us", account_scope="toss_live", user_id=42, seed_symbols=None
     )
 
-    assert journal_repo.calls == [("us", "kis_live")]
+    assert journal_repo.calls == [("us", "toss_live")]
 
 
 # ---------------------------------------------------------------------------

@@ -132,7 +132,7 @@ async def test_blocked_run_artifacts_still_queryable(db_session):
         snapshot_bundle_uuid=uuid.uuid4(),
         market="kr",
         market_session="regular",
-        account_scope="kis_live",
+        account_scope="toss_live",
     )
     artifact_bull = await repo.persist_artifact(
         run.run_uuid,

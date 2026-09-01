@@ -471,7 +471,7 @@ class TestPlaceOrderRegistration:
         live_stub.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_account_type_real_still_calls_live_impl(self):
+    async def test_default_equity_routes_to_toss_preview(self):
         from app.mcp_server.tooling import orders_registration
 
         registered: dict[str, Any] = {}
@@ -485,33 +485,28 @@ class TestPlaceOrderRegistration:
                 return _wrap
 
         orders_registration.register_order_tools(DummyMCP())
-        place_order = registered["place_order"]
-
-        paper_stub = AsyncMock()
-        live_stub = AsyncMock(return_value={"success": True, "dry_run": True})
-
-        with (
-            patch.object(orders_registration, "_place_paper_order", paper_stub),
-            patch.object(
-                orders_registration.order_execution,
-                "_place_order_impl",
-                live_stub,
-            ),
+        toss_stub = AsyncMock(
+            return_value={"success": True, "source": "toss", "approval_hash": "hash"}
+        )
+        with patch.object(
+            orders_registration.orders_toss_variants,
+            "toss_preview_order",
+            toss_stub,
         ):
-            result = await place_order(
+            result = await registered["place_order"](
                 symbol="005930",
                 side="buy",
-                order_type="limit",
                 quantity=10,
                 price=70000,
             )
 
         assert result["success"] is True
-        live_stub.assert_awaited_once()
-        paper_stub.assert_not_called()
+        assert result["account_mode"] == "toss_live"
+        toss_stub.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_account_mode_kis_mock_routes_to_order_impl_with_mock_enabled(self):
+    @pytest.mark.parametrize("account_mode", ["kis_live", "kis_mock"])
+    async def test_kis_modes_fail_closed_before_broker_call(self, account_mode):
         from app.mcp_server.tooling import orders_registration
 
         registered: dict[str, Any] = {}
@@ -525,39 +520,36 @@ class TestPlaceOrderRegistration:
                 return _wrap
 
         orders_registration.register_order_tools(DummyMCP())
-        place_order = registered["place_order"]
-
-        live_stub = AsyncMock(
-            return_value={"success": True, "dry_run": True, "source": "kis"}
-        )
-
+        legacy_stub = AsyncMock()
+        toss_stub = AsyncMock()
         with (
-            patch.object(
-                orders_registration,
-                "validate_kis_mock_config",
-                return_value=[],
-            ),
             patch.object(
                 orders_registration.order_execution,
                 "_place_order_impl",
-                live_stub,
+                legacy_stub,
+            ),
+            patch.object(
+                orders_registration.orders_toss_variants,
+                "toss_preview_order",
+                toss_stub,
             ),
         ):
-            result = await place_order(
+            result = await registered["place_order"](
                 symbol="005930",
                 side="buy",
-                order_type="limit",
                 quantity=10,
                 price=70000,
-                account_mode="kis_mock",
+                account_mode=account_mode,
             )
 
-        assert result["account_mode"] == "kis_mock"
-        live_stub.assert_awaited_once()
-        assert live_stub.await_args.kwargs["is_mock"] is True
+        assert result["success"] is False
+        assert result["error"] == "provider kis is not operational"
+        assert result["account_mode"] == account_mode
+        legacy_stub.assert_not_awaited()
+        toss_stub.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_account_mode_kis_mock_fails_closed_before_broker_call(self):
+    async def test_account_mode_kis_mock_rejects_history_without_dispatch(self):
         from app.mcp_server.tooling import orders_registration
 
         registered: dict[str, Any] = {}
@@ -571,36 +563,21 @@ class TestPlaceOrderRegistration:
                 return _wrap
 
         orders_registration.register_order_tools(DummyMCP())
-        place_order = registered["place_order"]
-
-        live_stub = AsyncMock()
-
-        with (
-            patch.object(
-                orders_registration,
-                "validate_kis_mock_config",
-                return_value=["KIS_MOCK_ENABLED", "KIS_MOCK_APP_KEY"],
-            ),
-            patch.object(
-                orders_registration.order_execution,
-                "_place_order_impl",
-                live_stub,
-            ),
+        history_stub = AsyncMock()
+        with patch.object(
+            orders_registration.orders_history,
+            "get_order_history_impl",
+            history_stub,
         ):
-            result = await place_order(
+            result = await registered["get_order_history"](
                 symbol="005930",
-                side="buy",
-                order_type="limit",
-                quantity=10,
-                price=70000,
                 account_mode="kis_mock",
             )
 
         assert result["success"] is False
+        assert result["error"] == "provider kis is not operational"
         assert result["account_mode"] == "kis_mock"
-        assert "KIS_MOCK_ENABLED" in result["error"]
-        assert "KIS_MOCK_APP_KEY" in result["error"]
-        live_stub.assert_not_called()
+        history_stub.assert_not_awaited()
 
 
 class TestGetOrderHistoryRegistration:
@@ -680,43 +657,3 @@ class TestGetOrderHistoryRegistration:
         assert result["success"] is True
         live_stub.assert_awaited_once()
         paper_stub.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_account_mode_kis_mock_routes_history_with_mock_enabled(self):
-        from app.mcp_server.tooling import orders_registration
-
-        registered: dict[str, Any] = {}
-
-        class DummyMCP:
-            def tool(self, name: str, description: str):
-                def _wrap(fn):
-                    registered[name] = fn
-                    return fn
-
-                return _wrap
-
-        orders_registration.register_order_tools(DummyMCP())
-        get_order_history = registered["get_order_history"]
-
-        live_stub = AsyncMock(return_value={"success": True, "orders": []})
-
-        with (
-            patch.object(
-                orders_registration,
-                "validate_kis_mock_config",
-                return_value=[],
-            ),
-            patch.object(
-                orders_registration.orders_history,
-                "get_order_history_impl",
-                live_stub,
-            ),
-        ):
-            result = await get_order_history(
-                symbol="005930",
-                account_mode="kis_mock",
-            )
-
-        assert result["account_mode"] == "kis_mock"
-        live_stub.assert_awaited_once()
-        assert live_stub.await_args.kwargs["is_mock"] is True

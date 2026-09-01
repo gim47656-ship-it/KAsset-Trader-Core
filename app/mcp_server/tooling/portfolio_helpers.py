@@ -71,7 +71,7 @@ def position_to_output(position: dict[str, Any]) -> dict[str, Any]:
         output["account_mode"] = _provenance_account_mode(
             broker=position.get("broker"),
             source=source,
-            routing_mode=str(position.get("routing_mode") or "kis_live"),
+            routing_mode=str(position.get("routing_mode") or "toss_live"),
         )
     return output
 

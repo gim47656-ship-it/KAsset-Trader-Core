@@ -96,8 +96,6 @@ def _holdings_kwargs(
         "include_current_price": include_current_price,
         "routing_account_mode": account_scope,
     }
-    if account_scope == "kis_mock":
-        kwargs["is_mock"] = True
     if account_scope == "upbit_live":
         kwargs["account"] = "upbit"
     if account_scope == "alpaca_paper":
@@ -122,11 +120,10 @@ def _account_routability(
     market: str,
     account_costs: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Compact per-account routability summary for the briefing (ROB-541).
+    """브리핑에 계정별 주문 가능 여부와 공급자 출처를 요약한다.
 
-    Surfaces ``account_mode`` (ROB-357 provenance label) and the authoritative
-    ``order_routable`` flag per account so a toss-held (reference-only) symbol is
-    distinguishable from a kis_live-sellable one without dumping full positions.
+    Toss API 보유와 수동 보유를 구분해 실제 ``order_routable`` 값을 그대로
+    노출하며 과거 KIS 출처를 Toss로 재분류하지 않는다.
     """
     accounts: list[dict[str, Any]] = []
     for account in holdings.get("accounts") or []:
@@ -286,6 +283,14 @@ async def get_operating_briefing_impl(
     cohort: str = "live_gated",
     include_counterfactual_delta: bool = False,
 ) -> dict[str, Any]:
+    if str(account_scope or "").startswith("kis"):
+        return {
+            "success": False,
+            "error": "provider kis is not operational",
+            "provider_unsupported": True,
+            "account_scope": account_scope,
+        }
+
     as_of = now_kst()
     effective_scope = _default_account_scope(market, account_scope)
     # ROB-1310: briefing consumes a bounded summary read model. It must not
@@ -476,8 +481,7 @@ async def get_operating_briefing_impl(
                 if "top_movers" in holdings
                 else _top_movers(holdings)
             ),
-            # ROB-541 — per-account routable/account_mode so a reference-only
-            # (toss/manual) holding is distinguishable from a kis_live-sellable one.
+            # Toss API 및 수동 참고 계정을 구분하는 계정별 provenance이다.
             "accounts": _account_routability(
                 holdings,
                 market=market,

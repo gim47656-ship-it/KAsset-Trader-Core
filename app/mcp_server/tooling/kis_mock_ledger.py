@@ -114,7 +114,7 @@ async def _fetch_kis_mock_baseline_qty(
     pre-buy baseline) and ``None`` only on broker/decoding failure so that the
     reconciler can flag it as ``baseline_missing`` later.
     """
-    from app.services.brokers.kis import KISClient
+    from app.services.brokers.kis.client import KISClient
 
     try:
         kis = KISClient(is_mock=True)

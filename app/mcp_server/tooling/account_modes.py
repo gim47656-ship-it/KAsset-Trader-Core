@@ -28,15 +28,11 @@ _ACCOUNT_MODE_ALIASES = {
     "kis_mock": (ACCOUNT_MODE_KIS_MOCK, False),
     "mock": (ACCOUNT_MODE_KIS_MOCK, True),
     "kis_live": (ACCOUNT_MODE_KIS_LIVE, False),
-    "real": (ACCOUNT_MODE_KIS_LIVE, False),
-    "live": (ACCOUNT_MODE_KIS_LIVE, True),
     "toss_live": (ACCOUNT_MODE_TOSS_LIVE, False),
 }
 
 _ACCOUNT_TYPE_ALIASES = {
     "paper": (ACCOUNT_MODE_DB_SIMULATED, True),
-    "real": (ACCOUNT_MODE_KIS_LIVE, False),
-    "live": (ACCOUNT_MODE_KIS_LIVE, True),
     "kis_live": (ACCOUNT_MODE_KIS_LIVE, False),
     "kis_mock": (ACCOUNT_MODE_KIS_MOCK, False),
     "toss_live": (ACCOUNT_MODE_TOSS_LIVE, False),
@@ -86,6 +82,10 @@ def _resolve_selector(
     normalized = _clean_selector(selector_value)
     if normalized is None:
         return None
+    if normalized in {"real", "live"}:
+        raise ValueError(
+            f"ambiguous {selector_name}='{normalized}'; use account_mode='toss_live'"
+        )
     if normalized not in aliases:
         allowed = ", ".join(sorted(aliases))
         raise ValueError(f"{selector_name} must be one of: {allowed}")
@@ -123,7 +123,7 @@ def normalize_account_mode(
     )
 
     if mode_result is None and type_result is None:
-        return AccountRouting(account_mode=ACCOUNT_MODE_KIS_LIVE)
+        return AccountRouting(account_mode=ACCOUNT_MODE_TOSS_LIVE)
 
     if mode_result is not None and type_result is not None:
         mode_value, _, _ = mode_result

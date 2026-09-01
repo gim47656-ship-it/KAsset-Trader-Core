@@ -23,8 +23,8 @@ class _StubService:
         accounts = [
             Account(
                 accountId="a1",
-                displayName="KIS",
-                source="kis",
+                displayName="Toss",
+                source="toss_api",
                 accountKind="live",
                 includedInHome=True,
                 valueKrw=10_000_000,
@@ -36,8 +36,8 @@ class _StubService:
             ),
             Account(
                 accountId="a2",
-                displayName="Mock",
-                source="kis_mock",
+                displayName="Alpaca Paper",
+                source="alpaca_paper",
                 accountKind="paper",
                 includedInHome=False,
                 valueKrw=99,
@@ -52,7 +52,7 @@ class _StubService:
             Holding(
                 holdingId="h1",
                 accountId="a1",
-                source="kis",
+                source="toss_api",
                 accountKind="live",
                 symbol="005930",
                 market="KR",
@@ -120,9 +120,9 @@ def test_get_home_returns_200_with_schema(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["homeSummary"]["totalValueKrw"] == 10_000_000  # mock 제외
-    assert "kis_mock" in body["homeSummary"]["excludedSources"]
+    assert "alpaca_paper" in body["homeSummary"]["excludedSources"]
     assert any(
-        a["source"] == "kis_mock" and a["includedInHome"] is False
+        a["source"] == "alpaca_paper" and a["includedInHome"] is False
         for a in body["accounts"]
     )
     assert body["groupedHoldings"][0]["groupId"] == "KR:equity:KRW:005930"
@@ -197,9 +197,76 @@ async def test_home_endpoint_passes_include_paper_query():
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         r = await client.get(
-            "/invest/api/home?includePaper=true&paperSources=kis_mock,alpaca_paper"
+            "/invest/api/home?includePaper=true&paperSources=alpaca_paper"
         )
 
     assert r.status_code == 200
     assert received["include_paper"] is True
-    assert received["paper_sources"] == frozenset({"kis_mock", "alpaca_paper"})
+    assert received["paper_sources"] == frozenset({"alpaca_paper"})
+
+
+@pytest.mark.unit
+def test_home_dependency_wires_toss_without_constructing_kis(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from app.routers import invest_api
+    from app.services import (
+        invest_home_readers,
+        invest_quote_service,
+        portfolio_snapshot_cache,
+    )
+
+    db = object()
+    quote_service = object()
+    upbit_reader = object()
+    manual_reader = object()
+    toss_reader = object()
+    paper_reader = object()
+    snapshot_cache = object()
+    forbidden_kis_factory = MagicMock(
+        side_effect=AssertionError("KIS runtime factory must not be called")
+    )
+    monkeypatch.setattr(
+        invest_home_readers,
+        "KISHomeReader",
+        forbidden_kis_factory,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        invest_home_readers,
+        "SafeKISClient",
+        forbidden_kis_factory,
+        raising=False,
+    )
+    quote_factory = MagicMock(return_value=quote_service)
+    monkeypatch.setattr(invest_quote_service, "InvestQuoteService", quote_factory)
+    monkeypatch.setattr(
+        invest_home_readers, "UpbitHomeReader", MagicMock(return_value=upbit_reader)
+    )
+    manual_factory = MagicMock(return_value=manual_reader)
+    monkeypatch.setattr(invest_home_readers, "ManualHomeReader", manual_factory)
+    monkeypatch.setattr(
+        invest_home_readers, "TossApiHomeReader", MagicMock(return_value=toss_reader)
+    )
+    monkeypatch.setattr(
+        invest_home_readers,
+        "AlpacaPaperHomeReader",
+        MagicMock(return_value=paper_reader),
+    )
+    monkeypatch.setattr(
+        portfolio_snapshot_cache,
+        "get_shared_portfolio_snapshot_cache",
+        MagicMock(return_value=snapshot_cache),
+    )
+
+    service = invest_api.get_invest_home_service(db)
+
+    quote_factory.assert_called_once_with(db)
+    manual_factory.assert_called_once_with(db, quote_service=quote_service)
+    forbidden_kis_factory.assert_not_called()
+    assert service._upbit is upbit_reader
+    assert service._manual is manual_reader
+    assert service._toss_api is toss_reader
+    assert service._paper_readers == [paper_reader]
+    assert service._snapshot_cache is snapshot_cache
+    assert not hasattr(service, "_kis")

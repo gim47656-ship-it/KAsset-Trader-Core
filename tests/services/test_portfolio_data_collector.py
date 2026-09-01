@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,139 +20,117 @@ def _make_collector():
     return PortfolioDataCollector(db)
 
 
-def _make_kis_kr_stock(**kwargs):
+def _make_toss_position(**overrides):
     defaults = {
-        "hldg_qty": "10",
-        "pchs_avg_pric": "50000",
-        "prpr": "55000",
-        "evlu_amt": "550000",
-        "evlu_pfls_amt": "50000",
-        "evlu_pfls_rt": "10.00",
-        "pdno": "005930",
-        "prdt_name": "삼성전자",
+        "instrument_type": "equity_kr",
+        "symbol": "005930",
+        "name": "삼성전자",
+        "account_name": "Toss",
+        "quantity": Decimal("10"),
+        "avg_buy_price": Decimal("50000"),
+        "current_price": Decimal("55000"),
+        "evaluation_amount": Decimal("550000"),
+        "profit_loss": Decimal("50000"),
+        "profit_rate": Decimal("0.10"),
+        "sellable_quantity": Decimal("10"),
     }
-    defaults.update(kwargs)
-    return defaults
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
-def _make_kis_us_stock(**kwargs):
-    defaults = {
-        "ovrs_cblc_qty": "5",
-        "pchs_avg_pric": "150.00",
-        "now_pric2": "170.00",
-        "ovrs_stck_evlu_amt": "850.00",
-        "frcr_evlu_pfls_amt": "100.00",
-        "evlu_pfls_rt": "13.33",
-        "ovrs_pdno": "AAPL",
-        "ovrs_item_name": "Apple Inc",
-    }
-    defaults.update(kwargs)
-    return defaults
+def test_collector_module_does_not_expose_kis_runtime_symbols():
+    import app.services.portfolio_data_collector as module
 
-
-# ---------------------------------------------------------------------------
-# _collect_kis_kr_components
-# ---------------------------------------------------------------------------
+    assert not hasattr(module, "KISClient")
+    assert not hasattr(PortfolioDataCollector, "_collect_kis_components")
+    assert not hasattr(PortfolioDataCollector, "_collect_kis_kr_components")
+    assert not hasattr(PortfolioDataCollector, "_collect_kis_us_components")
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_collect_kis_kr_returns_component_for_held_stock():
+async def test_collect_toss_maps_kr_and_us_general_snapshot():
     collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_stocks.return_value = [_make_kis_kr_stock()]
+    fetcher = AsyncMock(
+        return_value=SimpleNamespace(
+            positions=[
+                _make_toss_position(profit_loss=None),
+                _make_toss_position(
+                    instrument_type="equity_us",
+                    symbol="AAPL",
+                    name="Apple",
+                    quantity=Decimal("5"),
+                    avg_buy_price=Decimal("150"),
+                    current_price=Decimal("170"),
+                    evaluation_amount=Decimal("850"),
+                    profit_loss=Decimal("100"),
+                    profit_rate=Decimal("0.1333"),
+                ),
+                _make_toss_position(symbol="000660", quantity=Decimal("0")),
+                _make_toss_position(instrument_type="crypto", symbol="KRW-BTC"),
+            ],
+            errors=[],
+        )
+    )
     warnings: list[str] = []
 
-    components, w = await collector._collect_kis_kr_components(kis_client, warnings)
+    with patch(
+        "app.services.portfolio_data_collector.fetch_toss_portfolio_snapshot",
+        fetcher,
+    ):
+        components = await collector._collect_toss_components(warnings)
 
-    assert len(components) == 1
-    comp = components[0]
-    assert comp["market_type"] == "KR"
-    assert comp["symbol"] == "005930"
-    assert comp["broker"] == "kis"
-    assert comp["quantity"] == 10.0
-    assert w == []
+    assert [(row["market_type"], row["symbol"]) for row in components] == [
+        ("KR", "005930"),
+        ("US", "AAPL"),
+    ]
+    assert components[0]["account_key"] == "live:toss"
+    assert components[0]["broker"] == "toss"
+    assert components[0]["profit_rate"] == pytest.approx(0.10)
+    assert components[0]["profit_loss"] is None
+    assert "sellable_quantity" not in components[0]
+    assert warnings == []
+    fetcher.assert_awaited_once_with(need_sellable=False, need_cash=False)
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_collect_kis_kr_skips_zero_quantity():
+async def test_collect_toss_appends_warning_on_failure():
     collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_stocks.return_value = [_make_kis_kr_stock(hldg_qty="0")]
+    fetcher = AsyncMock(side_effect=RuntimeError("network error"))
     warnings: list[str] = []
 
-    components, w = await collector._collect_kis_kr_components(kis_client, warnings)
+    with patch(
+        "app.services.portfolio_data_collector.fetch_toss_portfolio_snapshot",
+        fetcher,
+    ):
+        components = await collector._collect_toss_components(warnings)
 
     assert components == []
-    assert w == []
+    assert len(warnings) == 1
+    assert "Toss" in warnings[0]
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_collect_kis_kr_appends_warning_on_failure():
+async def test_collect_toss_surfaces_sanitized_partial_code():
     collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_stocks.side_effect = RuntimeError("network error")
+    fetcher = AsyncMock(
+        return_value=SimpleNamespace(
+            positions=[],
+            errors=[{"code": "snapshot_partial"}],
+        )
+    )
     warnings: list[str] = []
 
-    components, w = await collector._collect_kis_kr_components(kis_client, warnings)
+    with patch(
+        "app.services.portfolio_data_collector.fetch_toss_portfolio_snapshot",
+        fetcher,
+    ):
+        components = await collector._collect_toss_components(warnings)
 
     assert components == []
-    assert len(w) == 1
-    assert "KIS KR" in w[0]
-
-
-# ---------------------------------------------------------------------------
-# _collect_kis_us_components
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_collect_kis_us_returns_component_for_held_stock():
-    collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_us_stocks.return_value = [_make_kis_us_stock()]
-    warnings: list[str] = []
-
-    components, w = await collector._collect_kis_us_components(kis_client, warnings)
-
-    assert len(components) == 1
-    comp = components[0]
-    assert comp["market_type"] == "US"
-    assert comp["symbol"] == "AAPL"
-    assert comp["broker"] == "kis"
-    assert w == []
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_collect_kis_us_skips_zero_quantity():
-    collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_us_stocks.return_value = [_make_kis_us_stock(ovrs_cblc_qty="0")]
-    warnings: list[str] = []
-
-    components, w = await collector._collect_kis_us_components(kis_client, warnings)
-
-    assert components == []
-    assert w == []
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_collect_kis_us_appends_warning_on_failure():
-    collector = _make_collector()
-    kis_client = AsyncMock()
-    kis_client.fetch_my_us_stocks.side_effect = RuntimeError("timeout")
-    warnings: list[str] = []
-
-    components, w = await collector._collect_kis_us_components(kis_client, warnings)
-
-    assert components == []
-    assert len(w) == 1
-    assert "KIS US" in w[0]
+    assert warnings == ["Toss holdings partial: snapshot_partial"]
 
 
 # ---------------------------------------------------------------------------

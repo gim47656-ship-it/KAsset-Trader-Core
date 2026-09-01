@@ -1,13 +1,8 @@
-"""Daily candle sync orchestrator.
+"""일봉 동기화 오케스트레이터.
 
-Composes:
-- kis_daily_fetcher (KR + US primary)
-- upbit daily fetcher (crypto primary)
-- yahoo_us_fallback (US fallback only)
-- DailyCandlesRepository (DB boundary)
-
-Pure orchestration. The actual external-API calls live in the
-fetcher modules; the SQL lives in the repository.
+주식의 유일한 기본 provider는 Toss다. KR benchmark는 Toss market
+indicator를 우선 사용하고 Naver로 보강하며, crypto는 Upbit를 사용한다.
+Yahoo는 명시적 adjusted-close 보강 작업에만 남긴다.
 """
 
 from __future__ import annotations
@@ -107,12 +102,10 @@ class SyncOneResult:
     skipped_reason: str | None = None
 
 
-KISKrFetcher = Callable[..., Awaitable[pd.DataFrame]]
-KISUsFetcher = Callable[..., Awaitable[pd.DataFrame]]
 YahooUsFetcher = Callable[..., Awaitable[list[YahooFallbackRow]]]
 UpbitCryptoFetcher = Callable[..., Awaitable[pd.DataFrame]]
 TossDailyFetcher = Callable[..., Awaitable[pd.DataFrame]]
-KISKrBenchmarkFetcher = Callable[..., Awaitable[pd.DataFrame]]
+TossKrBenchmarkFetcher = Callable[..., Awaitable[pd.DataFrame]]
 NaverKrBenchmarkFetcher = Callable[..., Awaitable[pd.DataFrame]]
 
 
@@ -121,29 +114,25 @@ class DailyCandleSyncService:
         self,
         *,
         repository: DailyCandlesRepository,
-        kis_kr_fetcher: KISKrFetcher,
-        kis_us_fetcher: KISUsFetcher,
+        toss_kr_fetcher: TossDailyFetcher,
+        toss_us_fetcher: TossDailyFetcher,
         yahoo_us_fetcher: YahooUsFetcher,
         upbit_crypto_fetcher: UpbitCryptoFetcher,
-        toss_kr_fetcher: TossDailyFetcher | None = None,
-        toss_us_fetcher: TossDailyFetcher | None = None,
-        kis_kr_benchmark_fetcher: KISKrBenchmarkFetcher | None = None,
+        toss_kr_benchmark_fetcher: TossKrBenchmarkFetcher | None = None,
         naver_kr_benchmark_fetcher: NaverKrBenchmarkFetcher | None = None,
         close_callbacks: list[Callable[[], object]] | None = None,
     ) -> None:
         self._repository = repository
-        self._kis_kr = kis_kr_fetcher
-        self._kis_us = kis_us_fetcher
-        self._yahoo_us = yahoo_us_fetcher
-        self._upbit = upbit_crypto_fetcher
         self._toss_kr = toss_kr_fetcher
         self._toss_us = toss_us_fetcher
-        self._kis_kr_benchmark = kis_kr_benchmark_fetcher
+        self._yahoo_us = yahoo_us_fetcher
+        self._upbit = upbit_crypto_fetcher
+        self._toss_kr_benchmark = toss_kr_benchmark_fetcher
         self._naver_kr_benchmark = naver_kr_benchmark_fetcher
         self._close_callbacks = close_callbacks or []
 
     async def close(self) -> None:
-        """Release resources owned by the default service factory."""
+        """기본 service factory가 소유한 자원을 해제한다."""
         for callback in self._close_callbacks:
             result = callback()
             if inspect.isawaitable(result):
@@ -161,7 +150,7 @@ class DailyCandleSyncService:
     async def sync_us_adjusted_close(
         self, *, target: SyncTarget, horizon_bars: int
     ) -> int:
-        """Require and persist a complete Yahoo adjusted-close backfill slice."""
+        """완전한 Yahoo adjusted-close backfill slice만 저장한다."""
         if target.market != MarketKey.US:
             raise ValueError("Yahoo adjusted-close 보강은 US 대상만 지원합니다")
         if target.partition not in _VALID_US_PARTITIONS:
@@ -223,7 +212,6 @@ class DailyCandleSyncService:
         symbol: str | None = None,
     ) -> SyncOneResult:
         """후보 유니버스와 분리된 시장별 벤치마크를 동기화한다."""
-
         normalized_symbol = str(symbol or "").strip().upper()
         if market == MarketKey.US:
             if normalized_symbol and normalized_symbol != "SPY":
@@ -240,7 +228,7 @@ class DailyCandleSyncService:
             raise ValueError(f"일봉 벤치마크가 없는 시장입니다: {market}")
         if normalized_symbol not in {"", "KOSPI", "KOSDAQ"}:
             raise ValueError(f"지원하지 않는 KR 벤치마크입니다: {symbol!r}")
-        if self._kis_kr_benchmark is None and self._naver_kr_benchmark is None:
+        if self._toss_kr_benchmark is None and self._naver_kr_benchmark is None:
             raise RuntimeError("KR 벤치마크 fetcher가 설정되지 않았습니다")
 
         target = SyncTarget(
@@ -248,12 +236,12 @@ class DailyCandleSyncService:
             symbol=normalized_symbol or "KOSPI",
             partition="KRX",
         )
-        fallback_used = self._kis_kr_benchmark is None
+        fallback_used = self._toss_kr_benchmark is None
+        source = "toss_index"
         frame: pd.DataFrame | None = None
-        source = "kis_index"
-        if self._kis_kr_benchmark is not None:
+        if self._toss_kr_benchmark is not None:
             try:
-                frame = await self._kis_kr_benchmark(
+                frame = await self._toss_kr_benchmark(
                     symbol=target.symbol,
                     n=horizon_bars,
                 )
@@ -262,7 +250,7 @@ class DailyCandleSyncService:
                     raise
                 fallback_used = True
                 logger.warning(
-                    "KIS %s 일봉 조회 실패, Naver 대체 경로 사용: %s",
+                    "Toss %s 일봉 조회 실패, Naver 대체 경로 사용: %s",
                     target.symbol,
                     exc,
                 )
@@ -278,12 +266,12 @@ class DailyCandleSyncService:
                             target=target,
                             rows_upserted=0,
                             fallback_used=False,
-                            skipped_reason="kis_index_history_short",
+                            skipped_reason="toss_index_history_short",
                         )
                     fallback_used = True
                     frame = None
                     logger.warning(
-                        "KIS %s 완료 일봉 수 부족, Naver 대체 경로 사용 requested=%d",
+                        "Toss %s 완료 일봉 수 부족, Naver 대체 경로 사용 requested=%d",
                         target.symbol,
                         horizon_bars,
                     )
@@ -323,183 +311,65 @@ class DailyCandleSyncService:
         )
 
     async def _sync_kr(self, target: SyncTarget, horizon_bars: int) -> SyncOneResult:
-        fallback_used = False
-        rows: list[DailyCandleRow] = []
-        kis_errored = False
-        try:
-            frame = await self._kis_kr(code=target.symbol, n=horizon_bars + 1)
-        except Exception as exc:
-            # KIS 예외도 빈 응답과 같은 fallback 계기다. 성공했지만 malformed인
-            # DataFrame은 아래 검증에서 그대로 실패시켜 Toss로 세탁하지 않는다.
-            if self._toss_kr is None:
-                raise
-            kis_errored = True
-            logger.warning(
-                "KIS KR 조회 예외, Toss 대체 경로 시도 symbol=%s error=%s",
-                target.symbol,
-                exc,
-            )
-        else:
-            frame = _closed_equity_frame(
-                frame, market=MarketKey.KR.value, horizon_bars=horizon_bars
-            )
-            rows = frame_to_rows(
-                frame,
-                symbol=target.symbol,
-                partition=target.partition,
-                source="kis",
-            )
-
-        if not rows and self._toss_kr is not None:
-            if not kis_errored:
-                logger.warning(
-                    "KIS KR 조회 결과 없음, Toss 대체 경로 시도 symbol=%s",
-                    target.symbol,
-                )
-            toss_frame = await self._toss_kr(symbol=target.symbol, n=horizon_bars + 1)
-            toss_frame = _closed_equity_frame(
-                toss_frame, market=MarketKey.KR.value, horizon_bars=horizon_bars
-            )
-            rows = frame_to_rows(
-                toss_frame,
-                symbol=target.symbol,
-                partition=target.partition,
-                source="toss",
-            )
-            fallback_used = True
+        frame = await self._toss_kr(symbol=target.symbol, n=horizon_bars + 1)
+        frame = _closed_equity_frame(
+            frame,
+            market=MarketKey.KR.value,
+            horizon_bars=horizon_bars,
+        )
+        rows = frame_to_rows(
+            frame,
+            symbol=target.symbol,
+            partition=target.partition,
+            source="toss",
+        )
         if not rows:
             return SyncOneResult(
                 target=target,
                 rows_upserted=0,
-                fallback_used=fallback_used,
-                skipped_reason="sources_empty",
+                fallback_used=False,
+                skipped_reason="toss_empty",
             )
-
         upserted = await self._repository.upsert_rows(market=target.market, rows=rows)
         await self._commit_or_rollback()
         return SyncOneResult(
             target=target,
             rows_upserted=upserted,
-            fallback_used=fallback_used,
+            fallback_used=False,
         )
 
     async def _sync_us(self, target: SyncTarget, horizon_bars: int) -> SyncOneResult:
         if target.partition not in _VALID_US_PARTITIONS:
             raise ValueError(f"지원하지 않는 미국 일봉 파티션: {target.partition!r}")
-
-        kis_errored = False
-        try:
-            frame = await self._kis_us(
-                symbol=target.symbol,
-                exchange_code=target.partition,
-                n=horizon_bars + 1,
-            )
-        except Exception as exc:
-            kis_errored = True
-            rows: list[DailyCandleRow] = []
-            logger.warning(
-                "KIS US 조회 예외, Yahoo 대체 경로 시도 symbol=%s exchange=%s error=%s",
-                target.symbol,
-                target.partition,
-                exc,
-            )
-        else:
-            # 예외 처리 범위를 provider 호출로 한정한다. 성공 응답의 잘못된
-            # 스키마/숫자는 Yahoo fallback으로 숨기지 않고 호출자에게 전달한다.
-            frame = _closed_equity_frame(
-                frame, market=MarketKey.US.value, horizon_bars=horizon_bars
-            )
-            rows = frame_to_rows(
-                frame,
-                symbol=target.symbol,
-                partition=target.partition,
-                source="kis",
-            )
-
-        if rows:
-            upserted = await self._repository.upsert_rows(
-                market=target.market,
-                rows=rows,
-                update_adj_close=False,
-            )
-            await self._commit_or_rollback()
-            return SyncOneResult(
-                target=target,
-                rows_upserted=upserted,
-                fallback_used=False,
-            )
-
-        if not kis_errored:
-            logger.warning(
-                "KIS US 조회 결과 없음, Yahoo 대체 경로 시도 symbol=%s exchange=%s",
-                target.symbol,
-                target.partition,
-            )
-        fallback_rows = await self._yahoo_us(symbol=target.symbol, n=horizon_bars)
-        if not fallback_rows:
-            if self._toss_us is not None:
-                logger.warning(
-                    "Yahoo US 조회 결과 없음, Toss 대체 경로 시도 "
-                    "symbol=%s exchange=%s",
-                    target.symbol,
-                    target.partition,
-                )
-                toss_frame = await self._toss_us(
-                    symbol=target.symbol, n=horizon_bars + 1
-                )
-                toss_frame = _closed_equity_frame(
-                    toss_frame,
-                    market=MarketKey.US.value,
-                    horizon_bars=horizon_bars,
-                )
-                repo_rows = frame_to_rows(
-                    toss_frame,
-                    symbol=target.symbol,
-                    partition=target.partition,
-                    source="toss_fallback",
-                )
-                if repo_rows:
-                    upserted = await self._repository.upsert_rows(
-                        market=target.market,
-                        rows=repo_rows,
-                        update_adj_close=False,
-                    )
-                    await self._commit_or_rollback()
-                    return SyncOneResult(
-                        target=target,
-                        rows_upserted=upserted,
-                        fallback_used=True,
-                    )
+        frame = await self._toss_us(symbol=target.symbol, n=horizon_bars + 1)
+        frame = _closed_equity_frame(
+            frame,
+            market=MarketKey.US.value,
+            horizon_bars=horizon_bars,
+        )
+        rows = frame_to_rows(
+            frame,
+            symbol=target.symbol,
+            partition=target.partition,
+            source="toss",
+        )
+        if not rows:
             return SyncOneResult(
                 target=target,
                 rows_upserted=0,
-                fallback_used=True,
-                skipped_reason="sources_empty",
+                fallback_used=False,
+                skipped_reason="toss_empty",
             )
-        repo_rows = [
-            DailyCandleRow(
-                time_utc=row.time_utc,
-                symbol=row.symbol,
-                partition=target.partition,
-                open=row.open,
-                high=row.high,
-                low=row.low,
-                close=row.close,
-                adj_close=row.adj_close,
-                volume=row.volume,
-                value=row.value,
-                source="yahoo_fallback",
-            )
-            for row in fallback_rows[-horizon_bars:]
-        ]
         upserted = await self._repository.upsert_rows(
-            market=target.market, rows=repo_rows
+            market=target.market,
+            rows=rows,
+            update_adj_close=False,
         )
         await self._commit_or_rollback()
         return SyncOneResult(
             target=target,
             rows_upserted=upserted,
-            fallback_used=True,
+            fallback_used=False,
         )
 
     async def _sync_crypto(
@@ -837,12 +707,9 @@ class DailyCandleSyncService:
     ) -> dict[str, Any]:
         """Run sync_one for every active (symbol, partition) pair in the market.
 
-        Target universe rules (resolution helpers wire to existing services):
-        - kr: union of active rows from kr_symbol_universe + KIS KR holdings + manual KR holdings.
-        - us: union of active rows from us_symbol_universe + KIS US holdings + manual US holdings.
-        - crypto: rows from upbit_symbol_universe (KRW market).
-
-        For the holdings-union pattern, see app/services/us_candles_sync_service.py:471-481.
+        Target universe rules:
+        - kr/us: active universe plus active watch items and research cohorts.
+        - crypto: active KRW rows from upbit_symbol_universe.
         """
         targets = await self._resolve_universe(market=market)
         rows_total = 0
@@ -1015,55 +882,39 @@ class DailyCandleSyncService:
 
 
 async def _build_default_service() -> DailyCandleSyncService:
-    """Build a DailyCandleSyncService wired to real dependencies.
-
-    The repository receives a fresh AsyncSession from AsyncSessionLocal —
-    the caller is responsible for closing/committing the session, but in
-    cron / CLI contexts the service lives only for the duration of one
-    invocation, so this is acceptable.
-    """
+    """소유 자원을 포함한 Toss-primary 일봉 서비스를 만든다."""
     import app.services.brokers.upbit.client as upbit_service
-    from app.core.config import settings
     from app.core.db import AsyncSessionLocal
-    from app.services.brokers.kis.client import KISClient
-    from app.services.daily_candles.benchmark_fetcher import (
-        fetch_kr_benchmark_daily,
-        fetch_kr_benchmark_daily_kis,
+    from app.services.daily_candles.benchmark_fetcher import fetch_kr_benchmark_daily
+    from app.services.daily_candles.toss_daily_fetcher import (
+        fetch_daily_toss_unclamped,
     )
-    from app.services.daily_candles.kis_daily_fetcher import (
-        fetch_kr_daily_unclamped,
-        fetch_us_daily_unclamped,
-    )
-    from app.services.daily_candles.toss_daily_fetcher import fetch_daily_toss_unclamped
     from app.services.daily_candles.yahoo_us_fallback import (
         fetch_us_daily_yahoo_fallback,
     )
+    from app.services.market_data.toss_ohlcv import (
+        fetch_kr_index_daily_toss_frame,
+    )
 
     session = AsyncSessionLocal()
-    kis = KISClient()
-
-    async def _kr(*, code: str, n: int) -> pd.DataFrame:
-        return await fetch_kr_daily_unclamped(kis=kis, code=code, n=n)
-
-    async def _us(*, symbol: str, exchange_code: str, n: int) -> pd.DataFrame:
-        return await fetch_us_daily_unclamped(
-            kis=kis, symbol=symbol, exchange_code=exchange_code, n=n
-        )
 
     async def _yahoo(*, symbol: str, n: int) -> list[YahooFallbackRow]:
         return await fetch_us_daily_yahoo_fallback(symbol=symbol, n=n)
 
     async def _upbit(*, market: str, days: int) -> pd.DataFrame:
-        return await upbit_service.fetch_ohlcv(market=market, days=days, period="day")
+        return await upbit_service.fetch_ohlcv(
+            market=market,
+            days=days,
+            period="day",
+        )
 
     async def _toss(*, symbol: str, n: int) -> pd.DataFrame:
         return await fetch_daily_toss_unclamped(symbol=symbol, n=n)
 
-    async def _kis_kr_benchmark(*, symbol: str, n: int) -> pd.DataFrame:
-        return await fetch_kr_benchmark_daily_kis(
-            kis=kis,
+    async def _toss_kr_benchmark(*, symbol: str, n: int) -> pd.DataFrame:
+        return await fetch_kr_index_daily_toss_frame(
             symbol=symbol,
-            n=n,
+            count=n,
         )
 
     async def _naver_kr_benchmark(*, symbol: str, n: int) -> pd.DataFrame:
@@ -1071,13 +922,11 @@ async def _build_default_service() -> DailyCandleSyncService:
 
     return DailyCandleSyncService(
         repository=DailyCandlesRepository(session=session),
-        kis_kr_fetcher=_kr,
-        kis_us_fetcher=_us,
+        toss_kr_fetcher=_toss,
+        toss_us_fetcher=_toss,
         yahoo_us_fetcher=_yahoo,
         upbit_crypto_fetcher=_upbit,
-        toss_kr_fetcher=_toss if settings.toss_api_enabled else None,
-        toss_us_fetcher=_toss if settings.toss_api_enabled else None,
-        kis_kr_benchmark_fetcher=_kis_kr_benchmark,
+        toss_kr_benchmark_fetcher=_toss_kr_benchmark,
         naver_kr_benchmark_fetcher=_naver_kr_benchmark,
-        close_callbacks=[session.close, kis.close],
+        close_callbacks=[session.close],
     )

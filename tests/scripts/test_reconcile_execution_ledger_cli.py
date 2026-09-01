@@ -15,7 +15,7 @@ def test_parse_args_accepts_explicit_date_window(monkeypatch):
         [
             "reconcile_execution_ledger.py",
             "--broker",
-            "kis",
+            "toss",
             "--start-date",
             "2026-02-01",
             "--end-date",
@@ -33,6 +33,16 @@ def test_parse_args_accepts_explicit_date_window(monkeypatch):
     assert args.max_pages == 25
 
 
+def test_parse_args_rejects_kis_broker(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        "sys.argv",
+        ["reconcile_execution_ledger.py", "--broker", "kis"],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.parse_args()
+
+
 @pytest.mark.asyncio
 async def test_main_commits_dry_run_audit_row(monkeypatch, capsys):
     monkeypatch.setattr(
@@ -40,7 +50,7 @@ async def test_main_commits_dry_run_audit_row(monkeypatch, capsys):
         [
             "reconcile_execution_ledger.py",
             "--broker",
-            "kis",
+            "toss",
             "--dry-run",
         ],
     )
@@ -61,7 +71,7 @@ async def test_main_commits_dry_run_audit_row(monkeypatch, capsys):
             assert repository is session
 
         async def run(self, broker: str, **kwargs: object) -> FakeDiff:
-            assert broker == "kis"
+            assert broker == "toss"
             assert kwargs["dry_run"] is True
             return FakeDiff()
 

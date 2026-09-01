@@ -1,17 +1,15 @@
 """Best-effort, fail-open enrichment for fill notifications.
 
-브로커 직접 조회(env 자격)로 체결 시점 평단/포지션/실현손익 근사치를 얻는다.
-어떤 예외도 알림을 막지 않는다(항상 None 반환으로 graceful).
+Toss/Upbit read-only 보유 조회로 체결 시점 평단·포지션·실현손익 근사치를
+얻는다. 어떤 provider 예외도 알림을 막지 않는다.
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.models.manual_holdings import MarketType
-from app.services.brokers.kis.client import KISClient
 from app.services.fill_notification import FillEnrichment, FillOrder
-from app.services.kis_holdings_service import get_kis_holding_for_ticker
+from app.services.toss_portfolio_service import fetch_toss_portfolio_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 async def fetch_fill_enrichment(order: FillOrder) -> FillEnrichment | None:
     try:
         if order.market_type in ("kr", "us"):
-            return await _fetch_kis(order)
+            return await _fetch_toss(order)
         if order.market_type == "crypto":
             return await _fetch_upbit(order)
     except Exception:
@@ -42,13 +40,28 @@ def _build(order: FillOrder, *, qty: float, avg: float) -> FillEnrichment | None
     return enr
 
 
-async def _fetch_kis(order: FillOrder) -> FillEnrichment | None:
-    market = MarketType.KR if order.market_type == "kr" else MarketType.US
-    holding = await get_kis_holding_for_ticker(KISClient(), order.symbol, market)
+async def _fetch_toss(order: FillOrder) -> FillEnrichment | None:
+    snapshot = await fetch_toss_portfolio_snapshot(
+        need_sellable=False,
+        need_cash=False,
+    )
+    instrument_type = f"equity_{order.market_type}"
+    symbol = order.symbol.strip().upper()
+    position = next(
+        (
+            row
+            for row in snapshot.positions
+            if row.instrument_type == instrument_type
+            and row.symbol.strip().upper() == symbol
+        ),
+        None,
+    )
+    if position is None:
+        return None
     return _build(
         order,
-        qty=float(holding.get("quantity") or 0),
-        avg=float(holding.get("avg_price") or 0),
+        qty=float(position.quantity),
+        avg=float(position.avg_buy_price),
     )
 
 

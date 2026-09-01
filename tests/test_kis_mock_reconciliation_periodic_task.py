@@ -7,12 +7,10 @@ import pytest
 import app.tasks.kis_mock_reconciliation_tasks as task_mod
 
 
-def test_task_registered_without_recurring_schedule():
+def test_task_module_is_not_registered():
     import app.tasks as task_package
 
-    assert task_mod in task_package.TASKIQ_TASK_MODULES
-    labels = getattr(task_mod.kis_mock_reconcile_periodic, "labels", {}) or {}
-    assert labels.get("schedule") is None
+    assert task_mod not in task_package.TASKIQ_TASK_MODULES
 
 
 @pytest.mark.asyncio

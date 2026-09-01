@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -50,8 +50,10 @@ from app.services.investment_snapshots.collectors import CollectorRequest
 
 def _request(
     market: str = "kr",
-    account_scope: str = "kis_live",
+    account_scope: str = "toss_live",
     symbols: list[str] | None = None,
+    *,
+    user_id: int | None = 42,
 ) -> CollectorRequest:
     return CollectorRequest(
         market=market,  # type: ignore[arg-type]
@@ -59,6 +61,7 @@ def _request(
         symbols=symbols,
         candidate_limit=None,
         policy_snapshot={},
+        user_id=user_id,
     )
 
 
@@ -67,11 +70,10 @@ def _request(
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_portfolio_collector_returns_holdings(monkeypatch: pytest.MonkeyPatch):
-    """v1 manual-primary path remains for non-(kis_live) combos.
+    """manual-primary 경로가 운영 Toss scope 밖에서 그대로 유지되는지 확인한다.
 
-    ROB-278 reserved kr+kis_live and ROB-297 reserved us+kis_live for the
-    KIS live path (see test_portfolio_v2_*). Other combos keep the v1
-    contract and additionally surface ``primary_source="manual"``.
+    KR/US의 ``toss_live``는 live portfolio collector를 사용하고, 그 외
+    조합은 manual holdings를 ``primary_source="manual"``로 노출한다.
     """
     from app.models.manual_holdings import MarketType
 
@@ -125,19 +127,17 @@ async def test_portfolio_collector_empty_holdings_returns_partial():
 
 
 # ---------------------------------------------------------------------------
-# Portfolio v2 — ROB-278 KIS live path for KR + kis_live.
-#
-# Lockdown policy:
-# - user_id missing on kis_live → fail-closed (unavailable, no implicit default).
-# - KIS success → primary_source="kis"; manual rows go to reference_holdings.
-# - KIS failure → primary_source="none"; manual NEVER promoted to primary.
-# - Payload v2 is additive: existing v1 keys (holdings, count, market) preserved.
-# - Non-(kr+kis_live) combos preserve v1 manual-primary behaviour.
+# Portfolio — KR/US Toss 일반 snapshot primary, 수동 보유는 owner-scoped reference.
 # ---------------------------------------------------------------------------
-def _kr_kis_request(user_id: int | None = None) -> CollectorRequest:
+def _equity_request(
+    market: str = "kr",
+    *,
+    account_scope: str = "toss_live",
+    user_id: int | None = 42,
+) -> CollectorRequest:
     return CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
+        market=market,  # type: ignore[arg-type]
+        account_scope=account_scope,  # type: ignore[arg-type]
         symbols=None,
         candidate_limit=None,
         policy_snapshot={},
@@ -146,7 +146,6 @@ def _kr_kis_request(user_id: int | None = None) -> CollectorRequest:
 
 
 def _empty_manual_session() -> MagicMock:
-    """Session whose execute() returns no manual_holdings rows."""
     session = MagicMock()
     scalars = MagicMock(all=MagicMock(return_value=[]))
     session.execute = AsyncMock(
@@ -181,171 +180,136 @@ def _manual_kr_session(rows: list[Any] | None = None) -> MagicMock:
     return session
 
 
-def _kis_reader_with_holdings() -> MagicMock:
-    """KISHomeReader stub returning one KR holding + KRW cash."""
-    from app.schemas.invest_home import Account, CashAmounts, Holding
-    from app.services.invest_home_service import _SourceFetchResult
+def _toss_position(
+    *,
+    symbol: str = "005930",
+    market: str = "kr",
+) -> Any:
+    from decimal import Decimal
 
-    holding_kr = Holding(
-        holdingId="kis:kr:005930",
-        accountId="kis_account",
-        source="kis",
-        accountKind="live",
-        symbol="005930",
-        market="KR",
-        assetType="equity",
-        assetCategory="kr_stock",
-        displayName="삼성전자",
-        quantity=10.0,
-        averageCost=70_000,
-        costBasis=700_000,
-        currency="KRW",
-        valueNative=750_000,
-        valueKrw=750_000,
-        pnlKrw=50_000,
-        pnlRate=0.0714,
-        sellableQuantity=8.0,
-        pendingSellQuantity=2.0,
-        referenceQuantity=0.0,
+    from app.services.toss_portfolio_service import TossPortfolioPosition
+
+    is_kr = market == "kr"
+    return TossPortfolioPosition(
+        account="toss",
+        account_name="Toss",
+        broker="toss",
+        source="toss_api",
+        instrument_type="equity_kr" if is_kr else "equity_us",
+        market=market,
+        symbol=symbol,
+        name="삼성전자" if is_kr else "Apple",
+        quantity=Decimal("10"),
+        avg_buy_price=Decimal("70000" if is_kr else "150"),
+        current_price=Decimal("75000" if is_kr else "180"),
+        evaluation_amount=Decimal("750000" if is_kr else "1800"),
+        profit_loss=Decimal("50000" if is_kr else "300"),
+        profit_rate=Decimal("0.0714"),
+        sellable_quantity=Decimal("8"),
     )
-    account = Account(
-        accountId="kis_account",
-        displayName="KIS 실계좌",
-        source="kis",
-        accountKind="live",
-        includedInHome=True,
-        valueKrw=750_000,
-        costBasisKrw=700_000,
-        pnlKrw=50_000,
-        pnlRate=0.0714,
-        cashBalances=CashAmounts(krw=1_200_000.0, usd=None),
-        buyingPower=CashAmounts(krw=1_000_000.0, usd=None),
-    )
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[account], holdings=[holding_kr], warning=None
-        )
-    )
-    return reader
 
 
-def _kis_reader_failed() -> MagicMock:
-    from app.schemas.invest_home import InvestHomeWarning
-    from app.services.invest_home_service import _SourceFetchResult
+def _toss_snapshot(*positions: Any, errors: list[dict[str, Any]] | None = None) -> Any:
+    from decimal import Decimal
 
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[],
-            holdings=[],
-            warning=InvestHomeWarning(source="kis", message="connection timeout"),
-        )
+    from app.services.toss_portfolio_service import TossPortfolioSnapshot
+
+    return TossPortfolioSnapshot(
+        positions=list(positions),
+        cash_krw=Decimal("1200000"),
+        cash_usd=Decimal("500"),
+        errors=errors or [],
     )
-    return reader
 
 
 @pytest.mark.asyncio
-async def test_portfolio_v2_kr_kis_live_missing_user_id_is_fail_closed():
-    """ROB-278 — no user_id on kis_live request → unavailable, no implicit default."""
-    session = _empty_manual_session()
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        side_effect=AssertionError("KIS must not be called without user_id")
+@pytest.mark.parametrize("scope", ["kis_live", "kis_mock"])
+async def test_portfolio_rejects_non_operational_kis_scopes(scope: str):
+    fetcher = AsyncMock(return_value=_toss_snapshot())
+    collector = PortfolioSnapshotCollector(
+        _empty_manual_session(),
+        toss_snapshot_fetcher=fetcher,
     )
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_kr_kis_request(user_id=None))
-    assert len(results) == 1
-    assert results[0].snapshot_kind == "portfolio"
+
+    results = await collector.collect(_equity_request(account_scope=scope, user_id=42))
+
     assert results[0].freshness_status == "unavailable"
-    assert "user_id" in results[0].errors_json["reason"]
-    # ROB-318 Slice 1 — collector emits the closed reason_code for the gate.
-    assert results[0].errors_json["reason_code"] == "user_id_missing"
-    # primary_source label is present and explicitly "none" (manual NOT promoted).
-    assert results[0].payload_json.get("primary_source") == "none"
-    reader.fetch.assert_not_called()
+    assert results[0].errors_json["reason"] == "provider kis is not operational"
+    fetcher.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_portfolio_v2_kr_kis_live_success_populates_kis_primary():
-    """ROB-278 — KIS success: primary_source=kis, KIS holdings primary, manual in reference."""
-    session = _manual_kr_session()
-    reader = _kis_reader_with_holdings()
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_kr_kis_request(user_id=42))
-    assert len(results) == 1
+async def test_portfolio_toss_live_missing_user_id_is_fail_closed():
+    fetcher = AsyncMock(return_value=_toss_snapshot())
+    collector = PortfolioSnapshotCollector(
+        _empty_manual_session(),
+        toss_snapshot_fetcher=fetcher,
+    )
+
+    results = await collector.collect(_equity_request(user_id=None))
+
+    assert results[0].freshness_status == "unavailable"
+    assert results[0].errors_json["reason_code"] == "user_id_missing"
+    assert results[0].payload_json["primary_source"] == "none"
+    fetcher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_toss_live_uses_general_snapshot_without_sellable_evidence():
+    fetcher = AsyncMock(
+        return_value=_toss_snapshot(
+            _toss_position(),
+            _toss_position(symbol="AAPL", market="us"),
+        )
+    )
+    collector = PortfolioSnapshotCollector(
+        _manual_kr_session(),
+        toss_snapshot_fetcher=fetcher,
+    )
+
+    results = await collector.collect(_equity_request())
+
     payload = results[0].payload_json
-    assert results[0].freshness_status == "fresh"
-    # v1 keys preserved (additive shape).
-    assert "holdings" in payload
-    assert "count" in payload
-    assert "market" in payload
-    # v2 fields.
-    assert payload["primary_source"] == "kis"
+    assert payload["primary_source"] == "toss"
     assert payload["count"] == 1
     assert payload["holdings"][0]["ticker"] == "005930"
-    assert payload["holdings"][0]["source"] == "kis"
-    assert payload["holdings"][0]["sellable_quantity"] == 8.0
-    assert payload["holdings"][0]["pending_sell_quantity"] == 2.0
-    assert payload["cash"]["krw"] == 1_200_000.0
-    assert payload["buying_power"]["krw"] == 1_000_000.0
-    assert payload["sellable_summary"]["sellable_count"] == 1
-    # Manual KR row appears in reference_holdings, NOT in holdings.
-    assert payload["reference_holdings"][0]["ticker"] == "005930"
+    assert payload["holdings"][0]["source"] == "toss_api"
+    assert payload["holdings"][0]["sellable_quantity"] is None
+    assert payload["holdings"][0]["pending_sell_quantity"] is None
+    assert payload["sellable_summary"] is None
+    assert payload["cash"] is None
+    assert payload["buying_power"]["krw"] is not None
     assert payload["reference_holdings"][0]["source"] == "manual"
-    # Provenance.
-    assert payload["provenance"]["kis_fetch_status"] == "ok"
-    assert payload["provenance"]["account_scope"] == "kis_live"
-    reader.fetch.assert_awaited_once_with(user_id=42)
+    assert payload["provenance"]["toss_fetch_status"] == "ok"
+    assert payload["nav_scope"] == "toss_primary_general_snapshot"
+    fetcher.assert_awaited_once_with(need_sellable=False, need_cash=True)
 
 
 @pytest.mark.asyncio
-async def test_portfolio_v2_kr_kis_live_failure_does_not_promote_manual():
-    """ROB-278 — KIS failure: primary_source=none, manual stays in reference_holdings."""
-    session = _manual_kr_session()
-    reader = _kis_reader_failed()
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_kr_kis_request(user_id=42))
-    assert len(results) == 1
+async def test_portfolio_toss_failure_does_not_promote_manual_or_leak_detail():
+    fetcher = AsyncMock(side_effect=RuntimeError("secret-token"))
+    collector = PortfolioSnapshotCollector(
+        _manual_kr_session(),
+        toss_snapshot_fetcher=fetcher,
+    )
+
+    results = await collector.collect(_equity_request())
+
     payload = results[0].payload_json
     assert results[0].freshness_status == "unavailable"
     assert payload["primary_source"] == "none"
     assert payload["holdings"] == []
-    assert payload["count"] == 0
-    # Manual remains visible as reference, never promoted to primary.
-    assert len(payload["reference_holdings"]) == 1
     assert payload["reference_holdings"][0]["source"] == "manual"
-    # Provenance carries the failure reason.
-    assert payload["provenance"]["kis_fetch_status"] == "failed"
-    assert "kis" in str(payload["provenance"]["warnings"]).lower()
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_kr_kis_live_exception_is_fail_closed():
-    """ROB-278 — KISHomeReader raising is treated like 'failed', not crash."""
-    session = _manual_kr_session()
-    reader = MagicMock()
-    reader.fetch = AsyncMock(side_effect=RuntimeError("boom"))
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_kr_kis_request(user_id=42))
-    assert len(results) == 1
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "unavailable"
-    assert payload["primary_source"] == "none"
-    assert "boom" in payload["provenance"]["errors"][0]
+    assert payload["provenance"]["toss_fetch_status"] == "failed"
+    assert "secret-token" not in str(results[0].errors_json)
 
 
 # ---------------------------------------------------------------------------
-# Portfolio v2 — ROB-369 E9: crypto + upbit_live reads the live Upbit account.
+# Portfolio v2 — crypto+upbit_live는 ``UpbitHomeReader``를 사용한다.
 #
-# Before ROB-369 the crypto/upbit_live combo fell through to the v1
-# manual-primary path, so the portfolio snapshot carried no live NAV / cash /
-# buying power. The Hermes portfolio stage then reported "NAV=0,
-# buying_power_krw=0" for a real Upbit account (eval ~25.75M KRW) and misfired
-# a "buying_power < 5% NAV" risk on a 0/0 artifact. The collector now routes
-# crypto+upbit_live to ``UpbitHomeReader`` (mirroring the KIS-live path): live
-# holdings + KRW cash/orderable become primary; manual CRYPTO rows stay
-# reference-only and are never promoted.
+# live holdings와 KRW cash/orderable을 primary로 제공하고, manual CRYPTO
+# rows는 reference-only로 유지한다. 따라서 실제 계정이 있는데도
+# NAV/buying power가 0으로 보이는 회귀를 막는다.
 # ---------------------------------------------------------------------------
 def _crypto_upbit_request(user_id: int | None = 1) -> CollectorRequest:
     return CollectorRequest(
@@ -475,13 +439,9 @@ async def test_portfolio_v2_crypto_upbit_live_success_populates_upbit_primary():
     manual CRYPTO rows surface as reference only (never promoted)."""
     session = _manual_crypto_session()
     upbit_reader = _upbit_reader_with_holdings()
-    # KIS reader MUST NOT be touched for upbit_live.
-    kis_reader = MagicMock()
-    kis_reader.fetch = AsyncMock(
-        side_effect=AssertionError("KIS reader called for upbit_live request")
-    )
     collector = PortfolioSnapshotCollector(
-        session, kis_reader=kis_reader, upbit_reader=upbit_reader
+        session,
+        upbit_reader=upbit_reader,
     )
     results = await collector.collect(_crypto_upbit_request(user_id=1))
     assert len(results) == 1
@@ -505,7 +465,6 @@ async def test_portfolio_v2_crypto_upbit_live_success_populates_upbit_primary():
     assert payload["provenance"]["upbit_fetch_status"] == "ok"
     assert payload["provenance"]["account_scope"] == "upbit_live"
     upbit_reader.fetch.assert_awaited_once_with(user_id=1)
-    kis_reader.fetch.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -601,31 +560,9 @@ async def test_portfolio_v2_crypto_upbit_live_surfaces_hidden_dust_count():
 
 
 # ---------------------------------------------------------------------------
-# Portfolio v2 — ROB-297 KIS live path for US + kis_live.
-#
-# Guardrails (ROB-297 pre-implementation comment):
-#   - market="us" + account_scope="kis_live" is canonical KIS overseas.
-#   - Toss/manual US holdings stay reference-only — never summed into the
-#     KIS-primary ``holdings`` or ``sellable_summary``.
-#   - KIS unavailable → primary_source="none"; manual NEVER promoted.
+# Portfolio — US Toss snapshot은 US 포지션만 primary로 사용한다.
 # ---------------------------------------------------------------------------
-def _us_kis_request(user_id: int | None = None) -> CollectorRequest:
-    return CollectorRequest(
-        market="us",
-        account_scope="kis_live",
-        symbols=None,
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=user_id,
-    )
-
-
 def _manual_us_session(rows: list[Any] | None = None) -> MagicMock:
-    """Session whose execute() returns Toss-style manual US holdings.
-
-    Default row is intentionally a different quantity from the KIS holding
-    fixture so any accidental KIS+manual sum surfaces as a test failure.
-    """
     from app.models.manual_holdings import MarketType
 
     class _ManualUSRow:
@@ -651,200 +588,33 @@ def _manual_us_session(rows: list[Any] | None = None) -> MagicMock:
     return session
 
 
-def _kis_reader_with_us_holdings() -> MagicMock:
-    """KISHomeReader stub returning one US holding + USD cash.
-
-    The KIS quantity (10.0) is deliberately different from the
-    manual/Toss row default (5.0) so the Toss-no-sum invariant is
-    observable in assertions.
-    """
-    from app.schemas.invest_home import Account, CashAmounts, Holding
-    from app.services.invest_home_service import _SourceFetchResult
-
-    holding_us = Holding(
-        holdingId="kis:us:AAPL",
-        accountId="kis_overseas",
-        source="kis",
-        accountKind="live",
-        symbol="AAPL",
-        market="US",
-        assetType="equity",
-        assetCategory="us_stock",
-        displayName="Apple",
-        quantity=10.0,
-        averageCost=150.0,
-        costBasis=1_500.0,
-        currency="USD",
-        valueNative=1_700.0,
-        valueKrw=2_300_000.0,
-        pnlKrw=270_000.0,
-        pnlRate=0.1333,
-        sellableQuantity=8.0,
-        pendingSellQuantity=2.0,
-        referenceQuantity=0.0,
-    )
-    # KIS also exposes any KR-side holdings on the same account fetch;
-    # include one to verify the US branch filters by ``h.market == "US"``
-    # and does not mix domestic holdings into the US payload.
-    holding_kr_noise = Holding(
-        holdingId="kis:kr:005930",
-        accountId="kis_overseas",
-        source="kis",
-        accountKind="live",
-        symbol="005930",
-        market="KR",
-        assetType="equity",
-        assetCategory="kr_stock",
-        displayName="삼성전자",
-        quantity=99.0,
-        averageCost=70_000,
-        costBasis=6_930_000,
-        currency="KRW",
-        valueNative=7_000_000,
-        valueKrw=7_000_000,
-        pnlKrw=70_000,
-        pnlRate=0.01,
-        sellableQuantity=99.0,
-        pendingSellQuantity=0.0,
-        referenceQuantity=0.0,
-    )
-    account = Account(
-        accountId="kis_overseas",
-        displayName="KIS 해외주식",
-        source="kis",
-        accountKind="live",
-        includedInHome=True,
-        valueKrw=2_300_000.0,
-        costBasisKrw=2_000_000.0,
-        pnlKrw=300_000.0,
-        pnlRate=0.15,
-        cashBalances=CashAmounts(krw=None, usd=12_500.0),
-        buyingPower=CashAmounts(krw=None, usd=10_000.0),
-    )
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[account],
-            holdings=[holding_us, holding_kr_noise],
-            warning=None,
+@pytest.mark.asyncio
+async def test_portfolio_us_toss_snapshot_filters_market_without_manual_sum():
+    fetcher = AsyncMock(
+        return_value=_toss_snapshot(
+            _toss_position(),
+            _toss_position(symbol="AAPL", market="us"),
         )
     )
-    return reader
-
-
-def _kis_reader_us_failed() -> MagicMock:
-    from app.schemas.invest_home import InvestHomeWarning
-    from app.services.invest_home_service import _SourceFetchResult
-
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[],
-            holdings=[],
-            warning=InvestHomeWarning(source="kis", message="overseas auth refused"),
-        )
+    collector = PortfolioSnapshotCollector(
+        _manual_us_session(),
+        toss_snapshot_fetcher=fetcher,
     )
-    return reader
 
+    results = await collector.collect(_equity_request("us"))
 
-@pytest.mark.asyncio
-async def test_portfolio_v2_us_kis_live_missing_user_id_is_fail_closed():
-    """ROB-297 — no user_id on us+kis_live → unavailable, manual not promoted."""
-    session = _manual_us_session()
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        side_effect=AssertionError("KIS must not be called without user_id")
-    )
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_us_kis_request(user_id=None))
-    assert len(results) == 1
-    assert results[0].snapshot_kind == "portfolio"
-    assert results[0].freshness_status == "unavailable"
-    assert "user_id" in results[0].errors_json["reason"]
     payload = results[0].payload_json
-    assert payload["primary_source"] == "none"
-    assert payload["holdings"] == []
-    # Manual US row stays visible as reference (never promoted).
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["reference_holdings"][0]["source"] == "manual"
-    reader.fetch.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_us_kis_live_success_populates_kis_primary_with_toss_reference():
-    """ROB-297 — KIS US success: primary_source=kis, USD cash, Toss in reference.
-
-    Toss-no-sum invariant (ROB-297 guardrail #3): manual US quantity (5)
-    must NEVER be summed into KIS US holding (10) or sellable_summary.
-    """
-    session = _manual_us_session()
-    reader = _kis_reader_with_us_holdings()
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_us_kis_request(user_id=42))
-    assert len(results) == 1
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "fresh"
-    # KIS-primary holdings filtered to market="US"; KR noise stays out.
-    assert payload["primary_source"] == "kis"
+    assert payload["primary_source"] == "toss"
     assert payload["count"] == 1
     assert payload["holdings"][0]["ticker"] == "AAPL"
-    assert payload["holdings"][0]["source"] == "kis"
-    assert payload["holdings"][0]["quantity"] == 10.0  # NOT 10+5 (Toss-no-sum).
-    assert payload["holdings"][0]["sellable_quantity"] == 8.0
-    assert payload["holdings"][0]["pending_sell_quantity"] == 2.0
-    # USD cash + buying_power surfaced for US.
-    assert payload["cash"]["usd"] == 12_500.0
-    assert payload["buying_power"]["usd"] == 10_000.0
-    # Sellable summary counts KIS holdings only — NOT Toss quantity.
-    assert payload["sellable_summary"]["sellable_count"] == 1
-    # Toss/manual US row appears in reference_holdings (untouched, source="manual").
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["reference_holdings"][0]["ticker"] == "AAPL"
-    assert payload["reference_holdings"][0]["quantity"] == 5.0
-    assert payload["reference_holdings"][0]["source"] == "manual"
-    # Provenance.
-    assert payload["provenance"]["kis_fetch_status"] == "ok"
-    assert payload["provenance"]["account_scope"] == "kis_live"
-    reader.fetch.assert_awaited_once_with(user_id=42)
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_us_kis_live_failure_does_not_promote_manual():
-    """ROB-297 — KIS US failure: primary_source=none, manual stays reference."""
-    session = _manual_us_session()
-    reader = _kis_reader_us_failed()
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_us_kis_request(user_id=42))
-    assert len(results) == 1
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "unavailable"
-    assert payload["primary_source"] == "none"
-    assert payload["holdings"] == []
-    assert payload["count"] == 0
-    # Manual remains visible as reference, never promoted to primary.
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["reference_holdings"][0]["source"] == "manual"
-    # Provenance carries the failure reason.
-    assert payload["provenance"]["kis_fetch_status"] == "failed"
-    assert "kis" in str(payload["provenance"]["warnings"]).lower()
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_us_kis_live_exception_is_fail_closed():
-    """ROB-297 — KISHomeReader raising on US is treated like 'failed', not crash."""
-    session = _manual_us_session()
-    reader = MagicMock()
-    reader.fetch = AsyncMock(side_effect=RuntimeError("overseas endpoint down"))
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_us_kis_request(user_id=42))
-    assert len(results) == 1
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "unavailable"
-    assert payload["primary_source"] == "none"
-    assert payload["holdings"] == []
-    # Manual US row remains visible.
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["provenance"]["kis_fetch_status"] == "failed"
+    assert payload["holdings"][0]["quantity"] != (
+        payload["reference_holdings"][0]["quantity"]
+        + payload["holdings"][0]["quantity"]
+    )
+    assert payload["holdings"][0]["sellable_quantity"] is None
+    assert payload["sellable_summary"] is None
+    assert payload["cash"] is None
+    assert payload["buying_power"]["usd"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -871,7 +641,7 @@ async def test_journal_collector_returns_active_and_recent():
         exit_reason = None
         pnl_pct = None
         account_type = "live"
-        account = "kis"
+        account = "toss"
         created_at = dt.datetime(2026, 5, 18, tzinfo=dt.UTC)
         updated_at = dt.datetime(2026, 5, 19, tzinfo=dt.UTC)
 
@@ -1437,7 +1207,7 @@ async def test_news_collector_filters_to_focus_symbols_when_supplied():
     collector = NewsSnapshotCollector(session, query_service=query)
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["005930", "000660"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1480,7 +1250,7 @@ async def test_news_collector_no_focus_matches_surfaces_no_data_reason():
     collector = NewsSnapshotCollector(session, query_service=query)
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["005930"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1517,7 +1287,7 @@ async def test_news_collector_no_focus_symbols_returns_general_feed():
     collector = NewsSnapshotCollector(session, query_service=query)
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=None,
         candidate_limit=None,
         policy_snapshot={},
@@ -1585,7 +1355,7 @@ async def test_symbol_collector_returns_results_for_each_symbol():
 
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["005930", "000660"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1606,7 +1376,7 @@ async def test_symbol_collector_query_failure_is_fail_open():
     session.execute = AsyncMock(side_effect=RuntimeError("transient"))
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["005930"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1668,7 +1438,7 @@ async def test_symbol_collector_us_falls_back_to_universe_for_unheld():
     )
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["AAPL", "HCA"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1698,7 +1468,7 @@ async def test_symbol_collector_us_prefers_stock_info_meta_no_dup():
     )
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["AAPL"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1726,7 +1496,7 @@ async def test_symbol_collector_us_unresolved_reason_codes():
     )
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["NOPE", "DEAD"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1750,7 +1520,7 @@ async def test_symbol_collector_us_universe_empty_reason():
     session = _two_stage_session(stock_rows=[], universe_rows=[])
     req = CollectorRequest(
         market="us",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["NVDA"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1773,7 +1543,7 @@ async def test_symbol_collector_kr_missing_has_no_unresolved_field():
     session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
     req = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         symbols=["005930", "000660"],
         candidate_limit=None,
         policy_snapshot={},
@@ -1789,13 +1559,7 @@ async def test_symbol_collector_kr_missing_has_no_unresolved_field():
 
 
 # ---------------------------------------------------------------------------
-# Symbol collector quote/orderbook enrichment — ROB-278 Phase 2.
-#
-# For (market=kr, account_scope=kis_live, user_id present), the collector
-# enriches each resolved symbol with read-only KIS quote/orderbook evidence
-# (last price, best bid/ask, spread bps, depth). Adapter is injected so
-# tests use a fake. Per-symbol fetch failures fail-open with explicit
-# unavailable reasons and never crash other symbols.
+# Symbol collector equity quote cutover.
 # ---------------------------------------------------------------------------
 def _stock_info_row(symbol: str = "005930", name: str = "삼성전자"):
     class _Row:
@@ -1820,296 +1584,26 @@ def _stock_info_session(rows: list[Any]) -> MagicMock:
     return session
 
 
-def _fake_quote_client_ok() -> MagicMock:
-    """Fake KIS quote/orderbook client returning a full top-of-book."""
-
-    async def fetch_quote(symbol: str, venue: str = "krx") -> dict[str, Any]:
-        return {
-            "last_price": 70_000.0,
-            "best_bid": 69_900.0,
-            "best_ask": 70_100.0,
-            "bid_depth": 1234.0,
-            "ask_depth": 1500.0,
-            "venue": "krx",
-            "as_of": "2026-05-20T10:30:00+09:00",
-            "session": "regular",
-            "nxt_eligible": True,
-        }
-
-    client = MagicMock()
-    client.fetch_quote_orderbook = AsyncMock(side_effect=fetch_quote)
-    return client
-
-
 @pytest.mark.asyncio
-async def test_symbol_collector_enriches_with_kis_quote_when_kis_live():
-    """ROB-278 Phase 2 — KR + kis_live + user_id → per-symbol quote attached."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
-    quote_client = _fake_quote_client_ok()
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
+@pytest.mark.parametrize("scope", ["kis_live", "kis_mock"])
+async def test_symbol_collector_marks_kis_quote_provider_unsupported(scope: str):
+    session = _stock_info_session([_stock_info_row()])
+    collector = SymbolSnapshotCollector(session)
+    request = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope=scope,  # type: ignore[arg-type]
         symbols=["005930"],
         candidate_limit=None,
         policy_snapshot={},
         user_id=42,
     )
-    results = await collector.collect(req)
-    # One result per symbol (no missing).
-    assert len(results) == 1
-    payload = results[0].payload_json
-    # v1 keys preserved.
-    assert payload["symbol"] == "005930"
-    assert payload["name"] == "삼성전자"
-    # Quote/orderbook attached.
-    assert payload["quote"]["last_price"] == 70_000.0
-    assert payload["quote"]["best_bid"] == 69_900.0
-    assert payload["quote"]["best_ask"] == 70_100.0
-    # Derived spread.
-    assert payload["quote"]["spread"] == 200.0
-    assert payload["quote"]["spread_bps"] == pytest.approx(28.57, rel=0.01)
-    assert payload["quote"]["bid_depth"] == 1234.0
-    assert payload["quote"]["ask_depth"] == 1500.0
-    # Venue provenance.
-    assert payload["quote"]["venue"] == "krx"
-    assert payload["quote"]["nxt_eligible"] is True
-    assert payload["quote"]["session"] == "regular"
-    assert payload["quote"]["status"] == "ok"
-    quote_client.fetch_quote_orderbook.assert_awaited_once_with("005930", venue="krx")
 
+    results = await collector.collect(request)
 
-@pytest.mark.asyncio
-async def test_symbol_collector_enriches_us_kis_live_with_kis_quote():
-    """ROB-346 follow-up — US+kis_live must carry quote evidence too.
-
-    Before this regression fix only KR+kis_live had a KIS enrichment plan, so
-    US buy candidates resolved from the universe still emitted no quote and the
-    auto-emitter downgraded them to quote_missing/data_gap. Overseas KIS quote
-    evidence may only have last_price (no orderbook), which is still enough to
-    avoid an invented quote_missing state.
-    """
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    async def fetch_quote(symbol: str, venue: str = "us") -> dict[str, Any]:
-        return {
-            "last_price": 27.59,
-            "best_bid": None,
-            "best_ask": None,
-            "bid_depth": None,
-            "ask_depth": None,
-            "venue": venue,
-            "as_of": "2026-06-10T13:20:00+09:00",
-            "session": "delayed",
-            "nxt_eligible": False,
-        }
-
-    session = _two_stage_session(
-        stock_rows=[],
-        universe_rows=[_us_universe_row("DKNG", name_en="DraftKings", exchange="NASD")],
-    )
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(side_effect=fetch_quote)
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="us",
-        account_scope="kis_live",
-        symbols=["DKNG"],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=42,
-    )
-
-    results = await collector.collect(req)
-
-    assert len(results) == 1
-    payload = results[0].payload_json
-    assert payload["symbol"] == "DKNG"
-    assert payload["instrument_type"] == "equity_us"
-    assert payload["quote"]["status"] == "ok"
-    assert payload["quote"]["last_price"] == 27.59
-    assert payload["quote"]["spread"] is None
-    assert payload["quote"]["venue"] == "us"
-    quote_client.fetch_quote_orderbook.assert_awaited_once_with("DKNG", venue="us")
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_skips_quote_when_no_kis_live():
-    """ROB-278 Phase 2 — non-kis_live request must not call quote client."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(
-        side_effect=AssertionError("quote client must not be called")
-    )
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="kr",
-        account_scope=None,
-        symbols=["005930"],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=42,
-    )
-    results = await collector.collect(req)
-    payload = results[0].payload_json
-    assert "quote" not in payload or payload.get("quote") is None
-    quote_client.fetch_quote_orderbook.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_skips_quote_when_no_user_id():
-    """ROB-278 Phase 2 — quote enrichment requires explicit user_id (fail-closed)."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(
-        side_effect=AssertionError("must not be called without user_id")
-    )
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
-        symbols=["005930"],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=None,
-    )
-    results = await collector.collect(req)
-    payload = results[0].payload_json
-    assert payload.get("quote", {}).get("status") == "unavailable"
-    assert "user_id" in payload["quote"]["unavailable_reason"]
-    quote_client.fetch_quote_orderbook.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_quote_exception_marks_unavailable():
-    """ROB-278 Phase 2 — KIS error on one symbol marks that symbol unavailable
-    without crashing other symbols."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    rows = [
-        _stock_info_row("005930", "삼성전자"),
-        _stock_info_row("000660", "SK하이닉스"),
-    ]
-    session = _stock_info_session(rows)
-
-    async def fetch(symbol: str, venue: str = "krx"):
-        if symbol == "005930":
-            raise RuntimeError("session closed")
-        return {
-            "last_price": 100_000.0,
-            "best_bid": 99_900.0,
-            "best_ask": 100_100.0,
-            "bid_depth": 500.0,
-            "ask_depth": 500.0,
-            "venue": "krx",
-            "as_of": "2026-05-20T10:30:00+09:00",
-            "session": "regular",
-            "nxt_eligible": False,
-        }
-
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(side_effect=fetch)
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
-        symbols=["005930", "000660"],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=42,
-    )
-    results = await collector.collect(req)
-    by_symbol = {r.symbol: r for r in results if r.symbol}
-    assert by_symbol["005930"].payload_json["quote"]["status"] == "unavailable"
-    assert (
-        "session closed"
-        in by_symbol["005930"].payload_json["quote"]["unavailable_reason"]
-    )
-    assert by_symbol["000660"].payload_json["quote"]["status"] == "ok"
-    assert by_symbol["000660"].payload_json["quote"]["last_price"] == 100_000.0
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_quote_empty_book_marks_no_data_reason():
-    """ROB-278 Phase 2 — empty book (zero bid/ask) → unavailable with reason."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
-
-    async def fetch(symbol: str, venue: str = "krx"):
-        return {
-            "last_price": 0.0,
-            "best_bid": 0.0,
-            "best_ask": 0.0,
-            "bid_depth": 0.0,
-            "ask_depth": 0.0,
-            "venue": "krx",
-            "as_of": None,
-            "session": "closed",
-            "nxt_eligible": False,
-        }
-
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(side_effect=fetch)
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
-        symbols=["005930"],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=42,
-    )
-    results = await collector.collect(req)
     quote = results[0].payload_json["quote"]
     assert quote["status"] == "unavailable"
-    assert (
-        "empty_book" in quote["unavailable_reason"]
-        or "session" in quote["unavailable_reason"]
-    )
-    assert quote["session"] == "closed"
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_quote_respects_enrichment_cap():
-    """ROB-278 Phase 2 — quote enrichment is bounded; extras get a 'capped' status."""
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    rows = [_stock_info_row(f"00500{i}", f"sym_{i}") for i in range(5)]
-    session = _stock_info_session(rows)
-    quote_client = _fake_quote_client_ok()
-    collector = SymbolSnapshotCollector(
-        session, kis_quote_client=quote_client, quote_enrichment_limit=3
-    )
-    req = CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
-        symbols=[f"00500{i}" for i in range(5)],
-        candidate_limit=None,
-        policy_snapshot={},
-        user_id=42,
-    )
-    results = await collector.collect(req)
-    enriched = [
-        r
-        for r in results
-        if r.symbol and r.payload_json.get("quote", {}).get("status") == "ok"
-    ]
-    capped = [
-        r
-        for r in results
-        if r.symbol and r.payload_json.get("quote", {}).get("status") == "skipped"
-    ]
-    assert len(enriched) == 3
-    assert len(capped) == 2
-    assert all(
-        "cap" in r.payload_json["quote"]["unavailable_reason"].lower() for r in capped
+    assert quote["unavailable_reason"] == (
+        "provider_unsupported: KIS is non-operational"
     )
 
 
@@ -2315,7 +1809,7 @@ async def test_candidate_universe_kr_emits_candidate_evidence():
         return_value=[
             SimpleNamespace(
                 symbol="005930",
-                source="kis",
+                source="toss",
                 change_rate=3.0,
                 latest_close=78500,
                 daily_volume=14_000_000,
@@ -2324,7 +1818,7 @@ async def test_candidate_universe_kr_emits_candidate_evidence():
         ]
     )
     collector = CandidateUniverseSnapshotCollector(MagicMock(), equity_repository=repo)
-    results = await collector.collect(_request(market="kr", account_scope="kis_live"))
+    results = await collector.collect(_request(market="kr", account_scope="toss_live"))
     payload = results[0].payload_json
     assert payload["usefulness"] == "useful"
     assert payload["fresh_count"] == 12
@@ -2332,7 +1826,7 @@ async def test_candidate_universe_kr_emits_candidate_evidence():
     assert payload["freshness_status"] == "fresh"
     assert payload["candidates"][0]["symbol"] == "005930"
     assert payload["candidates"][0]["score"] == 6.5
-    assert payload["source_coverage"] == {"kis": 1}
+    assert payload["source_coverage"] == {"toss": 1}
     assert payload["missing_data"] is None
 
 
@@ -2356,7 +1850,7 @@ async def test_candidate_universe_kr_stale_only_sets_missing_data():
         return_value=[
             SimpleNamespace(
                 symbol="000660",
-                source="kis",
+                source="toss",
                 change_rate=1.5,
                 latest_close=120000,
                 daily_volume=5_000_000,
@@ -2365,7 +1859,7 @@ async def test_candidate_universe_kr_stale_only_sets_missing_data():
         ]
     )
     collector = CandidateUniverseSnapshotCollector(MagicMock(), equity_repository=repo)
-    results = await collector.collect(_request(market="kr", account_scope="kis_live"))
+    results = await collector.collect(_request(market="kr", account_scope="toss_live"))
     payload = results[0].payload_json
     assert payload["usefulness"] == "stale_only"
     assert payload["freshness_status"] == "stale"
@@ -2392,7 +1886,7 @@ async def test_candidate_universe_kr_empty_sets_missing_data():
     )
     repo.list_top_candidates = AsyncMock(return_value=[])
     collector = CandidateUniverseSnapshotCollector(MagicMock(), equity_repository=repo)
-    results = await collector.collect(_request(market="kr", account_scope="kis_live"))
+    results = await collector.collect(_request(market="kr", account_scope="toss_live"))
     payload = results[0].payload_json
     assert payload["usefulness"] == "empty"
     assert payload["candidates"] == []
@@ -2455,7 +1949,7 @@ async def test_candidate_universe_failure_is_fail_open():
     repo = MagicMock()
     repo.coverage = AsyncMock(side_effect=RuntimeError("boom"))
     collector = CandidateUniverseSnapshotCollector(session, equity_repository=repo)
-    results = await collector.collect(_request(market="kr", account_scope="kis_live"))
+    results = await collector.collect(_request(market="kr", account_scope="toss_live"))
     assert results[0].freshness_status == "unavailable"
 
 
@@ -2528,14 +2022,13 @@ def test_production_registry_registers_pending_orders():
     assert "pending_orders" in registry.list_kinds()
 
 
-def test_production_registry_wires_upbit_quote_client_into_symbol_collector():
-    """ROB-369 2c — the symbol collector gets the Upbit orderbook adapter so
-    crypto + upbit_live requests can be enriched."""
+def test_production_registry_wires_only_active_symbol_quote_clients():
+    """Equity quote는 collector 내부 Toss→snapshot, registry는 Upbit만 주입한다."""
     registry = production_collector_registry(session=MagicMock())
     symbol_collector = registry.get("symbol")
     assert symbol_collector is not None
     assert symbol_collector._upbit_quote_client is not None
-    assert symbol_collector._kis_quote_client is not None
+    assert not hasattr(symbol_collector, "_kis_quote_client")
 
 
 @pytest.mark.asyncio
@@ -2657,11 +2150,11 @@ def test_collector_modules_do_not_import_broker_or_activation_paths():
 def test_collector_request_carries_market_session_default_none():
     from app.services.investment_snapshots.collectors import CollectorRequest
 
-    req = CollectorRequest(market="kr", account_scope="kis_live", policy_snapshot={})
+    req = CollectorRequest(market="kr", account_scope="toss_live", policy_snapshot={})
     assert req.market_session is None
     req2 = CollectorRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         policy_snapshot={},
         market_session="nxt",
     )
@@ -2673,7 +2166,7 @@ def test_ensure_bundle_request_carries_market_session_default_none():
 
     req = EnsureBundleRequest(
         market="kr",
-        account_scope="kis_live",
+        account_scope="toss_live",
         purpose="testing",
         policy_version="v1",
     )
@@ -2725,7 +2218,7 @@ async def test_snapshot_bundle_threads_market_session_into_collector_request():
         kind_policy=kind_policy,
         request=EnsureBundleRequest(
             market="kr",
-            account_scope="kis_live",
+            account_scope="toss_live",
             market_session="nxt",
             purpose="testing",
             policy_version="v1",
@@ -2734,167 +2227,6 @@ async def test_snapshot_bundle_threads_market_session_into_collector_request():
     )
     assert attempted is True
     assert captured["market_session"] == "nxt"
-
-
-@pytest.mark.asyncio
-async def test_kis_adapter_maps_nxt_venue_to_market_code_nx():
-    from unittest.mock import AsyncMock, MagicMock
-
-    import pandas as pd
-
-    from app.services.action_report.snapshot_backed.collectors.registry import (
-        _KISDomesticQuoteOrderbookAdapter,
-    )
-
-    captured: dict = {}
-
-    kis_client = MagicMock()
-    kis_client.inquire_price = AsyncMock(
-        return_value=pd.DataFrame({"close": [70_000.0]})
-    )
-
-    async def _inquire_orderbook(code, market="J"):
-        captured["market"] = market
-        return {
-            "askp1": "70100",
-            "bidp1": "69900",
-            "askp_rsqn1": "10",
-            "bidp_rsqn1": "12",
-        }
-
-    kis_client.inquire_orderbook = AsyncMock(side_effect=_inquire_orderbook)
-
-    adapter = _KISDomesticQuoteOrderbookAdapter(kis_client)
-    raw = await adapter.fetch_quote_orderbook("005930", venue="nxt")
-    assert captured["market"] == "NX"
-    assert raw["venue"] == "nxt"
-
-    raw_krx = await adapter.fetch_quote_orderbook("005930")  # default venue
-    assert captured["market"] == "J"
-    assert raw_krx["venue"] == "krx"
-
-
-@pytest.mark.asyncio
-async def test_kis_adapter_maps_us_venue_to_overseas_current_price():
-    from unittest.mock import AsyncMock, MagicMock
-
-    import pandas as pd
-
-    from app.services.action_report.snapshot_backed.collectors.registry import (
-        _KISDomesticQuoteOrderbookAdapter,
-    )
-
-    kis_client = MagicMock()
-    kis_client.inquire_overseas_price = AsyncMock(
-        return_value=pd.DataFrame(
-            {"close": [27.59], "previous_close": [26.5], "volume": [123456]}
-        )
-    )
-    kis_client.inquire_price = AsyncMock(
-        side_effect=AssertionError("domestic price path must not run for US venue")
-    )
-    kis_client.inquire_orderbook = AsyncMock(
-        side_effect=AssertionError("domestic orderbook path must not run for US venue")
-    )
-
-    adapter = _KISDomesticQuoteOrderbookAdapter(kis_client)
-    raw = await adapter.fetch_quote_orderbook("DKNG", venue="us")
-
-    assert raw["last_price"] == 27.59
-    assert raw["best_bid"] is None
-    assert raw["best_ask"] is None
-    assert raw["venue"] == "us"
-    assert raw["session"] == "delayed"
-    assert raw["previous_close"] == 26.5
-    assert raw["volume"] == 123456
-    kis_client.inquire_overseas_price.assert_awaited_once_with(
-        "DKNG", exchange_code="NASD"
-    )
-    kis_client.inquire_price.assert_not_called()
-    kis_client.inquire_orderbook.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_kis_adapter_us_quote_falls_back_and_preserves_missing_numeric_truth():
-    from unittest.mock import AsyncMock, MagicMock
-
-    import pandas as pd
-
-    from app.services.action_report.snapshot_backed.collectors.registry import (
-        _KISDomesticQuoteOrderbookAdapter,
-    )
-
-    kis_client = MagicMock()
-    kis_client.inquire_overseas_price = AsyncMock(
-        side_effect=[
-            pd.DataFrame(),
-            pd.DataFrame({"close": ["not-a-number"], "volume": ["bad-volume"]}),
-        ]
-    )
-
-    adapter = _KISDomesticQuoteOrderbookAdapter(kis_client)
-    raw = await adapter.fetch_quote_orderbook("DUAL", venue="us")
-
-    assert raw["exchange_code"] == "NYSE"
-    assert raw["last_price"] is None
-    assert raw["previous_close"] is None
-    assert raw["volume"] is None
-    assert raw["session"] == "closed"
-    assert kis_client.inquire_overseas_price.await_args_list == [
-        call("DUAL", exchange_code="NASD"),
-        call("DUAL", exchange_code="NYSE"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_kis_adapter_overseas_quote_requires_client():
-    from app.services.action_report.snapshot_backed.collectors.registry import (
-        _KISDomesticQuoteOrderbookAdapter,
-    )
-
-    adapter = _KISDomesticQuoteOrderbookAdapter(None)
-    with pytest.raises(RuntimeError, match="kis client unavailable"):
-        await adapter._fetch_overseas_quote("AAPL")
-
-
-@pytest.mark.asyncio
-async def test_symbol_collector_switches_to_nxt_venue_when_nxt_session():
-    from app.services.investment_snapshots.collectors import CollectorRequest
-
-    session = _stock_info_session([_stock_info_row("005930", "삼성전자")])
-
-    captured: dict = {}
-
-    async def fetch_quote(symbol: str, venue: str = "krx") -> dict[str, Any]:
-        captured["venue"] = venue
-        return {
-            "last_price": 70_000.0,
-            "best_bid": 69_900.0,
-            "best_ask": 70_100.0,
-            "bid_depth": 100.0,
-            "ask_depth": 120.0,
-            "venue": venue,
-            "as_of": "2026-06-01T08:30:00+09:00",
-            "session": "nxt",
-            "nxt_eligible": True,
-        }
-
-    quote_client = MagicMock()
-    quote_client.fetch_quote_orderbook = AsyncMock(side_effect=fetch_quote)
-    collector = SymbolSnapshotCollector(session, kis_quote_client=quote_client)
-    req = CollectorRequest(
-        market="kr",
-        account_scope="kis_live",
-        symbols=["005930"],
-        policy_snapshot={},
-        user_id=42,
-        market_session="nxt",
-    )
-    results = await collector.collect(req)
-    payload = results[0].payload_json
-    assert captured["venue"] == "nxt"
-    assert payload["quote"]["venue"] == "nxt"
-    assert payload["quote"]["session"] == "nxt"
 
 
 @pytest.mark.asyncio
@@ -2934,18 +2266,19 @@ async def test_market_collector_kr_regular_session_has_no_frozen_note():
 # ROB-392 Slice A — NAV scope label + KR code-as-name fallback.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_kr_kis_live_payload_carries_nav_scope_label():
-    # Reuse the same fixture wiring as
-    # test_portfolio_v2_kr_kis_live_success_populates_kis_primary.
-    session = _manual_kr_session()
-    reader = _kis_reader_with_holdings()
-    collector = PortfolioSnapshotCollector(session, kis_reader=reader)
-    results = await collector.collect(_kr_kis_request(user_id=42))
+async def test_kr_toss_live_payload_carries_general_snapshot_nav_scope_label():
+    fetcher = AsyncMock(return_value=_toss_snapshot(_toss_position()))
+    collector = PortfolioSnapshotCollector(
+        _manual_kr_session(),
+        toss_snapshot_fetcher=fetcher,
+    )
+
+    results = await collector.collect(_equity_request())
+
     payload = results[0].payload_json
-    assert payload["primary_source"] == "kis"
-    assert payload["nav_scope"] == "kis_primary_sellable"
-    assert "ISA/Toss" in payload["nav_scope_label"]
-    # 수치 회귀: holdings/count는 라벨 추가와 무관하게 유지.
+    assert payload["primary_source"] == "toss"
+    assert payload["nav_scope"] == "toss_primary_general_snapshot"
+    assert "매도가능 수량 근거로 사용하지 않음" in payload["nav_scope_label"]
     assert payload["count"] == len(payload["holdings"])
 
 
