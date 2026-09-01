@@ -563,6 +563,7 @@ async def _discard_invalid_token(
         select(KAssetDeviceSession)
         .where(KAssetDeviceSession.id == target.session_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if record is None or record.fcm_token_hash != target.token_hash:
         await db.commit()
