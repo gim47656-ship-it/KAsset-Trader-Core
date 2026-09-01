@@ -54,7 +54,18 @@ _SCOPE_CONSTRAINTS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _table_exists(table: str) -> bool:
+    """Return whether an optional review table exists in this database."""
+    try:
+        return sa.inspect(op.get_bind()).has_table(table, schema=_SCHEMA)
+    except sa.exc.NoInspectionAvailable:
+        # Unit operation recorders are intentionally not SQLAlchemy-inspectable.
+        return True
+
+
 def _replace_check(table: str, name: str, expression: str) -> None:
+    if not _table_exists(table):
+        return
     op.drop_constraint(name, table, schema=_SCHEMA, type_="check")
     op.create_check_constraint(name, table, expression, schema=_SCHEMA)
 
@@ -82,6 +93,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     for table, _ in _SCOPE_CONSTRAINTS:
+        if not _table_exists(table):
+            continue
         exists = bind.execute(
             sa.text(
                 f'SELECT 1 FROM {_SCHEMA}."{table}" '
@@ -94,31 +107,36 @@ def downgrade() -> None:
                 "downgrade blocked: toss_live rows exist in "
                 f"{_SCHEMA}.{table}; no data rewrite or deletion is permitted"
             )
-    toss_execution = bind.execute(
-        sa.text(
-            f"SELECT 1 FROM {_SCHEMA}.execution_ledger WHERE broker = :broker LIMIT 1"
-        ),
-        {"broker": "toss"},
-    ).scalar()
-    if toss_execution is not None:
-        raise RuntimeError(
-            "downgrade blocked: toss rows exist in review.execution_ledger; "
-            "no data rewrite or deletion is permitted"
-        )
+    toss_execution = None
+    if _table_exists("execution_ledger"):
+        toss_execution = bind.execute(
+            sa.text(
+                f"SELECT 1 FROM {_SCHEMA}.execution_ledger "
+                "WHERE broker = :broker LIMIT 1"
+            ),
+            {"broker": "toss"},
+        ).scalar()
+        if toss_execution is not None:
+            raise RuntimeError(
+                "downgrade blocked: toss rows exist in review.execution_ledger; "
+                "no data rewrite or deletion is permitted"
+            )
 
-    toss_reconcile_run = bind.execute(
-        sa.text(
-            f"SELECT 1 FROM {_SCHEMA}.execution_ledger_reconcile_runs "
-            "WHERE broker = :broker LIMIT 1"
-        ),
-        {"broker": "toss"},
-    ).scalar()
-    if toss_reconcile_run is not None:
-        raise RuntimeError(
-            "downgrade blocked: toss rows exist in "
-            "review.execution_ledger_reconcile_runs; no data rewrite or deletion "
-            "is permitted"
-        )
+    toss_reconcile_run = None
+    if _table_exists("execution_ledger_reconcile_runs"):
+        toss_reconcile_run = bind.execute(
+            sa.text(
+                f"SELECT 1 FROM {_SCHEMA}.execution_ledger_reconcile_runs "
+                "WHERE broker = :broker LIMIT 1"
+            ),
+            {"broker": "toss"},
+        ).scalar()
+        if toss_reconcile_run is not None:
+            raise RuntimeError(
+                "downgrade blocked: toss rows exist in "
+                "review.execution_ledger_reconcile_runs; no data rewrite or deletion "
+                "is permitted"
+            )
 
     _replace_check(
         "execution_ledger_reconcile_runs",
