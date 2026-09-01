@@ -354,7 +354,7 @@ class TestUnifiedWebSocketMonitor:
         monitor = UnifiedWebSocketMonitor()
 
         status = await monitor._record_execution_ledger_fill(
-            {"order_id": "upbit-order-disabled"},
+            {"uuid": "upbit-order-disabled"},
             FillOrder(
                 symbol="KRW-BTC",
                 side="bid",
@@ -362,7 +362,7 @@ class TestUnifiedWebSocketMonitor:
                 filled_qty=1,
                 filled_amount=70_000,
                 filled_at="2026-05-12T00:01:09Z",
-                account="live",
+                account="upbit",
                 order_id="upbit-order-disabled",
                 market_type="crypto",
                 currency="KRW",
@@ -406,25 +406,28 @@ class TestUnifiedWebSocketMonitor:
         monkeypatch.setattr(mod, "ExecutionLedgerRepository", FakeRepository)
         monitor = UnifiedWebSocketMonitor()
 
+        event = {
+            "uuid": "upbit-order-1",
+            "trade_uuid": "upbit-trade-1",
+            "trade_timestamp": 1_747_008_069_000,
+            "token": "secret",
+        }
+        order = FillOrder(
+            symbol="KRW-BTC",
+            side="bid",
+            filled_price=1_959_000,
+            filled_qty=1,
+            filled_amount=1_959_000,
+            filled_at="2026-05-12T00:01:09Z",
+            account="upbit",
+            order_id="upbit-order-1",
+            market_type="crypto",
+            currency="KRW",
+        )
         status = await monitor._record_execution_ledger_fill(
-            {
-                "order_id": "upbit-order-1",
-                "fill_seq": "7",
-                "token": "secret",
-            },
-            FillOrder(
-                symbol="KRW-BTC",
-                side="bid",
-                filled_price=1_959_000,
-                filled_qty=1,
-                filled_amount=1_959_000,
-                filled_at="2026-05-12T00:01:09Z",
-                account="live",
-                order_id="upbit-order-1",
-                market_type="crypto",
-                currency="KRW",
-            ),
-            correlation_id="corr-upbit-upsert",
+            event,
+            order,
+            correlation_id=event["uuid"],
         )
 
         fill = captured["fill"]
@@ -437,12 +440,14 @@ class TestUnifiedWebSocketMonitor:
         assert fill.symbol == "BTC"
         assert fill.side == "buy"
         assert fill.broker_order_id == "upbit-order-1"
-        assert fill.fill_seq == 7
+        assert fill.fill_seq == monitor._ledger_fill_seq(event, order)
         assert str(fill.filled_qty) == "1"
         assert str(fill.filled_price) == "1959000"
         assert fill.currency == "KRW"
-        assert fill.correlation_id == "corr-upbit-upsert"
+        assert fill.correlation_id == "upbit-order-1"
         assert fill.source == "websocket"
+        assert fill.raw_payload_json["uuid"] == "upbit-order-1"
+        assert fill.raw_payload_json["trade_uuid"] == "upbit-trade-1"
         assert fill.raw_payload_json["token"] == "[REDACTED]"
 
     @pytest.mark.asyncio

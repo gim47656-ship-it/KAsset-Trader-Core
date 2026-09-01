@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import hashlib
 import inspect
+import json
 from dataclasses import fields, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -80,8 +82,8 @@ class _RosterReader:
         self.declared_hash = declared_hash
 
     async def read_configured_kr_accounts(self) -> AuthoritativeAccountRoster:
-        roster_id = "kr-live-routable-accounts"
-        roster_version = "2026-07-23T15:50:00+09:00"
+        roster_id = "kr-account-evidence-roster"
+        roster_version = "toss-active-v1"
         roster_hash = self.declared_hash or compute_account_roster_hash(
             roster_id=roster_id,
             roster_version=roster_version,
@@ -144,9 +146,11 @@ def _configured(
     broker: KrBroker,
     account_id: str,
     *,
-    routable: bool = True,
+    routable: bool | None = None,
     kind: AccountKind = AccountKind.TAXABLE,
 ) -> ConfiguredAccount:
+    if routable is None:
+        routable = broker is KrBroker.TOSS
     return ConfiguredAccount(
         identity=_identity(broker, account_id),
         account_kind=kind,
@@ -198,7 +202,7 @@ def _firm_quote(
         symbol=symbol,
         venue=venue,
         quote_kind=QuoteKind.BROKER_LAST_TRADE,
-        source=QuoteSource.KIS_BROKER,
+        source=QuoteSource.TOSS_BROKER,
         observed_at=observed_at,
         executable=True,
         firm=True,
@@ -226,30 +230,20 @@ def _resistance(
 
 
 def _default_roster() -> tuple[ConfiguredAccount, ...]:
-    return (
-        _configured(KrBroker.KIS, "kis-main"),
-        _configured(KrBroker.TOSS, "toss-main"),
-    )
+    return (_configured(KrBroker.TOSS, "toss-main"),)
 
 
 def _default_accounts(
     *,
-    target_broker: KrBroker = KrBroker.TOSS,
-    target_account_id: str = "toss-main",
     symbol: str = "257720",
     average_cost: str = "31800",
 ) -> tuple[BrokerAccountEvidence, ...]:
     target_lot = _lot(symbol=symbol, average_cost=average_cost)
     return (
         _account(
-            KrBroker.KIS,
-            "kis-main",
-            lots=(target_lot,) if target_broker is KrBroker.KIS else (),
-        ),
-        _account(
             KrBroker.TOSS,
             "toss-main",
-            lots=(target_lot,) if target_broker is KrBroker.TOSS else (),
+            lots=(target_lot,),
         ),
     )
 
@@ -257,7 +251,6 @@ def _default_accounts(
 def _make_context(
     *,
     symbol: str = "257720",
-    target_broker: KrBroker = KrBroker.TOSS,
     target_account_id: str = "toss-main",
     target_lot_id: str = "target-lot",
     roster: tuple[ConfiguredAccount, ...] | None = None,
@@ -271,11 +264,7 @@ def _make_context(
     live: bool = False,
 ) -> ValidatedSingleShareExitContext:
     configured_accounts = roster or _default_roster()
-    broker_accounts = accounts or _default_accounts(
-        target_broker=target_broker,
-        target_account_id=target_account_id,
-        symbol=symbol,
-    )
+    broker_accounts = accounts or _default_accounts(symbol=symbol)
     quote_evidence = quote or _firm_quote(symbol=symbol)
     resistance_evidence = (
         _resistance(symbol=symbol) if resistance is ... else resistance
@@ -309,7 +298,7 @@ def _make_context(
         )
     target = SingleShareExitTarget(
         symbol=symbol,
-        broker=target_broker,
+        broker=KrBroker.TOSS,
         broker_account_id=target_account_id,
         lot_id=target_lot_id,
     )
@@ -343,16 +332,18 @@ def test_raw_public_construction_and_completeness_flags_are_removed():
     )
 
 
-def test_producer_enumerates_exact_roster_and_scopes_open_actions():
+def test_replay_producer_enumerates_toss_roster_with_retired_kis_evidence():
     roster = (
-        _configured(KrBroker.KIS, "kis-main"),
-        _configured(KrBroker.KIS, "kis-secondary"),
+        _configured(
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            kind=AccountKind.RETIREMENT,
+        ),
         _configured(KrBroker.TOSS, "toss-main"),
     )
     broker_reader = _BrokerReader(
         (
-            _account(KrBroker.KIS, "kis-main"),
-            _account(KrBroker.KIS, "kis-secondary"),
+            _account(KrBroker.KIS_RETIRED, "kis-retired"),
             _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
         )
     )
@@ -380,36 +371,70 @@ def test_producer_enumerates_exact_roster_and_scopes_open_actions():
     assert broker_reader.requested_accounts == roster
     assert open_reader.scope == ("257720", "sell", "toss-main")
     assert context.expected_account_identities == (
-        _identity(KrBroker.KIS, "kis-main"),
-        _identity(KrBroker.KIS, "kis-secondary"),
+        _identity(KrBroker.KIS_RETIRED, "kis-retired"),
         _identity(KrBroker.TOSS, "toss-main"),
     )
     assert context.expected_account_identities == context.observed_account_identities
     assert context.roster_hash == context.derived_roster_hash
-    assert context.producer_capability
+    assert context.producer_identity == "kr_single_share_exit_snapshot_producer/v3"
+    assert context.producer_capability == "validated_exhaustive_toss_snapshot/v3"
 
 
-def test_omitted_account_cannot_claim_complete():
+def test_omitted_retired_account_cannot_claim_complete_replay_roster():
     roster = (
-        _configured(KrBroker.KIS, "kis-main"),
-        _configured(KrBroker.KIS, "kis-secondary"),
+        _configured(
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            kind=AccountKind.RETIREMENT,
+        ),
         _configured(KrBroker.TOSS, "toss-main"),
     )
-    observed = (
-        _account(KrBroker.KIS, "kis-main"),
-        _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
-    )
+    observed = (_account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),)
     result = _replay_result(roster=roster, accounts=observed)
     assert (result.outcome, result.reason) == (
         "INELIGIBLE",
         "expected_observed_account_roster_mismatch",
     )
     assert result.expected_account_identities == (
-        "kis:kis-main",
-        "kis:kis-secondary",
+        "kis:kis-retired",
         "toss:toss-main",
     )
-    assert result.observed_account_identities == ("kis:kis-main", "toss:toss-main")
+    assert result.observed_account_identities == ("toss:toss-main",)
+
+
+def test_retired_kis_account_cannot_be_routable_or_targeted():
+    with pytest.raises(ValueError, match="retired KIS accounts must be non-routable"):
+        ConfiguredAccount(
+            identity=_identity(KrBroker.KIS_RETIRED, "kis-retired"),
+            account_kind=AccountKind.RETIREMENT,
+            order_routable=True,
+        )
+    with pytest.raises(
+        ValueError,
+        match="single-share exit target broker must be Toss",
+    ):
+        SingleShareExitTarget(
+            "257720",
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            "historical-lot",
+        )
+
+
+def test_live_producer_rejects_retired_kis_replay_roster():
+    roster = (
+        _configured(
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            kind=AccountKind.RETIREMENT,
+        ),
+        _configured(KrBroker.TOSS, "toss-main"),
+    )
+    with pytest.raises(
+        ValueError,
+        match="live account roster must contain only Toss accounts",
+    ):
+        _make_context(roster=roster, live=True)
 
 
 def test_context_uses_private_exact_replay_type_with_derived_mode():
@@ -606,37 +631,83 @@ def test_mismatched_declared_roster_hash_is_rejected():
     )
 
 
-def test_roster_hash_canonical_compatibility_vector_is_unchanged():
-    assert (
-        compute_account_roster_hash(
-            roster_id="kr-live-routable-accounts",
-            roster_version="2026-07-23T15:50:00+09:00",
-            read_model_identity="offline.authoritative_roster",
-            accounts=_default_roster(),
-        )
-        == "34f9275b3b4c153af15f39200da470ad7f4e9acbf26795bc1a5ae94fed26c4a9"
+def test_roster_hash_matches_canonical_json_after_toss_cutover():
+    cases = (
+        (
+            "kr-account-evidence-roster",
+            "toss-active-v1",
+            "offline.authoritative_roster",
+            _default_roster(),
+            [
+                {
+                    "account_kind": "taxable",
+                    "broker": "toss",
+                    "broker_account_id": "toss-main",
+                    "order_routable": True,
+                }
+            ],
+        ),
+        (
+            '명부"A',
+            "v1\\n",
+            "reader/한글",
+            (
+                _configured(KrBroker.TOSS, "toss-main"),
+                _configured(
+                    KrBroker.KIS_RETIRED,
+                    '계좌"\\n',
+                    kind=AccountKind.RETIREMENT,
+                ),
+            ),
+            [
+                {
+                    "account_kind": "retirement",
+                    "broker": "kis",
+                    "broker_account_id": '계좌"\\n',
+                    "order_routable": False,
+                },
+                {
+                    "account_kind": "taxable",
+                    "broker": "toss",
+                    "broker_account_id": "toss-main",
+                    "order_routable": True,
+                },
+            ],
+        ),
     )
-    assert (
-        compute_account_roster_hash(
-            roster_id='명부"A',
-            roster_version="v1\\n",
-            read_model_identity="reader/한글",
-            accounts=(_configured(KrBroker.KIS, '계좌"\\n'),),
+    for (
+        roster_id,
+        roster_version,
+        reader_identity,
+        accounts,
+        expected_accounts,
+    ) in cases:
+        canonical_payload = json.dumps(
+            {
+                "accounts": expected_accounts,
+                "read_model_identity": reader_identity,
+                "roster_id": roster_id,
+                "roster_version": roster_version,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         )
-        == "f4d927823d5cba703695fe9e7a642eedd751d1ecff92579e0dac3c6fe69089c2"
-    )
+        assert (
+            compute_account_roster_hash(
+                roster_id=roster_id,
+                roster_version=roster_version,
+                read_model_identity=reader_identity,
+                accounts=accounts,
+            )
+            == hashlib.sha256(canonical_payload.encode()).hexdigest()
+        )
 
 
 def test_replay_clock_does_not_create_live_eligibility():
     old_clock = _CLOCK_AT - timedelta(days=1)
     old_evidence = _EVIDENCE_AT - timedelta(days=1)
     accounts = (
-        _account(
-            KrBroker.KIS,
-            "kis-main",
-            holdings_at=old_evidence,
-            orders_at=old_evidence,
-        ),
         _account(
             KrBroker.TOSS,
             "toss-main",
@@ -667,12 +738,6 @@ def test_replay_clock_does_not_create_live_eligibility():
 def test_pairwise_600_second_endpoint_skew_is_rejected():
     oldest = _CLOCK_AT - timedelta(seconds=600)
     accounts = (
-        _account(
-            KrBroker.KIS,
-            "kis-main",
-            holdings_at=oldest,
-            orders_at=oldest,
-        ),
         _account(
             KrBroker.TOSS,
             "toss-main",
@@ -732,12 +797,6 @@ def test_each_evidence_kind_has_wall_clock_age_limit(
     resistance = _resistance(computed_at=stale if field == "resistance" else fresh)
     accounts = (
         _account(
-            KrBroker.KIS,
-            "kis-main",
-            holdings_at=stale if field == "holdings" else fresh,
-            orders_at=stale if field == "open_orders" else fresh,
-        ),
-        _account(
             KrBroker.TOSS,
             "toss-main",
             lots=(_lot(),),
@@ -777,6 +836,25 @@ def test_non_executable_quote_kinds_fail_closed(kind, source):
             if kind is QuoteKind.PREVIOUS_CLOSE_ECHO
             else QuoteProvenance.INDICATIVE_MODEL
         ),
+    )
+    result = _replay_result(quote=quote)
+    assert (result.outcome, result.reason) == (
+        "INELIGIBLE",
+        "quote_quality_not_executable",
+    )
+
+
+def test_nhplug_read_only_quote_is_not_executable_broker_evidence():
+    quote = TypedQuoteEvidence(
+        symbol="257720",
+        venue=QuoteVenue.KRX,
+        quote_kind=QuoteKind.BROKER_LAST_TRADE,
+        source=QuoteSource.NHPLUG_MARKET_DATA,
+        observed_at=_EVIDENCE_AT,
+        executable=True,
+        firm=True,
+        last_price=Decimal("36450"),
+        last_provenance=QuoteProvenance.VENUE_LAST_TRADE,
     )
     result = _replay_result(quote=quote)
     assert (result.outcome, result.reason) == (
@@ -860,8 +938,12 @@ def test_resistance_must_cover_expected_completed_krx_bar():
 def test_same_symbol_broker_open_order_defers():
     pending = BrokerOpenOrderEvidence("pending-1", "257720", "buy")
     accounts = (
-        _account(KrBroker.KIS, "kis-main", orders=(pending,)),
-        _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
+        _account(
+            KrBroker.TOSS,
+            "toss-main",
+            lots=(_lot(),),
+            orders=(pending,),
+        ),
     )
     result = _replay_result(accounts=accounts)
     assert (result.outcome, result.reason) == (
@@ -887,7 +969,6 @@ def test_scoped_open_action_defers_and_scope_is_exact():
 
 def test_target_non_routable_is_ineligible():
     roster = (
-        _configured(KrBroker.KIS, "kis-main"),
         _configured(KrBroker.TOSS, "toss-main"),
         _configured(
             KrBroker.TOSS,
@@ -897,7 +978,6 @@ def test_target_non_routable_is_ineligible():
         ),
     )
     accounts = (
-        _account(KrBroker.KIS, "kis-main"),
         _account(KrBroker.TOSS, "toss-main"),
         _account(KrBroker.TOSS, "toss-isa", lots=(_lot(),)),
     )
@@ -912,24 +992,21 @@ def test_target_non_routable_is_ineligible():
     )
 
 
-def test_secondary_non_routable_retirement_lot_is_excluded_from_aggregate():
+def test_retired_kis_lot_is_excluded_from_toss_routable_aggregate():
     roster = (
-        _configured(KrBroker.KIS, "kis-main"),
         _configured(KrBroker.TOSS, "toss-main"),
         _configured(
-            KrBroker.KIS,
-            "kis-retirement",
-            routable=False,
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
             kind=AccountKind.RETIREMENT,
         ),
     )
     accounts = (
-        _account(KrBroker.KIS, "kis-main"),
         _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
         _account(
-            KrBroker.KIS,
-            "kis-retirement",
-            lots=(_lot(lot_id="retirement-lot", quantity="99"),),
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            lots=(_lot(lot_id="retired-lot", quantity="99"),),
         ),
     )
     result = _replay_result(roster=roster, accounts=accounts)
@@ -937,34 +1014,23 @@ def test_secondary_non_routable_retirement_lot_is_excluded_from_aggregate():
     assert result.symbol_routable_sellable_quantity == Decimal("1")
 
 
-def test_actual_total_quantity_over_one_fails_with_one_account_lot():
-    roster = (
-        _configured(KrBroker.KIS, "kis-main"),
-        _configured(KrBroker.KIS, "kis-secondary"),
-        _configured(KrBroker.TOSS, "toss-main"),
-    )
-    omitted_secondary = (
-        _account(KrBroker.KIS, "kis-main"),
-        _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
-    )
-    omitted_result = _replay_result(roster=roster, accounts=omitted_secondary)
-    assert omitted_result.reason == "expected_observed_account_roster_mismatch"
-
-    exhaustive = (
-        _account(KrBroker.KIS, "kis-main"),
+def test_toss_total_quantity_over_one_fails_with_multiple_account_lots():
+    accounts = (
         _account(
-            KrBroker.KIS,
-            "kis-secondary",
-            lots=(_lot(lot_id="secondary", quantity="3"),),
+            KrBroker.TOSS,
+            "toss-main",
+            lots=(
+                _lot(),
+                _lot(lot_id="secondary", quantity="3"),
+            ),
         ),
-        _account(KrBroker.TOSS, "toss-main", lots=(_lot(),)),
     )
-    exhaustive_result = _replay_result(roster=roster, accounts=exhaustive)
-    assert (exhaustive_result.outcome, exhaustive_result.reason) == (
+    result = _replay_result(accounts=accounts)
+    assert (result.outcome, result.reason) == (
         "INELIGIBLE",
         "symbol_routable_sellable_quantity_not_one",
     )
-    assert exhaustive_result.symbol_routable_sellable_quantity == Decimal("4")
+    assert result.symbol_routable_sellable_quantity == Decimal("4")
 
 
 @pytest.mark.parametrize(
@@ -1060,115 +1126,75 @@ def test_operational_1550_nxt_evidence_is_quote_quality_rejected_exactly():
     fixtures = (
         (
             "257720",
-            KrBroker.TOSS,
             "31800",
             "36450",
             "39946.31",
             ("bb_upper", "fib_50"),
             (
-                _account(
-                    KrBroker.KIS,
-                    "kis-main",
-                    lots=(
-                        _lot(
-                            lot_id="kis-lot",
-                            quantity="5",
-                            average_cost="35000",
-                        ),
-                    ),
-                ),
-                _account(
-                    KrBroker.TOSS,
-                    "toss-main",
-                    lots=(_lot(quantity="1", average_cost="31800"),),
+                _lot(quantity="1", average_cost="31800"),
+                _lot(
+                    lot_id="secondary-lot",
+                    quantity="5",
+                    average_cost="35000",
                 ),
             ),
             (),
         ),
         (
             "042660",
-            KrBroker.TOSS,
             "78800",
             "89400",
             "100548.9",
             ("fib_38.2", "volume_value_area_low"),
             (
-                _account(KrBroker.KIS, "kis-main"),
-                _account(
-                    KrBroker.TOSS,
-                    "toss-main",
-                    lots=(
-                        _lot(
-                            symbol="042660",
-                            quantity="1",
-                            average_cost="78800",
-                        ),
-                    ),
+                _lot(
+                    symbol="042660",
+                    quantity="1",
+                    average_cost="78800",
                 ),
             ),
             (),
         ),
         (
             "086790",
-            KrBroker.KIS,
             "117000",
             "130500",
             "142264.52",
             ("bb_upper", "fib_0"),
             (
-                _account(
-                    KrBroker.KIS,
-                    "kis-main",
-                    lots=(
-                        _lot(
-                            symbol="086790",
-                            quantity="1",
-                            average_cost="117000",
-                        ),
-                    ),
+                _lot(
+                    symbol="086790",
+                    quantity="1",
+                    average_cost="117000",
                 ),
-                _account(KrBroker.TOSS, "toss-main"),
             ),
             (
                 OpenActionEvidence(
                     "2fd4fa42",
                     "086790",
                     "sell",
-                    "kis-main",
+                    "toss-main",
                     "open",
                 ),
             ),
         ),
         (
             "035420",
-            KrBroker.TOSS,
             "197900",
             "220000",
             "242550",
             ("fib_50",),
             (
-                _account(
-                    KrBroker.KIS,
-                    "kis-main",
-                    lots=(
-                        _lot(
-                            symbol="035420",
-                            lot_id="kis-lot",
-                            quantity="3",
-                            average_cost="241500",
-                        ),
-                    ),
+                _lot(
+                    symbol="035420",
+                    quantity="1",
+                    average_cost="197900",
                 ),
-                _account(
-                    KrBroker.TOSS,
-                    "toss-main",
-                    lots=(
-                        _lot(
-                            symbol="035420",
-                            quantity="1",
-                            average_cost="197900",
-                        ),
-                    ),
+                _lot(
+                    symbol="035420",
+                    lot_id="secondary-lot",
+                    quantity="3",
+                    average_cost="241500",
                 ),
             ),
             (),
@@ -1176,12 +1202,11 @@ def test_operational_1550_nxt_evidence_is_quote_quality_rejected_exactly():
     )
     for (
         symbol,
-        target_broker,
         average_cost,
         quote_price,
         resistance_price,
         sources,
-        accounts,
+        lots,
         actions,
     ) in fixtures:
         quote = TypedQuoteEvidence(
@@ -1197,11 +1222,13 @@ def test_operational_1550_nxt_evidence_is_quote_quality_rejected_exactly():
         )
         context = _make_context(
             symbol=symbol,
-            target_broker=target_broker,
-            target_account_id=(
-                "kis-main" if target_broker is KrBroker.KIS else "toss-main"
+            accounts=(
+                _account(
+                    KrBroker.TOSS,
+                    "toss-main",
+                    lots=lots,
+                ),
             ),
-            accounts=accounts,
             quote=quote,
             resistance=_resistance(
                 symbol=symbol,
@@ -1232,12 +1259,20 @@ def test_operational_1550_nxt_evidence_is_quote_quality_rejected_exactly():
         assert result.resistance_distance_pct is None
 
 
-def test_257720_authoritative_toss_one_plus_kis_five_is_quantity_six():
+def test_257720_retired_kis_five_is_excluded_from_toss_quantity():
+    roster = (
+        _configured(KrBroker.TOSS, "toss-main"),
+        _configured(
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            kind=AccountKind.RETIREMENT,
+        ),
+    )
     accounts = (
         _account(
-            KrBroker.KIS,
-            "kis-main",
-            lots=(_lot(lot_id="kis-lot", quantity="5", average_cost="35000"),),
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            lots=(_lot(lot_id="retired-lot", quantity="5", average_cost="35000"),),
         ),
         _account(
             KrBroker.TOSS,
@@ -1245,23 +1280,31 @@ def test_257720_authoritative_toss_one_plus_kis_five_is_quantity_six():
             lots=(_lot(quantity="1", average_cost="31800"),),
         ),
     )
-    result = _replay_result(accounts=accounts)
+    result = _replay_result(roster=roster, accounts=accounts)
     assert (result.outcome, result.reason) == (
-        "INELIGIBLE",
-        "symbol_routable_sellable_quantity_not_one",
+        "REPLAY_ELIGIBLE",
+        "replay_candidate_no_live_eligibility",
     )
-    assert result.symbol_routable_sellable_quantity == Decimal("6")
+    assert result.symbol_routable_sellable_quantity == Decimal("1")
 
 
-def test_naver_authoritative_toss_one_plus_kis_three_is_quantity_four():
+def test_naver_retired_kis_three_does_not_mask_resistance_family_gate():
+    roster = (
+        _configured(KrBroker.TOSS, "toss-main"),
+        _configured(
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
+            kind=AccountKind.RETIREMENT,
+        ),
+    )
     accounts = (
         _account(
-            KrBroker.KIS,
-            "kis-main",
+            KrBroker.KIS_RETIRED,
+            "kis-retired",
             lots=(
                 _lot(
                     symbol="035420",
-                    lot_id="kis-lot",
+                    lot_id="retired-lot",
                     quantity="3",
                     average_cost="241500",
                 ),
@@ -1281,6 +1324,7 @@ def test_naver_authoritative_toss_one_plus_kis_three_is_quantity_four():
     )
     result = _replay_result(
         symbol="035420",
+        roster=roster,
         accounts=accounts,
         quote=_firm_quote(symbol="035420", price="220000"),
         resistance=_resistance(
@@ -1291,9 +1335,9 @@ def test_naver_authoritative_toss_one_plus_kis_three_is_quantity_four():
     )
     assert (result.outcome, result.reason) == (
         "INELIGIBLE",
-        "symbol_routable_sellable_quantity_not_one",
+        "insufficient_independent_resistance_families",
     )
-    assert result.symbol_routable_sellable_quantity == Decimal("4")
+    assert result.symbol_routable_sellable_quantity == Decimal("1")
 
 
 def test_loss_guard_is_decimal_and_separate():
@@ -1351,6 +1395,29 @@ def test_public_policy_loader_returns_detached_policy_copy():
 
 
 @pytest.mark.parametrize(
+    ("component", "unsafe_value"),
+    [
+        ("lanes", []),
+        ("brokers", ["toss", "nhplug"]),
+        ("required_broker_inventory", ["toss", "nhplug"]),
+    ],
+)
+def test_schema_rejects_hidden_lane_or_non_toss_account_broker(
+    component,
+    unsafe_value,
+):
+    raw = policy.load_trading_policy().model_dump(mode="python")
+    rule = raw["decision_rules"]["sell.single_share_exit"]
+    if component == "lanes":
+        rule["lanes"] = unsafe_value
+    else:
+        rule["scope"][component] = unsafe_value
+
+    with pytest.raises(ValueError):
+        TradingPolicyDocument.model_validate(raw)
+
+
+@pytest.mark.parametrize(
     ("component", "field", "unsafe_value"),
     [
         ("proposal", "action", "order_proposal_create"),
@@ -1359,6 +1426,9 @@ def test_public_policy_loader_returns_detached_policy_copy():
         ("proposal", "auto_approve", True),
         ("proposal", "execution", "direct_broker_submit"),
         ("rule", "operator_approval_required", False),
+        ("rule", "lanes", []),
+        ("scope", "brokers", ["toss", "nhplug"]),
+        ("scope", "required_broker_inventory", ["toss", "nhplug"]),
         ("conditions", "min_sell_price_multiple_policy_key", "other.key"),
     ],
 )
@@ -1379,6 +1449,10 @@ def test_exact_policy_safety_projection_is_rechecked(
             update={
                 "conditions": rule.conditions.model_copy(update={field: unsafe_value})
             }
+        )
+    elif component == "scope":
+        mutated = rule.model_copy(
+            update={"scope": rule.scope.model_copy(update={field: unsafe_value})}
         )
     else:
         mutated = rule.model_copy(update={field: unsafe_value})
@@ -1412,12 +1486,6 @@ def test_unsafe_nested_proposal_does_not_leak_auto_approval_metadata(
     rule.proposal.execution = "direct_broker_submit"
     monkeypatch.setattr(policy, "_single_share_policy_document", lambda: doc)
     accounts = (
-        _account(
-            KrBroker.KIS,
-            "kis-main",
-            holdings_at=now,
-            orders_at=now,
-        ),
         _account(
             KrBroker.TOSS,
             "toss-main",
@@ -1541,12 +1609,6 @@ def test_live_producer_uses_internal_clock_and_remains_shadow_off(monkeypatch):
         policy, "_expected_completed_krx_bar", lambda _now: expected_date
     )
     accounts = (
-        _account(
-            KrBroker.KIS,
-            "kis-main",
-            holdings_at=now,
-            orders_at=now,
-        ),
         _account(
             KrBroker.TOSS,
             "toss-main",

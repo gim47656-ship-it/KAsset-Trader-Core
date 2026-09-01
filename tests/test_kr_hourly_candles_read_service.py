@@ -22,11 +22,14 @@ def _minute_frame() -> pd.DataFrame:
             "datetime": pd.to_datetime(
                 ["2025-01-02T09:00:00+09:00", "2025-01-02T09:01:00+09:00"]
             ),
+            "date": [dt.date(2025, 1, 2), dt.date(2025, 1, 2)],
+            "time": [dt.time(9, 0), dt.time(9, 1)],
             "open": [100.0, 101.0],
             "high": [102.0, 103.0],
             "low": [99.0, 100.0],
             "close": [101.0, 102.0],
             "volume": [10.0, 20.0],
+            "value": [1_000.0, 2_000.0],
         }
     )
 
@@ -70,6 +73,19 @@ async def test_current_session_overlays_toss_and_returns_kst_naive(monkeypatch) 
     )
 
     assert result["datetime"].dt.tz is None
+    assert result.columns.tolist() == [
+        "datetime",
+        "date",
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "value",
+        "session",
+        "venues",
+    ]
     assert result["datetime"].tolist() == [
         pd.Timestamp("2025-01-02 09:00:00"),
         pd.Timestamp("2025-01-02 09:01:00"),

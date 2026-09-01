@@ -6,6 +6,10 @@ for evidence over that roster, derives the roster hash, and returns a private
 live or replay concrete context type that the matching evaluator recognizes by
 exact type.
 
+Live production accepts Toss account identities only. Replay rosters may retain
+KIS identities solely as non-routable historical rows; NH PLUG is represented
+only as market data and never as an account identity or order route.
+
 This type check is an API boundary, not an evidence-authenticity or security
 boundary. Capability values are descriptive labels, and callers supply the read
 ports; future live composition must therefore pin trusted adapter provenance
@@ -25,8 +29,8 @@ from json.encoder import encode_basestring_ascii
 from operator import attrgetter
 from typing import Protocol
 
-PRODUCER_IDENTITY = "kr_single_share_exit_snapshot_producer/v2"
-PRODUCER_CAPABILITY = "validated_exhaustive_kis_toss_snapshot/v2"
+PRODUCER_IDENTITY = "kr_single_share_exit_snapshot_producer/v3"
+PRODUCER_CAPABILITY = "validated_exhaustive_toss_snapshot/v3"
 ROSTER_CAPABILITY = "configured_kr_account_roster_read/v1"
 BROKER_EVIDENCE_CAPABILITY = "exhaustive_broker_account_evidence_read/v1"
 OPEN_ACTION_CAPABILITY = "scoped_open_action_evidence_read/v1"
@@ -41,7 +45,9 @@ _REQUIRED_READER_CAPABILITIES = (
 
 
 class KrBroker(StrEnum):
-    KIS = "kis"
+    """Account-broker identity; KIS survives only for retired replay rows."""
+
+    KIS_RETIRED = "kis"
     TOSS = "toss"
 
 
@@ -71,8 +77,8 @@ class QuoteKind(StrEnum):
 
 
 class QuoteSource(StrEnum):
-    KIS_BROKER = "kis_broker"
     TOSS_BROKER = "toss_broker"
+    NHPLUG_MARKET_DATA = "nhplug_market_data"
     NXT_EXPECTED_MODEL = "nxt_expected_model"
     PREVIOUS_CLOSE = "previous_close"
     INDICATIVE_MODEL = "indicative_model"
@@ -126,6 +132,8 @@ class ConfiguredAccount:
     def __post_init__(self) -> None:
         if not isinstance(self.account_kind, AccountKind):
             raise ValueError("account_kind must be typed")
+        if self.identity.broker is KrBroker.KIS_RETIRED and self.order_routable:
+            raise ValueError("retired KIS accounts must be non-routable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +164,8 @@ class SingleShareExitTarget:
         _require_kr_symbol(self.symbol)
         if not isinstance(self.broker, KrBroker):
             raise ValueError("broker must be a typed KrBroker")
+        if self.broker is not KrBroker.TOSS:
+            raise ValueError("single-share exit target broker must be Toss")
         _require_text(self.broker_account_id, "broker_account_id")
         _require_text(self.lot_id, "lot_id")
 
@@ -481,11 +491,10 @@ def compute_account_roster_hash(
 
 
 def executable_quote_price(quote: TypedQuoteEvidence) -> Decimal | None:
-    broker_sources = {QuoteSource.KIS_BROKER, QuoteSource.TOSS_BROKER}
     if (
         not quote.executable
         or not quote.firm
-        or quote.source not in broker_sources
+        or quote.source is not QuoteSource.TOSS_BROKER
         or quote.venue not in {QuoteVenue.KRX, QuoteVenue.NXT}
     ):
         return None
@@ -537,6 +546,10 @@ class _Producer:
         context_type: type[_ValidatedSingleShareExitContextBase],
     ) -> _ValidatedSingleShareExitContextBase:
         roster = await self._roster_reader.read_configured_kr_accounts()
+        if mode is ContextMode.LIVE and any(
+            account.identity.broker is not KrBroker.TOSS for account in roster.accounts
+        ):
+            raise ValueError("live account roster must contain only Toss accounts")
         accounts, open_actions, market = await asyncio.gather(
             self._broker_reader.read_accounts(
                 symbol=target.symbol,

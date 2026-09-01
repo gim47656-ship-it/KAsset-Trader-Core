@@ -39,12 +39,13 @@ __all__ = [
 
 
 def _aggregate_minutes_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
-    """분봉을 1시간봉으로 집계한다."""
+    """분봉을 1시간봉으로 집계하고 KST-naive 시각을 반환한다."""
     aggregated = _aggregate_minutes_to_buckets(df, bucket_minutes=60)
     if aggregated.empty:
         return pd.DataFrame(
             columns=["datetime", "open", "high", "low", "close", "volume"]
         )
+    aggregated["datetime"] = _to_kst_naive_series(aggregated["datetime"])
     return aggregated[["datetime", "open", "high", "low", "close", "volume"]]
 
 
@@ -69,6 +70,8 @@ def _prepare_toss_overlay(
         return _empty_intraday_frame()
     out = frame.copy()
     out["datetime"] = _to_kst_naive_series(out["datetime"])
+    out["date"] = out["datetime"].dt.date
+    out["time"] = out["datetime"].dt.time
     end_naive = _ensure_kst_aware(end_time_kst).replace(tzinfo=None)
     out = out.loc[out["datetime"] <= end_naive]
     if not nxt_eligible:

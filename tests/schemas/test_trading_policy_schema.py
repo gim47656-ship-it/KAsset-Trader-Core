@@ -905,12 +905,12 @@ def test_single_share_exit_rule_is_provisional_shadow_only():
         "sell.single_share_exit"
     ]
 
-    assert rule.lanes == []
+    assert rule.lanes == ["sell"]
     assert rule.activation_state == "shadow"
     assert rule.proposal_enabled is False
     assert rule.scope.markets == ["kr"]
-    assert rule.scope.brokers == ["toss", "nhplug"]
-    assert rule.scope.required_broker_inventory == ["toss", "nhplug"]
+    assert rule.scope.brokers == ["toss"]
+    assert rule.scope.required_broker_inventory == ["toss"]
     assert rule.scope.order_routable_required is True
     assert rule.conditions.symbol_routable_sellable_quantity_eq == 1
     assert rule.conditions.profit_pct_min == 8
@@ -966,11 +966,24 @@ def test_single_share_exit_rule_rejects_live_activation_or_enabled_proposal():
         TradingPolicyDocument.model_validate(enabled)
 
 
-def test_single_share_exit_rule_requires_both_toss_and_nhplug_inventory():
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("lanes", []),
+        ("brokers", ["toss", "nhplug"]),
+        ("required_broker_inventory", ["toss", "nhplug"]),
+    ],
+)
+def test_single_share_exit_rule_rejects_hidden_lane_or_non_toss_broker(
+    field,
+    unsafe_value,
+):
     raw = _raw()
-    raw["decision_rules"]["sell.single_share_exit"]["scope"][
-        "required_broker_inventory"
-    ] = ["toss"]
+    rule = raw["decision_rules"]["sell.single_share_exit"]
+    if field == "lanes":
+        rule[field] = unsafe_value
+    else:
+        rule["scope"][field] = unsafe_value
 
     with pytest.raises(ValidationError):
         TradingPolicyDocument.model_validate(raw)
@@ -1255,23 +1268,33 @@ def test_rob_1289_preserves_all_preexisting_policy_keys_and_values():
     reserve_base["owned_symbol_add_exempt_from_symbol_cap"] = reserve_cur[
         "owned_symbol_add_exempt_from_symbol_cap"
     ]
-    # Toss/NH PLUG clean cutover — the historical baseline names the retired
-    # KIS evidence pair and an evaluable sell lane. The current shadow record
-    # is deliberately deactivated and its provider exact set contains only the
-    # supported KR sources. Patch only these enumerated fields so the historical
-    # fixture can be parsed by the current closed schema; every other field
-    # remains covered by the equality assertion below.
+    # Toss-only active account cutover — the historical baseline preserves the
+    # retired KIS+Toss replay cohort, while the current evaluable sell lane has
+    # Toss as its sole account broker. Patch only these enumerated deltas so the
+    # historical fixture can be parsed by the current closed schema; every
+    # unrelated field remains covered by the equality assertion below.
     baseline_single_share = baseline["decision_rules"]["sell.single_share_exit"]
     current_single_share = current_raw["decision_rules"]["sell.single_share_exit"]
     assert baseline_single_share["lanes"] == ["sell"]
-    assert current_single_share["lanes"] == []
+    assert current_single_share["lanes"] == ["sell"]
     baseline_scope = baseline_single_share["scope"]
     current_scope = current_single_share["scope"]
     assert baseline_scope["brokers"] == ["kis", "toss"]
     assert baseline_scope["required_broker_inventory"] == ["kis", "toss"]
-    assert current_scope["brokers"] == ["toss", "nhplug"]
-    assert current_scope["required_broker_inventory"] == ["toss", "nhplug"]
-    baseline_single_share["lanes"] = current_single_share["lanes"]
+    assert current_scope["brokers"] == ["toss"]
+    assert current_scope["required_broker_inventory"] == ["toss"]
+    assert "historical KR KIS+Toss shadow" in baseline_single_share["semantics"]
+    assert current_single_share["semantics"].startswith(
+        "NARROW KR TOSS SINGLE-SHARE FAR-RESISTANCE SHADOW CLASSIFIER."
+    )
+    assert (
+        "Retired KIS evidence is non-routable replay context only"
+        in (current_single_share["recalibration_note"])
+    )
+    baseline_single_share["semantics"] = current_single_share["semantics"]
+    baseline_single_share["recalibration_note"] = current_single_share[
+        "recalibration_note"
+    ]
     baseline_scope["brokers"] = current_scope["brokers"]
     baseline_scope["required_broker_inventory"] = current_scope[
         "required_broker_inventory"

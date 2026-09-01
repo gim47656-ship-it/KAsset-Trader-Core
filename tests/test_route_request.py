@@ -102,6 +102,8 @@ def test_profit_taking_labels_kr_single_share_rule_as_shadow_only():
 
     assert rule["activation_state"] == "shadow"
     assert rule["proposal_enabled"] is False
+    assert rule["scope"]["brokers"] == ["toss"]
+    assert rule["scope"]["required_broker_inventory"] == ["toss"]
     assert rule["operator_approval_required"] is True
     assert rule["proposal"]["execution"] == "proposal_only"
     assert rule["proposal"]["auto_approve"] is False

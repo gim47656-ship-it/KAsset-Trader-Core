@@ -158,6 +158,12 @@ async def test_get_trading_policy_returns_sell_trim_preplace_rule():
     single_share = out["decision_rules"]["sell.single_share_exit"]
     assert single_share["activation_state"] == "shadow"
     assert single_share["proposal_enabled"] is False
+    assert single_share["scope"] == {
+        "markets": ["kr"],
+        "brokers": ["toss"],
+        "required_broker_inventory": ["toss"],
+        "order_routable_required": True,
+    }
     assert single_share["conditions"]["profit_pct_min"] == 8
     assert single_share["conditions"]["resistance_strength_min"] == "strong"
     assert single_share["conditions"]["resistance_distance_pct_min_exclusive"] == 6

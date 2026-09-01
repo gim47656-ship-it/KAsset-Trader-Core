@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from app.core.db import AsyncSessionLocal
 from app.models.order_proposals import OrderProposal, OrderProposalRung
 from app.services.order_proposals.service import OrderProposalsService
 
@@ -69,12 +70,11 @@ async def reconcile_toss_auto_veto_terminal(
         # in which case it is no longer in the open-row worklist this targeted
         # pass scans.  Read only the evidence-stamped original `place` row;
         # a cancel replacement acknowledgement cannot satisfy this lookup.
-        from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
         from app.services.toss_live_order_ledger_service import (
             TossLiveOrderLedgerService,
         )
 
-        async with _order_session_factory()() as db:
+        async with AsyncSessionLocal() as db:
             terminal_status = await TossLiveOrderLedgerService(
                 db
             ).reconciled_terminal_status_for_place_order(broker_order_id=order_id)

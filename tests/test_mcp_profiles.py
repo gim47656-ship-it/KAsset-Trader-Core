@@ -41,11 +41,6 @@ from app.mcp_server.tooling.market_quote_snapshot_tools import (
     MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
 )
 from app.mcp_server.tooling.order_proposal_tools import ORDER_PROPOSAL_TOOL_NAMES
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
-)
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_TOOL_NAMES,
 )
@@ -73,7 +68,19 @@ from app.mcp_server.tooling.tradingcodex_execution_registration import (
 )
 from tests._mcp_tooling_support import DummyMCP
 
-_LEGACY_ORDER_TOOL_NAMES = ORDER_TOOL_NAMES  # {place_order, cancel_order, ...}
+_ACTIVE_GENERIC_ORDER_TOOL_NAMES = ORDER_TOOL_NAMES
+_RETIRED_KIS_ORDER_TOOL_NAMES = {
+    "kis_live_place_order",
+    "kis_live_cancel_order",
+    "kis_live_modify_order",
+    "kis_live_get_order_history",
+    "kis_live_reconcile_orders",
+    "kis_mock_place_order",
+    "kis_mock_cancel_order",
+    "kis_mock_modify_order",
+    "kis_mock_get_order_history",
+    "live_reconcile_orders",
+}
 _ALPACA_PAPER_TOOL_NAMES = (
     ALPACA_PAPER_READONLY_TOOL_NAMES
     | ALPACA_PAPER_PREVIEW_TOOL_NAMES
@@ -127,15 +134,13 @@ def _build_mcp(profile: McpProfile) -> DummyMCP:
 
 
 class TestDefaultProfile:
-    def test_registers_legacy_order_tools(self) -> None:
+    def test_registers_generic_toss_upbit_order_tools(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert _LEGACY_ORDER_TOOL_NAMES <= mcp.tools.keys()
+        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
 
-    def test_does_not_register_kis_order_variants(self) -> None:
+    def test_does_not_register_retired_kis_order_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert (KIS_LIVE_ORDER_TOOL_NAMES | KIS_MOCK_ORDER_TOOL_NAMES).isdisjoint(
-            mcp.tools.keys()
-        )
+        assert _RETIRED_KIS_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
     def test_registers_typed_toss_live_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
@@ -244,17 +249,14 @@ class TestCryptoProfile:
         assert "get_crypto_top_movers" in mcp.tools
 
     def test_registers_crypto_trading_surface(self) -> None:
-        # A crypto session must be able to trade and settle: generic
-        # account_mode order tools are the only Upbit entry point and
-        # live_reconcile_orders is the US/crypto settle path.
+        # Generic account_mode order tools are the active Upbit entry point.
+        # Execution reconciliation is inline, not a separate KIS-era tool.
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert _LEGACY_ORDER_TOOL_NAMES <= mcp.tools.keys()
-        assert LIVE_RECONCILE_TOOL_NAMES <= mcp.tools.keys()
+        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
 
-    def test_does_not_register_kis_typed_order_tools(self) -> None:
+    def test_does_not_register_retired_kis_order_tools(self) -> None:
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert KIS_LIVE_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
-        assert KIS_MOCK_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
+        assert _RETIRED_KIS_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
 
 class TestKiwoomProfile:
@@ -386,11 +388,11 @@ class TestKiwoomDefaultProfileGate:
 _ALPACA_MUTATING = ALPACA_PAPER_MUTATING_TOOL_NAMES
 _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.DEFAULT: (
-        _LEGACY_ORDER_TOOL_NAMES
+        _ACTIVE_GENERIC_ORDER_TOOL_NAMES
         | TOSS_LIVE_ORDER_TOOL_NAMES
         | PAPER_LIMIT_ORDER_TOOL_NAMES
     ),
-    McpProfile.CRYPTO: set(_LEGACY_ORDER_TOOL_NAMES),
+    McpProfile.CRYPTO: set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES),
     McpProfile.US_PAPER: set(_ALPACA_MUTATING) | ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
     McpProfile.DB_PAPER: set(),
     McpProfile.KIWOOM: KIWOOM_MOCK_TOOL_NAMES | KIWOOM_MOCK_US_TOOL_NAMES,
@@ -400,10 +402,9 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     # (frozen-context read + policy + route_request only, early-return).
     McpProfile.SHADOW_REPLAY: set(),
     McpProfile.ANALYSIS_READONLY: {"toss_get_positions"},
-    # ROB-760 — account_read exposes read-only order-history tools (they are
-    # in _ALL_ORDER_TOOL_NAMES via ORDER/KIS_LIVE/TOSS_LIVE sets), so they must
-    # be listed here; separate forbidden-surface tests below prove the
-    # mutation/write tools stay absent.
+    # ROB-760 — account_read exposes the active generic and Toss read-only
+    # order-history tools, so they must be listed here; separate
+    # forbidden-surface tests below prove the mutation/write tools stay absent.
     McpProfile.ACCOUNT_READ: {
         "get_order_history",
         "kiwoom_mock_get_order_history",
@@ -441,10 +442,8 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.WATCH_REPRICING: set(),
 }
 _ALL_ORDER_TOOL_NAMES = (
-    _LEGACY_ORDER_TOOL_NAMES
-    | KIS_LIVE_ORDER_TOOL_NAMES
-    | KIS_MOCK_ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
+    _ACTIVE_GENERIC_ORDER_TOOL_NAMES
+    | _RETIRED_KIS_ORDER_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES
     | KIWOOM_MOCK_US_TOOL_NAMES
     | _ALPACA_MUTATING
@@ -706,7 +705,6 @@ class TestAccountReadProfile:
             "get_cash_balance",
             "toss_get_orderable_cash",
             "get_order_history",
-            "kis_live_get_order_history",
             "kiwoom_mock_get_positions",
             "kiwoom_mock_get_orderable_cash",
             "kiwoom_mock_get_order_history",
@@ -861,7 +859,7 @@ class TestTradingCodexExecutionProfile:
         result = await tool(
             symbol="005930",
             instrument_type="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             outcome="filled",
             created_by_profile=" ",
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -44,20 +45,19 @@ async def test_collect_portfolio_positions_defaults_to_no_sellable_and_allows_ex
         return _Snap()
 
     monkeypatch.setattr(portfolio_holdings.settings, "toss_api_enabled", True)
+    monkeypatch.setattr(
+        portfolio_holdings,
+        "get_shared_portfolio_snapshot_cache",
+        lambda: SimpleNamespace(usable=False),
+    )
     monkeypatch.setattr(portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch)
 
-    # Isolate the sibling collectors — with market=None, _collect_portfolio_positions
-    # otherwise fans out to the REAL _collect_kis_positions / _collect_upbit_positions
-    # (live KIS/Upbit HTTP) and _collect_manual_positions (AsyncSessionLocal DB). That
-    # makes this a slow, non-hermetic test, and _collect_upbit_positions can surface
-    # UpbitSymbolUniverseLookupError, which _collect_portfolio_positions RE-RAISES
-    # (portfolio_holdings.py:857-858) → the test would crash before asserting. Stub
-    # all three to empty so only the toss forwarding path is exercised. They are
-    # module globals resolved at call time, so setattr on the module patches them.
+    # Isolate the sibling active collectors — with market=None this path would
+    # otherwise call the real Upbit API and manual-holdings DB. Only the Toss
+    # forwarding contract belongs in this unit test.
     async def _empty(*args, **kwargs):
         return [], []
 
-    monkeypatch.setattr(portfolio_holdings, "_collect_kis_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", _empty)
 
@@ -147,9 +147,13 @@ async def test_collect_portfolio_positions_forwards_fresh_sellable(monkeypatch):
 
     monkeypatch.setattr(portfolio_holdings.settings, "toss_api_enabled", True)
     monkeypatch.setattr(
+        portfolio_holdings,
+        "get_shared_portfolio_snapshot_cache",
+        lambda: SimpleNamespace(usable=False),
+    )
+    monkeypatch.setattr(
         portfolio_holdings, "_collect_toss_api_positions", fake_collect_toss
     )
-    monkeypatch.setattr(portfolio_holdings, "_collect_kis_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", _empty)
 

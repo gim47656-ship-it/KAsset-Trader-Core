@@ -30,12 +30,12 @@ def _consumer() -> SupportReserveNetConsumer:
 def _cash(
     *,
     market: str = "equity_kr",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     fresh: str = "500000",
     net: str | None = None,
     all_pending: str = "0",
     reserve_armed: str = "0",
-    broker_account_id: str = "acct-1",
+    broker_account_id: str = "acct-exact-1",
 ) -> CashSnapshot:
     return CashSnapshot(
         account_mode=account_mode,
@@ -54,7 +54,7 @@ def _new(
     symbol: str = "NEW",
     *,
     market: str = "equity_kr",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     required_cash: str = "200000",
     quantity: str = "1000",
     support_strength: str = "moderate",
@@ -62,7 +62,7 @@ def _new(
     honest_upside: str = "45",
     proposed_limit: str = "91.2",
     sector: str = "software",
-    broker_account_id: str = "acct-1",
+    broker_account_id: str = "acct-exact-1",
 ) -> ReserveNetCandidate:
     return ReserveNetCandidate(
         normalized_symbol=symbol,
@@ -93,7 +93,7 @@ def _add(
     symbol: str = "ADD",
     *,
     market: str = "equity_kr",
-    account_mode: str = "kis_live",
+    account_mode: str = "toss_live",
     quantity: str = "5",
     required_cash: str = "500",
     support_strength: str = "strong",
@@ -104,7 +104,7 @@ def _add(
         normalized_symbol=symbol,
         market=market,  # type: ignore[arg-type]
         account_mode=account_mode,
-        broker_account_id="acct-1",
+        broker_account_id="acct-exact-1",
         beneficial_owner_id="owner-1",
         intent="add",
         current_price=Decimal("100"),
@@ -163,8 +163,8 @@ def test_acceptance_vector_new_one_add_one_remaining_slot_selects_new() -> None:
         normalized_symbol="FILLED",
         market="equity_kr",
         beneficial_owner_id="owner-1",
-        account_mode="kis_live",
-        broker_account_id="acct-1",
+        account_mode="toss_live",
+        broker_account_id="acct-exact-1",
         state="filled",
         sector_cluster="hardware",
     )
@@ -191,8 +191,8 @@ def test_max_symbol_count_ignores_other_strategy_holdings() -> None:
             normalized_symbol="OTHER1",
             market="equity_kr",
             beneficial_owner_id="owner-1",
-            account_mode="kis_live",
-            broker_account_id="acct-1",
+            account_mode="toss_live",
+            broker_account_id="acct-exact-1",
             state="filled",
             strategy="ordinary_buy_strategy",
         ),
@@ -200,8 +200,8 @@ def test_max_symbol_count_ignores_other_strategy_holdings() -> None:
             normalized_symbol="OTHER2",
             market="equity_kr",
             beneficial_owner_id="owner-1",
-            account_mode="kis_live",
-            broker_account_id="acct-1",
+            account_mode="toss_live",
+            broker_account_id="acct-exact-1",
             state="filled",
             strategy="ordinary_buy_strategy",
         ),
@@ -491,7 +491,7 @@ def test_us_new_candidates_can_use_two_slots_without_the_kr_threshold() -> None:
 def test_us_add_is_disabled_even_with_otherwise_complete_evidence() -> None:
     candidate = _add(
         market="equity_us",
-        account_mode="kis_live",
+        account_mode="toss_live",
         required_cash="500",
     )
     plan = _consumer().plan(
@@ -530,8 +530,8 @@ def test_known_self_unfilled_buy_blocks_same_symbol_before_candidate_selection()
         normalized_symbol="NEW",
         market="equity_kr",
         beneficial_owner_id="owner-1",
-        account_mode="kis_live",
-        broker_account_id="acct-1",
+        account_mode="toss_live",
+        broker_account_id="acct-exact-1",
     )
     plan = _consumer().plan(_request(_new(), self_unfilled=(open_buy,)))
 
@@ -585,7 +585,7 @@ async def test_noncanonical_candidate_account_id_stops_before_seam_inspection() 
 
     spy = SeamSpy()
     result = await _consumer().consume(
-        _request(replace(_new(), broker_account_id=" acct-1 ")),
+        _request(replace(_new(), broker_account_id=" acct-exact-1 ")),
         proposal_creator=spy,
     )
 
@@ -614,7 +614,7 @@ async def test_noncanonical_cash_account_id_stops_before_seam_inspection() -> No
 
     spy = SeamSpy()
     result = await _consumer().consume(
-        _request(_new(), cash=(_cash(broker_account_id="acct-1 "),)),
+        _request(_new(), cash=(_cash(broker_account_id="acct-exact-1 "),)),
         proposal_creator=spy,
     )
 
@@ -640,16 +640,34 @@ async def test_consume_inspects_all_scopes_before_companion_create_and_keeps_los
         sector="hardware",
     )
     service = OrderProposalsService(db_session)
-    events: list[tuple[str, str, str | None]] = []
+    events: list[tuple[str, str, str, str, str | None, str]] = []
     original_inspect = service.inspect_watch_to_order_scope
     original_create = service.create_proposal_in_watch_to_order_scope
 
     async def record_inspect(**kwargs):
-        events.append(("inspect", kwargs["symbol"], kwargs["broker_account_id"]))
+        events.append(
+            (
+                "inspect",
+                kwargs["symbol"],
+                kwargs["market"],
+                kwargs["account_mode"],
+                kwargs["broker_account_id"],
+                kwargs["action"],
+            )
+        )
         return await original_inspect(**kwargs)
 
     async def record_create(inspection, **kwargs):
-        events.append(("create", kwargs["symbol"], inspection.scope.broker_account_id))
+        events.append(
+            (
+                "create",
+                kwargs["symbol"],
+                kwargs["market"],
+                kwargs["account_mode"],
+                inspection.scope.broker_account_id,
+                kwargs["action"],
+            )
+        )
         return await original_create(inspection, **kwargs)
 
     monkeypatch.setattr(service, "inspect_watch_to_order_scope", record_inspect)
@@ -668,16 +686,61 @@ async def test_consume_inspects_all_scopes_before_companion_create_and_keeps_los
     assert result.plan.proposal_creation_block_code is None
     assert result.plan.unatomicity_notice is None
     assert events == [
-        ("inspect", first.normalized_symbol, None),
-        ("inspect", first.normalized_symbol, "acct-1"),
-        ("inspect", second.normalized_symbol, None),
-        ("inspect", second.normalized_symbol, "acct-1"),
-        ("create", first.normalized_symbol, "acct-1"),
-        ("create", second.normalized_symbol, "acct-1"),
+        (
+            "inspect",
+            first.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            None,
+            "place",
+        ),
+        (
+            "inspect",
+            first.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            "acct-exact-1",
+            "place",
+        ),
+        (
+            "inspect",
+            second.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            None,
+            "place",
+        ),
+        (
+            "inspect",
+            second.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            "acct-exact-1",
+            "place",
+        ),
+        (
+            "create",
+            first.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            "acct-exact-1",
+            "place",
+        ),
+        (
+            "create",
+            second.normalized_symbol,
+            "equity_kr",
+            "toss_live",
+            "acct-exact-1",
+            "place",
+        ),
     ]
     assert len(result.proposals_created) == 2
     for created in result.proposals_created:
         group, rungs = await service.get_proposal(created.proposal_id)
+        assert group.market == "equity_kr"
+        assert group.account_mode == "toss_live"
+        assert group.broker_account_id == "acct-exact-1"
         assert group.side == "buy"
         assert group.action == "place"
         assert group.exit_intent is None
@@ -696,8 +759,8 @@ async def test_concrete_scope_active_group_blocks_companion_create(
     await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
-        broker_account_id="acct-1",
+        account_mode="toss_live",
+        broker_account_id="acct-exact-1",
         side="buy",
         order_type="limit",
         proposer="concrete-probe",
@@ -736,7 +799,7 @@ async def test_probe_b_legacy_none_scope_blocks_concrete_create(
     legacy = await service.create_proposal(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         broker_account_id=None,
         side="buy",
         order_type="limit",
@@ -766,8 +829,8 @@ async def test_probe_b_legacy_none_scope_blocks_concrete_create(
     concrete = await service.inspect_watch_to_order_scope(
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
-        broker_account_id="acct-1",
+        account_mode="toss_live",
+        broker_account_id="acct-exact-1",
         action="place",
     )
     assert concrete.lock_acquired is True
