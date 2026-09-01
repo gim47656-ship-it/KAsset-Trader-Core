@@ -320,6 +320,7 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 text("DROP INDEX IF EXISTS paper.uq_paper_trades_account_correlation")
             )
             for table in (
+                "kasset_push_deliveries",
                 "kasset_android_paper_orders",
                 "kasset_android_paper_accounts",
                 "kasset_android_runtime_state",
@@ -363,6 +364,7 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 text("ALTER TABLE instruments DROP COLUMN aliases")
             )
             await connection.execute(text("DROP TABLE symbol_master"))
+            await connection.execute(text("DROP TABLE research.kr_candles_1m_toss"))
             # KR lifecycle evidence and persisted research cohorts are also
             # introduced after this boundary.
             for table in (
