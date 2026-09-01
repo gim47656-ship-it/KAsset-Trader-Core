@@ -1166,7 +1166,7 @@ def test_auto_veto_card_has_symbol_quantity_price_and_thesis_fields():
     assert "종목: `005930` · 삼성전자" in text
     assert "수량: #1 2" in text
     assert "가격: #1 97000" in text
-    assert "핵심 수치: 총수량 2주 / 주문금액 ₩194,000" in text
+    assert "핵심 수치: 총수량 2 / 주문금액 194000" in text
     assert "근거: valuation dislocation" in text
     assert "유효기간: 10:30 KST (2026-07-14)" in text
     assert "/invest/stocks/kr/005930" in text
@@ -1732,8 +1732,12 @@ async def test_daily_notional_uses_auto_approval_time_not_create_time(db_session
 @pytest.mark.asyncio
 async def test_daily_notional_reuses_durable_execution_price_cap_observation(
     db_session,
+    monkeypatch,
 ):
     """A later dispatch must retain §156's execution-price daily charge."""
+    from app.services.order_proposals import auto_approve as module
+
+    monkeypatch.setattr(module.settings, "ORDER_PROPOSALS_TOSS_LIVE_VETO_ENABLED", True)
     service = OrderProposalsService(db_session)
     now = datetime.now(UTC)
     account_id = f"execution-cap-{uuid.uuid4()}"

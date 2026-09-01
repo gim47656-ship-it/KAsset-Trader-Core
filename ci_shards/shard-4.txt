@@ -339,7 +339,6 @@ tests/test_kis_domestic_order_normalization.py
 tests/test_kis_domestic_pending_mock.py
 tests/test_kis_holdings_service.py
 tests/test_kis_manual_holdings_integration.py
-tests/test_kis_mock_execution_consumer.py
 tests/test_kis_mock_market_open_pilot.py
 tests/test_kis_mock_scalping_adapters.py
 tests/test_kis_order_ops.py

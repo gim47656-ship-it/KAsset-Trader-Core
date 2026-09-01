@@ -19,7 +19,6 @@ class TestNormalizeEquityMarket:
             ("korea", "kr"),
             ("kospi", "kr"),
             ("kosdaq", "kr"),
-            ("kis", "kr"),
             ("equity_kr", "kr"),
             ("naver", "kr"),
             ("us", "us"),
@@ -33,7 +32,9 @@ class TestNormalizeEquityMarket:
     def test_valid_markets(self, raw: str, expected: str) -> None:
         assert normalize_equity_market(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["crypto", "upbit", "invalid", ""])
+    @pytest.mark.parametrize(
+        "raw", ["crypto", "upbit", "invalid", "", "kis", "kis-kr", "kis-us"]
+    )
     def test_invalid_markets(self, raw: str) -> None:
         with pytest.raises(ValueError, match="market must be"):
             normalize_equity_market(raw)

@@ -151,12 +151,15 @@ class CandidateScreeningService:
 
         if market in ("crypto", "all"):
             try:
-                from app.services.upbit_holdings_service import (
-                    fetch_upbit_holdings_for_user,
-                )
+                from app.core.symbol import to_upbit_symbol
+                from app.services.invest_home_readers import UpbitHomeReader
 
-                rows = await fetch_upbit_holdings_for_user(self.db, user_id)
-                held.update(str(r.ticker).upper() for r in rows if r.quantity)
+                result = await UpbitHomeReader(self.db).fetch(user_id=user_id)
+                held.update(
+                    to_upbit_symbol(row.symbol)
+                    for row in result.holdings
+                    if row.quantity
+                )
             except Exception:
                 pass
 

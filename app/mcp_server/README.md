@@ -99,8 +99,10 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 
 - `search_symbol(query, limit=20)`
 - `get_quote(symbol, market=None)`
-  - KR equity quotes use Toss data. NXT/unified venue data that depended on KIS
-    is not synthesized; unsupported venue requests return `provider_unsupported`.
+  - KR/US equity live quotes use Toss. `analyze_stock_batch(..., quick=True)` is
+    DB-only and never fetches a live price; always call `get_quote` for that.
+  - NXT/unified venue data that depended on KIS is not synthesized; unsupported
+    venue requests return `provider_unsupported`.
 - `get_fx_rate(pair="USDKRW")`
   - Read-only spot FX quote for exchange-timing and US-market cash conversion decisions.
   - P1 supports USD/KRW only. Accepted spellings: `USDKRW`, `USD/KRW`, `USD_KRW`, `USD-KRW`.
@@ -1903,7 +1905,7 @@ Response contract additions:
   with `data_state_reason="live_price_refresh_failed"` rather than silently
   reading as current.
 - `filters.minimum_value`: when `minimum_value=None` in the request, this field contains the per-currency threshold dict that was applied
-- When `TOSS_API_ENABLED=true`, Toss Open API holdings are emitted with `broker="toss"`, `source="toss_api"`. `order_routable` (and `get_cash_balance` `orderable`, `/invest` home `isTradeable`) remain gated on `TOSS_LIVE_ORDER_MUTATIONS_ENABLED` (ROB-549). General holdings/home/briefing reads omit `sellable_quantity` or return `sellableQuantity=null`; they never fan out to Toss `/api/v1/sellable-quantity`. Toss live order tools revalidate sellability directly at the broker immediately before a live sell mutation. Every live sell placement requires an explicit, finite, positive `quantity`: an orderAmount-only live sell is rejected with `error_code="sell_quantity_required"` before any broker mutation, because Toss's orderAmount shape carries no broker-authoritative quantity and one is never synthesized from holdings, snapshots, or sellable caches. Successful live sell place/modify responses publish the authorizing evidence as `fresh_sellable_quantity` and `sellable_quantity_source="toss_broker_preflight"`.
+- When `TOSS_API_ENABLED=true`, Toss Open API holdings are emitted with `broker="toss"`, `source="toss_api"`. `order_routable` (and `get_cash_balance` `orderable`, `/invest` home `isTradeable`) remain gated on `TOSS_LIVE_ORDER_MUTATIONS_ENABLED` (ROB-549). General holdings/home/briefing reads omit `sellable_quantity` or return `sellableQuantity=null`; `need_sellable=false` paths skip Toss sellable reads entirely, and they never fan out to Toss `/api/v1/sellable-quantity`. Toss live order tools revalidate sellability directly at the broker immediately before a live sell mutation. Every live sell placement requires an explicit, finite, positive `quantity`: an orderAmount-only live sell is rejected with `error_code="sell_quantity_required"` before any broker mutation, because Toss's orderAmount shape carries no broker-authoritative quantity and one is never synthesized from holdings, snapshots, or sellable caches. Successful live sell place/modify responses publish the authorizing evidence as `fresh_sellable_quantity` and `sellable_quantity_source="toss_broker_preflight"`.
 - The composed Upbit/manual/Toss portfolio read model used by general holdings, home, briefing, and calendar held-key reads uses a short-lived process-shared Redis snapshot with a Redis distributed singleflight (ROB-1310). A live owner renews its lock lease; corrupt entries re-enter the same singleflight recovery path, while Redis outages/owner death retain bounded direct read-only recovery and never fabricate sellable data. Calendar held-key reads never fall back to full live readers: a cold/invalid snapshot returns an explicit `portfolio_snapshot_unavailable` 503 with availability metadata.
 - The Home-to-MCP snapshot projection preserves the MCP contract: Upbit/Toss/manual account IDs use canonical groups, crypto symbols use the `KRW-` market prefix, US P/L remains in native currency, and Home ratio fields are exposed as percentage points. Snapshot serialization excludes sellable and pending-sell quantities.
 - When Toss API holdings succeed, duplicate Toss `manual_holdings` rows for the same market/symbol are hidden from normal output.

@@ -268,7 +268,6 @@ tests/services/watch_trigger_repricing/test_invariants.py
 tests/services/watch_trigger_repricing/test_lifecycle_completion.py
 tests/services/watch_trigger_repricing/test_live_spawner_contract.py
 tests/services/watch_trigger_repricing/test_migration_roundtrip.py
-tests/tasks/test_kis_live_reconcile_tasks.py
 tests/tasks/test_live_reconcile_tasks.py
 tests/tasks/test_news_relevance_judgment_tasks.py
 tests/tasks/test_nhplug_symbol_master_tasks.py
@@ -337,7 +336,6 @@ tests/test_kis_domestic_orders_nxt.py
 tests/test_kis_integrated_margin_mock.py
 tests/test_kis_mock_holdings_delta_fill.py
 tests/test_kis_mock_lifecycle_reconciliation_acceptance.py
-tests/test_kis_mock_reconciliation_periodic_task.py
 tests/test_kis_overseas_orders_mutation_guards.py
 tests/test_kis_rankings.py
 tests/test_kis_request_error_retry_policy.py

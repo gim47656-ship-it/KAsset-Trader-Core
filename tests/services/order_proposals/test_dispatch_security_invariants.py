@@ -1575,6 +1575,7 @@ async def test_auto_dispatch_compensates_only_current_failed_result(
     first_service = SimpleNamespace(
         acquire_auto_dispatch_lock=AsyncMock(),
         get_proposal=AsyncMock(return_value=(group, [rung])),
+        active_toss_auto_submission_freeze=AsyncMock(return_value=None),
         auto_approved_daily_notional=AsyncMock(return_value=Decimal("0")),
         record_auto_approval=AsyncMock(),
         set_approval_nonce=AsyncMock(),

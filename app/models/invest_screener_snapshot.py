@@ -33,7 +33,7 @@ class InvestScreenerSnapshot(Base):
             name="ck_invest_screener_snapshots_market",
         ),
         CheckConstraint(
-            "source IN ('kis', 'yahoo')",
+            "source IN ('kis', 'yahoo', 'toss')",
             name="ck_invest_screener_snapshots_source",
         ),
         Index(

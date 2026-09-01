@@ -81,7 +81,7 @@ def _draft(symbol: str = "005930", event_uuid: str = EVENT) -> ProposalDraft:
         event_uuid=event_uuid,
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         rungs=(
@@ -151,7 +151,7 @@ def test_a_draft_with_no_rungs_cannot_be_constructed() -> None:
             event_uuid=EVENT,
             symbol="005930",
             market="equity_kr",
-            account_mode="kis_live",
+            account_mode="toss_live",
             side="sell",
             order_type="limit",
             rungs=(),

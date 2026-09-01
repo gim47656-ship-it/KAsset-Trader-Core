@@ -15,9 +15,9 @@ from app.services.execution_ledger.opening_lots import OpeningLotCandidate
 
 def _candidate(**overrides) -> OpeningLotCandidate:  # noqa: ANN003
     data = {
-        "broker": "kis",
+        "broker": "toss",
         "account_mode": "live",
-        "venue": "krx",
+        "venue": "toss_kr",
         "instrument_type": "equity_kr",
         "symbol": "005930",
         "raw_symbol": "005930",
@@ -52,7 +52,7 @@ async def test_seed_cli_dry_run_rolls_back(monkeypatch):
     )
 
     rc = await cli._run(
-        brokers=["kis"],
+        brokers=["toss"],
         cutover=datetime(2026, 5, 10, tzinfo=UTC),
         dry_run=True,
     )
@@ -95,7 +95,7 @@ async def test_seed_cli_dry_run_reports_classified_counts_and_samples(
     )
 
     rc = await cli._run(
-        brokers=["kis"],
+        brokers=["toss"],
         cutover=datetime(2026, 5, 10, tzinfo=UTC),
         dry_run=True,
     )
@@ -106,7 +106,7 @@ async def test_seed_cli_dry_run_reports_classified_counts_and_samples(
     assert payload["would_update"] == 1
     assert payload["unchanged"] == 1
     assert payload["sample_seed_rows"][0]["broker_order_id"].startswith(
-        "SEED-20260510-kis-krx-005930"
+        "SEED-20260510-toss-toss_kr-005930"
     )
 
 
@@ -120,7 +120,7 @@ async def test_seed_cli_commit_requires_gate(monkeypatch):
 
     with pytest.raises(RuntimeError, match="EXECUTION_LEDGER_COMMIT_ENABLED"):
         await cli._run(
-            brokers=["kis"],
+            brokers=["toss"],
             cutover=datetime(2026, 5, 10, tzinfo=UTC),
             dry_run=False,
         )

@@ -137,7 +137,7 @@ async def _create_real_proposal() -> str:
     created = await opt.order_proposal_create(
         symbol="005930",
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         proposer="rob1286-e2e",

@@ -925,7 +925,7 @@ async def test_operator_void_kis_lookup_is_explicitly_unsupported():
         market="equity_kr",
         symbol="005930",
         rungs=[rung],
-        client_order_ids={0: "legacy-kis-intent"},
+        now=NOW,
     )
 
     assert evidence[0].outcome == "unknown"

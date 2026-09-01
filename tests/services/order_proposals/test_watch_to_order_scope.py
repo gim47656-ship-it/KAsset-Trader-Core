@@ -55,7 +55,9 @@ async def test_inspect_watch_to_order_scope_uses_every_scope_axis(db_session):
         **_create_kwargs(scope, broker_account_id=f"other-{uuid.uuid4().hex}")
     )
     await service.create_proposal(**_create_kwargs(scope, broker_account_id=None))
-    await service.create_proposal(**_create_kwargs(scope, account_mode="toss_live"))
+    await service.create_proposal(
+        **_create_kwargs(scope, account_mode="upbit", market="crypto")
+    )
     await service.create_proposal(**_create_kwargs(scope, market="equity_kr"))
 
     inspection = await service.inspect_watch_to_order_scope(

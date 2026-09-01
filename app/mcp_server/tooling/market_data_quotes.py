@@ -1225,12 +1225,14 @@ async def _get_orderbook_impl(
         )
         return _build_orderbook_payload(snapshot)
     except Exception as exc:
-        return _error_payload_from_exception(
+        payload = _error_payload_from_exception(
             source=source,
             exc=exc,
             symbol=symbol,
             instrument_type=instrument_type,
         )
+        payload["success"] = False
+        return payload
 
 
 async def _get_ohlcv_impl(
@@ -1332,8 +1334,10 @@ def _register_market_data_tools_impl(mcp: FastMCP) -> None:
         name="get_quote",
         description=(
             "KR/US equity는 Toss, crypto는 Upbit에서 최신 시세를 읽습니다. "
-            "include_extended_hours는 호환성 인자일 뿐 US provider를 바꾸지 "
-            "않습니다. 캔들 이력은 get_ohlcv를 사용하세요."
+            "analyze_stock_batch quick=True is DB-only and never fetches a live "
+            "price; always call get_quote for that. include_extended_hours는 "
+            "호환성 인자일 뿐 US provider를 바꾸지 않습니다. 캔들 이력은 "
+            "get_ohlcv를 사용하세요."
         ),
     )
     async def get_quote(

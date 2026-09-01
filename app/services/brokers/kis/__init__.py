@@ -1,21 +1,3 @@
-# pyright: reportImportCycles=false
-from __future__ import annotations
+"""Dormant KIS modules are available only through direct module imports."""
 
-from .account import AccountClient, extract_domestic_cash_summary_from_integrated_margin
-from .base import BaseKISClient
-from .corporate_actions import CorporateActionsClient
-from .domestic_orders import DomesticOrderClient
-from .market_data import MarketDataClient
-from .overseas_orders import OverseasOrderClient
-from .protocols import KISClientProtocol
-
-__all__ = [
-    "AccountClient",
-    "BaseKISClient",
-    "CorporateActionsClient",
-    "DomesticOrderClient",
-    "KISClientProtocol",
-    "MarketDataClient",
-    "OverseasOrderClient",
-    "extract_domestic_cash_summary_from_integrated_margin",
-]
+__all__: tuple[str, ...] = ()

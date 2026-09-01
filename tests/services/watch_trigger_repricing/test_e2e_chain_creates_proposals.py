@@ -91,7 +91,7 @@ def sell_draft(event_uuid: str, symbol: str, *, limit_price: str) -> ProposalDra
         event_uuid=event_uuid,
         symbol=symbol,
         market="equity_kr",
-        account_mode="kis_live",
+        account_mode="toss_live",
         side="sell",
         order_type="limit",
         rungs=(
@@ -264,6 +264,7 @@ async def test_the_created_row_carries_the_draft_and_lane_provenance(seeded) -> 
     assert row is not None
     assert row.symbol == symbol
     assert row.side == "sell"
+    assert row.account_mode == "toss_live"
     assert row.proposer == PROPOSER
     assert row.rationale["event_uuid"] == event_uuid
     assert row.rationale["source"] == "watch_trigger_repricing"

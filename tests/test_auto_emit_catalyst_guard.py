@@ -97,8 +97,10 @@ def _snap(kind, payload, *, symbol=None):
 
 
 def _portfolio(holdings_list):
-    # _held_kis_symbols 요구: primary_source=="kis" + holdings=list[dict{ticker,sellable_quantity}]
-    return _snap("portfolio", {"primary_source": "kis", "holdings": holdings_list})
+    # Toss 운영 snapshot: primary_source + holdings[ticker, quantity].
+    return _snap(
+        "portfolio", {"primary_source": "toss_live", "holdings": holdings_list}
+    )
 
 
 def _quote(symbol):
@@ -140,7 +142,7 @@ def _cat(symbol, category, date_str):
 
 @pytest.mark.unit
 def test_sell_held_with_positive_catalyst_attaches_warning():
-    holdings = [{"ticker": "035420", "sellable_quantity": 10}]
+    holdings = [{"ticker": "035420", "quantity": 10}]
     snapshots = [
         _portfolio(holdings),
         _quote("035420"),
@@ -162,7 +164,7 @@ def test_sell_held_with_positive_catalyst_attaches_warning():
 
 @pytest.mark.unit
 def test_sell_without_catalyst_has_no_attachment():
-    holdings = [{"ticker": "035420", "sellable_quantity": 10}]
+    holdings = [{"ticker": "035420", "quantity": 10}]
     snapshots = [_portfolio(holdings), _quote("035420"), _market([])]
     items = EvidenceAutoEmitter().propose(
         snapshots=snapshots, request_market="kr", account_scope=None, now=NOW

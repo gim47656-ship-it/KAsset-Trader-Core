@@ -628,15 +628,14 @@ async def order_proposal_create(
     Args:
         market: Canonical market in {equity_kr, equity_us, crypto}; aliases
                 kr→equity_kr and us→equity_us are accepted. Supported place
-                combinations are kis_live/toss_live with equity_kr or equity_us,
-                and upbit with crypto.
+                combinations are toss_live with equity_kr or equity_us, and
+                upbit with crypto.
         rungs: list of {"rung_index": int, "side": str, "quantity": str,
                "limit_price": str|None, "notional": str|None}.
         supersedes_proposal_id: if this proposal replaces an existing one (price/qty
                change), the original is marked superseded and lineage is linked.
         action: ``place`` (default), ``replace``, or ``cancel``. Replace/cancel
-                support the same account_mode/market combinations as place
-                (kis_live/toss_live equity_kr|equity_us, upbit crypto) and
+                support the same account_mode/market combinations as place and
                 perform a read-only target-order preflight before persistence.
                 An unsupported combination returns success=False with a
                 structured supported_matrix (per action) instead of a bare

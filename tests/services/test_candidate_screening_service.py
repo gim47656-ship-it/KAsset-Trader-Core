@@ -86,6 +86,7 @@ async def test_passes_filters_through(monkeypatch) -> None:
 async def test_load_held_symbols_uses_toss_merged_quantity_and_owner_scope(
     monkeypatch,
 ) -> None:
+    from app.services.invest_home_readers import UpbitHomeReader
     from app.services.merged_portfolio_service import MergedPortfolioService
 
     domestic = AsyncMock(
@@ -104,12 +105,11 @@ async def test_load_held_symbols_uses_toss_merged_quantity_and_owner_scope(
         MergedPortfolioService, "get_merged_portfolio_overseas", overseas
     )
     fetch_crypto = AsyncMock(
-        return_value=[SimpleNamespace(ticker="KRW-BTC", quantity=1)]
+        return_value=SimpleNamespace(
+            holdings=[SimpleNamespace(symbol="BTC", quantity=1)]
+        )
     )
-    monkeypatch.setattr(
-        "app.services.upbit_holdings_service.fetch_upbit_holdings_for_user",
-        fetch_crypto,
-    )
+    monkeypatch.setattr(UpbitHomeReader, "fetch", fetch_crypto)
 
     service = CandidateScreeningService(MagicMock())
     held = await service._load_held_symbols(user_id=42, market="all")
@@ -117,4 +117,4 @@ async def test_load_held_symbols_uses_toss_merged_quantity_and_owner_scope(
     assert held == {"005930", "AAPL", "KRW-BTC"}
     domestic.assert_awaited_once_with(42)
     overseas.assert_awaited_once_with(42)
-    fetch_crypto.assert_awaited_once_with(service.db, 42)
+    fetch_crypto.assert_awaited_once_with(user_id=42)

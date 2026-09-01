@@ -170,15 +170,11 @@ async def run_kis_mock_reconciliation(
     zero-synthesis fail-closed guard for out-of-scope-fetch symbols is
     unaffected by order scoping.
 
-    ROB-1007 R4: this function is called directly by two job-layer callers
-    that bypass the MCP tool surface (``app/tasks/kis_mock_reconciliation_tasks.py``,
-    ``kis_mock_execution_consumer.py``) and previously built ``scope`` inline
-    without ever running it through :func:`resolve_kis_mock_reconcile_scope` —
-    an unknown ``market`` at this layer silently produced a false
-    ``success=True, orders_processed=0`` rather than the ``success=False``
-    the MCP layer already guaranteed. This call re-validates through the same
-    chokepoint so both entry points share one allowlist/shape, regardless of
-    whether a caller already validated (idempotent — normalization is stable).
+    ROB-1007 R4: the dormant kernel still re-validates scope at this layer so
+    an explicit test or operator-only invocation cannot bypass the common
+    allowlist/shape. An unknown ``market`` must return ``success=False`` rather
+    than silently producing ``success=True, orders_processed=0``. Validation is
+    idempotent because normalization is stable.
     """
     scope, scope_error = resolve_kis_mock_reconcile_scope(
         market=market, symbol=symbol, ledger_ids=ledger_ids

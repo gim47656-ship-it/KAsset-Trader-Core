@@ -713,10 +713,6 @@ def _format_symbol_label(symbol: str, *, display_name: str | None) -> str:
 
 
 def _build_order_core_metrics(*, group: Any, rungs: Sequence[Any]) -> str:
-    market = str(getattr(group, "market", "") or "")
-    symbol = str(getattr(group, "symbol", "") or "")
-    currency = _currency_for_market(market=market, symbol=symbol)
-    quantity_unit = "주" if market in {"equity_kr", "equity_us"} else ""
     total_quantity = Decimal("0")
     quantity_known = bool(rungs)
     total_notional = Decimal("0")
@@ -733,12 +729,12 @@ def _build_order_core_metrics(*, group: Any, rungs: Sequence[Any]) -> str:
         else:
             total_notional += quantity * price
     quantity_text = (
-        f"총수량 {_format_decimal(total_quantity)}{quantity_unit}"
+        f"총수량 {_format_decimal(total_quantity)}"
         if quantity_known
         else "총수량 미기재"
     )
     price_text = (
-        f"주문금액 {_format_money(total_notional, currency=currency)}"
+        f"주문금액 {_format_decimal(total_notional)}"
         if notional_known
         else "주문금액 시장가/미기재"
     )

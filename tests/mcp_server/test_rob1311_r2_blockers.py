@@ -1467,7 +1467,7 @@ def test_mcp_readme_screen_stocks_enrich_section_positively_owns_live_holdings_a
         "- `get_top_stocks(market=",
     )
     lowered = section.lower()
-    assert "live kis holdings" in lowered
+    assert "live toss holdings" in lowered
     assert "consensus" in lowered
 
 
