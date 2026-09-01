@@ -6,6 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest  # type: ignore[reportMissingImports]
+from pydantic import SecretStr
 
 
 class _FakeRedis:
@@ -37,6 +38,29 @@ class _AlwaysFailClaimRedis(_FakeRedis):
         if nx:
             return False
         return await super().set(key, value, ex=ex, nx=nx)
+
+
+def _generated_report() -> dict[str, Any]:
+    return {
+        "decision": "hold",
+        "confidence": 60,
+        "reasons": ["range"],
+        "price_analysis": {
+            "appropriate_buy_range": {"min": 100, "max": 110},
+            "appropriate_sell_range": {"min": 120, "max": 130},
+            "buy_hope_range": {"min": 95, "max": 98},
+            "sell_target_range": {"min": 150, "max": 160},
+        },
+        "detailed_text": "done",
+    }
+
+
+async def _await_background_reports() -> None:
+    from app.services import screener_service
+
+    tasks = tuple(screener_service._BACKGROUND_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 @pytest.mark.asyncio
@@ -390,49 +414,250 @@ async def test_refresh_screening_invalidates_cache(
     assert mock_screen.await_count == 2
 
 
+def _terra_snapshot(*route_ids: Any):
+    """``review_terra``만 지정 순서로 채운 정책 snapshot."""
+    from app.extensions.kasset.ai.runtime_config import (
+        DEFAULT_ROUTE_POLICY,
+        AiLane,
+        AiRuntimeSnapshot,
+        freeze_route_policy,
+    )
+
+    lanes = dict(DEFAULT_ROUTE_POLICY)
+    lanes[AiLane.REVIEW_TERRA] = tuple(route_ids)
+    return AiRuntimeSnapshot(
+        revision=7,
+        updated_at=None,
+        updated_by_user_id=None,
+        source="persisted",
+        lanes=freeze_route_policy(lanes),
+    )
+
+
+def _install_report_route_doubles(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    snapshot: Any,
+) -> dict[str, list[str]]:
+    """전송 계층을 가짜로 바꾸고 어떤 provider가 실제로 불렸는지 기록한다."""
+    from app.core.config import settings
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.ai import structured_router
+    from app.mcp_server.tooling import analysis_tool_handlers
+    from app.services import screener_service
+
+    used: dict[str, list[str]] = {"built": [], "called": []}
+
+    class _FakeMcpClient:
+        def __init__(self, **_kwargs: object) -> None:
+            used["built"].append("mcp")
+
+        @property
+        def name(self) -> str:
+            return "mcp"
+
+        @property
+        def tool_name(self) -> str:
+            return "run_skill"
+
+        async def request_json(self, **kwargs: object) -> dict[str, Any]:
+            used["called"].append("mcp")
+            used["payload"] = kwargs["input_payload"]  # type: ignore[assignment]
+            return _generated_report()
+
+    class _FakeResponsesClient:
+        def __init__(self, *, name: str, **_kwargs: object) -> None:
+            self._name = name
+            used["built"].append(name)
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def request_json(self, **kwargs: object) -> dict[str, Any]:
+            used["called"].append(self._name)
+            used["payload"] = kwargs["input_payload"]  # type: ignore[assignment]
+            return _generated_report()
+
+    async def _snapshot() -> Any:
+        return snapshot
+
+    async def _no_ledger(attempts: object) -> bool:
+        return True
+
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "http://mcp.test/mcp")
+    monkeypatch.setattr(settings, "KASSET_AI_API_BASE_URL", "https://direct.invalid/v1")
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", SecretStr("direct-key"))
+    monkeypatch.setattr(settings, "KASSET_AI_MODEL_TERRA", "model-terra")
+    monkeypatch.setattr(
+        settings, "KASSET_AI_OPENROUTER_BASE_URL", "https://router.invalid/api/v1"
+    )
+    monkeypatch.setattr(
+        settings, "KASSET_AI_OPENROUTER_API_KEY", SecretStr("openrouter-key")
+    )
+    monkeypatch.setattr(
+        settings, "KASSET_AI_OPENROUTER_MODEL_PRO", "model-openrouter-pro"
+    )
+    monkeypatch.setattr(ai_factory, "McpStructuredJsonClient", _FakeMcpClient)
+    monkeypatch.setattr(ai_factory, "OpenAiResponsesClient", _FakeResponsesClient)
+    monkeypatch.setattr(structured_router, "record_ai_call_attempts", _no_ledger)
+    monkeypatch.setattr(screener_service, "_report_route_snapshot", _snapshot)
+    monkeypatch.setattr(
+        analysis_tool_handlers,
+        "analyze_stock_impl",
+        AsyncMock(return_value={"success": True, "current_price": 101}),
+    )
+    return used
+
+
 @pytest.mark.asyncio
-async def test_request_report_reuses_inflight_job() -> None:
+async def test_generate_screener_report_uses_review_terra_mcp_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.extensions.kasset.ai.runtime_config import AiRouteId
+    from app.services.screener_service import generate_screener_report
+
+    used = _install_report_route_doubles(
+        monkeypatch,
+        snapshot=_terra_snapshot(
+            AiRouteId.MCP_TOOL,
+            AiRouteId.DIRECT_TERRA,
+            AiRouteId.OPENROUTER_PRO,
+        ),
+    )
+
+    report = await generate_screener_report(market="us", symbol="KLAC", name="KLA")
+
+    assert report["decision"] == "hold"
+    assert used["called"] == ["mcp"]
+    assert used["payload"]["analysis"] == {  # type: ignore[index]
+        "success": True,
+        "current_price": 101,
+    }
+
+
+@pytest.mark.asyncio
+async def test_generate_screener_report_uses_direct_route_when_policy_drops_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영자가 ``mcp_tool``을 끄면 MCP URL이 있어도 direct fallback으로 간다."""
+    from app.extensions.kasset.ai.runtime_config import AiRouteId
+    from app.services.screener_service import generate_screener_report
+
+    used = _install_report_route_doubles(
+        monkeypatch,
+        snapshot=_terra_snapshot(AiRouteId.DIRECT_TERRA, AiRouteId.OPENROUTER_PRO),
+    )
+
+    report = await generate_screener_report(market="us", symbol="KLAC", name="KLA")
+
+    assert report["decision"] == "hold"
+    assert used["called"] == ["direct-api"]
+    assert "mcp" not in used["built"]
+
+
+@pytest.mark.asyncio
+async def test_generate_screener_report_falls_back_past_an_unavailable_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP가 사용 불가로 실패하면 정책의 다음 route가 이어받는다."""
+    from app.extensions.kasset.ai import factory as ai_factory
+    from app.extensions.kasset.ai.base import AiProviderUnavailable
+    from app.extensions.kasset.ai.runtime_config import AiRouteId
+    from app.services.screener_service import generate_screener_report
+
+    used = _install_report_route_doubles(
+        monkeypatch,
+        snapshot=_terra_snapshot(
+            AiRouteId.MCP_TOOL,
+            AiRouteId.DIRECT_TERRA,
+            AiRouteId.OPENROUTER_PRO,
+        ),
+    )
+
+    class _DownMcpClient:
+        def __init__(self, **_kwargs: object) -> None:
+            used["built"].append("mcp")
+
+        @property
+        def name(self) -> str:
+            return "mcp"
+
+        @property
+        def tool_name(self) -> str:
+            return "run_skill"
+
+        async def request_json(self, **_kwargs: object) -> dict[str, Any]:
+            used["called"].append("mcp")
+            raise AiProviderUnavailable("sidecar down")
+
+    monkeypatch.setattr(ai_factory, "McpStructuredJsonClient", _DownMcpClient)
+
+    report = await generate_screener_report(market="us", symbol="KLAC", name="KLA")
+
+    assert report["decision"] == "hold"
+    assert used["called"] == ["mcp", "direct-api"]
+
+
+@pytest.mark.asyncio
+async def test_generate_screener_report_fails_closed_on_empty_terra_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.screener_service import generate_screener_report
+
+    _install_report_route_doubles(monkeypatch, snapshot=_terra_snapshot())
+
+    with pytest.raises(RuntimeError, match="review_terra"):
+        await generate_screener_report(market="us", symbol="KLAC", name="KLA")
+
+
+@pytest.mark.asyncio
+async def test_request_report_reuses_completed_report() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-1")
+    generator = AsyncMock(return_value=_generated_report())
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
+    first = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await _await_background_reports()
+    second = await service.request_report(market="us", symbol="AAPL", name="Apple")
+
+    assert first["status"] == "queued"
+    assert second["job_id"] == first["job_id"]
+    assert second["status"] == "completed"
+    assert second["is_reused"] is True
+    generator.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_report_concurrent_same_symbol_single_generation() -> None:
+    from app.services.screener_service import ScreenerService
+
+    fake_redis = _FakeRedis()
+    release = asyncio.Event()
+
+    async def delayed_report(**_kwargs: object) -> dict[str, Any]:
+        await release.wait()
+        return _generated_report()
+
+    generator = AsyncMock(side_effect=delayed_report)
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
     first = await service.request_report(market="us", symbol="AAPL", name="Apple")
     second = await service.request_report(market="us", symbol="AAPL", name="Apple")
 
-    assert first["job_id"] == "job-1"
-    assert first["is_reused"] is False
-    assert second["job_id"] == "job-1"
-    assert second["is_reused"] is True
-    agent.request_analysis.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_request_report_concurrent_same_symbol_single_dispatch() -> None:
-    from app.services.screener_service import ScreenerService
-
-    fake_redis = _FakeRedis()
-
-    async def delayed_request_analysis(**kwargs: object) -> str:
-        await asyncio.sleep(0.01)
-        return str(kwargs["request_id"])
-
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(side_effect=delayed_request_analysis)
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
-    first, second = await asyncio.gather(
-        service.request_report(market="us", symbol="AAPL", name="Apple"),
-        service.request_report(market="us", symbol="AAPL", name="Apple"),
-    )
-
     assert first["job_id"] == second["job_id"]
     assert {first["is_reused"], second["is_reused"]} == {False, True}
-    agent.request_analysis.assert_awaited_once()
+    release.set()
+    await _await_background_reports()
+    generator.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -456,39 +681,28 @@ async def test_request_report_returns_failed_when_inflight_claim_is_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_request_report_does_not_downgrade_completed_status() -> None:
+async def test_get_report_status_marks_running_while_generation_is_inflight() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-race")
+    release = asyncio.Event()
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-    fake_redis.store["screener:report:status:job-race"] = "completed"
+    async def delayed_report(**_kwargs: object) -> dict[str, Any]:
+        await release.wait()
+        return _generated_report()
 
-    result = await service.request_report(market="us", symbol="AAPL", name="Apple")
-
-    assert result["job_id"] == "job-race"
-    assert result["status"] == "completed"
-    assert fake_redis.store["screener:report:status:job-race"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_get_report_status_marks_running_when_inflight_exists() -> None:
-    from app.services.screener_service import ScreenerService
-
-    fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-running")
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=delayed_report,
+    )
     queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await asyncio.sleep(0)
     status = await service.get_report_status(queued["job_id"])
 
     assert queued["status"] == "queued"
     assert status["status"] == "running"
-    assert fake_redis.store["screener:report:status:job-running"] == "running"
+    release.set()
+    await _await_background_reports()
 
 
 @pytest.mark.asyncio
@@ -508,65 +722,124 @@ async def test_get_report_status_unknown_job_returns_not_found_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_callback_completes_job_and_reuses_report() -> None:
+async def test_request_report_marks_failed_when_mcp_generation_fails() -> None:
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-2")
-
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
+    generator = AsyncMock(side_effect=RuntimeError("mcp down"))
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=generator,
+    )
 
     queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
-    assert queued["status"] == "queued"
+    await _await_background_reports()
+    status = await service.get_report_status(queued["job_id"])
 
-    callback_payload = {
-        "request_id": "job-2",
-        "symbol": "AAPL",
-        "name": "Apple",
-        "instrument_type": "equity_us",
-        "decision": "hold",
-        "confidence": 60,
-        "reasons": ["range"],
-        "price_analysis": {
-            "appropriate_buy_range": {"min": 100, "max": 110},
-            "appropriate_sell_range": {"min": 120, "max": 130},
-            "buy_hope_range": {"min": 95, "max": 98},
-            "sell_target_range": {"min": 150, "max": 160},
-        },
-        "detailed_text": "done",
-    }
-    callback_result = await service.process_callback(callback_payload)
-    status = await service.get_report_status("job-2")
-    reused = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    assert status["status"] == "failed"
+    assert "mcp down" in status["error"]
 
-    assert callback_result["status"] == "ok"
-    assert status["status"] == "completed"
-    assert status["report"]["decision"] == "hold"
-    assert reused["status"] == "completed"
-    assert reused["is_reused"] is True
-    agent.request_analysis.assert_awaited_once()
+
+def test_report_generation_timeout_stays_below_the_inflight_ttl() -> None:
+    from app.services.screener_service import ScreenerService
+
+    assert (
+        ScreenerService.REPORT_GENERATION_TIMEOUT_SECONDS
+        < ScreenerService.REPORT_INFLIGHT_TTL_SECONDS
+    )
 
 
 @pytest.mark.asyncio
-async def test_request_report_marks_failed_when_agent_request_fails() -> None:
+async def test_report_generation_times_out_and_releases_its_own_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """무제한 생성은 inflight TTL을 넘긴다. 상한에서 끊고 claim을 반납한다."""
+    from app.services.screener_service import ScreenerService
+
+    monkeypatch.setattr(
+        ScreenerService, "REPORT_GENERATION_TIMEOUT_SECONDS", 0.05, raising=True
+    )
+    fake_redis = _FakeRedis()
+
+    async def never_returns(**_kwargs: object) -> dict[str, Any]:
+        await asyncio.sleep(30)
+        raise AssertionError("generator must be cut off by the timeout")
+
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=never_returns,
+    )
+
+    queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await _await_background_reports()
+    status = await service.get_report_status(queued["job_id"])
+
+    assert status["status"] == "failed"
+    assert status["error"] == "report_generation_timeout"
+    assert "screener:report:inflight:us:AAPL" not in fake_redis.store
+
+
+@pytest.mark.asyncio
+async def test_failed_job_does_not_release_a_newer_jobs_inflight_claim() -> None:
+    """늦게 실패한 job이 그 사이 시작한 job의 claim을 지우면 3차 생성이 열린다."""
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(side_effect=RuntimeError("agent down"))
+    release = asyncio.Event()
 
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
+    async def blocked_report(**_kwargs: object) -> dict[str, Any]:
+        await release.wait()
+        raise RuntimeError("mcp down")
 
-    result = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=blocked_report,
+    )
 
-    assert result["status"] == "failed"
-    assert result["is_reused"] is False
-    assert "agent down" in result["error"]
+    stale = await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await asyncio.sleep(0)
+    # TTL이 만료된 것과 같은 상태: 다음 요청이 같은 key를 새 job_id로 다시 잡는다.
+    inflight_key = "screener:report:inflight:us:AAPL"
+    await fake_redis.set(inflight_key, "job-newer")
 
-    status = await service.get_report_status(result["job_id"])
+    release.set()
+    await _await_background_reports()
+
+    assert fake_redis.store[inflight_key] == "job-newer"
+    status = await service.get_report_status(stale["job_id"])
     assert status["status"] == "failed"
-    assert "agent down" in status["error"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_tracked_report_tasks() -> None:
+    from app.services import screener_service
+    from app.services.screener_service import (
+        ScreenerService,
+        shutdown_screener_report_tasks,
+    )
+
+    fake_redis = _FakeRedis()
+    started = asyncio.Event()
+
+    async def hanging_report(**_kwargs: object) -> dict[str, Any]:
+        started.set()
+        await asyncio.sleep(30)
+        raise AssertionError("shutdown must cancel the generation task")
+
+    service = ScreenerService(
+        redis_client=cast(Any, fake_redis),
+        report_generator=hanging_report,
+    )
+
+    await service.request_report(market="us", symbol="AAPL", name="Apple")
+    await asyncio.wait_for(started.wait(), timeout=5)
+    tracked = tuple(screener_service._BACKGROUND_TASKS)
+    assert len(tracked) == 1
+
+    await shutdown_screener_report_tasks()
+
+    assert tracked[0].cancelled()
+    assert not screener_service._BACKGROUND_TASKS
 
 
 @pytest.mark.asyncio
@@ -608,12 +881,22 @@ async def test_callback_payload_mismatch_marks_failed_and_clears_inflight() -> N
     from app.services.screener_service import ScreenerService
 
     fake_redis = _FakeRedis()
-    agent = AsyncMock()
-    agent.request_analysis = AsyncMock(return_value="job-mismatch")
-    service = ScreenerService(redis_client=cast(Any, fake_redis), agent_client=agent)
-
-    queued = await service.request_report(market="us", symbol="AAPL", name="Apple")
-    assert queued["status"] == "queued"
+    service = ScreenerService(redis_client=cast(Any, fake_redis))
+    keys = service._report_keys("us", "AAPL", "job-mismatch")
+    await service._store_json(
+        keys.job_key,
+        service.REPORT_CACHE_TTL_SECONDS,
+        {
+            "job_id": "job-mismatch",
+            "market": "us",
+            "symbol": "AAPL",
+            "result_key": keys.result_key,
+            "status_key": keys.status_key,
+            "inflight_key": keys.inflight_key,
+        },
+    )
+    await fake_redis.set(keys.status_key, "running")
+    await fake_redis.set(keys.inflight_key, "job-mismatch")
 
     callback_result = await service.process_callback(
         {

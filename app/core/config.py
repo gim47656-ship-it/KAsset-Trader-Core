@@ -654,9 +654,6 @@ class Settings(BaseSettings):
     AGENT_GATEWAY_TOKEN: str = ""
     AGENT_GATEWAY_CALLBACK_TOKEN: str = ""  # shared secret for inbound callback auth
     AGENT_GATEWAY_CALLBACK_URL: str = "http://localhost:8000/api/v1/agent/callback"
-    AGENT_GATEWAY_SCREENER_CALLBACK_URL: str = (
-        "http://localhost:8000/api/screener/callback"
-    )
     AGENT_GATEWAY_ENABLED: bool = False
 
     # Hermes review-trigger notification (ROB-265 Plan 4). Replaces the

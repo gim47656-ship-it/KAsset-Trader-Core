@@ -23,6 +23,7 @@ from app.extensions.kasset.ai.model_router import OpenAiModelRouter
 from app.extensions.kasset.ai.provider_router import AiProviderRouter
 from app.extensions.kasset.ai.runtime_config import (
     DEFAULT_ROUTE_POLICY,
+    MCP_MODEL_PREFIX,
     AiLane,
     AiRouteId,
     AiRuntimeSnapshot,
@@ -67,11 +68,12 @@ def _lane_route_order(
     return snapshot.routes(lane)
 
 
-def _build_api_json_routes(
+def _build_json_routes(
     *,
     direct_model: str,
     fallback_model: str,
     route_order: tuple[AiRouteId, ...],
+    mcp_client: McpStructuredJsonClient | None = None,
 ) -> list[StructuredJsonRoute]:
     normalized_direct_model = direct_model.strip()
     direct_key = (
@@ -89,7 +91,15 @@ def _build_api_json_routes(
     routes: list[StructuredJsonRoute] = []
     for route_id in route_order:
         provider = ai_route_provider(route_id)
-        if provider == "direct-api":
+        if provider == "mcp":
+            if mcp_client is not None:
+                routes.append(
+                    StructuredJsonRoute(
+                        client=mcp_client,
+                        model=f"{MCP_MODEL_PREFIX}{mcp_client.tool_name}",
+                    )
+                )
+        elif provider == "direct-api":
             if direct_key and normalized_direct_model:
                 routes.append(
                     StructuredJsonRoute(
@@ -127,12 +137,49 @@ def build_summary_json_client(
 
     lane이 비어 있거나 사용 가능한 route가 없으면 ``None``을 돌려주고, 호출자는
     "미설정" 상태로 처리한다. 환경변수 기본값으로 되돌아가지 않는다.
+
+    ``mcp_client``를 넘기지 않는 것은 의도다. ``summary_luna`` allowlist에
+    ``mcp_tool``이 없으므로 이 lane은 API route만 만든다.
     """
 
-    routes = _build_api_json_routes(
+    routes = _build_json_routes(
         direct_model=direct_model,
         fallback_model=fallback_model,
         route_order=_lane_route_order(snapshot, AiLane.SUMMARY_LUNA),
+    )
+    if not routes:
+        return None
+    return AvailabilityRoutedJsonClient(name=name, routes=routes)
+
+
+def build_review_json_client(
+    *,
+    name: str,
+    lane: AiLane,
+    direct_model: str,
+    fallback_model: str,
+    snapshot: AiRuntimeSnapshot | None = None,
+) -> AvailabilityRoutedJsonClient | None:
+    """검토 lane 정책 순서로 MCP·direct·openrouter route를 만든다.
+
+    ``OpenAiModelRouter``는 tier escalation까지 함께 돌리므로, 단일 lane의
+    strict-JSON 호출 한 번만 필요한 호출자는 이 builder를 쓴다. 정책 순서와
+    fail-closed 규칙(설정 없는 route는 조용히 빠짐)은 router와 동일하다.
+    """
+
+    route_order = _lane_route_order(snapshot, lane)
+    # 정책이 MCP를 부르지 않으면 transport 자체를 만들지 않는다. 정책에 없는
+    # provider를 조립하는 호출자가 다시 생기지 않게 하는 지점이다.
+    mcp_client = (
+        _build_mcp_json_client()
+        if any(ai_route_provider(route_id) == "mcp" for route_id in route_order)
+        else None
+    )
+    routes = _build_json_routes(
+        direct_model=direct_model,
+        fallback_model=fallback_model,
+        route_order=route_order,
+        mcp_client=mcp_client,
     )
     if not routes:
         return None
@@ -260,5 +307,6 @@ __all__ = [
     "build_ai_provider_router",
     "build_api_provider_chain",
     "build_model_router",
+    "build_review_json_client",
     "build_summary_json_client",
 ]

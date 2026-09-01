@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -8,14 +11,128 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import redis.asyncio as redis
+from pydantic import BaseModel, ConfigDict, Field
 from redis.exceptions import WatchError
 
+from app.analysis.models import PriceAnalysis
 from app.core.config import settings
 
 if TYPE_CHECKING:
-    from app.services.agent_gateway import AgentGatewayClient
+    from app.extensions.kasset.ai.runtime_config import AiRuntimeSnapshot
+
+logger = logging.getLogger(__name__)
 
 ScreenMarket = Literal["kr", "us", "crypto"]
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+#: 종료 시 취소한 보고서 task를 회수하는 유한 대기. 취소를 계속 삼키는 코루틴은
+#: Python이 강제 종료할 수 없으므로 빈 registry를 약속하지 않는다.
+_REPORT_SHUTDOWN_REAP_TIMEOUT_SECONDS = 5.0
+
+
+def _spawn_background(
+    coro: Coroutine[Any, Any, Any], *, name: str
+) -> asyncio.Task[Any]:
+    task = asyncio.create_task(coro, name=name)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+async def shutdown_screener_report_tasks() -> None:
+    """앱 종료 전에 추적 중인 보고서 생성 task를 취소하고 유한하게 회수한다."""
+
+    tasks = tuple(_BACKGROUND_TASKS)
+    if not tasks:
+        return
+
+    for task in tasks:
+        task.cancel()
+
+    _, pending = await asyncio.wait(
+        tasks, timeout=_REPORT_SHUTDOWN_REAP_TIMEOUT_SECONDS
+    )
+    if pending:
+        logger.warning(
+            "screener.report_shutdown_pending",
+            extra={"pending_report_tasks": len(pending)},
+        )
+
+
+class _GeneratedScreenerReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["buy", "hold", "sell"]
+    confidence: int = Field(ge=0, le=100)
+    reasons: list[str] = Field(min_length=1, max_length=8)
+    price_analysis: PriceAnalysis
+    detailed_text: str = Field(min_length=1)
+
+
+async def _report_route_snapshot() -> AiRuntimeSnapshot:
+    """보고서 route 정책 snapshot을 한 번 읽는다.
+
+    배경 task에는 요청 scope session이 없으므로 다른 job/flow와 같이 자체
+    session을 연다. 조회가 실패하면 ``get_ai_runtime_snapshot``이 fail-closed
+    snapshot을 돌려주고, 그 결과 route가 하나도 조립되지 않는다.
+    """
+
+    from app.core.db import AsyncSessionLocal
+    from app.services.ai_runtime_config import get_ai_runtime_snapshot
+
+    async with AsyncSessionLocal() as db:
+        return await get_ai_runtime_snapshot(db)
+
+
+async def generate_screener_report(
+    *, market: str, symbol: str, name: str
+) -> dict[str, Any]:
+    """``review_terra`` 정책 순서로 근거 기반 보고서를 만든다.
+
+    운영자가 저장한 lane 정책이 route 순서를 정하고, MCP sidecar가 없거나
+    정책에서 빠지면 direct-api·openrouter fallback이 그대로 이어받는다.
+    """
+    from app.extensions.kasset.ai.factory import build_review_json_client
+    from app.extensions.kasset.ai.runtime_config import AiLane
+    from app.mcp_server.tooling.analysis_tool_handlers import analyze_stock_impl
+
+    client = build_review_json_client(
+        name="screener-report",
+        lane=AiLane.REVIEW_TERRA,
+        direct_model=settings.KASSET_AI_MODEL_TERRA,
+        fallback_model=settings.KASSET_AI_OPENROUTER_MODEL_PRO,
+        snapshot=await _report_route_snapshot(),
+    )
+    if client is None:
+        raise RuntimeError("review_terra lane has no usable AI route")
+    evidence = await analyze_stock_impl(symbol=symbol, market=market)
+    raw = await client.request_json(
+        model=settings.KASSET_AI_MODEL_TERRA,
+        input_payload={
+            "market": market,
+            "symbol": symbol,
+            "name": name,
+            "analysis": evidence,
+        },
+        reasoning_effort="high",
+        schema_name="screener_trading_report",
+        schema=_GeneratedScreenerReport.model_json_schema(),
+        additional_instructions=(
+            "분석 증거에 없는 수치나 사실을 만들지 마세요. 모든 설명은 한국어로 작성하고 "
+            "현재가와 기술적 근거에 맞춰 네 가격 범위를 제시하세요. 각 범위는 min이 max보다 "
+            "작거나 같아야 합니다. 투자 수익을 보장하거나 매매를 강요하지 마세요."
+        ),
+    )
+    report = _GeneratedScreenerReport.model_validate(raw)
+    price_analysis = report.price_analysis
+    for price_range in (
+        price_analysis.appropriate_buy_range,
+        price_analysis.appropriate_sell_range,
+        price_analysis.buy_hope_range,
+        price_analysis.sell_target_range,
+    ):
+        if price_range.min > price_range.max:
+            raise ValueError("screener report price range min exceeds max")
+    return report.model_dump(mode="json")
 
 
 async def screen_stocks_impl(**kwargs: Any) -> dict[str, Any]:
@@ -48,6 +165,10 @@ class ScreenerService:
     SCREENING_CACHE_TTL_SECONDS = 300
     REPORT_CACHE_TTL_SECONDS = 3600
     REPORT_INFLIGHT_TTL_SECONDS = 120
+    # 생성 상한은 inflight TTL보다 반드시 짧아야 한다. TTL이 먼저 만료되면 다음
+    # ``request_report``가 새 ``SET NX``를 잡아 같은 종목에 두 번째 생성을 띄우고
+    # evidence 수집과 모델 호출 비용이 이중으로 든다.
+    REPORT_GENERATION_TIMEOUT_SECONDS = 100
     REPORT_STATUSES = frozenset({"queued", "running", "completed", "failed"})
     TERMINAL_REPORT_STATUSES = frozenset({"completed", "failed"})
     REPORT_STATUS_ORDER = {
@@ -60,17 +181,10 @@ class ScreenerService:
     def __init__(
         self,
         redis_client: redis.Redis | None = None,
-        agent_client: AgentGatewayClient | None = None,
+        report_generator: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._redis = redis_client
-        self._agent = agent_client
-
-    def _get_agent(self) -> AgentGatewayClient:
-        if self._agent is None:
-            from app.services.agent_gateway import AgentGatewayClient
-
-            self._agent = AgentGatewayClient()
-        return self._agent
+        self._report_generator = report_generator or generate_screener_report
 
     async def _get_redis(self) -> redis.Redis:
         if self._redis is None:
@@ -310,6 +424,48 @@ class ScreenerService:
             normalized_next,
         )
         return normalized_next
+
+    async def _release_inflight_claim(
+        self,
+        inflight_key: str,
+        job_id: str,
+        *,
+        redis_client: redis.Redis | None = None,
+    ) -> bool:
+        """이 job이 잡은 claim일 때만 지운다.
+
+        inflight key는 market+symbol 스코프라 개별 job보다 오래 산다. 소유권을
+        확인하지 않고 지우면 늦게 끝난 job이 그 사이에 시작한 다음 job의 claim을
+        날려 같은 종목에 세 번째 생성을 열어 준다.
+        """
+
+        if not inflight_key or not job_id:
+            return False
+        if redis_client is None:
+            redis_client = await self._get_redis()
+
+        pipeline_factory = getattr(redis_client, "pipeline", None)
+        if not callable(pipeline_factory):
+            if await redis_client.get(inflight_key) != job_id:
+                return False
+            await redis_client.delete(inflight_key)
+            return True
+
+        for _ in range(3):
+            pipeline = cast(Any, pipeline_factory(transaction=True))
+            try:
+                await pipeline.watch(inflight_key)
+                if await pipeline.get(inflight_key) != job_id:
+                    return False
+                pipeline.multi()
+                pipeline.delete(inflight_key)
+                await pipeline.execute()
+                return True
+            except WatchError:
+                continue
+            finally:
+                await pipeline.reset()
+        return False
 
     async def _load_cached_json(self, key: str) -> dict[str, Any] | None:
         redis_client = await self._get_redis()
@@ -653,59 +809,12 @@ class ScreenerService:
             }
 
         display_name = (name or normalized_symbol).strip() or normalized_symbol
-        prompt = (
-            "Produce a trading report for the instrument below using MCP tools and return a JSON callback.\n"
-            f"market={normalized_market}\n"
-            f"symbol={normalized_symbol}\n"
-            f"name={display_name}\n"
-            "Include decision, confidence, reasons, and price_analysis ranges."
-        )
         instrument_type = self._instrument_type(normalized_market)
-        try:
-            job_id = await self._get_agent().request_analysis(
-                prompt=prompt,
-                symbol=normalized_symbol,
-                name=display_name,
-                instrument_type=instrument_type,
-                callback_url=settings.AGENT_GATEWAY_SCREENER_CALLBACK_URL,
-                include_model_name=False,
-                request_id=provisional_job_id,
-            )
-        except Exception as exc:
-            await redis_client.delete(inflight_key)
-            error_message = str(exc).strip() or exc.__class__.__name__
-            keys = self._report_keys(
-                normalized_market, normalized_symbol, provisional_job_id
-            )
-            await self._transition_report_status(
-                keys.status_key,
-                "failed",
-                redis_client=redis_client,
-            )
-            await self._store_json(
-                keys.job_key,
-                self.REPORT_CACHE_TTL_SECONDS,
-                {
-                    "job_id": provisional_job_id,
-                    "market": normalized_market,
-                    "symbol": normalized_symbol,
-                    "result_key": keys.result_key,
-                    "status_key": keys.status_key,
-                    "inflight_key": keys.inflight_key,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    "error": error_message,
-                },
-            )
-            return {
-                "job_id": provisional_job_id,
-                "status": "failed",
-                "error": error_message,
-                "is_reused": False,
-            }
-
-        keys = self._report_keys(normalized_market, normalized_symbol, job_id)
+        keys = self._report_keys(
+            normalized_market, normalized_symbol, provisional_job_id
+        )
         metadata = {
-            "job_id": job_id,
+            "job_id": provisional_job_id,
             "market": normalized_market,
             "symbol": normalized_symbol,
             "result_key": keys.result_key,
@@ -721,15 +830,98 @@ class ScreenerService:
         )
         await redis_client.set(
             keys.inflight_key,
-            job_id,
+            provisional_job_id,
             ex=self.REPORT_INFLIGHT_TTL_SECONDS,
         )
-
+        _spawn_background(
+            self._generate_and_store_report(
+                job_id=provisional_job_id,
+                market=normalized_market,
+                symbol=normalized_symbol,
+                name=display_name,
+                instrument_type=instrument_type,
+                keys=keys,
+                metadata=metadata,
+            ),
+            name=f"screener-report:{provisional_job_id}",
+        )
         return {
-            "job_id": job_id,
+            "job_id": provisional_job_id,
             "status": persisted_status,
             "is_reused": False,
         }
+
+    async def _generate_and_store_report(
+        self,
+        *,
+        job_id: str,
+        market: ScreenMarket,
+        symbol: str,
+        name: str,
+        instrument_type: str,
+        keys: _ReportKeys,
+        metadata: dict[str, Any],
+    ) -> None:
+        redis_client = await self._get_redis()
+        await self._transition_report_status(
+            keys.status_key,
+            "running",
+            redis_client=redis_client,
+        )
+        generated: dict[str, Any] | None = None
+        error_message = "report_generation_failed"
+        try:
+            # 무제한 생성은 inflight TTL을 넘겨 같은 종목에 두 번째 생성을
+            # 띄운다. 상한은 evidence 수집과 모델 호출 전체를 덮는다.
+            async with asyncio.timeout(self.REPORT_GENERATION_TIMEOUT_SECONDS):
+                generated = await self._report_generator(
+                    market=market,
+                    symbol=symbol,
+                    name=name,
+                )
+        except TimeoutError:
+            error_message = "report_generation_timeout"
+        except Exception as exc:
+            error_message = str(exc).strip() or exc.__class__.__name__
+
+        if generated is not None:
+            try:
+                callback_result = await self.process_callback(
+                    {
+                        "request_id": job_id,
+                        "symbol": symbol,
+                        "name": name,
+                        "instrument_type": instrument_type,
+                        **generated,
+                    }
+                )
+                if callback_result.get("status") != "ok":
+                    raise RuntimeError(
+                        str(callback_result.get("error") or "report_callback_failed")
+                    )
+                return
+            except Exception as exc:
+                error_message = str(exc).strip() or exc.__class__.__name__
+
+        await self._release_inflight_claim(
+            keys.inflight_key,
+            job_id,
+            redis_client=redis_client,
+        )
+        await self._transition_report_status(
+            keys.status_key,
+            "failed",
+            redis_client=redis_client,
+        )
+        await self._store_json(
+            keys.job_key,
+            self.REPORT_CACHE_TTL_SECONDS,
+            {
+                **metadata,
+                "updated_at": datetime.now(UTC).isoformat(),
+                "error": error_message,
+            },
+        )
 
     async def get_report_status(self, job_id: str) -> dict[str, Any]:
         if not job_id:
@@ -838,8 +1030,11 @@ class ScreenerService:
                         "error": error_message,
                     },
                 )
-                if inflight_key:
-                    await redis_client.delete(inflight_key)
+                await self._release_inflight_claim(
+                    inflight_key,
+                    job_id,
+                    redis_client=redis_client,
+                )
             return {
                 "status": "failed",
                 "request_id": job_id,
@@ -900,8 +1095,11 @@ class ScreenerService:
                                 "error": error_message,
                             },
                         )
-                        if inflight_key:
-                            await redis_client.delete(inflight_key)
+                        await self._release_inflight_claim(
+                            inflight_key,
+                            job_id,
+                            redis_client=redis_client,
+                        )
                     return {
                         "status": "failed",
                         "request_id": job_id,
@@ -960,7 +1158,11 @@ class ScreenerService:
                 "updated_at": datetime.now(UTC).isoformat(),
             },
         )
-        await redis_client.delete(inflight_key)
+        await self._release_inflight_claim(
+            inflight_key,
+            job_id,
+            redis_client=redis_client,
+        )
 
         return {
             "status": "ok",
