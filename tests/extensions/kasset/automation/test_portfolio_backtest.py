@@ -768,8 +768,20 @@ def _stored_evidence_payload(
     return raw, metrics
 
 
-def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
-    raw, expected = _stored_evidence_payload()
+@pytest.fixture(scope="module")
+def historical_stored_evidence() -> tuple[dict[str, object], PromotionMetrics]:
+    return _stored_evidence_payload()
+
+
+@pytest.fixture(scope="module")
+def forward_stored_evidence() -> tuple[dict[str, object], PromotionMetrics]:
+    return _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+
+
+def test_stored_portfolio_result_derives_exact_promotion_metrics(
+    historical_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
+    raw, expected = copy.deepcopy(historical_stored_evidence)
     diagnostics = raw["portfolioDiagnostics"]
     stored = raw["derivedPromotionMetrics"]
     thresholds = raw["promotionThresholds"]
@@ -811,8 +823,10 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     assert derived.as_snapshot() == expected.as_snapshot()
 
 
-def test_stored_payload_rejects_selected_symbol_outside_eligible_partition() -> None:
-    raw, _ = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+def test_stored_payload_rejects_selected_symbol_outside_eligible_partition(
+    forward_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
+    raw, _ = copy.deepcopy(forward_stored_evidence)
     data = raw["data"]
     assert isinstance(data, dict)
     eligible = data["eligibleSymbols"]
@@ -826,8 +840,10 @@ def test_stored_payload_rejects_selected_symbol_outside_eligible_partition() -> 
         derive_metrics_from_stored_payload(raw)
 
 
-def test_stored_payload_rejects_eligibility_count_mismatch() -> None:
-    raw, _ = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+def test_stored_payload_rejects_eligibility_count_mismatch(
+    forward_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
+    raw, _ = copy.deepcopy(forward_stored_evidence)
     data = raw["data"]
     assert isinstance(data, dict)
     eligible = data["eligibleSymbols"]
@@ -841,10 +857,12 @@ def test_stored_payload_rejects_eligibility_count_mismatch() -> None:
         derive_metrics_from_stored_payload(raw)
 
 
-def test_forward_track_payload_replays_without_historical_proof() -> None:
+def test_forward_track_payload_replays_without_historical_proof(
+    forward_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
     """forward 코호트 근거는 PIT/상장폐지 증명 없이도 그대로 재현된다."""
 
-    raw, expected = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    raw, expected = copy.deepcopy(forward_stored_evidence)
 
     assert raw["promotionTrack"] == FORWARD_PAPER_TRACK
     validation = raw["validation"]
@@ -862,10 +880,12 @@ def test_forward_track_payload_replays_without_historical_proof() -> None:
     assert derived.survivorship_evidence is False
 
 
-def test_stored_thresholds_must_match_the_declared_track() -> None:
+def test_stored_thresholds_must_match_the_declared_track(
+    historical_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
     """느슨한 임계 스냅샷을 historical 트랙 근거에 실어 보낼 수 없다."""
 
-    raw, _metrics = _stored_evidence_payload()
+    raw, _metrics = historical_stored_evidence
     tampered = copy.deepcopy(raw)
     tampered["promotionThresholds"] = _thresholds(track=FORWARD_PAPER_TRACK)
 
@@ -875,10 +895,12 @@ def test_stored_thresholds_must_match_the_declared_track() -> None:
         derive_metrics_from_stored_payload(tampered)
 
 
-def test_forward_payload_cannot_claim_historical_thresholds() -> None:
+def test_forward_payload_cannot_claim_historical_thresholds(
+    forward_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
     """반대 방향도 막는다: 트랙과 임계 프로필은 항상 한 쌍이다."""
 
-    raw, _metrics = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    raw, _metrics = forward_stored_evidence
     tampered = copy.deepcopy(raw)
     tampered["promotionThresholds"] = _thresholds(track=HISTORICAL_PIT_TRACK)
 
@@ -918,8 +940,9 @@ def test_forward_payload_cannot_claim_historical_thresholds() -> None:
 def test_stored_evidence_fails_closed_when_required_proof_is_missing(
     path: tuple[str, ...],
     value: object,
+    historical_stored_evidence: tuple[dict[str, object], PromotionMetrics],
 ) -> None:
-    raw, _metrics = _stored_evidence_payload()
+    raw, _metrics = historical_stored_evidence
     tampered = copy.deepcopy(raw)
     target = tampered
     for key in path[:-1]:
@@ -930,8 +953,10 @@ def test_stored_evidence_fails_closed_when_required_proof_is_missing(
         derive_metrics_from_stored_payload(tampered)
 
 
-def test_stored_evidence_fails_closed_when_benchmark_window_is_invalid() -> None:
-    raw, _metrics = _stored_evidence_payload()
+def test_stored_evidence_fails_closed_when_benchmark_window_is_invalid(
+    historical_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
+    raw, _metrics = historical_stored_evidence
     tampered = copy.deepcopy(raw)
     baseline = tampered["portfolioDiagnostics"]["baseline"]  # type: ignore[index]
     first_window = baseline["benchmarkWindows"][0]  # type: ignore[index]
@@ -964,8 +989,10 @@ def test_benchmark_windows_allow_unsynchronized_kr_us_sessions() -> None:
     )
 
 
-def test_stored_evidence_fails_closed_when_fold_benchmark_market_is_missing() -> None:
-    raw, _metrics = _stored_evidence_payload()
+def test_stored_evidence_fails_closed_when_fold_benchmark_market_is_missing(
+    historical_stored_evidence: tuple[dict[str, object], PromotionMetrics],
+) -> None:
+    raw, _metrics = historical_stored_evidence
     tampered = copy.deepcopy(raw)
     folds = tampered["walkForward"]["folds"]  # type: ignore[index]
     fold_test = folds[0]["test"]  # type: ignore[index]
