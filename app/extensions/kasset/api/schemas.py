@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.trading import UserRole
 
@@ -271,6 +271,25 @@ class NicknameUpdateRequest(AndroidWireModel):
 
 class RefreshRequest(AndroidWireModel):
     refresh_token: str = Field(alias="refreshToken", min_length=1, repr=False)
+
+
+class PushTokenRequest(AndroidWireModel):
+    """FCM registration token 등록 본문.
+
+    기기 귀속은 access token의 세션에서 서버가 정하므로 deviceId/platform 같은
+    클라이언트 주장 필드는 받지 않는다(``extra="forbid"``가 거절한다).
+    ``repr=False``로 두어 검증 오류나 예외 표현에 원문이 새지 않게 한다.
+    """
+
+    token: str = Field(min_length=1, max_length=4096, repr=False)
+
+    @field_validator("token")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("token must not be blank")
+        return stripped
 
 
 class CredentialRequest(AndroidWireModel):

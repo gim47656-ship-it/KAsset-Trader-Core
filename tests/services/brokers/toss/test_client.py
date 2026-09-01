@@ -775,6 +775,55 @@ async def test_candles_returns_typed_page_and_sends_query_params() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_indicator_candles_use_dedicated_index_route() -> None:
+    seen: dict[str, str] = {}
+    observed = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["interval"] = request.url.params["interval"]
+        seen["count"] = request.url.params["count"]
+        return httpx.Response(
+            200,
+            json=_json(
+                {
+                    "candles": [
+                        {
+                            "timestamp": "2026-06-12T09:00:00+09:00",
+                            "openPrice": "2900.10",
+                            "highPrice": "2901.25",
+                            "lowPrice": "2899.80",
+                            "closePrice": "2901.00",
+                            "volume": "10276",
+                        }
+                    ],
+                    "nextBefore": None,
+                }
+            ),
+            request=request,
+        )
+
+    client = TossReadClient(
+        token_manager=_TokenManager(),
+        transport=httpx.MockTransport(handler),
+        response_observer=lambda group, status, headers: observed.append(group),
+    )
+    try:
+        page = await client.market_indicator_candles("KOSPI", interval="1m", count=1)
+    finally:
+        await client.aclose()
+
+    assert seen == {
+        "path": "/api/v1/market-indicators/KOSPI/candles",
+        "interval": "1m",
+        "count": "1",
+    }
+    assert page.candles[0].close_price == Decimal("2901.00")
+    assert page.candles[0].currency is None
+    assert observed == [TossApiGroup.MARKET_INDICATOR_CHART]
+
+
+@pytest.mark.asyncio
 async def test_candles_response_observer_receives_documented_rate_headers() -> None:
     observed = []
 

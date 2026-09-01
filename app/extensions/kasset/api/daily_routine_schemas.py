@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
-from app.extensions.kasset.api.schemas import AndroidWireModel
+from app.extensions.kasset.api.schemas import AndroidWireModel, WatchlistMarket
 
 RoutineKey = Literal[
     "RAPID_RISE",
@@ -40,6 +40,9 @@ class DailyRoutineAlert(AndroidWireModel):
     translated_title: str | None = None
     translated_excerpt: str | None = None
     symbol: str | None = None
+    # Price alerts carry the watchlist market so a push receiver can address the
+    # symbol without guessing. News alerts have no market and leave it null.
+    market: WatchlistMarket | None = None
     source: str | None = None
     url: str | None = None
     occurred_at: datetime

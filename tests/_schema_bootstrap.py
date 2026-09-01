@@ -104,10 +104,18 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v49: kasset_ai_runtime_config (AI route 정책 singleton)이 ORM shape에 들어온다.
 # create_all이 테이블을 통째로 만들고 mirrored ALTER는 없다. 운영은
 # alembic/versions/20260830_kasset_ai_runtime_config.py를 따로 적용한다.
+# v50: kasset_device_sessions에 FCM token/hash/updated_at nullable 컬럼과
+# fingerprint 부분 unique index·짝 CHECK가 붙고, kasset_push_deliveries가 새
+# ORM 테이블로 들어온다. mirrored ALTER는 없으므로 이미 v49인 로컬 상시 테스트
+# DB가 한 번 재생성되어야 새 컬럼/테이블이 생긴다. 운영은
+# alembic/versions/20260901_kasset_fcm_push.py를 따로 적용한다.
+# v51: research.kr_candles_1m_toss (Toss 분봉 영속화)가 새 ORM 테이블로 들어온다.
+# app/models/__init__.py가 KRTossMinuteCandle을 등록하므로 create_all이 통째로
+# 만들고 mirrored ALTER는 없다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 49
+SCHEMA_BOOTSTRAP_VERSION = 51
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

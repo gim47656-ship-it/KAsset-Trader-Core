@@ -34,6 +34,9 @@ NEWS_TARGET_LIMIT = 50
 NEWS_RECOMMENDATION_LOOKBACK = timedelta(days=7)
 _CYCLE_LOCK_NAMESPACE = 1_263_498_067
 _CYCLE_LOCK_KEY = 1
+# Same namespace, distinct key: a push run and an analysis cycle are unrelated
+# and must not block each other.
+_PUSH_LOCK_KEY = 2
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,29 @@ async def kasset_google_news_us_sync() -> dict[str, object]:
     """Refresh Google News for the bounded US PAPER portfolio universe."""
 
     return await _sync_google_news_market("us")
+
+
+@broker.task(
+    task_name="kasset.push.price_alerts",
+    # 10분마다 그날의 미발송 ±5% 알림만 밀어낸다. 실제 발송 여부는
+    # KASSET_FCM_ENABLED와 service-account 설정이 최종 결정하며, 둘 중 하나라도
+    # 없으면 외부 요청 없이 끝난다.
+    schedule=[{"cron": "*/10 * * * *", "cron_offset": "Asia/Seoul"}],
+)
+async def kasset_price_alert_push() -> dict[str, object]:
+    """Deliver today's outstanding rapid-rise/fall alerts to registered devices."""
+
+    if not settings.KASSET_FCM_ENABLED:
+        return {"enabled": False, "reason": "disabled"}
+
+    from app.extensions.kasset.fcm_push_service import dispatch_price_alert_pushes
+
+    async with _advisory_single_flight(_PUSH_LOCK_KEY) as acquired:
+        if not acquired:
+            logger.info("kasset FCM push skipped: push_already_running")
+            return {"enabled": True, "skipped": "push_already_running"}
+        async with _session() as session:
+            return await dispatch_price_alert_pushes(session)
 
 
 async def _sync_google_news_market(market: str) -> dict[str, object]:
@@ -273,14 +299,14 @@ async def _sync_watchlist_symbol(symbol: str) -> dict[str, object]:
 
 
 @asynccontextmanager
-async def _cycle_single_flight() -> AsyncIterator[bool]:
-    """Serialize scheduled cycles across every TaskIQ worker process."""
+async def _advisory_single_flight(key: int) -> AsyncIterator[bool]:
+    """Serialize one scheduled job across every TaskIQ worker process."""
 
     async with _session() as session:
         acquired = bool(
             await session.scalar(
                 text("SELECT pg_try_advisory_lock(:namespace, :key)"),
-                {"namespace": _CYCLE_LOCK_NAMESPACE, "key": _CYCLE_LOCK_KEY},
+                {"namespace": _CYCLE_LOCK_NAMESPACE, "key": key},
             )
         )
         try:
@@ -290,12 +316,16 @@ async def _cycle_single_flight() -> AsyncIterator[bool]:
                 try:
                     await session.scalar(
                         text("SELECT pg_advisory_unlock(:namespace, :key)"),
-                        {"namespace": _CYCLE_LOCK_NAMESPACE, "key": _CYCLE_LOCK_KEY},
+                        {"namespace": _CYCLE_LOCK_NAMESPACE, "key": key},
                     )
                 except Exception:
                     # Connection close also releases session advisory locks. Log the
                     # failed explicit cleanup without masking the completed cycle.
-                    logger.exception("kasset AI cycle advisory unlock failed")
+                    logger.exception("kasset advisory unlock failed: key=%s", key)
+
+
+def _cycle_single_flight() -> AbstractAsyncContextManager[bool]:
+    return _advisory_single_flight(_CYCLE_LOCK_KEY)
 
 
 def _session() -> AbstractAsyncContextManager[AsyncSession]:
@@ -309,5 +339,6 @@ __all__ = [
     "kasset_google_news_kr_sync",
     "kasset_google_news_us_sync",
     "kasset_market_events_run",
+    "kasset_price_alert_push",
     "kasset_watchlist_candles_sync",
 ]

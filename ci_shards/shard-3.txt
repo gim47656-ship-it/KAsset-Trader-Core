@@ -27,6 +27,7 @@ tests/extensions/kasset/api/test_candles.py
 tests/extensions/kasset/api/test_market_indicators.py
 tests/extensions/kasset/api/test_market_quotes.py
 tests/extensions/kasset/api/test_orderbook.py
+tests/extensions/kasset/test_fcm_push_service.py
 tests/integration/test_paper_positions_market_filter.py
 tests/integration/test_rob279_staged_pipeline_e2e.py
 tests/jobs/test_kis_mock_reconciliation_job.py

@@ -24,6 +24,10 @@ from app.extensions.kasset.automation.strategy_artifact import (
     load_current_strategy_artifact,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
+    FORWARD_PAPER_PROMOTION_THRESHOLDS,
+    FORWARD_PAPER_TRACK,
+    HISTORICAL_PIT_PROMOTION_THRESHOLDS,
+    HISTORICAL_PIT_TRACK,
     IllegalPromotionTransition,
     PromotionEvidence,
     PromotionIdentityMismatch,
@@ -36,6 +40,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
     evaluate_thresholds,
     hash_metrics_snapshot,
     paper_approval_for,
+    promotion_thresholds_for_track,
     transition_promotion,
 )
 from app.extensions.kasset.automation.strategy_promotion_service import (
@@ -385,7 +390,11 @@ def _recommendation(
     )
 
 
-def _trust() -> promotion_service._CandidateTrust:
+def _trust(
+    *,
+    track: str = HISTORICAL_PIT_TRACK,
+    metrics: PromotionMetrics | None = None,
+) -> promotion_service._CandidateTrust:
     approved = _trusted_approved()
     return promotion_service._CandidateTrust(
         candidate=SimpleNamespace(id=7),
@@ -394,10 +403,12 @@ def _trust() -> promotion_service._CandidateTrust:
             strategy_key=approved.strategy_key,
             strategy_version=approved.version,
         ),
-        metrics=_passing_metrics(),
+        metrics=metrics or _passing_metrics(),
         artifact_fingerprint="a" * 64,
         source_commit="b" * 40,
         evidence_schema_version=PROMOTION_EVIDENCE_SCHEMA_VERSION,
+        track=track,  # type: ignore[arg-type]
+        thresholds=promotion_thresholds_for_track(track),
     )
 
 
@@ -423,6 +434,107 @@ async def test_service_approval_uses_persisted_candidate_trust_snapshot() -> Non
     assert approved.metrics_snapshot() == _passing_metrics().as_snapshot()
     assert approved.strategy_artifact_fingerprint == "a" * 64
     assert db.commit_count == 2
+
+
+def test_forward_track_relaxes_only_survivorship_evidence() -> None:
+    """forward 트랙은 생존편향 근거 하나만 빼고 나머지는 historical과 동일하다."""
+
+    forward = FORWARD_PAPER_PROMOTION_THRESHOLDS
+    historical = HISTORICAL_PIT_PROMOTION_THRESHOLDS
+
+    assert forward.require_survivorship_evidence is False
+    assert historical.require_survivorship_evidence is True
+    assert replace(forward, require_survivorship_evidence=True) == historical
+
+
+def test_forward_track_still_enforces_performance_and_sample_floors() -> None:
+    """근거 트랙이 달라도 성과·표본·데이터품질·결정성 하한은 그대로다."""
+
+    metrics = _passing_metrics()
+    thresholds = promotion_thresholds_for_track(FORWARD_PAPER_TRACK)
+
+    assert evaluate_thresholds(metrics, thresholds).passed is True
+    for weakened, failed_metric in (
+        (replace(metrics, total_return=Decimal("-0.01")), "total_return"),
+        (replace(metrics, max_drawdown=Decimal("0.31")), "max_drawdown"),
+        (replace(metrics, win_rate=Decimal("0.10")), "win_rate"),
+        (replace(metrics, excess_return=Decimal("-0.01")), "excess_return"),
+        (
+            replace(metrics, cost_stressed_total_return=Decimal("-0.01")),
+            "cost_stressed_total_return",
+        ),
+        (replace(metrics, trade_count=3), "trade_count"),
+        (replace(metrics, walk_forward_passed_folds=1), "walk_forward_pass_rate"),
+        (replace(metrics, data_quality_evidence=False), "data_quality_evidence"),
+        (replace(metrics, deterministic=False), "deterministic"),
+    ):
+        evaluation = evaluate_thresholds(weakened, thresholds)
+        assert evaluation.passed is False
+        assert failed_metric in evaluation.failed_metrics
+
+
+def test_unprovable_survivorship_blocks_historical_but_not_forward_track() -> None:
+    """forward 코호트에서 증명 불가능한 생존편향 근거가 PAPER를 영구 차단하지 않는다."""
+
+    metrics = replace(_passing_metrics(), survivorship_evidence=False)
+
+    forward = evaluate_thresholds(
+        metrics, promotion_thresholds_for_track(FORWARD_PAPER_TRACK)
+    )
+    historical = evaluate_thresholds(
+        metrics, promotion_thresholds_for_track(HISTORICAL_PIT_TRACK)
+    )
+
+    assert forward.passed is True
+    assert historical.passed is False
+    assert "survivorship_evidence" in historical.failed_metrics
+
+
+def test_promotion_thresholds_for_track_rejects_unknown_track() -> None:
+    with pytest.raises(ValueError, match="unsupported promotion track"):
+        promotion_thresholds_for_track("paper_live")
+
+
+@pytest.mark.asyncio
+async def test_forward_track_candidate_reaches_paper_approved() -> None:
+    """historical 근거가 없어도 forward 트랙 후보는 PAPER_APPROVED까지 간다."""
+
+    metrics = replace(_passing_metrics(), survivorship_evidence=False)
+    db = _MutablePromotionDb()
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+    service._candidate_trust = AsyncMock(  # type: ignore[method-assign]
+        return_value=_trust(track=FORWARD_PAPER_TRACK, metrics=metrics)
+    )
+
+    await service.create_draft(7, at=_NOW, operator_reason="검증 후보 등록")
+    approved = await service.approve_candidate(
+        7,
+        at=_NOW + timedelta(minutes=1),
+        operator_reason="PAPER 승인 검토 완료",
+    )
+
+    assert approved.state == PromotionState.PAPER_APPROVED
+    assert approved.metrics_snapshot()["survivorshipEvidence"] is False
+
+
+@pytest.mark.asyncio
+async def test_historical_track_candidate_without_survivorship_is_refused() -> None:
+    """같은 지표라도 historical 트랙으로 선언된 후보는 승인되지 않는다."""
+
+    metrics = replace(_passing_metrics(), survivorship_evidence=False)
+    db = _MutablePromotionDb()
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+    service._candidate_trust = AsyncMock(  # type: ignore[method-assign]
+        return_value=_trust(track=HISTORICAL_PIT_TRACK, metrics=metrics)
+    )
+
+    await service.create_draft(7, at=_NOW, operator_reason="검증 후보 등록")
+    with pytest.raises(PromotionThresholdNotMet):
+        await service.approve_candidate(
+            7,
+            at=_NOW + timedelta(minutes=1),
+            operator_reason="PAPER 승인 검토 완료",
+        )
 
 
 @pytest.mark.asyncio

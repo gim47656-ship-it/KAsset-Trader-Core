@@ -21,13 +21,10 @@ from app.services.daily_candles.repository import (
     DailyCandlesRepository,
     MarketKey,
 )
+from app.services.market_data.constants import KR_BENCHMARK_SYMBOL_BY_EXCHANGE
 
 BENCHMARK_SESSIONS: Final = 60
 _BENCHMARK_BAR_COUNT: Final = BENCHMARK_SESSIONS + 1
-_KR_BENCHMARK_BY_EXCHANGE: Final[dict[str, str]] = {
-    "KOSPI": "KOSPI",
-    "KOSDAQ": "KOSDAQ",
-}
 _US_BENCHMARK: Final = "SPY"
 
 
@@ -51,7 +48,7 @@ def benchmark_symbol_for_exchange(exchange: str | None) -> str | None:
     """Map a KR universe exchange label to its own broad-market benchmark."""
 
     normalized = str(exchange or "").strip().upper()
-    return _KR_BENCHMARK_BY_EXCHANGE.get(normalized)
+    return KR_BENCHMARK_SYMBOL_BY_EXCHANGE.get(normalized)
 
 
 def compute_benchmark_return_60_from_bars(

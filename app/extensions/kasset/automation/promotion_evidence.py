@@ -38,10 +38,14 @@ from app.extensions.kasset.automation.strategy_artifact import (
     current_strategy_artifact,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
-    DEFAULT_PROMOTION_THRESHOLDS,
+    FORWARD_PAPER_TRACK,
+    HISTORICAL_PIT_TRACK,
+    PROMOTION_TRACKS,
     PromotionMetrics,
     PromotionThresholds,
+    PromotionTrack,
     evaluate_thresholds,
+    promotion_thresholds_for_track,
 )
 from app.models.research_backtest import (
     ResearchBacktestRun,
@@ -69,6 +73,9 @@ from app.services.strategy_experiment_registry import (
 _FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
 _HEX64 = frozenset("0123456789abcdef")
 
+#: 트랙 어휘와 임계 프로필은 ``strategy_promotion``이 유일한 출처다. 여기서는
+#: 근거 payload가 선언한 트랙을 읽어 그 프로필로만 평가한다.
+
 
 class PromotionEvidenceBuildError(ValueError):
     """The DB-backed source cannot produce promotion-grade evidence."""
@@ -76,6 +83,7 @@ class PromotionEvidenceBuildError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class PortfolioEvidenceSource:
+    track: PromotionTrack
     as_of: datetime
     readiness: DailyCandlesReadiness
     candidates: tuple[CandidateMetadata, ...]
@@ -219,15 +227,17 @@ async def load_portfolio_evidence_source(
     *,
     as_of: datetime | None = None,
     cohort_ids: Mapping[str, str] | None = None,
+    track: str = FORWARD_PAPER_TRACK,
 ) -> PortfolioEvidenceSource:
     """Read readiness denominator and exact rank-bounded active-core evidence."""
 
+    resolved_track = _require_track(track)
     measured_at = _aware_utc(as_of or datetime.now(UTC))
     readiness = await DailyCandlesReadinessService(db).measure(
         as_of=measured_at,
         cohort_ids=cast(Any, cohort_ids),
     )
-    _require_readiness(readiness)
+    _require_readiness(readiness, track=resolved_track)
 
     candidates: list[CandidateMetadata] = []
     selected_evidence: list[Mapping[str, object]] = []
@@ -384,7 +394,11 @@ async def load_portfolio_evidence_source(
         raise PromotionEvidenceBuildError("daily_candles_missing")
     period_start = min(all_timestamps)
     period_end = max(all_timestamps)
-    _require_readiness(readiness, period_start=period_start.date())
+    _require_readiness(
+        readiness,
+        track=resolved_track,
+        period_start=period_start.date(),
+    )
     content_hash = _dataset_content_hash(
         candidates=tuple(candidates),
         bars_by_candidate=bars_by_candidate,
@@ -393,6 +407,7 @@ async def load_portfolio_evidence_source(
         selected_universe=tuple(selected_evidence),
     )
     return PortfolioEvidenceSource(
+        track=resolved_track,
         as_of=measured_at,
         readiness=readiness,
         candidates=tuple(candidates),
@@ -411,6 +426,7 @@ async def build_and_store_portfolio_evidence(
     *,
     as_of: datetime | None = None,
     cohort_ids: Mapping[str, str] | None = None,
+    track: str = FORWARD_PAPER_TRACK,
 ) -> PromotionEvidenceBuildResult:
     """Run deterministic engines and persist experiment -> run -> candidate."""
 
@@ -419,6 +435,7 @@ async def build_and_store_portfolio_evidence(
         db,
         as_of=as_of,
         cohort_ids=cohort_ids,
+        track=track,
     )
     config = PortfolioBacktestConfig(
         strategy_key=artifact.strategy_key,
@@ -449,9 +466,15 @@ async def build_and_store_portfolio_evidence(
             f"backtest_evidence_unavailable:{exc}"
         ) from exc
 
-    metrics = derive_promotion_metrics(diagnostics, walk_forward, source.readiness)
-    thresholds = _thresholds_snapshot(DEFAULT_PROMOTION_THRESHOLDS)
-    evaluation = evaluate_thresholds(metrics)
+    metrics = derive_promotion_metrics(
+        diagnostics,
+        walk_forward,
+        source.readiness,
+        track=source.track,
+    )
+    threshold_profile = promotion_thresholds_for_track(source.track)
+    thresholds = _thresholds_snapshot(threshold_profile)
+    evaluation = evaluate_thresholds(metrics, threshold_profile)
     raw_payload = build_promotion_raw_payload(
         artifact=artifact,
         source=source,
@@ -554,10 +577,13 @@ def derive_promotion_metrics(
     diagnostics: PortfolioBacktestDiagnostics,
     walk_forward: WalkForwardResult,
     readiness: DailyCandlesReadiness,
+    *,
+    track: str = FORWARD_PAPER_TRACK,
 ) -> PromotionMetrics:
     """Derive the only accepted promotion metric snapshot from engine results."""
 
-    _require_readiness(readiness)
+    resolved_track = _require_track(track)
+    _require_readiness(readiness, track=resolved_track)
     baseline = diagnostics.baseline
     _require_benchmark_window_coverage(baseline, readiness)
     if baseline.excess_return is None:
@@ -602,8 +628,17 @@ def derive_promotion_metrics(
         trade_count=baseline.trade_count,
         walk_forward_folds=len(folds),
         walk_forward_passed_folds=sum(_fold_passed(fold) for fold in folds),
-        data_quality_evidence=True,
-        survivorship_evidence=True,
+        data_quality_evidence=readiness.daily_history_ready,
+        # 생존 편향 없음은 point-in-time 멤버십과 상장폐지 멤버가 실제로 증명될
+        # 때만 참이다. forward 코호트에서는 거짓이며, 그 사실을 그대로 지표에
+        # 실어 승격 임계 검사가 스스로 막게 한다.
+        survivorship_evidence=bool(
+            readiness.markets
+            and all(
+                item.point_in_time_available and item.includes_delisted
+                for item in readiness.markets
+            )
+        ),
         deterministic=True,
         backtest_hashes=hashes,
     )
@@ -673,6 +708,7 @@ def build_promotion_raw_payload(
     ]
     return {
         "schemaVersion": PROMOTION_EVIDENCE_SCHEMA_VERSION,
+        "promotionTrack": source.track,
         "strategy": {
             "key": artifact.strategy_key,
             "version": artifact.strategy_version,
@@ -707,8 +743,13 @@ def build_promotion_raw_payload(
         "readiness": {
             "dailyHistoryReady": source.readiness.daily_history_ready,
             "promotionReady": source.readiness.promotion_ready,
+            "historicalEvidenceReady": (source.readiness.historical_evidence_ready),
             "dailyHistoryBlockers": list(source.readiness.daily_history_blockers),
             "blockers": list(source.readiness.blockers),
+            "historicalEvidenceBlockers": list(
+                source.readiness.historical_evidence_blockers
+            ),
+            "unresolvedEvidence": list(source.readiness.unresolved_evidence),
             "reasons": list(source.readiness.reasons),
             "markets": markets,
         },
@@ -725,6 +766,10 @@ def build_promotion_raw_payload(
             ),
             "delistedIncluded": all(
                 item.includes_delisted for item in source.readiness.markets
+            ),
+            "corporateActionLedgerProven": all(
+                item.corporate_action_status == "clear"
+                for item in source.readiness.markets
             ),
             "benchmarkProven": all(
                 item.benchmark.status == "available"
@@ -805,11 +850,25 @@ def build_promotion_raw_payload(
     }
 
 
+def _require_track(track: str) -> PromotionTrack:
+    if track not in PROMOTION_TRACKS:
+        raise PromotionEvidenceBuildError(f"promotion_track_invalid:{track}")
+    return cast(PromotionTrack, track)
+
+
 def _require_readiness(
     readiness: DailyCandlesReadiness,
     *,
+    track: PromotionTrack,
     period_start: date | None = None,
 ) -> None:
+    """Fail closed on the evidence the requested track actually claims.
+
+    Both tracks require the full obtainable daily-history evidence. Only the
+    historical track additionally requires point-in-time membership, delisted
+    survivors, the corporate-action ledger and a primary-provider price series;
+    on the forward track those facts stay recorded as unresolved evidence.
+    """
     if not readiness.promotion_ready:
         detail = ",".join(readiness.blockers) or "readiness_not_ready"
         raise PromotionEvidenceBuildError(detail)
@@ -817,12 +876,33 @@ def _require_readiness(
         raise PromotionEvidenceBuildError("daily_history_not_ready")
     if readiness.eligible_symbol_count <= 0:
         raise PromotionEvidenceBuildError("eligible_symbols_zero")
+    if track == HISTORICAL_PIT_TRACK and not readiness.historical_evidence_ready:
+        detail = (
+            ",".join(readiness.historical_evidence_blockers)
+            or "historical_evidence_not_ready"
+        )
+        raise PromotionEvidenceBuildError(detail)
     for market in readiness.markets:
         cohort = market.cohort
         if cohort is None:
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_not_found")
         if cohort.method != "latest_market_cap":
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_method_invalid")
+        if (
+            market.total_symbol_count <= 0
+            or market.eligible_symbol_count != market.total_symbol_count
+        ):
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:cohort_members_not_ready"
+            )
+        if market.benchmark.status != "available":
+            raise PromotionEvidenceBuildError(f"{market.market}:benchmark_unavailable")
+        if not market.benchmark.sources:
+            raise PromotionEvidenceBuildError(
+                f"{market.market}:benchmark_source_missing"
+            )
+        if track != HISTORICAL_PIT_TRACK:
+            continue
         if cohort.evidence_scope != "historical_pit":
             raise PromotionEvidenceBuildError(
                 f"{market.market}:cohort_not_historical_pit"
@@ -837,13 +917,6 @@ def _require_readiness(
         if period_start is not None and period_start < cohort.effective_date:
             raise PromotionEvidenceBuildError(
                 f"{market.market}:cohort_window_predates_effective_date"
-            )
-        if (
-            market.total_symbol_count <= 0
-            or market.eligible_symbol_count != market.total_symbol_count
-        ):
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:cohort_members_not_ready"
             )
         if market.fallback_only:
             raise PromotionEvidenceBuildError(f"{market.market}:fallback_only")
@@ -867,11 +940,9 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(
                 f"{market.market}:delisted_members_absent"
             )
-        if market.benchmark.status != "available":
-            raise PromotionEvidenceBuildError(f"{market.market}:benchmark_unavailable")
-        if not market.benchmark.sources:
+        if market.corporate_action_status != "clear":
             raise PromotionEvidenceBuildError(
-                f"{market.market}:benchmark_source_missing"
+                f"{market.market}:corporate_action_unknown"
             )
         if set(market.benchmark.sources) <= _FALLBACK_SOURCES:
             raise PromotionEvidenceBuildError(
@@ -1109,6 +1180,12 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
         "cohort": cohort_payload,
         "evaluatedWindowStart": _date_text(item.evaluated_window_start),
         "evaluatedWindowEnd": _date_text(item.evaluated_window_end),
+        "latestCompletedSession": _date_text(item.latest_completed_session),
+        "ingestLagSessionCount": item.ingest_lag_session_count,
+        "unevidencedSessionCount": item.unevidenced_session_count,
+        "unevidencedSessions": [
+            session_day.isoformat() for session_day in item.unevidenced_sessions
+        ],
         "totalSymbolCount": item.total_symbol_count,
         "cohortActiveMemberCount": item.cohort_active_member_count,
         "forcedMemberCount": item.forced_member_count,
@@ -1117,6 +1194,7 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
         "inactiveSymbolCount": item.inactive_symbol_count,
         "symbolsWithAtLeast252Bars": item.symbols_with_at_least_252_bars,
         "eligibleSymbolCount": item.eligible_symbol_count,
+        "priceAdjustmentStatus": item.price_adjustment_status,
         "corporateActionStatus": item.corporate_action_status,
         "corporateActionCoveredSymbolCount": (
             item.corporate_action_covered_symbol_count
@@ -1132,6 +1210,9 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
         "fallbackOnly": item.fallback_only,
         "dailyHistoryReady": item.daily_history_ready,
         "promotionReady": item.promotion_ready,
+        "historicalEvidenceReady": item.historical_evidence_ready,
+        "historicalEvidenceBlockers": list(item.historical_evidence_blockers),
+        "unresolvedEvidence": list(item.unresolved_evidence),
         "benchmark": {
             "symbol": item.benchmark.symbol,
             "source": item.benchmark.source,
@@ -1263,6 +1344,18 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     payload = _required_mapping(raw, "raw_payload")
     if payload.get("schemaVersion") != PROMOTION_EVIDENCE_SCHEMA_VERSION:
         raise PromotionEvidenceBuildError("evidence_schema_version_mismatch")
+    declared_track = payload.get("promotionTrack")
+    if not isinstance(declared_track, str) or declared_track not in PROMOTION_TRACKS:
+        raise PromotionEvidenceBuildError("promotion_track_invalid")
+    track = cast(PromotionTrack, declared_track)
+    historical = track == HISTORICAL_PIT_TRACK
+    # The threshold profile is derived from the track, never trusted from the
+    # payload: a stored payload cannot smuggle in a laxer profile.
+    expected_thresholds = _thresholds_snapshot(promotion_thresholds_for_track(track))
+    if canonical_sha256(payload.get("promotionThresholds")) != canonical_sha256(
+        expected_thresholds
+    ):
+        raise PromotionEvidenceBuildError("promotion_thresholds_track_mismatch")
     strategy = _required_mapping(payload.get("strategy"), "strategy")
     if not all(
         isinstance(strategy.get(field), str) and str(strategy[field]).strip()
@@ -1307,14 +1400,15 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         cohort_id = cohort.get("cohortId")
         selection_date = _required_date(cohort, "selectionDate")
         effective_date = _required_date(cohort, "effectiveDate")
+        expected_scope = "historical_pit" if historical else "forward_paper"
         if (
             not isinstance(cohort_id, str)
             or not cohort_id.strip()
             or cohort.get("method") != "latest_market_cap"
-            or cohort.get("evidenceScope") != "historical_pit"
+            or cohort.get("evidenceScope") != expected_scope
         ):
             raise PromotionEvidenceBuildError(f"{market}:cohort_identity_invalid")
-        if period_start < effective_date:
+        if historical and period_start < effective_date:
             raise PromotionEvidenceBuildError(
                 f"{market}:cohort_window_predates_effective_date"
             )
@@ -1332,7 +1426,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
             or row.get("cohortMethod") != "latest_market_cap"
             or row.get("cohortSelectionDate") != selection_date.isoformat()
             or row.get("cohortEffectiveDate") != effective_date.isoformat()
-            or row.get("cohortEvidenceScope") != "historical_pit"
+            or row.get("cohortEvidenceScope") != expected_scope
             or row.get("memberKind") not in {"active", "forced"}
             or _required_int(row, "memberRank") <= 0
             for row in market_rows
@@ -1361,8 +1455,11 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
                 not isinstance(source, str) or not source.strip()
                 for source in source_values
             )
-            or {cast(str, source).strip() for source in source_values}
-            <= _FALLBACK_SOURCES
+            or (
+                historical
+                and {cast(str, source).strip() for source in source_values}
+                <= _FALLBACK_SOURCES
+            )
             or any(_required_int(row, "loadedBarCount") <= 0 for row in market_rows)
         ):
             raise PromotionEvidenceBuildError(
@@ -1381,14 +1478,35 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         raise PromotionEvidenceBuildError("daily_history_blocked")
     if _required_sequence(readiness.get("blockers"), "readiness.blockers"):
         raise PromotionEvidenceBuildError("readiness_blocked")
+    # The forward track must still declare the historical facts it could not
+    # prove; a payload that silently drops the key is not replayable evidence.
+    unresolved = _required_sequence(
+        readiness.get("unresolvedEvidence"), "readiness.unresolvedEvidence"
+    )
+    if historical:
+        if readiness.get("historicalEvidenceReady") is not True:
+            raise PromotionEvidenceBuildError("historical_evidence_not_ready")
+        if _required_sequence(
+            readiness.get("historicalEvidenceBlockers"),
+            "readiness.historicalEvidenceBlockers",
+        ):
+            raise PromotionEvidenceBuildError("historical_evidence_blocked")
+        if unresolved:
+            raise PromotionEvidenceBuildError("historical_evidence_unresolved")
     validation = _required_mapping(payload.get("validation"), "validation")
-    required_validation = {
+    required_validation: dict[str, bool] = {
         "eligibleNonzero": True,
-        "fallbackOnly": False,
-        "pointInTimeProven": True,
-        "delistedIncluded": True,
         "benchmarkProven": True,
     }
+    if historical:
+        required_validation.update(
+            {
+                "fallbackOnly": False,
+                "pointInTimeProven": True,
+                "delistedIncluded": True,
+                "corporateActionLedgerProven": True,
+            }
+        )
     if any(
         validation.get(key) is not expected
         for key, expected in required_validation.items()
@@ -1403,10 +1521,15 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         )
         if (
             benchmark.get("status") != "available"
-            or benchmark.get("fallbackOnly") is not False
             or not sources
             or not all(isinstance(source, str) and source.strip() for source in sources)
-            or set(cast(Sequence[str], sources)) <= _FALLBACK_SOURCES
+            or (
+                historical
+                and (
+                    benchmark.get("fallbackOnly") is not False
+                    or set(cast(Sequence[str], sources)) <= _FALLBACK_SOURCES
+                )
+            )
         ):
             raise PromotionEvidenceBuildError(f"{market}:benchmark_evidence_invalid")
         coverage = _required_mapping(
@@ -1521,8 +1644,13 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         trade_count=_required_int(baseline, "tradeCount"),
         walk_forward_folds=len(folds),
         walk_forward_passed_folds=passed_folds,
-        data_quality_evidence=True,
-        survivorship_evidence=True,
+        # Mirror the build-time derivation exactly: the replayed snapshot may
+        # never assert evidence the persisted validation block does not carry.
+        data_quality_evidence=readiness.get("dailyHistoryReady") is True,
+        survivorship_evidence=bool(
+            validation.get("pointInTimeProven") is True
+            and validation.get("delistedIncluded") is True
+        ),
         deterministic=True,
         backtest_hashes=(
             cast(str, diagnostics_hash),
@@ -1674,9 +1802,12 @@ def _date_text(value: date | None) -> str | None:
 
 
 __all__ = [
+    "FORWARD_PAPER_TRACK",
+    "HISTORICAL_PIT_TRACK",
     "PortfolioEvidenceSource",
     "PromotionEvidenceBuildError",
     "PromotionEvidenceBuildResult",
+    "PromotionTrack",
     "build_and_store_portfolio_evidence",
     "build_promotion_raw_payload",
     "derive_metrics_from_stored_payload",

@@ -17,6 +17,7 @@ tests/extensions/kasset/api/test_market_overview.py
 tests/extensions/kasset/api/test_market_stream.py
 tests/extensions/kasset/api/test_session_token_lifecycle.py
 tests/extensions/kasset/automation/test_p0_cycle_trace.py
+tests/extensions/kasset/test_fcm_push_dispatch.py
 tests/infra/test_schema_barrier.py
 tests/integration/test_screener_e2e.py
 tests/integration/test_strategy_event_db_roundtrip.py

@@ -68,6 +68,7 @@ from .kasset_research_cohorts import (
     KAssetResearchCohort,
     KAssetResearchCohortMember,
 )
+from .kr_candles_1m_toss import KRTossMinuteCandle
 from .kr_lifecycle_actions import (
     KAssetCorporateActionFetchCoverage,
     KRCorporateActionEvidence,
@@ -278,6 +279,7 @@ __all__ = [
     "KAssetResearchCohortMember",
     "InvestThemeEventSnapshot",
     "InvestThemeEventSnapshotStock",
+    "KRTossMinuteCandle",
     "KRStockWarning",
     "KRCorporateActionEvidence",
     "KRStockLifecycleObservation",

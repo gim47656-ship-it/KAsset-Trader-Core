@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from typing import override
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pandas as pd
@@ -1530,6 +1530,69 @@ async def test_fetch_kr_intraday_toss_frame_aggregates_1m_to_5m(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ("KOSPI", "KOSDAQ"))
+async def test_fetch_kr_index_intraday_uses_market_indicator_candles(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+) -> None:
+    from app.services.market_data import toss_ohlcv
+
+    one_minute = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-06-12 09:00:00")
+                + pd.Timedelta(minutes=index),
+                "date": dt.date(2026, 6, 12),
+                "time": dt.time(9, index),
+                "open": 2900.0 + index,
+                "high": 2901.0 + index,
+                "low": 2899.0 + index,
+                "close": 2900.5 + index,
+                "volume": 1000.0 + index,
+                "value": (2900.5 + index) * (1000.0 + index),
+            }
+            for index in range(5)
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def aclose(self): ...
+
+    async def fake_fetch(**kwargs):
+        captured.update(kwargs)
+        return one_minute
+
+    monkeypatch.setattr(
+        toss_ohlcv.TossReadClient, "from_settings", lambda: FakeClient()
+    )
+    monkeypatch.setattr(
+        toss_ohlcv,
+        "fetch_toss_market_indicator_candles_frame",
+        fake_fetch,
+    )
+    monkeypatch.setattr(
+        toss_ohlcv,
+        "fetch_toss_candles_frame",
+        AsyncMock(side_effect=AssertionError("equity candles must not be used")),
+    )
+
+    frame = await toss_ohlcv.fetch_kr_index_intraday_toss_frame(
+        symbol=symbol,
+        period="5m",
+        count=1,
+        end_date=None,
+    )
+
+    assert captured["symbol"] == symbol
+    assert captured["interval"] == "1m"
+    assert captured["count"] == 5
+    assert len(frame) == 1
+    assert frame.iloc[0]["open"] == 2900.0
+    assert frame.iloc[0]["close"] == 2904.5
+
+
+@pytest.mark.asyncio
 async def test_fetch_kr_intraday_toss_frame_requests_full_depth_not_capped(monkeypatch):
     """ROB-548: aggregating N buckets needs N*bucket one-minute candles via
     pagination, not a silent 200 one-minute hard cap (5m@count=100 -> 500, not 200)."""
@@ -1689,6 +1752,86 @@ async def test_get_ohlcv_kr_intraday_uses_toss_first(monkeypatch):
         end_date=None,
     )
     assert candles[0].source == "toss"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ("KOSPI", "KOSDAQ"))
+async def test_get_ohlcv_kr_index_intraday_uses_toss_indicator_route(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-06-12 09:00:00+09:00"),
+                "open": 2900.0,
+                "high": 2902.0,
+                "low": 2899.0,
+                "close": 2901.0,
+                "volume": 1000.0,
+                "value": 2_901_000.0,
+            }
+        ]
+    )
+    index_mock = AsyncMock(return_value=frame)
+    equity_mock = AsyncMock(
+        side_effect=AssertionError("index must not use the equity candle route")
+    )
+    monkeypatch.setattr(
+        market_data_service, "fetch_kr_index_intraday_toss_frame", index_mock
+    )
+    monkeypatch.setattr(
+        market_data_service, "fetch_kr_intraday_toss_frame", equity_mock
+    )
+    monkeypatch.setattr(
+        market_data_service,
+        "KISClient",
+        MagicMock(side_effect=AssertionError("index must not fall back to KIS")),
+    )
+
+    candles = await market_data_service.get_ohlcv(
+        symbol,
+        "kr",
+        "5m",
+        count=84,
+    )
+
+    index_mock.assert_awaited_once_with(
+        symbol=symbol,
+        period="5m",
+        count=84,
+        end_date=None,
+    )
+    equity_mock.assert_not_awaited()
+    assert candles[0].symbol == symbol
+    assert candles[0].source == "toss"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_kr_index_provider_failure_does_not_forge_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        market_data_service,
+        "fetch_kr_index_intraday_toss_frame",
+        AsyncMock(side_effect=RuntimeError("indicator unavailable")),
+    )
+    equity_mock = AsyncMock(
+        side_effect=AssertionError("index must not use an equity as a proxy")
+    )
+    monkeypatch.setattr(
+        market_data_service, "fetch_kr_intraday_toss_frame", equity_mock
+    )
+    monkeypatch.setattr(
+        market_data_service,
+        "KISClient",
+        MagicMock(side_effect=AssertionError("index must not fall back to KIS")),
+    )
+
+    with pytest.raises(UpstreamUnavailableError, match="indicator unavailable"):
+        await market_data_service.get_ohlcv("KOSPI", "kr", "5m", count=84)
+
+    equity_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

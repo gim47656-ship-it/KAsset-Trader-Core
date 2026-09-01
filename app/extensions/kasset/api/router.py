@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.web_router import limiter
 from app.core.config import settings
 from app.core.db import get_db
-from app.extensions.kasset.api import krx_quotes
+from app.extensions.kasset.api import krx_quotes, push_tokens
 from app.extensions.kasset.api import market_news as market_news_service
 from app.extensions.kasset.api import market_overview as market_overview_service
 from app.extensions.kasset.api.ai_briefing import (
@@ -88,6 +88,7 @@ from app.extensions.kasset.api.schemas import (
     MarketOverviewResponse,
     NicknameUpdateRequest,
     OrderbookResponse,
+    PushTokenRequest,
     RefreshRequest,
     RegisterRequest,
     SessionTokens,
@@ -339,6 +340,41 @@ async def revoke(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     await mobile_auth.revoke(db, session)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/push/token", status_code=status.HTTP_204_NO_CONTENT)
+async def register_push_token_route(
+    request: PushTokenRequest,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """현재 기기 세션에 FCM registration token을 귀속시킨다.
+
+    응답은 본문 없는 204다. token이나 그 fingerprint를 되돌려주지 않는다.
+    """
+    await push_tokens.register_push_token(
+        db,
+        session_id=session.device_session.id,
+        owner_user_id=session.user.id,
+        device_id=session.device_id,
+        token=request.token,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/push/token", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_push_token_route(
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """현재 기기 세션의 token만 폐기한다. 등록이 없어도 멱등 204다."""
+    await push_tokens.clear_push_token(
+        db,
+        session_id=session.device_session.id,
+        owner_user_id=session.user.id,
+        device_id=session.device_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

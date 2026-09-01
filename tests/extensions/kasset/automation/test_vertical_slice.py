@@ -14,6 +14,7 @@ from app.extensions.kasset.automation.candidate_ranker import (
     CandidateRankerConfig,
     CandidateRankingBatch,
     CandidateRankResult,
+    RankEvidence,
 )
 from app.extensions.kasset.automation.contracts import (
     Action,
@@ -33,9 +34,14 @@ from app.extensions.kasset.automation.decision_evidence import (
     ai_review_from_observation,
     unknown_news_shadow,
 )
-from app.extensions.kasset.automation.intraday_data import CompletedIntradayBars
+from app.extensions.kasset.automation.intraday_data import (
+    CompletedIntradayBars,
+    IntradayBarsUnavailable,
+    load_index_session_bars,
+)
 from app.extensions.kasset.automation.intraday_triggers import (
     DEFAULT_INTRADAY_TRIGGER_POLICY,
+    INDEX_INTRADAY_UNAVAILABLE,
     INTRADAY_TRIGGER_SCHEMA_VERSION,
     OPENING_RANGE_BREAKOUT,
     RELATIVE_VOLUME_5M,
@@ -43,6 +49,7 @@ from app.extensions.kasset.automation.intraday_triggers import (
     TriggerDecisionStatus,
     TriggerResult,
     TriggerStatus,
+    intraday_relative_strength,
 )
 from app.extensions.kasset.automation.market_session import RegularSession
 from app.extensions.kasset.automation.policy import HardRiskResult, PortfolioPlan
@@ -81,6 +88,7 @@ def _rank_result(
     *,
     position: int,
     market: str = "KR",
+    benchmark_symbol: str | None = None,
 ) -> CandidateRankResult:
     return CandidateRankResult(
         symbol=symbol,
@@ -94,7 +102,17 @@ def _rank_result(
         atr_14=Decimal("2"),
         average_volume_20=Decimal("1000000"),
         average_turnover_20=Decimal("100000000"),
-        evidence=(),
+        evidence=(
+            (
+                RankEvidence(
+                    code="relative_strength_benchmark",
+                    value=benchmark_symbol,
+                    detail="fixture benchmark",
+                ),
+            )
+            if benchmark_symbol is not None
+            else ()
+        ),
         sources=("tvscreener_kr",),
         is_held=False,
         is_watchlisted=False,
@@ -418,6 +436,224 @@ def _stub_review_cycle(
     )
     instance._persist_recommendation = persist_recommendation  # type: ignore[method-assign]
     return instance, analyze_for_owner, portfolio_plan, persist_recommendation
+
+
+@pytest.mark.asyncio
+async def test_vertical_slice_loads_kospi_and_kosdaq_benchmarks_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rankings = (
+        _rank_result("005930", position=1, benchmark_symbol="KOSPI"),
+        _rank_result("035900", position=2, benchmark_symbol="KOSDAQ"),
+    )
+    setups = tuple(_qualified_setup(ranking) for ranking in rankings)
+    session = RegularSession(
+        market="kr",
+        session_date=_NOW.date(),
+        opens_at=_NOW - timedelta(hours=1),
+        closes_at=_NOW + timedelta(hours=5),
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def load_index(**kwargs):
+        calls.append((kwargs["index_symbol"], kwargs["market"]))
+        return _completed_intraday_bars(kwargs["index_symbol"])
+
+    monkeypatch.setattr(vertical_slice, "load_index_session_bars", load_index)
+    instance = object.__new__(AIRecommendationVerticalSlice)
+    instance._now = _NOW  # type: ignore[attr-defined]
+
+    loaded = await instance._load_index_intraday_bars(
+        setups,
+        ranking_by_key={ranking.key: ranking for ranking in rankings},
+        session_by_market={"KR": session},
+    )
+
+    assert set(loaded) == {"KOSPI", "KOSDAQ"}
+    assert calls == [("KOSDAQ", "KRX"), ("KOSPI", "KRX")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index_symbol", "index_close", "expected_excess"),
+    (("KOSPI", "102", "0.020000"), ("KOSDAQ", "98", "0.060000")),
+)
+async def test_kr_benchmark_indices_produce_available_relative_strength(
+    monkeypatch: pytest.MonkeyPatch,
+    index_symbol: str,
+    index_close: str,
+    expected_excess: str,
+) -> None:
+    session = RegularSession(
+        market="kr",
+        session_date=_NOW.date(),
+        opens_at=_NOW - timedelta(hours=1),
+        closes_at=_NOW + timedelta(hours=5),
+    )
+    first_timestamp = _NOW - timedelta(minutes=15)
+    latest_completed_timestamp = _NOW - timedelta(minutes=10)
+    partial_timestamp = _NOW
+    candles = [
+        SimpleNamespace(
+            timestamp=first_timestamp,
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            volume=1000,
+            source="toss",
+        ),
+        SimpleNamespace(
+            timestamp=latest_completed_timestamp,
+            open=100,
+            high=max(Decimal(index_close), Decimal("100")) + Decimal("1"),
+            low=min(Decimal(index_close), Decimal("100")) - Decimal("1"),
+            close=Decimal(index_close),
+            volume=1000,
+            source="toss",
+        ),
+        SimpleNamespace(
+            timestamp=partial_timestamp,
+            open=100,
+            high=1000,
+            low=1,
+            close=999,
+            volume=1000,
+            source="toss",
+        ),
+    ]
+    get_ohlcv = AsyncMock(return_value=candles)
+    monkeypatch.setattr(
+        "app.services.market_data.service.get_ohlcv",
+        get_ohlcv,
+    )
+
+    loaded = await load_index_session_bars(
+        index_symbol=index_symbol,
+        market="KRX",
+        as_of=_NOW,
+        session=session,
+    )
+
+    assert isinstance(loaded, CompletedIntradayBars)
+    assert [bar.timestamp for bar in loaded.bars] == [
+        first_timestamp,
+        latest_completed_timestamp,
+    ]
+    get_ohlcv.assert_awaited_once_with(
+        symbol=index_symbol,
+        market="equity_kr",
+        period="5m",
+        count=84,
+    )
+    candidate_bars = (
+        PriceBar(
+            timestamp=first_timestamp,
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=Decimal("1000"),
+        ),
+        PriceBar(
+            timestamp=latest_completed_timestamp,
+            open=Decimal("100"),
+            high=Decimal("105"),
+            low=Decimal("99"),
+            close=Decimal("104"),
+            volume=Decimal("1000"),
+        ),
+    )
+    strength = intraday_relative_strength(
+        candidate_bars,
+        loaded.bars,
+        direction=Action.BUY,
+        threshold=Decimal("0"),
+        bar_interval=timedelta(minutes=5),
+        source="toss",
+        index_source=loaded.source,
+    )
+
+    assert strength.status is TriggerStatus.ACTIVE
+    assert strength.value == expected_excess
+    assert strength.source == "toss"
+
+
+@pytest.mark.asyncio
+async def test_kr_index_provider_failure_keeps_unavailable_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = RegularSession(
+        market="kr",
+        session_date=_NOW.date(),
+        opens_at=_NOW - timedelta(hours=1),
+        closes_at=_NOW + timedelta(hours=5),
+    )
+    monkeypatch.setattr(
+        "app.services.market_data.service.get_ohlcv",
+        AsyncMock(side_effect=RuntimeError("provider down")),
+    )
+
+    loaded = await load_index_session_bars(
+        index_symbol="KOSPI",
+        market="KRX",
+        as_of=_NOW,
+        session=session,
+    )
+
+    assert isinstance(loaded, IntradayBarsUnavailable)
+    assert loaded.blocked_reason == INDEX_INTRADAY_UNAVAILABLE
+    assert "intraday_provider_unavailable" in loaded.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    (("invalid", "intraday_bar_invalid"), ("stale", "intraday_bars_stale")),
+)
+async def test_kr_index_unusable_or_stale_bars_remain_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    expected_reason: str,
+) -> None:
+    session = RegularSession(
+        market="kr",
+        session_date=_NOW.date(),
+        opens_at=_NOW - timedelta(hours=1),
+        closes_at=_NOW + timedelta(hours=5),
+    )
+    if case == "invalid":
+        timestamp = _NOW - timedelta(minutes=10)
+        high = Decimal("99")
+    else:
+        timestamp = session.opens_at
+        high = Decimal("101")
+    monkeypatch.setattr(
+        "app.services.market_data.service.get_ohlcv",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    timestamp=timestamp,
+                    open=Decimal("100"),
+                    high=high,
+                    low=Decimal("99"),
+                    close=Decimal("100"),
+                    volume=Decimal("1000"),
+                    source="toss",
+                )
+            ]
+        ),
+    )
+
+    loaded = await load_index_session_bars(
+        index_symbol="KOSDAQ",
+        market="KRX",
+        as_of=_NOW,
+        session=session,
+    )
+
+    assert isinstance(loaded, IntradayBarsUnavailable)
+    assert loaded.blocked_reason == expected_reason
 
 
 @pytest.mark.asyncio

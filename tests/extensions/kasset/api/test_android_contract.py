@@ -115,6 +115,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/ai/trading/state": {"get", "put"},
         "/api/v1/watchlist": {"get", "post"},
         "/api/v1/watchlist/{symbol}": {"delete"},
+        "/api/v1/push/token": {"put", "delete"},
     }
     assert "/api/v1/auth/pair" not in paths
     for path, methods in required.items():

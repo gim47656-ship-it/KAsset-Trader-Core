@@ -657,6 +657,7 @@ async def test_kr_universe_unions_active_watchlist_symbols() -> None:
         side_effect=[
             [SimpleNamespace(symbol="005930")],
             [SimpleNamespace(symbol="005380"), SimpleNamespace(symbol="005930")],
+            [],
         ]
     )
     svc = DailyCandleSyncService(
@@ -689,6 +690,7 @@ async def test_us_watchlist_without_exchange_defaults_to_nasd_partition() -> Non
                 SimpleNamespace(symbol="TQQQ", exchange=None),
                 SimpleNamespace(symbol="SOXL", exchange="NASDAQ"),
             ],
+            [],
         ]
     )
     svc = DailyCandleSyncService(
@@ -718,6 +720,7 @@ async def test_universe_table_partition_wins_over_watchlist() -> None:
         side_effect=[
             [SimpleNamespace(symbol="TQQQ", exchange="NYSE")],
             [SimpleNamespace(symbol="TQQQ", exchange=None)],
+            [],
         ]
     )
     svc = DailyCandleSyncService(
@@ -731,6 +734,77 @@ async def test_universe_table_partition_wins_over_watchlist() -> None:
     targets = await svc._resolve_universe(market="us")
 
     assert targets == [SyncTarget(market=MarketKey.US, symbol="TQQQ", partition="NYSE")]
+
+
+@pytest.mark.asyncio
+async def test_kr_universe_unions_research_cohort_members() -> None:
+    """코호트 멤버가 활성 유니버스에서 빠져도 일봉 수집은 계속돼야 한다.
+
+    readiness와 PAPER 승격은 불변 코호트를 기준으로 측정되므로, 멤버가 비활성/
+    상장폐지로 빠지는 순간 수집이 끊기면 그 코호트 행은 영구히 stale이 되고
+    승격 게이트를 다시 닫을 방법이 없다.
+    """
+
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(symbol="005930")],
+            [],
+            [
+                SimpleNamespace(symbol="000660", exchange="KRX"),
+                SimpleNamespace(symbol="005930", exchange="KRX"),
+            ],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc._resolve_universe(market="kr")
+
+    assert targets == [
+        SyncTarget(market=MarketKey.KR, symbol="000660", partition="KRX"),
+        SyncTarget(market=MarketKey.KR, symbol="005930", partition="KRX"),
+    ]
+    cohort_sql = str(repo.session.execute.await_args_list[2].args[0])
+    assert "kasset_research_cohort_members" in cohort_sql
+    assert "public.kr_symbol_universe" in cohort_sql
+    assert repo.session.execute.await_args_list[2].args[1] == {"market": "kr"}
+
+
+@pytest.mark.asyncio
+async def test_us_cohort_member_without_a_valid_exchange_is_never_guessed() -> None:
+    """파티션을 못 정하는 코호트 멤버는 임의 파티션으로 쓰지 않고 제외한다."""
+
+    repo = MagicMock()
+    repo.session = MagicMock()
+    repo.session.execute = AsyncMock(
+        side_effect=[
+            [],
+            [],
+            [
+                SimpleNamespace(symbol="OLDCO", exchange=None),
+                SimpleNamespace(symbol="BADX", exchange="TSE"),
+                SimpleNamespace(symbol="NVDA", exchange="NASDAQ"),
+            ],
+        ]
+    )
+    svc = DailyCandleSyncService(
+        repository=repo,
+        kis_kr_fetcher=AsyncMock(),
+        kis_us_fetcher=AsyncMock(),
+        yahoo_us_fetcher=AsyncMock(),
+        upbit_crypto_fetcher=AsyncMock(),
+    )
+
+    targets = await svc._resolve_universe(market="us")
+
+    assert targets == [SyncTarget(market=MarketKey.US, symbol="NVDA", partition="NASD")]
 
 
 @pytest.mark.asyncio

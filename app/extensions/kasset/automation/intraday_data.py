@@ -1,8 +1,8 @@
 """장중 Trigger가 쓰는 완료 정규장 bar 적재기.
 
-공용 :func:`app.services.market_data.service.get_ohlcv`만 쓴다. KR 분봉은 그
-서비스가 이미 Toss를 먼저 보고 실패할 때만 KIS/DB로 내려가므로 여기서 두 번째
-공급자 계층을 만들지 않는다.
+공용 :func:`app.services.market_data.service.get_ohlcv`만 쓴다. KR 개별 종목은 그
+서비스의 Toss-first 경로를 따르고, KOSPI/KOSDAQ은 Toss 시장지표 전용 경로를
+따른다. 지수 공급 실패는 종목/KIS proxy로 대체하지 않고 unavailable로 남긴다.
 
 이 모듈이 책임지는 것은 딱 셋이다.
 
@@ -251,9 +251,9 @@ async def load_index_session_bars(
 ) -> IntradayBarsResult:
     """지수 완료 분봉을 같은 공용 경로로 시도한다.
 
-    지수 심볼에 분봉 경로가 실제로 없으면 값을 추정하거나 일봉으로 대체하지
-    않는다. ``index_intraday_unavailable``만 남기고, 그 사실은 상대강도 trigger
-    하나에만 영향을 준다.
+    공용 경로는 KOSPI/KOSDAQ을 Toss 시장지표 전용 endpoint로 보낸다. 실제 지수
+    분봉을 받지 못하면 값을 추정하거나 종목·ETF·일봉으로 대체하지 않고
+    ``index_intraday_unavailable`` 근거를 남긴다.
     """
 
     result = await load_completed_session_bars(

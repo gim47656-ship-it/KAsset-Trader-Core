@@ -27,6 +27,7 @@ from app.extensions.kasset.automation.promotion_evidence import (
     _dataset_content_hash,
     _require_readiness,
     _select_universe_rows,
+    _thresholds_snapshot,
     _universe_query,
     build_promotion_raw_payload,
     derive_metrics_from_stored_payload,
@@ -38,7 +39,10 @@ from app.extensions.kasset.automation.strategy_artifact import (
 )
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
+    FORWARD_PAPER_TRACK,
+    HISTORICAL_PIT_TRACK,
     PromotionMetrics,
+    promotion_thresholds_for_track,
 )
 from app.services.daily_candles.readiness import (
     BenchmarkCoverage,
@@ -492,7 +496,18 @@ def test_reporting_benchmark_does_not_fill_partial_candidate_ranking_input() -> 
     assert with_reporting.excess_return is not None
 
 
-def _ready_market(market: str) -> MarketReadiness:
+def _ready_market(market: str, *, track: str = HISTORICAL_PIT_TRACK) -> MarketReadiness:
+    historical = track == HISTORICAL_PIT_TRACK
+    # forward 코호트는 현재 시점 시가총액으로 뽑히므로 과거 시점 멤버십과
+    # 상장폐지 생존자를 증명할 수 없다. 그 사실을 그대로 반영한다.
+    historical_blockers = (
+        ()
+        if historical
+        else (
+            f"{market}:cohort_not_historical_pit",
+            f"{market}:point_in_time_unavailable",
+        )
+    )
     benchmark = BenchmarkCoverage(
         market=market,  # type: ignore[arg-type]
         symbol="KOSPI" if market == "kr" else "SPY",
@@ -514,13 +529,17 @@ def _ready_market(market: str) -> MarketReadiness:
         active_member_count=10,
         valuation_snapshot_date=date(2024, 1, 1),
         valuation_snapshot_source="naver_finance" if market == "kr" else "yahoo",
-        evidence_scope="historical_pit",
+        evidence_scope=track,
     )
     return MarketReadiness(
         market=market,  # type: ignore[arg-type]
         cohort=cohort,
         evaluated_window_start=date(2024, 2, 1),
         evaluated_window_end=date(2025, 1, 1),
+        latest_completed_session=date(2025, 1, 1),
+        ingest_lag_session_count=0,
+        unevidenced_session_count=0,
+        unevidenced_sessions=(),
         total_symbol_count=10,
         cohort_active_member_count=10,
         forced_member_count=0,
@@ -536,13 +555,14 @@ def _ready_market(market: str) -> MarketReadiness:
         ohlc_anomaly_count=0,
         missing_expected_trading_day_count=0,
         calendar_status="available",
+        price_adjustment_status="covered",
         corporate_action_status="clear",
         corporate_action_covered_symbol_count=10,
         adjustment_covered_symbol_count=10,
         list_date_covered_symbol_count=10,
         members_listed_after_cohort_start=0,
         delist_date_covered_inactive_count=1,
-        point_in_time_available=True,
+        point_in_time_available=historical,
         inactive_with_candles_count=1,
         delisted_symbol_count=1,
         delisted_with_candles_count=1,
@@ -551,42 +571,39 @@ def _ready_market(market: str) -> MarketReadiness:
         benchmark=benchmark,
         daily_history_ready=True,
         promotion_ready=True,
+        historical_evidence_ready=historical,
         daily_history_blockers=(),
         blockers=(),
-        reasons=(),
+        historical_evidence_blockers=historical_blockers,
+        unresolved_evidence=historical_blockers,
+        reasons=historical_blockers,
     )
 
 
-def _readiness() -> DailyCandlesReadiness:
+def _readiness(*, track: str = HISTORICAL_PIT_TRACK) -> DailyCandlesReadiness:
+    markets = (_ready_market("kr", track=track), _ready_market("us", track=track))
+    historical_blockers = tuple(
+        code for market in markets for code in market.historical_evidence_blockers
+    )
     return DailyCandlesReadiness(
         as_of=_START + timedelta(days=329),
         required_history_bars=252,
-        markets=(_ready_market("kr"), _ready_market("us")),
+        markets=markets,
         daily_history_ready=True,
         promotion_ready=True,
+        historical_evidence_ready=not historical_blockers,
         daily_history_blockers=(),
         blockers=(),
-        reasons=(),
+        historical_evidence_blockers=historical_blockers,
+        unresolved_evidence=historical_blockers,
+        reasons=historical_blockers,
     )
 
 
-def _thresholds() -> dict[str, object]:
-    value = DEFAULT_PROMOTION_THRESHOLDS
-    return {
-        "minTotalReturn": str(value.min_total_return),
-        "maxDrawdown": str(value.max_drawdown),
-        "minWinRate": str(value.min_win_rate),
-        "minExpectancy": str(value.min_expectancy),
-        "minExcessReturn": str(value.min_excess_return),
-        "minProfitFactor": str(value.min_profit_factor),
-        "minCostStressedTotalReturn": str(value.min_cost_stressed_total_return),
-        "minTradeCount": value.min_trade_count,
-        "minWalkForwardFolds": value.min_walk_forward_folds,
-        "minWalkForwardPassRate": str(value.min_walk_forward_pass_rate),
-        "requireDataQualityEvidence": value.require_data_quality_evidence,
-        "requireSurvivorshipEvidence": value.require_survivorship_evidence,
-        "requireDeterministic": value.require_deterministic,
-    }
+def _thresholds(*, track: str = HISTORICAL_PIT_TRACK) -> dict[str, object]:
+    """트랙별로 실제 적용되는 임계 스냅샷. 손으로 다시 만들지 않는다."""
+
+    return _thresholds_snapshot(promotion_thresholds_for_track(track))
 
 
 def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
@@ -618,7 +635,9 @@ def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
         derive_promotion_metrics(diagnostics, walk, _readiness())
 
 
-def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
+def _stored_evidence_payload(
+    *, track: str = HISTORICAL_PIT_TRACK
+) -> tuple[dict[str, object], PromotionMetrics]:
     bars = _bars(count=330)
     kr_bars = _bars(count=330, scale=Decimal("10"))
     candidate = _candidate()
@@ -639,7 +658,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
     config = _config()
     universe = UniverseEvidence(
         source="daily_candles_readiness",
-        point_in_time_membership=True,
+        point_in_time_membership=track == HISTORICAL_PIT_TRACK,
         includes_delisted=True,
         as_of=bars[-1].timestamp,
     )
@@ -661,9 +680,10 @@ def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
         benchmark_bars_by_candidate=candidate_benchmarks,
         universe_evidence=universe,
     )
-    readiness = _readiness()
-    metrics = derive_promotion_metrics(diagnostics, walk, readiness)
+    readiness = _readiness(track=track)
+    metrics = derive_promotion_metrics(diagnostics, walk, readiness, track=track)
     source = PortfolioEvidenceSource(
+        track=track,  # type: ignore[arg-type]
         as_of=readiness.as_of,
         readiness=readiness,
         candidates=candidates,
@@ -678,7 +698,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
                 "cohortMethod": "latest_market_cap",
                 "cohortSelectionDate": "2024-01-02",
                 "cohortEffectiveDate": "2024-01-03",
-                "cohortEvidenceScope": "historical_pit",
+                "cohortEvidenceScope": track,
                 "memberRank": 1,
                 "memberKind": "active",
                 "marketCap": "1000000",
@@ -696,7 +716,7 @@ def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
                 "cohortMethod": "latest_market_cap",
                 "cohortSelectionDate": "2024-01-02",
                 "cohortEffectiveDate": "2024-01-03",
-                "cohortEvidenceScope": "historical_pit",
+                "cohortEvidenceScope": track,
                 "memberRank": 1,
                 "memberKind": "active",
                 "marketCap": "1000000",
@@ -729,9 +749,10 @@ def _stored_evidence_payload() -> tuple[dict[str, object], PromotionMetrics]:
         diagnostics=diagnostics,
         walk_forward=walk,
         metrics=metrics,
-        thresholds=_thresholds(),
+        thresholds=_thresholds(track=track),
     )
     assert raw["schemaVersion"] == PROMOTION_EVIDENCE_SCHEMA_VERSION
+    assert raw["promotionTrack"] == track
     return raw, metrics
 
 
@@ -778,6 +799,53 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
     assert derived.as_snapshot() == expected.as_snapshot()
 
 
+def test_forward_track_payload_replays_without_historical_proof() -> None:
+    """forward 코호트 근거는 PIT/상장폐지 증명 없이도 그대로 재현된다."""
+
+    raw, expected = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+
+    assert raw["promotionTrack"] == FORWARD_PAPER_TRACK
+    validation = raw["validation"]
+    assert isinstance(validation, dict)
+    assert validation["pointInTimeProven"] is False
+    readiness = raw["readiness"]
+    assert isinstance(readiness, dict)
+    assert readiness["historicalEvidenceReady"] is False
+    assert readiness["unresolvedEvidence"]
+    assert expected.survivorship_evidence is False
+
+    derived = derive_metrics_from_stored_payload(raw)
+
+    assert derived.as_snapshot() == expected.as_snapshot()
+    assert derived.survivorship_evidence is False
+
+
+def test_stored_thresholds_must_match_the_declared_track() -> None:
+    """느슨한 임계 스냅샷을 historical 트랙 근거에 실어 보낼 수 없다."""
+
+    raw, _metrics = _stored_evidence_payload()
+    tampered = copy.deepcopy(raw)
+    tampered["promotionThresholds"] = _thresholds(track=FORWARD_PAPER_TRACK)
+
+    with pytest.raises(
+        PromotionEvidenceBuildError, match="promotion_thresholds_track_mismatch"
+    ):
+        derive_metrics_from_stored_payload(tampered)
+
+
+def test_forward_payload_cannot_claim_historical_thresholds() -> None:
+    """반대 방향도 막는다: 트랙과 임계 프로필은 항상 한 쌍이다."""
+
+    raw, _metrics = _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    tampered = copy.deepcopy(raw)
+    tampered["promotionThresholds"] = _thresholds(track=HISTORICAL_PIT_TRACK)
+
+    with pytest.raises(
+        PromotionEvidenceBuildError, match="promotion_thresholds_track_mismatch"
+    ):
+        derive_metrics_from_stored_payload(tampered)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -797,6 +865,12 @@ def test_stored_portfolio_result_derives_exact_promotion_metrics() -> None:
         (("data", "selectedUniverse"), []),
         (("portfolioDiagnostics", "symbolRemoval"), []),
         (("walkForward", "folds"), []),
+        (("promotionTrack",), "forward_paper"),
+        (("promotionTrack",), "paper_live"),
+        (("promotionTrack",), None),
+        (("readiness", "unresolvedEvidence"), ["us:fallback_only"]),
+        (("readiness", "historicalEvidenceReady"), False),
+        (("validation", "corporateActionLedgerProven"), False),
     ],
 )
 def test_stored_evidence_fails_closed_when_required_proof_is_missing(
@@ -988,7 +1062,67 @@ def test_require_readiness_rejects_current_forward_historical_use() -> None:
         PromotionEvidenceBuildError,
         match="us:cohort_not_historical_pit",
     ):
-        _require_readiness(tampered)
+        _require_readiness(tampered, track="historical_pit")
+
+
+def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
+    """A forward cohort must reach candidate creation on the forward track."""
+
+    readiness = _readiness()
+    forward_markets = tuple(
+        replace(
+            item,
+            cohort=replace(
+                item.cohort,  # type: ignore[arg-type]
+                evidence_scope="forward_paper",
+            ),
+            point_in_time_available=False,
+            includes_delisted=False,
+            fallback_only=True,
+            corporate_action_status="unknown",
+            historical_evidence_ready=False,
+            historical_evidence_blockers=(
+                f"{item.market}:cohort_not_historical_pit",
+                f"{item.market}:point_in_time_unavailable",
+                f"{item.market}:delisted_members_absent",
+                f"{item.market}:corporate_action_unknown",
+                f"{item.market}:fallback_only",
+            ),
+            unresolved_evidence=(f"{item.market}:cohort_not_historical_pit",),
+        )
+        for item in readiness.markets
+    )
+    forward = replace(
+        readiness,
+        markets=forward_markets,
+        historical_evidence_ready=False,
+        historical_evidence_blockers=tuple(
+            code
+            for item in forward_markets
+            for code in item.historical_evidence_blockers
+        ),
+        unresolved_evidence=tuple(
+            code for item in forward_markets for code in item.unresolved_evidence
+        ),
+    )
+
+    _require_readiness(forward, track="forward_paper")
+
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="cohort_not_historical_pit",
+    ):
+        _require_readiness(forward, track="historical_pit")
+
+
+def test_require_readiness_rejects_an_unknown_track() -> None:
+    with pytest.raises(PromotionEvidenceBuildError, match="promotion_track_invalid"):
+        derive_promotion_metrics(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            _readiness(),
+            track="paper_live",
+        )
 
 
 @pytest.mark.parametrize(
@@ -1024,4 +1158,4 @@ def test_require_readiness_rejects_missing_constituent_lifecycle_evidence(
     )
 
     with pytest.raises(PromotionEvidenceBuildError, match=expected):
-        _require_readiness(tampered)
+        _require_readiness(tampered, track="historical_pit")

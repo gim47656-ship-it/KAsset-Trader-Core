@@ -92,12 +92,14 @@ def test_kasset_compose_discovers_news_tasks_in_worker_and_scheduler() -> None:
         'command: ["/app/.venv/bin/taskiq", "worker", '
         '"app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", '
         '"app.tasks.news_summary_tasks", '
+        '"app.tasks.toss_minute_candles_tasks", '
         '"app.tasks.truth_social_tasks", "--workers", "1"]'
     )
     scheduler_command = (
         'command: ["/app/.venv/bin/taskiq", "scheduler", '
         '"app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks", '
         '"app.tasks.news_summary_tasks", '
+        '"app.tasks.toss_minute_candles_tasks", '
         '"app.tasks.truth_social_tasks"]'
     )
 
