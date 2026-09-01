@@ -1382,10 +1382,11 @@ snapshot) and the `investment_watch_scanner` job (which evaluates
 those alerts, writes `investment_watch_events` with the full trigger
 identity snapshot, and emits Hermes review-trigger notifications).
 Watches are review triggers by default. The explicit `auto_execute_mock` mode
-is permanently restricted to `kis_mock`; its event starts with
-`outcome='pending'` and becomes `executed` only after positive executor
-evidence. Delivery state is auditable per event row (`delivery_status` /
-`delivery_reason` / `delivered_at` / `delivery_attempts`).
+is restricted to the owner-scoped `db_simulated` paper account and dispatches
+through the Android `PaperOrderFacade`; `kis_mock` and every live broker are
+rejected. Its event starts with `outcome='pending'` and becomes `executed` only
+after positive executor evidence. Delivery state is auditable per event row
+(`delivery_status` / `delivery_reason` / `delivered_at` / `delivery_attempts`).
 
 ### `list_active_watches`
 
@@ -2297,7 +2298,7 @@ The `MCP_PROFILE` env var selects which tool subset is registered at startup.
 |---|---|---|
 | Default | `default` (or unset) | Toss KR/US equity and Upbit crypto surfaces; typed `kis_live_*`/`kis_mock_*` tools are absent. Typed `kiwoom_mock_*` remains controlled by its existing gate. |
 | Crypto | `crypto` | Read-only/research plus Upbit crypto order/history/reconcile tools; no equity or KIS order surface. |
-| US paper | `us-paper` | Read-only/research plus Alpaca paper and `us_dual_paper_*` tools; no live equity order surface. |
+| US paper | `us-paper` | Read-only/research plus Alpaca paper tools; no live equity order surface. |
 | DB paper simulator | `db-paper` | Read-only/research plus internal `paper.paper_*` simulator, analytics, and journal bridge tools. |
 | Kiwoom mock | `kiwoom` | Read-only/research plus both typed Kiwoom mock namespaces. Prefer `kiwoom_kr` for a KR-only session. |
 | Kiwoom mock KR-only | `kiwoom_kr` | Read-only/research plus exactly the eight KR `kiwoom_mock_*` tools; US and KIS namespaces are absent. |
@@ -2306,7 +2307,8 @@ The `MCP_PROFILE` env var selects which tool subset is registered at startup.
 | TradingCodex execution | `tradingcodex_execution` | Reviewed Toss/Upbit execution and gated Kiwoom mock allowlist. Requires dedicated auth and approval-hash modes; no KIS tools. |
 | Canonical paper execution | `paper_execution` | ROB-845 façade + ROB-848 validation + ROB-849 operator kill switch. Default-off and auth-required; no generic, venue-native, or live tools. |
 
-Generic `live_reconcile_orders` is evidence-first: `none` returns
+Generic `live_reconcile_orders` is the Upbit crypto evidence-first settlement
+tool. US/KIS inputs fail closed. For Upbit, `none` returns
 `noop_no_evidence` with `requires_manual_review=true` and leaves the ledger open.
 Only explicit broker cancellation evidence returns `cancelled`; its dry-run
 action is `would_mark_cancelled`, while an applied reconcile reports

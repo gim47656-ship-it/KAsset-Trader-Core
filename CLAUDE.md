@@ -204,15 +204,15 @@ KIS live/mock 주문, 계좌, 시장데이터, WebSocket, reconcile, probe, smok
   참조하지 않는다.
 
 
-### US & Crypto Live Order Fill-Evidence Gate (ROB-407)
+### Crypto Live Order Fill-Evidence Gate (ROB-407)
 ...
 시장가 crypto 주문의 경우 전송 즉시 inline으로 Reconcile을 자동 수행하여 체결 장부를 확정합니다.
 
 - **모델**: `app/models/review.LiveOrderLedger`
 - **서비스**: `app/mcp_server/tooling/live_order_ledger.py`, `app/mcp_server/tooling/live_order_evidence.py`
-- **MCP 도구**: `live_reconcile_orders` (dry_run-default)
+- **MCP 도구**: `live_reconcile_orders` (Upbit crypto 전용, dry_run-default)
 - **런북**: `docs/runbooks/live-order-reconcile.md`
-- **스코프**: US/해외 및 crypto live 주문 전체.
+- **스코프**: Upbit crypto live 주문. US/KIS 입력은 fail-closed.
 
 ### KR/US Category Normalization & Lazy Fill (ROB-512)
 

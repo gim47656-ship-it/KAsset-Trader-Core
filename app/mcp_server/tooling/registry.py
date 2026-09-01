@@ -7,7 +7,8 @@ Profile → tool surface mapping
   All side-effect-free research tools (crypto research included — ROB-503) +
   read-only portfolio tools +
   generic order tools (equities route through Toss; crypto through Upbit) +
-  typed Toss live variants. Typed kiwoom_mock_* is additive only when the
+  the crypto/Upbit-pinned live reconcile tool + typed Toss live variants.
+  Typed kiwoom_mock_* is additive only when the
   existing ROB-601 feature gate is enabled. Alpaca paper read/preview/
   confirm-gated order/ledger tools are additive only when the ROB-908
   ``alpaca_paper_default_tools_enabled`` gate is on — and even then the
@@ -18,7 +19,7 @@ Profile → tool surface mapping
 "crypto" (McpProfile.CRYPTO):
   Default research/read-only surface (crypto research tools register on every
   profile since ROB-503), the generic account_mode order tools (crypto live
-  trading entry point).
+  trading entry point), and the crypto/Upbit-pinned live reconcile tool.
 
 "us-paper" (McpProfile.US_PAPER):
   Default research/read-only surface plus Alpaca paper and us_dual_paper tools.
@@ -132,6 +133,9 @@ from app.mcp_server.tooling.investment_reports_handlers import (
 )
 from app.mcp_server.tooling.investment_snapshots_registration import (
     register_investment_snapshots_tools,
+)
+from app.mcp_server.tooling.live_reconcile_registration import (
+    register_live_reconcile_tools,
 )
 from app.mcp_server.tooling.market_brief_registration import (
     register_market_brief_tools,
@@ -262,8 +266,9 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
     """Register MCP tools according to the given profile.
 
     Side-effect order tool registration depends on profile. DEFAULT exposes
-    generic Toss/Upbit routing plus typed Toss tools; provider-specific paper
-    profiles keep their existing isolated surfaces.
+    generic Toss/Upbit routing, the Upbit-only accepted-order reconcile tool,
+    and typed Toss tools; provider-specific paper profiles keep their existing
+    isolated surfaces.
     """
     if profile is McpProfile.SHADOW_REPLAY:
         # ROB-697 M1 — frozen-context replay ONLY: read the bundle + policy +
@@ -413,6 +418,7 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
         register_paper_limit_order_tools(mcp)
         # Generic equity requests use Toss; crypto requests keep the Upbit path.
         register_order_tools(mcp)
+        register_live_reconcile_tools(mcp)
         register_toss_live_order_tools(mcp)
         # ROB-866: Toss manual-activity detection sweep (read-only; alert-only).
         register_toss_manual_activity_tools(mcp)
@@ -501,9 +507,10 @@ def register_all_tools(mcp: FastMCP, profile: McpProfile = McpProfile.DEFAULT) -
         register_kiwoom_kr_tools(mcp)
     elif profile is McpProfile.CRYPTO:
         # Crypto live trading enters through the generic account_mode order
-        # tools (the only MCP entry point for Upbit orders, with ROB-407
-        # inline reconcile).
+        # tools. Accepted limit orders settle only through the explicitly
+        # crypto/Upbit-pinned reconcile wrapper.
         register_order_tools(mcp)
+        register_live_reconcile_tools(mcp)
 
 
 __all__ = ["register_all_tools"]

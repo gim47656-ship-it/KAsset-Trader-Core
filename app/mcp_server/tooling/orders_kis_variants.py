@@ -63,13 +63,6 @@ KIS_MOCK_ORDER_TOOL_NAMES: set[str] = {
     "kis_mock_get_order_history",
 }
 
-# US/overseas + crypto live reconcile (ROB-407 generic ledger). Registered
-# separately from the KIS KR live variants so the crypto profile can expose
-# order reconcile without pulling in the KIS KR live order surface.
-LIVE_RECONCILE_TOOL_NAMES: set[str] = {
-    "live_reconcile_orders",
-}
-
 
 # ---------------------------------------------------------------------------
 # Shared guard/delegation helpers
@@ -713,53 +706,6 @@ def register_kis_live_order_tools(mcp: FastMCP) -> None:
             limit=limit,
             account_mode=account_mode,
             account_type=account_type,
-        )
-
-
-# ---------------------------------------------------------------------------
-# US/overseas + crypto live reconcile (broker-generic ledger, ROB-407)
-# ---------------------------------------------------------------------------
-
-
-def register_live_reconcile_tools(mcp: FastMCP) -> None:
-    """Register the US/overseas + crypto live reconcile tool."""
-
-    @mcp.tool(
-        name="live_reconcile_orders",
-        description=(
-            "Reconcile accepted/pending US/overseas + crypto live (real-money) orders "
-            "against broker fill evidence (overseas daily-order / Upbit order-state). "
-            "Books fills/journals/realized_pnl ONLY from confirmed fills (delta-idempotent). "
-            "Evidence-first: explicit broker cancellation returns cancelled "
-            "(dry: would_mark_cancelled, real: marked_cancelled); missing evidence (NONE) "
-            "returns noop_no_evidence with requires_manual_review=true and leaves ledger open "
-            "without ledger/proposal rung mutation. dry_run=True by default. "
-            "ROB-568: Surfaces US FX PnL split (security_pnl_krw, fx_pnl_krw) "
-            "for overseas equity fills. "
-            "realized_pnl_pct (alias journal_pnl_pct, labeled "
-            "realized_pnl_basis='journal_entry') is the per-lot / journal-entry "
-            "(FIFO oldest-first) basis, NOT the account-average; get_holdings / "
-            "get_available_capital remain the account-average truth. "
-            "KR domestic uses kis_live_reconcile_orders instead."
-        ),
-    )
-    async def live_reconcile_orders(
-        market: str | None = None,
-        broker: str | None = None,
-        symbol: str | None = None,
-        order_id: str | None = None,
-        dry_run: bool = True,
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        from app.mcp_server.tooling.live_order_ledger import live_reconcile_orders_impl
-
-        return await live_reconcile_orders_impl(
-            market=market,
-            broker=broker,
-            symbol=symbol,
-            order_id=order_id,
-            dry_run=dry_run,
-            limit=limit,
         )
 
 

@@ -18,6 +18,9 @@ from app.mcp_server.tooling.alpaca_paper_automated_orders import (
 )
 from app.mcp_server.tooling.alpaca_paper_orders import ALPACA_PAPER_MUTATING_TOOL_NAMES
 from app.mcp_server.tooling.alpaca_paper_preview import ALPACA_PAPER_PREVIEW_TOOL_NAMES
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.market_quote_snapshot_tools import (
     MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
 )
@@ -276,7 +279,8 @@ PREVIEW_REVALIDATION_TOOLS: frozenset[str] = frozenset(
 )
 
 RECONCILE_TOOLS: frozenset[str] = frozenset(
-    {
+    LIVE_RECONCILE_TOOL_NAMES
+    | {
         "alpaca_paper_reconcile_orders",
         "paper_reconcile_orders",
         "toss_reconcile_orders",
@@ -308,6 +312,7 @@ STATUS_HELPER_TOOLS: frozenset[str] = frozenset(
 
 _LEGACY_MUTATION_TOOLS: frozenset[str] = frozenset(
     ORDER_TOOL_NAMES
+    | LIVE_RECONCILE_TOOL_NAMES
     | ALPACA_PAPER_AUTOMATED_TOOL_NAMES
     | TOSS_LIVE_ORDER_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES

@@ -32,7 +32,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
-from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
+from app.core.db import AsyncSessionLocal
 from app.mcp_server.tooling.toss_live_ledger import toss_reconcile_orders_impl
 from app.services.brokers.toss import TossReadClient
 from app.services.toss_fill_poller_service import TossFillPollerService
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 async def _preview_targets(*, market: str | None) -> dict[str, Any]:
     """DB-only scan-target listing. Makes no broker calls."""
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         rows = await TossLiveOrderLedgerService(db).list_open(
             market=market, limit=settings.TOSS_FILL_POLL_RECONCILE_LIMIT
         )
@@ -81,7 +81,7 @@ async def _invalidate_sellable_cache(booked_symbols: list[str]) -> None:
 async def _run_commit(*, market: str | None) -> dict[str, Any]:
     client = TossReadClient.from_settings()
     try:
-        async with _order_session_factory()() as db:
+        async with AsyncSessionLocal() as db:
             discover = await TossFillPollerService(
                 db, client=client
             ).discover_external_orders(

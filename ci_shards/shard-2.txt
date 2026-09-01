@@ -55,6 +55,7 @@ tests/mcp_server/test_rob1311_quick_projection.py
 tests/mcp_server/test_shadow_replay_profile.py
 tests/mcp_server/tooling/test_live_ledger_correlation_id.py
 tests/mcp_server/tooling/test_live_order_evidence_us.py
+tests/mcp_server/tooling/test_live_reconcile_registration.py
 tests/mcp_server/tooling/test_loss_cut_place_order.py
 tests/mcp_server/tooling/test_loss_cut_position_scope.py
 tests/mcp_server/tooling/test_screen_stocks_snapshot_docs.py

@@ -18,14 +18,12 @@ from app.mcp_server.tooling.analysis_bundle_handlers import (
 from app.mcp_server.tooling.analysis_registration import register_analysis_tools
 from app.mcp_server.tooling.forecast_registration import register_forecast_tools
 from app.mcp_server.tooling.fundamentals_registration import register_fundamentals_tools
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.market_data_registration import register_market_data_tools
 from app.mcp_server.tooling.operating_briefing_registration import (
     register_operating_briefing_tools,
-)
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-    LIVE_RECONCILE_TOOL_NAMES,
 )
 from app.mcp_server.tooling.orders_kiwoom_us_variants import (
     KIWOOM_MOCK_US_TOOL_NAMES,
@@ -57,6 +55,20 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+# Keep the retired KIS denylist local: importing its heavy registrar here would
+# pull that dormant order surface into the active registry startup graph.
+_RETIRED_KIS_ORDER_TOOL_NAMES: set[str] = {
+    "kis_live_place_order",
+    "kis_live_cancel_order",
+    "kis_live_modify_order",
+    "kis_live_get_order_history",
+    "kis_live_reconcile_orders",
+    "kis_mock_place_order",
+    "kis_mock_cancel_order",
+    "kis_mock_modify_order",
+    "kis_mock_get_order_history",
+}
 
 
 ANALYSIS_READONLY_TOOL_NAMES: set[str] = {
@@ -90,8 +102,7 @@ ANALYSIS_READONLY_TOOL_NAMES: set[str] = {
 
 ANALYSIS_READONLY_FORBIDDEN_TOOL_NAMES: set[str] = (
     ORDER_TOOL_NAMES
-    | KIS_LIVE_ORDER_TOOL_NAMES
-    | KIS_MOCK_ORDER_TOOL_NAMES
+    | _RETIRED_KIS_ORDER_TOOL_NAMES
     | LIVE_RECONCILE_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES
     | KIWOOM_MOCK_US_TOOL_NAMES

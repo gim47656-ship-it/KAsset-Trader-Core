@@ -88,6 +88,7 @@ def test_action_taxonomy_is_disjoint_and_total():
     assert L.ALL_KNOWN_TOOLS == L.READ_ONLY_ADVISORY_TOOLS | L.MUTATION_TOOLS
     assert L.ORDER_PROPOSAL_READ_TOOLS <= L.READ_ONLY_ADVISORY_TOOLS
     assert L.PROPOSAL_LED_TOOLS == {"order_proposal_create"}
+    assert "live_reconcile_orders" in L.RECONCILE_TOOLS
 
 
 def test_account_cleanup_route_allows_only_preflighted_alpaca_submit():

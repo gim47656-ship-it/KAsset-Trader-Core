@@ -1289,11 +1289,11 @@ class OrderSendNotCreated(Exception):
 
 
 # ROB-645: reconcile tool to consult when an order's send outcome is unknown.
-# Only live paths have a reconcile tool (KR → kis_live_reconcile_orders,
-# US/crypto → live_reconcile_orders). Mock has none, so we never name a phantom.
+# Active equity sends route through Toss; crypto sends route through Upbit's
+# generic live ledger. Mock has none, so we never name a phantom.
 _LIVE_RECONCILE_TOOL_BY_MARKET = {
-    "equity_kr": "kis_live_reconcile_orders",
-    "equity_us": "live_reconcile_orders",
+    "equity_kr": "toss_reconcile_orders",
+    "equity_us": "toss_reconcile_orders",
     "crypto": "live_reconcile_orders",
 }
 

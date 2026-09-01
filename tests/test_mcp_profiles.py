@@ -37,6 +37,9 @@ from app.mcp_server.tooling.kiwoom_kr_registration import (
     KIWOOM_KR_TOOL_NAMES,
     kiwoom_kr_profile_tool_names,
 )
+from app.mcp_server.tooling.live_reconcile_registration import (
+    LIVE_RECONCILE_TOOL_NAMES,
+)
 from app.mcp_server.tooling.market_quote_snapshot_tools import (
     MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
 )
@@ -79,7 +82,6 @@ _RETIRED_KIS_ORDER_TOOL_NAMES = {
     "kis_mock_cancel_order",
     "kis_mock_modify_order",
     "kis_mock_get_order_history",
-    "live_reconcile_orders",
 }
 _ALPACA_PAPER_TOOL_NAMES = (
     ALPACA_PAPER_READONLY_TOOL_NAMES
@@ -134,9 +136,11 @@ def _build_mcp(profile: McpProfile) -> DummyMCP:
 
 
 class TestDefaultProfile:
-    def test_registers_generic_toss_upbit_order_tools(self) -> None:
+    def test_registers_generic_orders_and_upbit_reconcile(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
+        assert (
+            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
+        ) <= mcp.tools.keys()
 
     def test_does_not_register_retired_kis_order_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
@@ -248,11 +252,13 @@ class TestCryptoProfile:
         mcp = _build_mcp(McpProfile.CRYPTO)
         assert "get_crypto_top_movers" in mcp.tools
 
-    def test_registers_crypto_trading_surface(self) -> None:
-        # Generic account_mode order tools are the active Upbit entry point.
-        # Execution reconciliation is inline, not a separate KIS-era tool.
+    def test_registers_crypto_trading_and_reconcile_surface(self) -> None:
+        # Generic account_mode orders and the crypto/Upbit-pinned reconcile
+        # wrapper are the active Upbit entry points.
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
+        assert (
+            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
+        ) <= mcp.tools.keys()
 
     def test_does_not_register_retired_kis_order_tools(self) -> None:
         mcp = _build_mcp(McpProfile.CRYPTO)
@@ -388,10 +394,13 @@ _ALPACA_MUTATING = ALPACA_PAPER_MUTATING_TOOL_NAMES
 _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.DEFAULT: (
         _ACTIVE_GENERIC_ORDER_TOOL_NAMES
+        | LIVE_RECONCILE_TOOL_NAMES
         | TOSS_LIVE_ORDER_TOOL_NAMES
         | PAPER_LIMIT_ORDER_TOOL_NAMES
     ),
-    McpProfile.CRYPTO: set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES),
+    McpProfile.CRYPTO: (
+        set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES) | LIVE_RECONCILE_TOOL_NAMES
+    ),
     McpProfile.US_PAPER: set(_ALPACA_MUTATING) | ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
     McpProfile.DB_PAPER: set(),
     McpProfile.KIWOOM: KIWOOM_MOCK_TOOL_NAMES | KIWOOM_MOCK_US_TOOL_NAMES,
@@ -443,6 +452,7 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
 _ALL_ORDER_TOOL_NAMES = (
     _ACTIVE_GENERIC_ORDER_TOOL_NAMES
     | _RETIRED_KIS_ORDER_TOOL_NAMES
+    | LIVE_RECONCILE_TOOL_NAMES
     | KIWOOM_MOCK_TOOL_NAMES
     | KIWOOM_MOCK_US_TOOL_NAMES
     | _ALPACA_MUTATING

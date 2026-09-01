@@ -8,7 +8,8 @@ review-trigger notifications.
 
 Locked semantics:
 * Watch is a **review trigger** unless the report activation explicitly uses
-  ``auto_execute_mock``; that mode is permanently limited to ``kis_mock``.
+  ``auto_execute_mock``; that mode is limited to owner-scoped ``db_simulated``
+  paper execution through Android ``PaperOrderFacade``.
 * No broker / live order mutation from this path.
 * Notification target is **Hermes**, never the agent gateway (the legacy
   agent-gateway watch-alert path has been removed).
