@@ -142,9 +142,9 @@ def toss_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 def regular_session(monkeypatch: pytest.MonkeyPatch) -> None:
     async def context(
         db: object, *, market: str, symbols: Sequence[str]
-    ) -> tuple[dict[str, str], None]:
+    ) -> tuple[dict[str, str], None, None]:
         del db, market
-        return (dict.fromkeys(symbols, "REGULAR"), None)
+        return (dict.fromkeys(symbols, "REGULAR"), None, None)
 
     monkeypatch.setattr(krx_quotes, "_quote_session_context", context)
 
@@ -607,10 +607,10 @@ def test_us_after_market_quote_tracks_current_price_from_regular_close(
 
     async def after_context(
         db: object, *, market: str, symbols: Sequence[str]
-    ) -> tuple[dict[str, str], TossSessionWindow]:
+    ) -> tuple[dict[str, str], TossSessionWindow, None]:
         del db
         assert market == "US"
-        return (dict.fromkeys(symbols, "AFTER_MARKET"), regular_window)
+        return (dict.fromkeys(symbols, "AFTER_MARKET"), regular_window, None)
 
     monkeypatch.setattr(krx_quotes, "_quote_session_context", after_context)
     monkeypatch.setattr(krx_quotes, "_candle_rows", AsyncMock(return_value={}))
