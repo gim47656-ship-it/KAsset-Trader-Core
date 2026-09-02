@@ -36,6 +36,11 @@ from app.extensions.kasset.automation.contracts import (
     PaperExecutionClaim,
     PaperExecutionOutcome,
 )
+from app.extensions.kasset.automation.decision_evidence import (
+    AiReviewStatus,
+    is_deterministic_position_exit,
+    latest_ai_review_from_evidence,
+)
 from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
     OperatingMode,
@@ -555,9 +560,30 @@ class OwnerScopedPaperOrders:
                 if reference_price is not None
                 else str(recommendation.reference_price)
             )
-            confidence = Decimal(str(recommendation.confidence))
         except (InvalidOperation, TypeError, ValueError) as exc:
             raise ValueError("recommendation numeric evidence is invalid") from exc
+        evidence = recommendation.evidence
+        if is_deterministic_position_exit(evidence):
+            # Position Manager 청산은 AI 검토 없이 생성 시점에 ai_confidence=1로
+            # Hard Risk를 통과한 결정론 경로다. 집행에서도 같은 값을 재현한다.
+            ai_review_status: str | None = "deterministic_exit"
+            confidence = Decimal("1")
+        else:
+            # 진입 추천은 실제 AI 검토가 동의하고 확신도가 유한할 때만 그 값을
+            # 쓴다. 부재·반대·저확신·파싱 실패는 0으로 넘겨 AI 규칙이 차단한다.
+            ai_review = latest_ai_review_from_evidence(evidence)
+            ai_review_confidence: Decimal | None = None
+            if ai_review is None:
+                ai_review_status = None
+            else:
+                ai_review_status, _, ai_review_confidence = ai_review
+            confidence = (
+                ai_review_confidence
+                if ai_review_status == AiReviewStatus.AGREES.value
+                and ai_review_confidence is not None
+                and ai_review_confidence.is_finite()
+                else Decimal("0")
+            )
         return await AITradingPolicyService().evaluate_hard_risk(
             db,
             int(owner_user_id),
@@ -567,6 +593,7 @@ class OwnerScopedPaperOrders:
             quantity=request.quantity,
             reference_price=price,
             ai_confidence=confidence,
+            ai_review_status=ai_review_status,
             now=self._now,
             base_risk_reasons=base_reasons,
         )
