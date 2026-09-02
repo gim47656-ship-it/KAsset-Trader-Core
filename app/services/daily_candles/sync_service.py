@@ -11,11 +11,15 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import pandas as pd
 
-from app.services.daily_candles.converters import frame_to_rows
+from app.services.daily_candles.converters import (
+    aggregate_kr_regular_daily_row,
+    frame_to_rows,
+)
 from app.services.daily_candles.crypto_identity import upbit_daily_candle_partition
 from app.services.daily_candles.read_service import drop_forming_daily_rows
 from app.services.daily_candles.readiness import REQUIRED_HISTORY_BARS
@@ -25,6 +29,7 @@ from app.services.daily_candles.repository import (
     MarketKey,
 )
 from app.services.daily_candles.yahoo_us_fallback import YahooFallbackRow
+from app.services.market_events.session_calendar import is_trading_session
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,38 @@ class SyncOneResult:
     skipped_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class KrRegularOverrideResult:
+    """한 거래일의 KRX 정규장 일봉 override 요약."""
+
+    session_date: date
+    targets_total: int
+    rows_eligible: int
+    rows_upserted: int
+    skip_reasons: dict[str, int]
+
+    @property
+    def status(self) -> str:
+        if self.targets_total == 0:
+            return "noop"
+        if self.rows_upserted == self.targets_total and not self.skip_reasons:
+            return "completed"
+        if self.rows_upserted > 0:
+            return "partial"
+        return "skipped"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "session_date": self.session_date.isoformat(),
+            "targets_total": self.targets_total,
+            "rows_eligible": self.rows_eligible,
+            "rows_upserted": self.rows_upserted,
+            "skipped": sum(self.skip_reasons.values()),
+            "skip_reasons": dict(self.skip_reasons),
+        }
+
+
 YahooUsFetcher = Callable[..., Awaitable[list[YahooFallbackRow]]]
 UpbitCryptoFetcher = Callable[..., Awaitable[pd.DataFrame]]
 TossDailyFetcher = Callable[..., Awaitable[pd.DataFrame]]
@@ -146,6 +183,101 @@ class DailyCandleSyncService:
         if target.market == MarketKey.US:
             return await self._sync_us(target, horizon_bars)
         return await self._sync_crypto(target, horizon_bars)
+
+    async def override_kr_regular_daily(
+        self,
+        *,
+        symbols: list[str],
+        session_date: date,
+    ) -> KrRegularOverrideResult:
+        """Toss 1분봉이 충분한 심볼만 KRX 정규장 일봉으로 덮어쓴다."""
+
+        normalized_symbols = sorted(
+            {
+                normalized_symbol
+                for symbol in symbols
+                if (normalized_symbol := str(symbol).strip().upper())
+            }
+        )
+        if not normalized_symbols:
+            return KrRegularOverrideResult(
+                session_date=session_date,
+                targets_total=0,
+                rows_eligible=0,
+                rows_upserted=0,
+                skip_reasons={},
+            )
+        if not is_trading_session("kr", session_date):
+            logger.warning(
+                "KR 정규장 일봉 override 건너뜀: 거래일 확인 실패 date=%s targets=%d",
+                session_date,
+                len(normalized_symbols),
+            )
+            return KrRegularOverrideResult(
+                session_date=session_date,
+                targets_total=len(normalized_symbols),
+                rows_eligible=0,
+                rows_upserted=0,
+                skip_reasons={
+                    "session_not_trading_or_unknown": len(normalized_symbols)
+                },
+            )
+
+        minute_rows_by_symbol = await self._repository.fetch_kr_toss_minutes(
+            session_date=session_date,
+            symbols=normalized_symbols,
+        )
+        daily_rows: list[DailyCandleRow] = []
+        skip_reasons: dict[str, int] = {}
+        for symbol in normalized_symbols:
+            aggregation = aggregate_kr_regular_daily_row(
+                minute_rows_by_symbol.get(symbol, []),
+                symbol=symbol,
+                session_date=session_date,
+            )
+            if aggregation.row is None:
+                reason = aggregation.skip_reason or "aggregation_unknown"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                logger.warning(
+                    "KR 정규장 일봉 override 건너뜀 "
+                    "date=%s symbol=%s reason=%s trade_bars=%d first_trade=%s",
+                    session_date,
+                    symbol,
+                    reason,
+                    aggregation.trade_bar_count,
+                    aggregation.first_trade_time_kst,
+                )
+                continue
+            daily_rows.append(aggregation.row)
+
+        if not daily_rows:
+            return KrRegularOverrideResult(
+                session_date=session_date,
+                targets_total=len(normalized_symbols),
+                rows_eligible=0,
+                rows_upserted=0,
+                skip_reasons=skip_reasons,
+            )
+
+        upserted = await self._repository.upsert_kr_regular_rows(rows=daily_rows)
+        await self._commit_or_rollback()
+        protected_count = max(len(daily_rows) - upserted, 0)
+        if protected_count:
+            skip_reasons["daily_source_protected"] = protected_count
+            logger.warning(
+                "KR 정규장 일봉 override source 보호로 미갱신 "
+                "date=%s eligible=%d upserted=%d",
+                session_date,
+                len(daily_rows),
+                upserted,
+            )
+        return KrRegularOverrideResult(
+            session_date=session_date,
+            targets_total=len(normalized_symbols),
+            rows_eligible=len(daily_rows),
+            rows_upserted=upserted,
+            skip_reasons=skip_reasons,
+        )
 
     async def sync_us_adjusted_close(
         self, *, target: SyncTarget, horizon_bars: int

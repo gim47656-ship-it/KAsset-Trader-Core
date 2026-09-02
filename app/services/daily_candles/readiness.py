@@ -36,9 +36,11 @@ MAX_INGEST_LAG_SESSIONS = 1
 #: lag는 이 값에서 포화하고 blocker만 남는다.
 _INGEST_LAG_PROBE_SESSIONS = 10
 _CALENDAR_LOOKBACK_DAYS = 550
-_FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
+_FALLBACK_SOURCES = frozenset(
+    {"toss", "toss_regular", "toss_fallback", "yahoo", "yahoo_fallback"}
+)
 _DELISTED_STATUSES = frozenset({"delisted", "상장폐지"})
-_KR_ADJUSTED_SOURCES = frozenset({"kis", "toss"})
+_KR_ADJUSTED_SOURCES = frozenset({"kis", "toss", "toss_regular"})
 _KR_ACTION_SPECS = (
     (
         "face_value_change",

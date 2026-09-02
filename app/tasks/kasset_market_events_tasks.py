@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,7 @@ _CYCLE_LOCK_KEY = 1
 # Same namespace, distinct key: a push run and an analysis cycle are unrelated
 # and must not block each other.
 _PUSH_LOCK_KEY = 2
+_KST = ZoneInfo("Asia/Seoul")
 
 logger = logging.getLogger(__name__)
 
@@ -68,15 +70,17 @@ async def kasset_market_events_run() -> dict[str, object]:
 
 @broker.task(
     task_name="kasset_watchlist_candles.sync",
-    schedule=[{"cron": "5 9-16 * * 1-5", "cron_offset": "Asia/Seoul"}],
+    schedule=[
+        {"cron": "5 9-16 * * 1-5", "cron_offset": "Asia/Seoul"},
+        # 15:31 이후 전체 1분봉 로테이션과 20:00 수집 종료 뒤 당일을 확정한다.
+        {"cron": "5 20 * * 1-5", "cron_offset": "Asia/Seoul"},
+    ],
 )
 async def kasset_watchlist_candles_sync() -> dict[str, object]:
-    """Backfill/refresh daily candles for KR watchlist symbols via Toss.
+    """Toss 일봉 동기화 뒤 KR 관심종목의 최근 완료 정규장 일봉을 보정한다.
 
-    The event scan reads ``kr_candles_1d`` but this deployment has no KIS
-    holdings-driven ingestion, so the watchlist is its own candle universe.
-    Toss daily rows upsert as ``source='toss'``; the repository's conflict
-    guard keeps them from overwriting KIS-sourced rows.
+    이벤트 스캔은 ``kr_candles_1d``를 읽지만 이 배포에는 KIS 보유종목 기반
+    적재가 없으므로 관심종목 목록 자체를 일봉 대상 유니버스로 사용한다.
     """
     if not settings.KASSET_MARKET_EVENTS_ENABLED:
         return {"enabled": False, "synced": []}
@@ -88,7 +92,12 @@ async def kasset_watchlist_candles_sync() -> dict[str, object]:
             synced.append(await _sync_watchlist_symbol(symbol))
         except Exception as exc:  # noqa: BLE001 - one symbol must not stop the rest
             synced.append({"symbol": symbol, "error": str(exc)})
-    return {"enabled": True, "synced": synced}
+    regular_override = await _override_recent_completed_kr_regular(symbols)
+    return {
+        "enabled": True,
+        "synced": synced,
+        "regularOverride": regular_override,
+    }
 
 
 @broker.task(
@@ -296,6 +305,65 @@ async def _sync_watchlist_symbol(symbol: str) -> dict[str, object]:
         upserted = await repository.upsert_rows(market=MarketKey.KR, rows=rows)
         await session.commit()
     return {"symbol": symbol, "rows": len(rows), "upserted": upserted}
+
+
+async def _override_recent_completed_kr_regular(
+    symbols: list[str],
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """최근 완료 거래일을 정규장 집계로 보정하고 실패 시 기존 일봉을 보존한다."""
+
+    from app.services.daily_candles.kr_regular_daily import (
+        latest_completed_kr_session_date,
+    )
+    from app.services.daily_candles.sync_service import _build_default_service
+
+    target_date = latest_completed_kr_session_date(now or datetime.now(_KST))
+    if target_date is None:
+        logger.warning("KR 정규장 일봉 override 건너뜀: 완료 거래일 확인 실패")
+        return {
+            "status": "skipped",
+            "reason": "completed_session_unknown",
+            "rows_upserted": 0,
+        }
+    if not symbols:
+        return {
+            "status": "noop",
+            "session_date": target_date.isoformat(),
+            "targets_total": 0,
+            "rows_upserted": 0,
+        }
+
+    service = None
+    try:
+        service = await _build_default_service()
+        result = await service.override_kr_regular_daily(
+            symbols=symbols,
+            session_date=target_date,
+        )
+        summary = result.as_dict()
+        logger.info("KR 정규장 일봉 override 완료: %s", summary)
+        return summary
+    except Exception as exc:  # noqa: BLE001 - 보정 실패는 기존 일봉을 보존해야 한다
+        logger.exception(
+            "KR 정규장 일봉 override 실패 date=%s: %s",
+            target_date,
+            exc,
+        )
+        return {
+            "status": "failed",
+            "session_date": target_date.isoformat(),
+            "error": f"{type(exc).__name__}: {exc}",
+            "rows_upserted": 0,
+        }
+    finally:
+        if service is not None:
+            # 보정 cleanup이 기존 일봉 sync를 실패시키면 안 된다.
+            try:
+                await service.close()
+            except Exception:  # noqa: BLE001
+                logger.exception("KR 정규장 일봉 override service close 실패")
 
 
 @asynccontextmanager
