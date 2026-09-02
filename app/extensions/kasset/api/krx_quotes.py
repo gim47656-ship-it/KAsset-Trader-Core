@@ -199,7 +199,11 @@ async def _quote_session_context(
         for symbol in symbols
     }
     regular_window = None
-    if market_state is not None and market_state != "REGULAR":
+    if _wire_market(market) == "KRX" or (
+        market_state is not None and market_state != "REGULAR"
+    ):
+        # 국내 정규장 시세도 직전 완료 정규장의 마지막 1분봉을 등락 기준으로 쓴다.
+        # 장외 구간에서는 같은 조회가 최신 완료 정규장 종가를 계속 제공한다.
         regular_window = await get_latest_completed_regular_window_from_toss(
             "us" if _wire_market(market) == "US" else "kr",
             moment,
@@ -238,7 +242,9 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
             {normalized: point}, window=regular_window
         )
         known_previous_close = (
-            regular_close if session in {"DAY_MARKET", "PRE_MARKET"} else {}
+            regular_close
+            if wire_market == "KRX" or session in {"DAY_MARKET", "PRE_MARKET"}
+            else {}
         )
         fallback = await _previous_close_fallback(
             market,
@@ -276,7 +282,7 @@ async def resolve_quotes(
     known_previous_closes = {
         symbol: close
         for symbol, close in regular_closes.items()
-        if sessions.get(symbol) in {"DAY_MARKET", "PRE_MARKET"}
+        if wire_market == "KRX" or sessions.get(symbol) in {"DAY_MARKET", "PRE_MARKET"}
     }
     fallback = await _previous_close_fallback(
         market,
@@ -378,7 +384,11 @@ def _toss_quote(
     regular_close: Decimal | None,
 ) -> Quote:
     previous_close = _previous_close(rows, market=market, before=point.as_of)
-    if previous_close is None:
+    if market == "KRX" and previous_close_fallback is not None:
+        # 국내 일봉 종가는 NXT 야간 체결까지 포함될 수 있으므로, 완료된 KRX
+        # 정규장 1분봉 종가가 확보되면 저장 일봉보다 먼저 쓴다.
+        previous_close = previous_close_fallback
+    elif previous_close is None:
         previous_close = previous_close_fallback
     return build_quote(
         market=market,
