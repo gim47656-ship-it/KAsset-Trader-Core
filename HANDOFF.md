@@ -12,6 +12,8 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 배포 후 실측(2026-09-02 UTC): 개장 직후 14:01~14:30 cycle은 candidates 100 → ranked 84 → setup qualified 3(rejected 81, 최다 `no_breakout_family_direction` 53) → actionable 3 → `trigger_statuses={'unavailable': 3}`, `trigger_failures={'relative_volume_unavailable': 3, 'no_directional_trigger': 2~3, 'intraday_relative_strength_disagrees': 1}`. 14:40 cycle부터 `trigger_statuses={'not_triggered': 3}`, `relative_volume_not_confirmed`로 바뀌었다. 즉 RVOL은 완료 5분봉 13~16개(개장 후 65~80분)가 모여야 계산되는 워밍업 구조이며, 그 이후로는 데이터 결함 없이 순수 조건 미충족으로 판정된다. 주문은 여전히 0건이고 이는 정상 무주문이다.
 - 승격(promotion) 레코드는 `review.kasset_strategy_promotions` 0건이다. 런타임 fingerprint는 `faacff97e2a877e8ef439bde0de72d0541ab3a6509a88fa254c826a493a4fd56`(source_commit `5a5f737f`)이며 `intraday_data.py`·`vertical_slice.py`가 `STRATEGY_CODE_PATHS`에 있어 이번 변경으로 회전했다. 레코드가 0건이라 fingerprint mismatch는 발생하지 않지만, `promotion_bypass_enabled`가 켜진 owner만 자동주문이 가능하다. 현재 owner 4 = `true`, owner 1·5 = `false`(= `strategy_promotion_required`로 차단). 자동화 sweep이 잡는 owner는 유효 추천이 있는 owner뿐이라 `owners=0`은 추천 0건의 결과다.
 - `us_candles_1m`·`us_candles_5m`·`kr_candles_1m`은 0행이다. `sync_us_candles`가 수집 대상을 `Toss 보유종목 ∪ manual_holdings`로만 만들고 둘 다 0이라 `no_target_symbols`로 종료한다(직접 실행 확인). automation은 DB가 아니라 `get_ohlcv`(Toss 직접)를 쓰므로 주문 차단 원인은 아니지만, 저장 분봉을 쓰는 다른 경로는 여전히 비어 있다.
+- **AI veto 제거 후 첫 PAPER 자동주문이 실제로 체결됐다.** 사용자 승인 아래 과거 `risk_preview_rejected:AI`로 실패한 추천 `rec-393431b4`(owner 4, KRX 055550 BUY 4주)의 execution 상태를 초기화하고 `valid_until`을 30분 연장한 뒤, 임계값은 그대로 두고 정규 자동 sweep이 집행하게 했다. 결과: `sweep done owners=1 outcomes=[{status: 'SUBMITTED', reason: 'submitted', promotion_bypass_reason: 'promotion_bypassed_by_owner'}]`, 주문 `b436d623-adf0-4ffb-80e2-29c69668c9b3` `client_order_id=ai-rec:rec-393431b4...` MARKET BUY 4주 `FILLED` @110,400, `paper.paper_trades` id 3 체결 기록, 추천 `paper_execution_status=SUCCEEDED`. 같은 추천의 원장 이력이 `REJECTED risk_preview_rejected:AI` → `SUBMITTED submitted`로 남아 AI veto가 유일한 차단 원인이었음이 증명됐다.
+- 수동 경로 `run_approved_recommendation_once`는 `required_mode=APPROVAL`을 요구하므로 owner 4(`AUTO_PAPER`)에서는 `owner_opt_in_disabled`로 막힌다. 강제 집행은 mode 변경 없이 자동 sweep 경로를 쓰는 것이 맞다.
 - 2026-09-02 13:30 UTC 1회 발생한 `portfolio snapshot owner did not complete`는 개장 순간 단발 timeout이었다. 실계좌 스냅샷은 직접 호출 0.47초 정상(positions 0)이고 Toss US 1분봉도 정상 수신한다.
 - PR #37 merge `8f965aaf92fd3993083fcc3360785b9ffa710cac`를 운영 배포했다. `.env.kasset`의 `CORE_IMAGE_TAG`가 이 full SHA이고 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 일치한다. 같은 날 PR #29(MCP-only), #31(Hard Risk), #33·#34·#35(기준가) 배포도 포함한다.
 - API, analysis MCP, AI MCP sidecar의 container 내부 `/health`가 모두 `ok`다. `api`, `mcp`, `ai-mcp`, `worker`, `scheduler`, `db`, `redis`, `caddy`가 기동 중이다.
@@ -62,7 +64,8 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - KR 저장 일봉 정규장 보정(PR #37): 신규 `kr_regular_daily.py`, `converters.aggregate_kr_regular_daily_row`, `repository.fetch_kr_toss_minutes/upsert_kr_regular_rows`, `sync_service.override_kr_regular_daily`, CLI `scripts/override_kr_regular_daily.py --date [--symbols]`(완료 거래일만 허용). 독립 checker major 3건(세션 tail gate 부재로 16:05 run이 오후 중간 종가로 덮어쓰기, CLI 완료 세션 guard 부재, adjusted 재적용 차단) 수용·수정 후 PASS. focused pytest 89 passed/5 skipped, ruff·CI 통과. 배포 후 운영 수동 실행: 관심종목 4종목 completed, 1d 유니버스 703종목 중 556 upsert·147 skip(`regular_trade_rows_short` 84, `regular_first_trade_late` 36, 1분봉 부재 23, `regular_tail_missing` 4 — 저유동성·ETN). 하이닉스 9/2 정규장 행: O 1,630,000 / H 1,661,000 / L 1,612,000 / C 1,613,000 / V 3,227,484(토스 1d V 3,493,365).
 
 ## 다음 세션이 바로 할 일
-1. owner 1·5로 자동주문을 내려면 승격이 필요하다(`strategy_promotion_required`). 승격 승인 시 런타임 fingerprint와 승격 레코드 fingerprint 일치를 반드시 대조한다 — `intraday_data.py`·`vertical_slice.py` 수정이 fingerprint를 바꾼다.
+1. 055550 PAPER 보유 4주는 Position Manager 청산 대상이다. 결정론 청산(`position_manager`/`position_exit`)이 정상 동작하는지 다음 KR 정규장에서 확인한다. 사용자 결정 없이 임의 청산하지 않는다.
+2. owner 1·5로 자동주문을 내려면 승격이 필요하다(`strategy_promotion_required`). 승격 승인 시 런타임 fingerprint와 승격 레코드 fingerprint 일치를 반드시 대조한다 — `intraday_data.py`·`vertical_slice.py` 수정이 fingerprint를 바꾼다.
 2. 관문 탈락률을 3~5 거래일 측정한 뒤에만 임계값을 논의한다. 지금 funnel은 `setup_rejections`(최다 `no_breakout_family_direction`)와 `trigger_failures`(`no_directional_trigger`, `relative_volume_not_confirmed`)를 분리해 남긴다. RVOL 1.5나 Daily Setup 조건을 측정 없이 낮추지 않는다.
 3. RVOL은 개장 후 65~80분 동안 구조적으로 `unavailable`이다(5m: window 1 + baseline 12, 20m: 4 + 12). 개장 직후 무주문을 provider 실패로 오판하지 않는다.
 4. `sync_us_candles`의 `no_target_symbols`를 고칠지 결정한다. 대상 심볼을 보유종목이 아니라 automation 후보 유니버스·`user_watch_items`·`us_symbol_universe`로 넓히면 저장 분봉이 채워진다. automation 주문 경로에는 영향이 없다.
@@ -79,6 +82,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-02: AI veto 제거 후 첫 PAPER 자동주문 체결(055550 BUY 4주 @110,400). 자동 sweep 경로 end-to-end 증명.
 - 2026-09-02: US ET-naive 분봉 수용, AI Hard Risk veto 제거(SHADOW), 관문 funnel 계측 배포(`ee170aba`). 배포 후 미국장 전 관문이 데이터 결함 없이 판정, 주문 0건은 조건 미충족.
 - 2026-09-02: KR 저장 일봉 최근 완료 거래일을 KRX 정규장 OHLCV로 보정하는 경로 배포, 9/2 유니버스 556종목 적용(PR #37 `8f965aaf`).
 - 2026-09-02: KR 등락 기준가를 직전 거래일 KRX 정규장 종가(동시호가 봉 포함)로 교정해 토스 등락률과 일치(PR #33·#34·#35, `7f4924ef`).
