@@ -766,7 +766,7 @@ async def test_detail_exposes_android_vertical_slice_evidence(
                         "BUDGET",
                         "POSITION",
                         "ORDER_COUNT",
-                        "AI",
+                        "AI_SHADOW",
                         "DAILY_GOAL",
                     )
                 ],
@@ -798,9 +798,10 @@ async def test_detail_exposes_android_vertical_slice_evidence(
         "BUDGET",
         "POSITION",
         "ORDER_COUNT",
-        "AI",
+        "AI_SHADOW",
         "DAILY_GOAL",
     ]
+    assert body["hardRisk"]["checks"][4]["passed"] is True
 
 
 @pytest.mark.asyncio

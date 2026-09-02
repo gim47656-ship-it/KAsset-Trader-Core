@@ -37,7 +37,6 @@ from app.extensions.kasset.automation.contracts import (
     PaperExecutionOutcome,
 )
 from app.extensions.kasset.automation.decision_evidence import (
-    AiReviewStatus,
     is_deterministic_position_exit,
     latest_ai_review_from_evidence,
 )
@@ -569,8 +568,8 @@ class OwnerScopedPaperOrders:
             ai_review_status: str | None = "deterministic_exit"
             confidence = Decimal("1")
         else:
-            # 진입 추천은 실제 AI 검토가 동의하고 확신도가 유한할 때만 그 값을
-            # 쓴다. 부재·반대·저확신·파싱 실패는 0으로 넘겨 AI 규칙이 차단한다.
+            # AI는 주문을 차단하지 않는다. SHADOW 기록에는 마지막 검토의 실제
+            # confidence를 넘기고, 부재·파싱 실패·비유한 값만 0으로 남긴다.
             ai_review = latest_ai_review_from_evidence(evidence)
             ai_review_confidence: Decimal | None = None
             if ai_review is None:
@@ -579,9 +578,7 @@ class OwnerScopedPaperOrders:
                 ai_review_status, _, ai_review_confidence = ai_review
             confidence = (
                 ai_review_confidence
-                if ai_review_status == AiReviewStatus.AGREES.value
-                and ai_review_confidence is not None
-                and ai_review_confidence.is_finite()
+                if ai_review_confidence is not None and ai_review_confidence.is_finite()
                 else Decimal("0")
             )
         return await AITradingPolicyService().evaluate_hard_risk(

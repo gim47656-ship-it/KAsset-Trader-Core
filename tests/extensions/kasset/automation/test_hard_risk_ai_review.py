@@ -133,6 +133,10 @@ async def test_ai_review_never_blocks_a_paper_order(
     shadow = _ai_shadow_check(result)
     assert shadow.passed is True
     assert f"aiStatus={status}" in shadow.detail
+    if confidence in {"NaN", "Infinity", "not-a-decimal"}:
+        assert "confidence=0;" in shadow.detail
+    else:
+        assert f"confidence={confidence};" in shadow.detail
     assert "shadow" in shadow.detail
     assert result.passed is True
 

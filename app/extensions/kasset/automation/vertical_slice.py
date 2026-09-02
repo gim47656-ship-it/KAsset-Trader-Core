@@ -1342,8 +1342,9 @@ class AIRecommendationVerticalSlice:
     ) -> _PreAiSizing | _PreAiExclusion:
         """Size the candidate before AI so unaffordable rows cost no AI slot.
 
-        Hard Risk와 AI 임계값은 그대로다. 여기서 걸리는 행은 어차피 저장
-        단계에서 수량 0으로 버려질 행이므로, AI 검토 예산만 아낀다.
+        결정론적 Hard Risk는 그대로다. AI confidence는 주문 관문이 아닌
+        SHADOW 기록이다. 여기서 걸리는 행은 어차피 저장 단계에서 수량 0으로
+        버려질 행이므로, AI 검토 예산만 아낀다.
         """
 
         candidate = item.candidate
