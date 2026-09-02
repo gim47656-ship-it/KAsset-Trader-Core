@@ -513,7 +513,11 @@ async def test_stale_revision_conflicts_and_writes_nothing(clean_policy, configu
     assert exc.value.current_revision == 5
     row = (await clean_policy.execute(select(AiRuntimeConfig))).scalar_one()
     assert row.revision == 5
-    assert row.route_policy["summary_luna"] == ["direct_luna", "openrouter_flash"]
+    assert row.route_policy["summary_luna"] == [
+        "mcp_tool",
+        "direct_luna",
+        "openrouter_flash",
+    ]
 
 
 @pytest.mark.asyncio

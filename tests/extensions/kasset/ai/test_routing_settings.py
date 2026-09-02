@@ -20,6 +20,15 @@ def test_openrouter_fallback_defaults_to_official_glm_slug() -> None:
     assert "KASSET_AI_OPENROUTER_MODEL" not in Settings.model_fields
 
 
+def test_news_summary_daily_limit_defaults_and_accepts_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings.model_fields["KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT"].default == 100
+    monkeypatch.setenv("KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT", "37")
+
+    assert Settings().KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT == 37
+
+
 def test_mcp_settings_accept_absolute_http_url_and_normalize_values() -> None:
     configured = Settings(
         KASSET_AI_MCP_URL=" https://mcp.example.test/rpc/ ",

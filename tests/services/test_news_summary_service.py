@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
+from app.extensions.kasset.ai.base import STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS
+from app.models.ai_call_events import AiCallEvent
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.schemas.news import NewsAnalysisResultResponse
 from app.services import news_summary_service
 from app.services.news_summary_service import (
-    AUTO_SUMMARY_BATCH_SIZE,
-    AUTO_SUMMARY_CANDIDATE_LIMIT,
     MAX_TRANSLATED_EXCERPT_CHARS,
     MAX_TRANSLATION_SOURCE_CHARS,
+    NEWS_SUMMARY_ARTICLES_PER_CALL,
     GeneratedNewsSummary,
     NewsSummaryInput,
     OpenAiNewsSummaryGenerator,
     _summary_input_for,
-    summarize_ingested_news,
     summarize_pending_news,
 )
 
@@ -34,7 +36,10 @@ class FakeResponsesClient:
 
     async def request_json(self, **kwargs):
         self.calls.append(dict(kwargs))
-        return self.responses[len(self.calls) - 1]
+        response = self.responses[len(self.calls) - 1]
+        if set(response) == {"items"}:
+            return response
+        return {"items": [{"index": 0, **response}]}
 
 
 class FakeSummaryGenerator:
@@ -47,25 +52,40 @@ class FakeSummaryGenerator:
         self.outcomes = outcomes
         self.translations = translations or {}
         self.calls: list[NewsSummaryInput] = []
+        self.batch_calls: list[tuple[NewsSummaryInput, ...]] = []
 
-    async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary:
-        self.calls.append(news)
-        outcome = self.outcomes[news.title]
-        if isinstance(outcome, BaseException):
-            raise outcome
-        translated_title, translated_excerpt = self.translations.get(
-            news.title, (None, None)
-        )
-        return GeneratedNewsSummary(
-            summary=outcome,
-            translated_title=translated_title,
-            translated_excerpt=translated_excerpt,
-            sentiment=Sentiment.NEUTRAL,
-            confidence=84,
-            model_name="test-news-summary",
-            prompt="test prompt",
-            raw_response="{}",
-        )
+    async def summarize_batch(
+        self,
+        news_items: Sequence[NewsSummaryInput],
+    ) -> dict[int, GeneratedNewsSummary]:
+        self.batch_calls.append(tuple(news_items))
+        generated: dict[int, GeneratedNewsSummary] = {}
+        for index, news in enumerate(news_items):
+            self.calls.append(news)
+            outcome = self.outcomes[news.title]
+            if isinstance(outcome, BaseException):
+                continue
+            translated_title, translated_excerpt = self.translations.get(
+                news.title, (None, None)
+            )
+            generated[index] = GeneratedNewsSummary(
+                summary=outcome,
+                translated_title=translated_title,
+                translated_excerpt=translated_excerpt,
+                sentiment=Sentiment.NEUTRAL,
+                confidence=84,
+                model_name="test-news-summary",
+                prompt="test prompt",
+                raw_response="{}",
+            )
+        return generated
+
+
+async def _summarize_one(
+    generator: OpenAiNewsSummaryGenerator,
+    news: NewsSummaryInput,
+) -> GeneratedNewsSummary:
+    return (await generator.summarize_batch((news,)))[0]
 
 
 def _article(
@@ -130,7 +150,7 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
         raw_excerpt=None,
     )
 
-    result = await generator.summarize(news)
+    result = await _summarize_one(generator, news)
 
     assert result.summary.startswith("회사는 2026년 7월 26일")
     assert result.translated_title == "회사의 분기 실적 발표"
@@ -142,17 +162,23 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
     assert call["model"] == "gpt-5.6-luna"
     assert call["reasoning_effort"] == "low"
     assert call["schema_name"] == "kasset_news_summary"
-    assert call["input_payload"] == news.to_payload()
-    assert set(call["schema"]["required"]) == {
+    assert call["input_payload"] == {"items": [{"index": 0, **news.to_payload()}]}
+    assert call["schema"]["required"] == ["items"]
+    assert call["schema"]["additionalProperties"] is False
+    items_schema = call["schema"]["properties"]["items"]
+    assert items_schema["maxItems"] == NEWS_SUMMARY_ARTICLES_PER_CALL
+    item_schema = items_schema["items"]
+    assert set(item_schema["required"]) == {
+        "index",
         "summary",
         "translated_title",
         "translated_excerpt",
         "sentiment",
         "confidence",
     }
-    assert call["schema"]["additionalProperties"] is False
+    assert item_schema["additionalProperties"] is False
     assert (
-        call["schema"]["properties"]["translated_excerpt"]["anyOf"][0]["maxLength"]
+        item_schema["properties"]["translated_excerpt"]["anyOf"][0]["maxLength"]
         == MAX_TRANSLATED_EXCERPT_CHARS
     )
     assert "2~4문장" in call["additional_instructions"]
@@ -162,6 +188,92 @@ async def test_openai_generator_translates_with_strict_grounded_contract() -> No
     assert "translated_excerpt를 요약" in call["additional_instructions"]
     assert "숫자와 단위" in call["additional_instructions"]
     assert "범위 밖 사실" in call["additional_instructions"]
+
+
+@pytest.mark.unit
+def test_ten_article_context_and_instruction_fit_sidecar_limits() -> None:
+    news_items = [
+        NewsSummaryInput(
+            title="T" * 500,
+            source="S" * 100,
+            article_content="가" * MAX_TRANSLATION_SOURCE_CHARS,
+            raw_excerpt=None,
+        )
+        for _ in range(NEWS_SUMMARY_ARTICLES_PER_CALL)
+    ]
+    payload = {
+        "items": [
+            {"index": index, **news.to_payload()}
+            for index, news in enumerate(news_items)
+        ]
+    }
+    full_instruction = (
+        f"{STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS} "
+        f"{news_summary_service._BATCH_SUMMARY_INSTRUCTIONS}"
+    )
+
+    assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= 256 * 1024
+    assert len(full_instruction) <= 8_000
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_duplicate_batch_index_fails_only_that_article_mapping() -> None:
+    news_items = (
+        NewsSummaryInput(
+            title="A기업 공급 계약 발표",
+            source="테스트 뉴스",
+            article_content=(
+                "A기업은 고객사와 공급 계약을 체결했다. "
+                "회사는 납품 준비 절차를 시작했다."
+            ),
+            raw_excerpt=None,
+        ),
+        NewsSummaryInput(
+            title="B기업 신규 서비스 발표",
+            source="테스트 뉴스",
+            article_content=(
+                "B기업은 신규 서비스를 공개했다. "
+                "회사는 기존 고객에게 서비스를 제공한다고 밝혔다."
+            ),
+            raw_excerpt=None,
+        ),
+    )
+    duplicated = {
+        "index": 0,
+        "summary": "A기업이 고객사와 공급 계약을 맺었다. 납품 준비 절차도 시작했다.",
+        "translated_title": None,
+        "translated_excerpt": None,
+        "sentiment": "neutral",
+        "confidence": 80,
+    }
+    client = FakeResponsesClient(
+        [
+            {
+                "items": [
+                    duplicated,
+                    dict(duplicated),
+                    {
+                        "index": 1,
+                        "summary": (
+                            "B기업이 신규 서비스를 공개했다. "
+                            "회사는 기존 고객에게 서비스를 제공한다고 밝혔다."
+                        ),
+                        "translated_title": None,
+                        "translated_excerpt": None,
+                        "sentiment": "neutral",
+                        "confidence": 80,
+                    },
+                ]
+            }
+        ]
+    )
+    generator = OpenAiNewsSummaryGenerator(client, model="test-news-summary")
+
+    generated = await generator.summarize_batch(news_items)
+
+    assert set(generated) == {1}
+    assert len(client.calls) == 1
 
 
 @pytest.mark.unit
@@ -179,13 +291,14 @@ async def test_openai_generator_accepts_equivalent_korean_scale_translation() ->
         model="gpt-5.6-luna",
     )
 
-    result = await generator.summarize(
+    result = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Company reports results",
             source="Example Wire",
             article_content="The company reported results. Revenue was $5 billion.",
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert result.summary == response["summary"]
@@ -221,13 +334,13 @@ async def test_openai_generator_translates_foreign_title_when_body_is_missing() 
         raw_excerpt=None,
     )
 
-    result = await generator.summarize(news)
+    result = await _summarize_one(generator, news)
 
     assert result.summary == "엔비디아 실적 발표 이후 아시아 증시는 혼조세를 보였다."
     assert result.translated_title == "엔비디아 실적 발표 후 아시아 증시 혼조"
     assert result.translated_excerpt is None
     assert "한국어 한 문장" in client.calls[0]["additional_instructions"]
-    rejected = await generator.summarize(news)
+    rejected = await _summarize_one(generator, news)
     assert rejected.summary == result.summary
     assert rejected.translated_title == result.translated_title
     assert rejected.translated_excerpt is None
@@ -260,8 +373,7 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
         raw_excerpt=raw_copy,
     )
 
-    with pytest.raises(ValueError, match="duplicates raw input"):
-        await copy_generator.summarize(news)
+    assert await copy_generator.summarize_batch((news,)) == {}
 
     number_client = FakeResponsesClient(
         [
@@ -278,8 +390,8 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
         number_client,
         model="gpt-5.6-luna",
     )
-    with pytest.raises(ValueError, match="numbers absent from source"):
-        await number_generator.summarize(
+    generated = await number_generator.summarize_batch(
+        (
             NewsSummaryInput(
                 title="신규 제품 출시",
                 source="테스트 뉴스",
@@ -288,8 +400,10 @@ async def test_openai_generator_rejects_raw_copy_and_invented_number() -> None:
                     "출시 일정도 추후 공개할 예정이다."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
+    )
+    assert generated == {}
     assert len(number_client.calls) == 1
 
 
@@ -324,8 +438,7 @@ async def test_generator_rejects_template_language_and_multi_sentence_title_fall
         ),
         model="gpt-5.6-luna",
     )
-    with pytest.raises(ValueError, match="template language"):
-        await template_generator.summarize(body_news)
+    assert await template_generator.summarize_batch((body_news,)) == {}
 
     title_generator = OpenAiNewsSummaryGenerator(
         FakeResponsesClient(
@@ -344,15 +457,17 @@ async def test_generator_rejects_template_language_and_multi_sentence_title_fall
         ),
         model="gpt-5.6-luna",
     )
-    with pytest.raises(ValueError, match="1 to 1 sentences"):
-        await title_generator.summarize(
+    generated = await title_generator.summarize_batch(
+        (
             NewsSummaryInput(
                 title="Nvidia Reports Quarterly Results",
                 source="Example Wire",
                 article_content=None,
                 raw_excerpt=None,
-            )
+            ),
         )
+    )
+    assert generated == {}
 
 
 @pytest.mark.unit
@@ -425,11 +540,11 @@ async def test_openai_generator_enforces_6000_character_translation_boundary() -
         raw_excerpt=None,
     )
 
-    accepted = await generator.summarize(news)
+    accepted = await _summarize_one(generator, news)
 
     assert accepted.translated_excerpt is not None
     assert len(accepted.translated_excerpt) == MAX_TRANSLATED_EXCERPT_CHARS
-    rejected = await generator.summarize(news)
+    rejected = await _summarize_one(generator, news)
     assert rejected.summary
     assert rejected.translated_excerpt is None
 
@@ -460,11 +575,11 @@ async def test_generator_summarizes_korean_source_without_translation() -> None:
         raw_excerpt=None,
     )
 
-    accepted = await generator.summarize(news)
+    accepted = await _summarize_one(generator, news)
 
     assert accepted.translated_title is None
     assert accepted.translated_excerpt is None
-    rejected = await generator.summarize(news)
+    rejected = await _summarize_one(generator, news)
     assert rejected.summary == valid_response["summary"]
     assert rejected.translated_title is None
     assert rejected.translated_excerpt is None
@@ -487,7 +602,8 @@ async def test_generator_does_not_translate_korean_title_with_latin_brand_names(
         model="gpt-5.6-luna",
     )
 
-    result = await generator.summarize(
+    result = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="LG전자 CES 참가",
             source="테스트 뉴스",
@@ -496,7 +612,7 @@ async def test_generator_does_not_translate_korean_title_with_latin_brand_names(
                 "회사는 현장에서 공개할 전시 제품군도 함께 소개했다."
             ),
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert result.summary == response["summary"]
@@ -525,8 +641,8 @@ async def test_openai_generator_rejects_incomplete_structured_translation_shape(
         model="gpt-5.6-luna",
     )
 
-    with pytest.raises(ValueError, match="response shape is invalid"):
-        await generator.summarize(
+    generated = await generator.summarize_batch(
+        (
             NewsSummaryInput(
                 title="Company publishes its market outlook",
                 source="Example Wire",
@@ -535,8 +651,10 @@ async def test_openai_generator_rejects_incomplete_structured_translation_shape(
                     "existing plan after reviewing current demand conditions."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
+    )
+    assert generated == {}
 
 
 @pytest.mark.unit
@@ -576,13 +694,14 @@ async def test_openai_generator_discards_translation_number_or_unit_drift(
         model="gpt-5.6-luna",
     )
 
-    result = await generator.summarize(
+    result = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Company revenue report",
             source="Example Wire",
             article_content=source_body,
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert result.summary
@@ -684,6 +803,13 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
     analysis_wire = NewsAnalysisResultResponse.model_validate(stored).model_dump()
     assert analysis_wire["translated_title"] == stored.translated_title
     assert analysis_wire["translated_excerpt"] == stored.translated_excerpt
+    failed_attempt = await db_session.scalar(
+        select(NewsAnalysisResult).where(NewsAnalysisResult.article_id == failed_id)
+    )
+    assert failed_attempt is not None
+    assert failed_attempt.summary == ""
+    assert len(generator.batch_calls) == 1
+    assert len(generator.batch_calls[0]) == 2
     await db_session.refresh(success)
     await db_session.refresh(failed)
     await db_session.refresh(thin)
@@ -702,13 +828,13 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         generator=generator,
     )
 
-    assert second.summarized == 1
+    assert second.summarized == 0
     assert second.skipped_insufficient == 1
     assert second.failed == 0
     assert [call.title for call in generator.calls].count(
         "Overseas company reports results"
     ) == 1
-    assert [call.title for call in generator.calls].count("공급 계약 발표") == 2
+    assert [call.title for call in generator.calls].count("공급 계약 발표") == 1
     analysis_ids = list(
         (
             await db_session.scalars(
@@ -719,6 +845,172 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
         ).all()
     )
     assert len(analysis_ids) == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ten_articles_use_one_model_call_and_missing_item_only_backs_off_that_row(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex
+    articles: list[NewsArticle] = []
+    response_items: list[dict[str, object]] = []
+    for index in range(NEWS_SUMMARY_ARTICLES_PER_CALL):
+        marker = chr(ord("A") + index)
+        article = _article(
+            url=f"https://news.test.invalid/{suffix}/batch-{index}",
+            title=f"테스트기업 {marker} 공급 계약 발표",
+            summary=(
+                f"테스트기업 {marker}는 고객사와 장기 공급 계약을 체결했다고 밝혔다. "
+                "회사는 납품 준비 절차를 진행하고 있다."
+            ),
+            published_at=datetime(2026, 8, 29, 12, 0) + timedelta(minutes=index),
+        )
+        articles.append(article)
+    db_session.add_all(articles)
+    await db_session.commit()
+
+    for index, article in enumerate(reversed(articles)):
+        if index == 4:
+            continue
+        marker = article.title.split()[1]
+        response_items.append(
+            {
+                "index": index,
+                "summary": (
+                    f"테스트기업 {marker}가 고객사와 장기 공급 계약을 맺었다. "
+                    "회사는 납품 준비 절차를 진행 중이라고 밝혔다."
+                ),
+                "translated_title": None,
+                "translated_excerpt": None,
+                "sentiment": "neutral",
+                "confidence": 84,
+            }
+        )
+    client = FakeResponsesClient([{"items": response_items}])
+    generator = OpenAiNewsSummaryGenerator(client, model="test-news-summary")
+
+    first = await summarize_pending_news(
+        db_session,
+        batch_size=NEWS_SUMMARY_ARTICLES_PER_CALL,
+        article_urls=[article.url for article in articles],
+        generator=generator,
+    )
+
+    assert len(client.calls) == 1
+    assert len(client.calls[0]["input_payload"]["items"]) == 10
+    assert first.status == "partial"
+    assert first.summarized == 9
+    assert first.failed == 1
+    requested_title = client.calls[0]["input_payload"]["items"][4]["title"]
+    failed_article = next(
+        article for article in articles if article.title == requested_title
+    )
+    assert first.failed_article_ids == (failed_article.id,)
+    analyses = list(
+        (
+            await db_session.scalars(
+                select(NewsAnalysisResult).where(
+                    NewsAnalysisResult.article_id.in_(
+                        [article.id for article in articles]
+                    )
+                )
+            )
+        ).all()
+    )
+    assert len(analyses) == 10
+    assert sum(analysis.summary == "" for analysis in analyses) == 1
+    assert (
+        next(
+            analysis
+            for analysis in analyses
+            if analysis.article_id == failed_article.id
+        ).summary
+        == ""
+    )
+
+    second = await summarize_pending_news(
+        db_session,
+        batch_size=NEWS_SUMMARY_ARTICLES_PER_CALL,
+        article_urls=[article.url for article in articles],
+        generator=generator,
+    )
+
+    assert second.selected == 0
+    assert len(client.calls) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_call_limit_returns_explicit_status_without_touching_article(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2035, 1, 2, 12, 0)
+    started_at = now.replace(tzinfo=UTC)
+    article = _article(
+        url=f"https://news.test.invalid/{uuid.uuid4().hex}/daily-limit",
+        title="테스트기업 일일 상한 확인",
+        summary=(
+            "테스트기업은 시장 운영 계획을 공개했다. "
+            "회사는 기존 서비스 제공을 이어간다고 밝혔다."
+        ),
+        published_at=now,
+    )
+    db_session.add_all(
+        [
+            article,
+            AiCallEvent(
+                logical_call_id=f"daily-limit-{uuid.uuid4().hex}",
+                attempt_no=1,
+                started_at=started_at,
+                finished_at=started_at,
+                latency_ms=0,
+                feature="kasset_news_summary",
+                route_name="news-summary",
+                provider="mcp",
+                model_name="tool:run_skill",
+                status="success",
+            ),
+        ]
+    )
+    await db_session.commit()
+    # _run_batch의 rollback이 인스턴스를 expire하므로 식별자를 미리 잡아둔다.
+    article_id = article.id
+    article_url = article.url
+    monkeypatch.setattr(news_summary_service, "_utcnow", lambda: now)
+    monkeypatch.setattr(news_summary_service, "NEWS_SUMMARY_DAILY_CALL_LIMIT", 1)
+    generator = FakeSummaryGenerator(
+        {
+            article.title: (
+                "테스트기업이 시장 운영 계획을 공개했다. "
+                "회사는 기존 서비스를 계속 제공한다고 밝혔다."
+            )
+        }
+    )
+
+    result = await summarize_pending_news(
+        db_session,
+        batch_size=1,
+        article_urls=[article_url],
+        generator=generator,
+    )
+
+    assert result.status == "daily_limit"
+    assert result.selected == 0
+    assert result.summarized == 0
+    assert result.failed == 0
+    assert generator.batch_calls == []
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(NewsAnalysisResult)
+            .where(NewsAnalysisResult.article_id == article_id)
+        )
+    ) == 0
+    await db_session.refresh(article)
+    assert article.is_analyzed is False
+    assert article.updated_at is None
 
 
 @pytest.mark.integration
@@ -801,6 +1093,10 @@ async def test_pre_ai_gate_blocks_noise_unreliable_and_duplicate_before_generato
     db_session.add_all(articles)
     await db_session.flush()
     korean_id = articles[0].id
+    unreliable_id = next(
+        article.id for article in articles if article.source == "Naver Blog"
+    )
+    article_urls = [article.url for article in articles]
     await db_session.commit()
 
     generator = FakeSummaryGenerator(
@@ -826,7 +1122,7 @@ async def test_pre_ai_gate_blocks_noise_unreliable_and_duplicate_before_generato
     result = await summarize_pending_news(
         db_session,
         batch_size=6,
-        article_urls=[article.url for article in articles],
+        article_urls=article_urls,
         generator=generator,
     )
 
@@ -839,9 +1135,6 @@ async def test_pre_ai_gate_blocks_noise_unreliable_and_duplicate_before_generato
     # 않는다. Python gate가 세는 탈락은 중복 1건 + 잡음 2건이다.
     assert result.skipped_insufficient == 3
     assert result.selected == 5
-    unreliable_id = next(
-        article.id for article in articles if article.source == "Naver Blog"
-    )
     assert unreliable_id not in result.skipped_article_ids
 
     korean_analysis = await db_session.scalar(
@@ -1164,57 +1457,18 @@ async def test_recent_incomplete_analysis_observes_retry_backoff(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ingested_news_summary_caps_and_chunks_persisted_urls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    async def fake_pending(_db, *, article_urls, **_kwargs):
-        urls = list(article_urls)
-        calls.append(urls)
-        return SimpleNamespace(
-            selected=len(urls),
-            summarized=len(urls),
-            skipped_existing=0,
-            skipped_insufficient=0,
-            failed=0,
-            status="success",
-            failed_article_ids=(),
-            skipped_article_ids=(),
-        )
-
-    monkeypatch.setattr(
-        news_summary_service,
-        "summarize_pending_news",
-        fake_pending,
-    )
-    urls = [f"https://news.test.invalid/chunk/{index}" for index in range(205)]
-
-    result = await summarize_ingested_news(object(), urls)
-
-    expected_chunks = AUTO_SUMMARY_CANDIDATE_LIMIT // AUTO_SUMMARY_BATCH_SIZE
-    assert [len(chunk) for chunk in calls] == (
-        [AUTO_SUMMARY_BATCH_SIZE] * expected_chunks
-    )
-    assert result.selected == AUTO_SUMMARY_CANDIDATE_LIMIT
-    assert result.summarized == AUTO_SUMMARY_CANDIDATE_LIMIT
-    assert result.status == "success"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_google_ingestion_invokes_summary_only_after_persistence(
+async def test_google_ingestion_returns_after_persistence_without_inline_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import google_news_ingestion as ingestion
     from app.services.symbol_news_store import FeedArticleInput, FeedArticleUpsertCounts
 
     item = FeedArticleInput(
-        url="https://news.test.invalid/auto-summary",
-        title="자동 요약 대상",
+        url="https://news.test.invalid/backfill-only",
+        title="5분 backfill 대상",
         source="테스트 뉴스",
         published_at=datetime(2026, 8, 29, 12, 0),
-        summary="자동 요약에 사용할 충분한 길이의 원문 발췌가 저장되어 있다.",
+        summary="5분 backfill이 처리할 충분한 길이의 원문 발췌가 저장되어 있다.",
     )
     collected = ingestion._CollectedFeeds(
         articles_by_url={item.url: item},
@@ -1238,13 +1492,9 @@ async def test_google_ingestion_invokes_summary_only_after_persistence(
         events.append("persist")
         return FeedArticleUpsertCounts(inserted=1, updated=0, skipped=0)
 
-    async def fake_summarize(db, article_urls):
-        events.append(f"summarize:{','.join(article_urls)}")
-
     monkeypatch.setattr(ingestion, "_collect_with_client", fake_collect)
     monkeypatch.setattr(ingestion, "_enrich_with_client", fake_enrich)
     monkeypatch.setattr(ingestion, "_persist_collected", fake_persist)
-    monkeypatch.setattr(ingestion, "_summarize_after_ingest", fake_summarize)
 
     result = await ingestion.ingest_google_news_rss(
         object(),
@@ -1253,7 +1503,7 @@ async def test_google_ingestion_invokes_summary_only_after_persistence(
     )
 
     assert result == (1, 0, 0)
-    assert events == ["enrich", "persist", f"summarize:{item.url}"]
+    assert events == ["enrich", "persist"]
 
 
 class FakeSessionContext:

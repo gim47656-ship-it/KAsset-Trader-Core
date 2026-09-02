@@ -6,7 +6,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -710,16 +709,7 @@ async def test_truth_social_default_transport_uses_browser_tls_impersonation(
         async def __aexit__(self, *_args) -> None:
             return None
 
-    async def fake_summary(_db, urls):
-        assert list(urls) == []
-        return SimpleNamespace(status="success", summarized=0, failed=0)
-
     monkeypatch.setattr(truth_social_ingestion, "CurlAsyncSession", FakeCurlSession)
-    monkeypatch.setattr(
-        truth_social_ingestion,
-        "summarize_ingested_news",
-        fake_summary,
-    )
 
     result = await ingest_truth_social(db_session)
 
@@ -778,22 +768,6 @@ async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
         ),
         _truth_status("not-a-decimal-id", "Federal Reserve rate decision."),
     ]
-    summary_calls: list[list[str]] = []
-
-    async def fake_summary(_db, urls):
-        captured = list(urls)
-        summary_calls.append(captured)
-        return SimpleNamespace(
-            status="success",
-            summarized=len(captured),
-            failed=0,
-        )
-
-    monkeypatch.setattr(
-        truth_social_ingestion,
-        "summarize_ingested_news",
-        fake_summary,
-    )
     relevant_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{relevant_id}"
     card_only_url = f"{TRUTH_SOCIAL_PROFILE_URL}/{card_only_id}"
     inserted_urls = [relevant_url, card_only_url]
@@ -821,11 +795,14 @@ async def test_truth_social_isolates_bad_rows_and_filters_non_original_posts(
         assert first.relevant == 2
         assert (first.inserted, first.updated, first.skipped) == (2, 0, 4)
         assert (second.inserted, second.updated, second.skipped) == (0, 0, 6)
-        assert first.summary_status == "success"
-        assert summary_calls == [
-            [relevant_url, card_only_url],
-            [relevant_url, card_only_url],
-        ]
+        assert set(first.to_dict()) == {
+            "run_uuid",
+            "fetched",
+            "relevant",
+            "inserted",
+            "updated",
+            "skipped",
+        }
         assert article.market == "us"
         assert article.feed_source == TRUTH_SOCIAL_FEED_SOURCE
         assert article.source == "Donald J. Trump · Truth Social"

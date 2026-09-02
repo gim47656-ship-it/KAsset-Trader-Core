@@ -133,19 +133,23 @@ def build_summary_json_client(
     fallback_model: str,
     snapshot: AiRuntimeSnapshot | None = None,
 ) -> AvailabilityRoutedJsonClient | None:
-    """``summary_luna`` 정책 순서로 요약 route를 만든다.
+    """``summary_luna`` 정책 순서로 MCP·direct·openrouter route를 만든다.
 
     lane이 비어 있거나 사용 가능한 route가 없으면 ``None``을 돌려주고, 호출자는
     "미설정" 상태로 처리한다. 환경변수 기본값으로 되돌아가지 않는다.
-
-    ``mcp_client``를 넘기지 않는 것은 의도다. ``summary_luna`` allowlist에
-    ``mcp_tool``이 없으므로 이 lane은 API route만 만든다.
     """
 
+    route_order = _lane_route_order(snapshot, AiLane.SUMMARY_LUNA)
+    mcp_client = (
+        _build_mcp_json_client()
+        if any(ai_route_provider(route_id) == "mcp" for route_id in route_order)
+        else None
+    )
     routes = _build_json_routes(
         direct_model=direct_model,
         fallback_model=fallback_model,
-        route_order=_lane_route_order(snapshot, AiLane.SUMMARY_LUNA),
+        route_order=route_order,
+        mcp_client=mcp_client,
     )
     if not routes:
         return None

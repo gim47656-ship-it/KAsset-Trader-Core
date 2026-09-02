@@ -9,11 +9,14 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.core.config import settings
+from app.extensions.kasset.ai.runtime_config import default_snapshot
 from app.models.news import NewsArticle
 from app.services import symbol_news_store
 from app.services.disclosures.summary_service import (
     DisclosureSummaryInput,
     OpenAiDisclosureSummaryGenerator,
+    build_disclosure_summary_generator,
     summarize_pending_disclosures,
 )
 from app.services.symbol_news_store import DisclosureArticleInput
@@ -78,6 +81,21 @@ async def _insert_disclosure(
         ],
     )
     await db_session.commit()
+
+
+@pytest.mark.unit
+def test_disclosure_summary_builder_includes_mcp_from_summary_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "https://mcp.test/rpc")
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_TOKEN", None)
+    monkeypatch.setattr(settings, "KASSET_AI_API_KEY", None)
+    monkeypatch.setattr(settings, "KASSET_AI_OPENROUTER_API_KEY", None)
+
+    generator = build_disclosure_summary_generator(snapshot=default_snapshot())
+
+    assert generator is not None
+    assert [route.client.name for route in generator._client._routes] == ["mcp"]
 
 
 @pytest.mark.unit

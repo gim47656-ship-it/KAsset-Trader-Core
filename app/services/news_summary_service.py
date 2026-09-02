@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.extensions.kasset.ai.base import StructuredJsonClient
 from app.extensions.kasset.ai.factory import build_summary_json_client
 from app.extensions.kasset.ai.runtime_config import AiRuntimeSnapshot
+from app.models.ai_call_events import AiCallEvent
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.services.ai_runtime_config import get_ai_runtime_snapshot
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
@@ -32,11 +33,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
-AUTO_SUMMARY_BATCH_SIZE = 20
-# 한 수집 회차의 인라인 AI 작업량은 단일 batch가 허용하는 최대치를 넘지 않는다.
-# 상한을 넘긴 기사는 버려지지 않고 5분 주기 backfill이 그대로 이어받는다.
-AUTO_SUMMARY_CANDIDATE_LIMIT = MAX_BATCH_SIZE
+NEWS_SUMMARY_ARTICLES_PER_CALL = 10
+NEWS_SUMMARY_DAILY_CALL_LIMIT = settings.KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT
 NEWS_SUMMARY_RETRY_BACKOFF = timedelta(hours=6)
+_NEWS_SUMMARY_FEATURE = "kasset_news_summary"
+_NEWS_SUMMARY_DAILY_LIMIT_LOCK_KEY = "kasset:news-summary:daily-call-limit"
 MAX_TRANSLATION_SOURCE_CHARS = 4_000
 MAX_TRANSLATED_TITLE_CHARS = 500
 MAX_TRANSLATED_EXCERPT_CHARS = 6_000
@@ -59,9 +60,14 @@ _EXCLUDED_SOURCE_SQL_KEYS: tuple[str, ...] = tuple(
     sorted(value.lower() for value in DEFAULT_EXCLUDED_SOURCES)
 )
 
-_SUMMARY_SCHEMA: dict[str, object] = {
+_SUMMARY_ITEM_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
+        "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": NEWS_SUMMARY_ARTICLES_PER_CALL - 1,
+        },
         "summary": {
             "type": "string",
             "minLength": 1,
@@ -94,12 +100,26 @@ _SUMMARY_SCHEMA: dict[str, object] = {
         "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
     },
     "required": [
+        "index",
         "summary",
         "translated_title",
         "translated_excerpt",
         "sentiment",
         "confidence",
     ],
+    "additionalProperties": False,
+}
+_SUMMARY_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": NEWS_SUMMARY_ARTICLES_PER_CALL,
+            "items": _SUMMARY_ITEM_SCHEMA,
+        }
+    },
+    "required": ["items"],
     "additionalProperties": False,
 }
 _SUMMARY_INSTRUCTIONS = (
@@ -122,6 +142,11 @@ _TITLE_ONLY_INSTRUCTIONS = (
     "article_content와 raw_excerpt가 모두 없으면 summary는 title에 명시된 주체와 사건만 "
     "자연스러운 한국어 한 문장으로 번역·재서술하라. 제목을 그대로 복사하지 말고 배경 설명, "
     "원인, 수치, 영향 또는 전망을 추가하지 마라. translated_excerpt는 null로 반환하라."
+)
+_BATCH_SUMMARY_INSTRUCTIONS = (
+    "입력 items의 각 index를 변경하지 말고, 입력마다 출력 items 항목을 정확히 하나씩 "
+    "같은 index로 반환하라. 항목을 합치거나 생략하거나 중복하지 마라. "
+    f"{_SUMMARY_INSTRUCTIONS} {_TITLE_ONLY_INSTRUCTIONS}"
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _NUMBER_RE = re.compile(
@@ -293,7 +318,7 @@ class GeneratedNewsSummary:
 
 @dataclass(frozen=True, slots=True)
 class NewsSummaryBatchResult:
-    status: Literal["success", "partial", "failed", "unconfigured"]
+    status: Literal["success", "partial", "failed", "unconfigured", "daily_limit"]
     selected: int
     summarized: int
     skipped_existing: int
@@ -307,11 +332,53 @@ class NewsSummaryBatchResult:
 
 
 class NewsSummaryGenerator(Protocol):
-    async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary: ...
+    async def summarize_batch(
+        self,
+        news_items: Sequence[NewsSummaryInput],
+    ) -> dict[int, GeneratedNewsSummary]: ...
 
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC).replace(tzinfo=None)
+
+
+async def _daily_model_call_count(db: AsyncSession) -> int:
+    """UTC 당일 일반 뉴스 요약 provider attempt 수를 원장에서 센다."""
+
+    day_start = _utcnow().replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=UTC,
+    )
+    count = await db.scalar(
+        select(func.count())
+        .select_from(AiCallEvent)
+        .where(
+            AiCallEvent.feature == _NEWS_SUMMARY_FEATURE,
+            AiCallEvent.started_at >= day_start,
+            AiCallEvent.started_at < day_start + timedelta(days=1),
+        )
+    )
+    return int(count or 0)
+
+
+async def _daily_call_limit_reached(db: AsyncSession) -> bool:
+    return await _daily_model_call_count(db) >= NEWS_SUMMARY_DAILY_CALL_LIMIT
+
+
+async def _lock_daily_call_budget(db: AsyncSession) -> bool:
+    """동시 worker를 직렬화하고 transaction 안에서 남은 일일 예산을 확인한다."""
+
+    await db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(_NEWS_SUMMARY_DAILY_LIMIT_LOCK_KEY, 0)
+            )
+        )
+    )
+    return not await _daily_call_limit_reached(db)
 
 
 def _normalized_text(value: str | None) -> str:
@@ -606,14 +673,8 @@ def _validated_confidence(value: object) -> int:
     return value
 
 
-def _instructions_for(news: NewsSummaryInput) -> str:
-    if news.body:
-        return _SUMMARY_INSTRUCTIONS
-    return f"{_SUMMARY_INSTRUCTIONS} {_TITLE_ONLY_INSTRUCTIONS}"
-
-
 class OpenAiNewsSummaryGenerator:
-    """Generate news summaries through the common structured JSON transport."""
+    """공통 structured JSON transport로 일반 뉴스 요약 batch를 생성한다."""
 
     def __init__(self, client: StructuredJsonClient, *, model: str) -> None:
         normalized_model = model.strip()
@@ -622,56 +683,119 @@ class OpenAiNewsSummaryGenerator:
         self._client = client
         self._model = normalized_model
 
-    async def summarize(self, news: NewsSummaryInput) -> GeneratedNewsSummary:
-        response = await self._request(news)
-        summary = _validated_summary(response.get("summary"), news)
-        translated_title, translated_excerpt = _validated_translations(
-            translated_title=response.get("translated_title"),
-            translated_excerpt=response.get("translated_excerpt"),
-            news=news,
-        )
-        sentiment = _validated_sentiment(response.get("sentiment"))
-        confidence = _validated_confidence(response.get("confidence"))
-        prompt = json.dumps(
-            {
-                "instructions": _instructions_for(news),
-                "input": news.to_payload(),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return GeneratedNewsSummary(
-            summary=summary,
-            translated_title=translated_title,
-            translated_excerpt=translated_excerpt,
-            sentiment=sentiment,
-            confidence=confidence,
-            model_name=str(getattr(response, "model_name", self._model)),
-            prompt=prompt,
-            raw_response=json.dumps(
-                response,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        )
+    async def summarize_batch(
+        self,
+        news_items: Sequence[NewsSummaryInput],
+    ) -> dict[int, GeneratedNewsSummary]:
+        response = await self._request(news_items)
+        raw_items = response["items"]
+        if not isinstance(raw_items, list):
+            raise ValueError("news summary response items must be an array")
 
-    async def _request(self, news: NewsSummaryInput) -> dict[str, object]:
-        response = await self._client.request_json(
-            model=self._model,
-            input_payload=news.to_payload(),
-            reasoning_effort="low",
-            schema_name="kasset_news_summary",
-            schema=_SUMMARY_SCHEMA,
-            additional_instructions=_instructions_for(news),
-        )
-        if set(response) != {
+        items_by_index: dict[int, list[dict[str, object]]] = {}
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            index = raw_item.get("index")
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < len(news_items)
+            ):
+                continue
+            items_by_index.setdefault(index, []).append(raw_item)
+
+        expected_keys = {
+            "index",
             "summary",
             "translated_title",
             "translated_excerpt",
             "sentiment",
             "confidence",
-        }:
+        }
+        model_name = str(getattr(response, "model_name", self._model))
+        generated: dict[int, GeneratedNewsSummary] = {}
+        for index, news in enumerate(news_items):
+            candidates = items_by_index.get(index, [])
+            if len(candidates) != 1:
+                if len(candidates) > 1:
+                    logger.warning(
+                        "일반 뉴스 요약 batch 응답 index 중복: index=%d count=%d",
+                        index,
+                        len(candidates),
+                    )
+                continue
+            item = candidates[0]
+            if set(item) != expected_keys:
+                logger.warning(
+                    "일반 뉴스 요약 batch 항목 shape 오류: index=%d",
+                    index,
+                )
+                continue
+            try:
+                summary = _validated_summary(item.get("summary"), news)
+                translated_title, translated_excerpt = _validated_translations(
+                    translated_title=item.get("translated_title"),
+                    translated_excerpt=item.get("translated_excerpt"),
+                    news=news,
+                )
+                sentiment = _validated_sentiment(item.get("sentiment"))
+                confidence = _validated_confidence(item.get("confidence"))
+            except ValueError as exc:
+                logger.warning(
+                    "일반 뉴스 요약 batch 항목 검증 실패: index=%d error_type=%s",
+                    index,
+                    type(exc).__name__,
+                )
+                continue
+            prompt = json.dumps(
+                {
+                    "instructions": _BATCH_SUMMARY_INSTRUCTIONS,
+                    "input": {"items": [{"index": index, **news.to_payload()}]},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            generated[index] = GeneratedNewsSummary(
+                summary=summary,
+                translated_title=translated_title,
+                translated_excerpt=translated_excerpt,
+                sentiment=sentiment,
+                confidence=confidence,
+                model_name=model_name,
+                prompt=prompt,
+                raw_response=json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        return generated
+
+    async def _request(
+        self,
+        news_items: Sequence[NewsSummaryInput],
+    ) -> dict[str, object]:
+        if not 1 <= len(news_items) <= NEWS_SUMMARY_ARTICLES_PER_CALL:
+            raise ValueError(
+                "news summary batch size must be between 1 and "
+                f"{NEWS_SUMMARY_ARTICLES_PER_CALL}"
+            )
+        response = await self._client.request_json(
+            model=self._model,
+            input_payload={
+                "items": [
+                    {"index": index, **news.to_payload()}
+                    for index, news in enumerate(news_items)
+                ]
+            },
+            reasoning_effort="low",
+            schema_name=_NEWS_SUMMARY_FEATURE,
+            schema=_SUMMARY_SCHEMA,
+            additional_instructions=_BATCH_SUMMARY_INSTRUCTIONS,
+        )
+        if set(response) != {"items"} or not isinstance(response.get("items"), list):
             raise ValueError("news summary response shape is invalid")
         return response
 
@@ -909,6 +1033,155 @@ def _analysis_quality(confidence: int) -> str:
     return "low"
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedNewsSummary:
+    article_id: int
+    news: NewsSummaryInput
+
+
+async def _has_complete_analysis(db: AsyncSession, article_id: int) -> bool:
+    analysis_id = await db.scalar(
+        select(NewsAnalysisResult.id)
+        .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
+        .where(
+            NewsArticle.id == article_id,
+            *complete_korean_analysis_conditions(),
+        )
+        .limit(1)
+    )
+    return analysis_id is not None
+
+
+async def _latest_analysis(
+    db: AsyncSession,
+    article_id: int,
+) -> NewsAnalysisResult | None:
+    return await db.scalar(
+        select(NewsAnalysisResult)
+        .where(NewsAnalysisResult.article_id == article_id)
+        .order_by(
+            func.coalesce(
+                NewsAnalysisResult.updated_at,
+                NewsAnalysisResult.created_at,
+            ).desc(),
+            NewsAnalysisResult.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+async def _persist_generated_summary(
+    db: AsyncSession,
+    *,
+    prepared: _PreparedNewsSummary,
+    generated: GeneratedNewsSummary,
+    elapsed_ms: int,
+) -> bool:
+    article = await db.scalar(
+        select(NewsArticle)
+        .where(NewsArticle.id == prepared.article_id)
+        .with_for_update(skip_locked=True)
+    )
+    if article is None or await _has_complete_analysis(db, prepared.article_id):
+        await db.rollback()
+        return False
+
+    summary = _validated_summary(generated.summary, prepared.news)
+    translated_title, translated_excerpt = _validated_translations(
+        translated_title=generated.translated_title,
+        translated_excerpt=generated.translated_excerpt,
+        news=prepared.news,
+    )
+    sentiment = _validated_sentiment(generated.sentiment)
+    confidence = _validated_confidence(generated.confidence)
+    repair_target = await _latest_analysis(db, prepared.article_id)
+    now = _utcnow()
+    analysis = repair_target or NewsAnalysisResult(
+        article_id=article.id,
+        created_at=now,
+    )
+    analysis.model_name = generated.model_name
+    analysis.sentiment = sentiment
+    analysis.sentiment_score = None
+    analysis.summary = summary
+    analysis.translated_title = translated_title
+    analysis.translated_excerpt = translated_excerpt
+    analysis.key_points = [
+        sentence.strip()
+        for sentence in _SENTENCE_SPLIT_RE.split(summary)
+        if sentence.strip()
+    ]
+    analysis.topics = None
+    analysis.price_impact = None
+    analysis.price_impact_score = None
+    analysis.confidence = confidence
+    analysis.analysis_quality = _analysis_quality(confidence)
+    analysis.prompt = generated.prompt
+    analysis.raw_response = generated.raw_response
+    analysis.processing_time_ms = elapsed_ms
+    analysis.updated_at = now if repair_target is not None else None
+    if repair_target is None:
+        db.add(analysis)
+    article.is_analyzed = True
+    article.updated_at = now
+    await db.commit()
+    return True
+
+
+async def _persist_failure_backoff(
+    db: AsyncSession,
+    *,
+    article_id: int,
+    error_type: str,
+    elapsed_ms: int,
+) -> bool:
+    """완료 데이터는 건드리지 않고 불완전 분석 행으로 6시간 backoff를 남긴다."""
+
+    article = await db.scalar(
+        select(NewsArticle)
+        .where(NewsArticle.id == article_id)
+        .with_for_update(skip_locked=True)
+    )
+    if article is None or await _has_complete_analysis(db, article_id):
+        await db.rollback()
+        return False
+
+    repair_target = await _latest_analysis(db, article_id)
+    now = _utcnow()
+    if repair_target is None:
+        db.add(
+            NewsAnalysisResult(
+                article_id=article_id,
+                model_name="news-summary-failed",
+                sentiment=Sentiment.NEUTRAL,
+                sentiment_score=None,
+                summary="",
+                translated_title=None,
+                translated_excerpt=None,
+                key_points=[],
+                topics=None,
+                price_impact=None,
+                price_impact_score=None,
+                confidence=0,
+                analysis_quality="low",
+                prompt="",
+                raw_response=json.dumps(
+                    {"error_type": error_type},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                processing_time_ms=elapsed_ms,
+                created_at=now,
+                updated_at=None,
+            )
+        )
+    else:
+        repair_target.processing_time_ms = elapsed_ms
+        repair_target.updated_at = now
+    await db.commit()
+    return True
+
+
 async def _run_batch(
     db: AsyncSession,
     *,
@@ -918,6 +1191,16 @@ async def _run_batch(
     article_urls: Sequence[str] | None,
     generator: NewsSummaryGenerator,
 ) -> NewsSummaryBatchResult:
+    if await _daily_call_limit_reached(db):
+        await db.rollback()
+        return NewsSummaryBatchResult(
+            status="daily_limit",
+            selected=0,
+            summarized=0,
+            skipped_existing=0,
+            skipped_insufficient=0,
+            failed=0,
+        )
     scan = await _scan_candidates(
         db,
         batch_size=batch_size,
@@ -935,121 +1218,136 @@ async def _run_batch(
     failed_ids: list[int] = []
     processed = len(scan.rejected)
     attempted = 0
-    for article_id in scan.admitted:
-        try:
-            article = await db.scalar(
-                select(NewsArticle)
-                .where(NewsArticle.id == article_id)
-                .with_for_update(skip_locked=True)
-            )
-            if article is None:
-                processed += 1
-                skipped_existing += 1
-                await db.rollback()
-                continue
-            complete_analysis_id = await db.scalar(
-                select(NewsAnalysisResult.id)
-                .join(NewsArticle, NewsArticle.id == NewsAnalysisResult.article_id)
-                .where(
-                    NewsArticle.id == article_id,
-                    *complete_korean_analysis_conditions(),
-                )
-                .limit(1)
-            )
-            if complete_analysis_id is not None:
-                processed += 1
-                skipped_existing += 1
-                await db.rollback()
-                continue
-            repair_target = await db.scalar(
-                select(NewsAnalysisResult)
-                .where(NewsAnalysisResult.article_id == article_id)
-                .order_by(
-                    func.coalesce(
-                        NewsAnalysisResult.updated_at,
-                        NewsAnalysisResult.created_at,
-                    ).desc(),
-                    NewsAnalysisResult.id.desc(),
-                )
-                .limit(1)
-            )
-            news_input = _summary_input_for(article)
-            if news_input is None:
-                skipped_ids.append(article_id)
-                processed += 1
-                logger.info(
-                    "일반 뉴스 요약 입력 부족으로 스킵: article_id=%d", article_id
-                )
-                await db.rollback()
-                continue
-            if attempted >= batch_size:
-                await db.rollback()
-                break
-            processed += 1
-            attempted += 1
+    candidate_offset = 0
+    daily_limit_hit = False
 
-            started = time.monotonic()
-            generated = await generator.summarize(news_input)
-            summary = _validated_summary(generated.summary, news_input)
-            translated_title, translated_excerpt = _validated_translations(
-                translated_title=generated.translated_title,
-                translated_excerpt=generated.translated_excerpt,
-                news=news_input,
+    while candidate_offset < len(scan.admitted) and attempted < batch_size:
+        prepared_batch: list[_PreparedNewsSummary] = []
+        while (
+            candidate_offset < len(scan.admitted)
+            and attempted < batch_size
+            and len(prepared_batch) < NEWS_SUMMARY_ARTICLES_PER_CALL
+        ):
+            article_id = scan.admitted[candidate_offset]
+            candidate_offset += 1
+            try:
+                article = await db.scalar(
+                    select(NewsArticle)
+                    .where(NewsArticle.id == article_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if article is None or await _has_complete_analysis(db, article_id):
+                    processed += 1
+                    skipped_existing += 1
+                    continue
+                news_input = _summary_input_for(article)
+                if news_input is None:
+                    skipped_ids.append(article_id)
+                    processed += 1
+                    logger.info(
+                        "일반 뉴스 요약 입력 부족으로 스킵: article_id=%d",
+                        article_id,
+                    )
+                    continue
+                processed += 1
+                attempted += 1
+                prepared_batch.append(
+                    _PreparedNewsSummary(article_id=article_id, news=news_input)
+                )
+            finally:
+                await db.rollback()
+
+        if not prepared_batch:
+            continue
+        if not await _lock_daily_call_budget(db):
+            await db.rollback()
+            daily_limit_hit = True
+            break
+
+        started = time.monotonic()
+        batch_error_type: str | None = None
+        try:
+            generated_by_index = await generator.summarize_batch(
+                tuple(prepared.news for prepared in prepared_batch)
             )
-            sentiment = _validated_sentiment(generated.sentiment)
-            confidence = _validated_confidence(generated.confidence)
-            elapsed_ms = int((time.monotonic() - started) * 1_000)
-            now = _utcnow()
-            analysis = repair_target or NewsAnalysisResult(
-                article_id=article.id,
-                created_at=now,
-            )
-            analysis.model_name = generated.model_name
-            analysis.sentiment = sentiment
-            analysis.sentiment_score = None
-            analysis.summary = summary
-            analysis.translated_title = translated_title
-            analysis.translated_excerpt = translated_excerpt
-            analysis.key_points = [
-                sentence.strip()
-                for sentence in _SENTENCE_SPLIT_RE.split(summary)
-                if sentence.strip()
-            ]
-            analysis.topics = None
-            analysis.price_impact = None
-            analysis.price_impact_score = None
-            analysis.confidence = confidence
-            analysis.analysis_quality = _analysis_quality(confidence)
-            analysis.prompt = generated.prompt
-            analysis.raw_response = generated.raw_response
-            analysis.processing_time_ms = elapsed_ms
-            analysis.updated_at = now if repair_target is not None else None
-            if repair_target is None:
-                db.add(analysis)
-            article.is_analyzed = True
-            article.updated_at = now
-            await db.commit()
-            summarized += 1
         except asyncio.CancelledError:
             await db.rollback()
             raise
         except Exception as exc:
-            await db.rollback()
-            failed_ids.append(article_id)
+            generated_by_index = {}
+            batch_error_type = type(exc).__name__
             logger.warning(
-                "일반 뉴스 요약 행 실패: article_id=%d error_type=%s",
-                article_id,
-                type(exc).__name__,
+                "일반 뉴스 요약 모델 batch 실패: articles=%d error_type=%s",
+                len(prepared_batch),
+                batch_error_type,
             )
+        elapsed_ms = int((time.monotonic() - started) * 1_000)
+
+        for index, prepared in enumerate(prepared_batch):
+            generated = generated_by_index.get(index)
+            if generated is not None:
+                try:
+                    if await _persist_generated_summary(
+                        db,
+                        prepared=prepared,
+                        generated=generated,
+                        elapsed_ms=elapsed_ms,
+                    ):
+                        summarized += 1
+                    else:
+                        skipped_existing += 1
+                    continue
+                except asyncio.CancelledError:
+                    await db.rollback()
+                    raise
+                except Exception as exc:
+                    await db.rollback()
+                    error_type = type(exc).__name__
+            else:
+                error_type = batch_error_type or "MissingBatchItem"
+
+            try:
+                marked = await _persist_failure_backoff(
+                    db,
+                    article_id=prepared.article_id,
+                    error_type=error_type,
+                    elapsed_ms=elapsed_ms,
+                )
+            except asyncio.CancelledError:
+                await db.rollback()
+                raise
+            except Exception as exc:
+                await db.rollback()
+                marked = True
+                logger.warning(
+                    "일반 뉴스 요약 실패 backoff 저장 실패: "
+                    "article_id=%d error_type=%s",
+                    prepared.article_id,
+                    type(exc).__name__,
+                )
+            if marked:
+                failed_ids.append(prepared.article_id)
+                logger.warning(
+                    "일반 뉴스 요약 행 실패: article_id=%d error_type=%s",
+                    prepared.article_id,
+                    error_type,
+                )
+            else:
+                skipped_existing += 1
 
     failed = len(failed_ids)
-    return NewsSummaryBatchResult(
-        status=_batch_status(
+    status: Literal["success", "partial", "failed", "daily_limit"]
+    if daily_limit_hit:
+        status = "daily_limit"
+    else:
+        status = _batch_status(
             summarized=summarized,
             skipped_existing=skipped_existing,
             skipped_insufficient=len(skipped_ids),
             failed=failed,
-        ),
+        )
+    return NewsSummaryBatchResult(
+        status=status,
         selected=processed,
         summarized=summarized,
         skipped_existing=skipped_existing,
@@ -1099,73 +1397,11 @@ async def summarize_pending_news(
     )
 
 
-async def summarize_ingested_news(
-    db: AsyncSession,
-    article_urls: Sequence[str],
-) -> NewsSummaryBatchResult:
-    """한 수집 회차의 고유 일반 뉴스를 ``AUTO_SUMMARY_CANDIDATE_LIMIT``까지 제한
-    chunk로 처리한다. 상한 밖의 기사는 버려지지 않고 5분 주기 backfill이 이어받는다.
-    """
-
-    unique_urls = tuple(dict.fromkeys(article_urls))[:AUTO_SUMMARY_CANDIDATE_LIMIT]
-    results: list[NewsSummaryBatchResult] = []
-    for offset in range(0, len(unique_urls), AUTO_SUMMARY_BATCH_SIZE):
-        result = await summarize_pending_news(
-            db,
-            batch_size=AUTO_SUMMARY_BATCH_SIZE,
-            article_urls=unique_urls[offset : offset + AUTO_SUMMARY_BATCH_SIZE],
-        )
-        results.append(result)
-        if result.status == "unconfigured":
-            break
-    if not results:
-        return NewsSummaryBatchResult(
-            status="success",
-            selected=0,
-            summarized=0,
-            skipped_existing=0,
-            skipped_insufficient=0,
-            failed=0,
-        )
-
-    selected = sum(result.selected for result in results)
-    summarized = sum(result.summarized for result in results)
-    skipped_existing = sum(result.skipped_existing for result in results)
-    skipped_insufficient = sum(result.skipped_insufficient for result in results)
-    failed_ids = tuple(
-        article_id for result in results for article_id in result.failed_article_ids
-    )
-    skipped_ids = tuple(
-        article_id for result in results for article_id in result.skipped_article_ids
-    )
-    if any(result.status == "unconfigured" for result in results):
-        status: Literal["success", "partial", "failed", "unconfigured"] = (
-            "partial" if summarized else "unconfigured"
-        )
-    else:
-        status = _batch_status(
-            summarized=summarized,
-            skipped_existing=skipped_existing,
-            skipped_insufficient=skipped_insufficient,
-            failed=len(failed_ids),
-        )
-    return NewsSummaryBatchResult(
-        status=status,
-        selected=selected,
-        summarized=summarized,
-        skipped_existing=skipped_existing,
-        skipped_insufficient=skipped_insufficient,
-        failed=len(failed_ids),
-        failed_article_ids=failed_ids,
-        skipped_article_ids=skipped_ids,
-    )
-
-
 __all__ = [
-    "AUTO_SUMMARY_BATCH_SIZE",
-    "AUTO_SUMMARY_CANDIDATE_LIMIT",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",
+    "NEWS_SUMMARY_ARTICLES_PER_CALL",
+    "NEWS_SUMMARY_DAILY_CALL_LIMIT",
     "MAX_TRANSLATED_EXCERPT_CHARS",
     "MAX_TRANSLATED_TITLE_CHARS",
     "MAX_TRANSLATION_SOURCE_CHARS",
@@ -1178,6 +1414,5 @@ __all__ = [
     "build_news_summary_generator",
     "complete_korean_analysis_conditions",
     "complete_korean_analysis_exists",
-    "summarize_ingested_news",
     "summarize_pending_news",
 ]
