@@ -1,11 +1,11 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-02 (AI 호출 전면 MCP(codex 구독) 전환, 유료 API 키 제거, 뉴스 요약 배칭·일일 상한 배포)
+갱신: 2026-09-02 (PAPER 자동주문 Hard Risk AI 규칙 수정 배포; 전 AI lane MCP-only·유료 키 제거·뉴스 요약 상한 유지)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
 ## 전체 진행 상태
-- PR #29 merge `ac2de5a957834c134812586b31247c80b319ba0a`를 운영 배포했다. `.env.kasset`의 `CORE_IMAGE_TAG`가 이 full SHA이고 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 일치한다.
+- PR #31 merge `3851a0eddf2a024505341bbe647418655a559542`를 운영 배포했다. `.env.kasset`의 `CORE_IMAGE_TAG`가 이 full SHA이고 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 일치한다. 배포 직후 14:40 KST cycle은 정상 실행됐다.
 - API, analysis MCP, AI MCP sidecar의 container 내부 `/health`가 모두 `ok`다. `api`, `mcp`, `ai-mcp`, `worker`, `scheduler`, `db`, `redis`, `caddy`가 기동 중이다.
 - migration head는 `20260902_screener_toss_source`다. `20260902_toss_report_scopes`와 Toss screener source migration은 additive하게 적용됐다.
 - 배포 전 DB full custom archive는 `backups/pre-toss-cutover-20260901T191938Z/database.dump`에 저장했다. SHA-256은 `2d3af1b360b6e9fc4658af924dccb46bd16d0b7faa448572049ee80c97dddafe`이며 `pg_restore --list`와 checksum 검증을 통과했다.
@@ -21,6 +21,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - `.env.kasset`에서 `KASSET_AI_API_KEY`와 `KASSET_AI_OPENROUTER_API_KEY`를 주석 처리했다(원본은 `.env.kasset.bak-20260902-keys`, mode 600). `factory.py`가 키 없으면 direct/openrouter route를 조립하지 않으므로 정책을 되돌려도 유료 호출은 불가능하다. admin `/admin/ops/ai-routes`에서 해당 route는 `missing_api_key`로 표시된다.
 - `KASSET_AI_MCP_TIMEOUT_SECONDS=120`(설정 상한), `KASSET_AI_SIDECAR_TIMEOUT_SECONDS=150`. 10건 배치 MCP 요약 실측 43초, 30초 기본값에서는 timeout이었다.
 - 뉴스 요약 일일 상한 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT`(기본 100)은 `review.ai_call_events`의 UTC 당일 `kasset_news_summary` attempt 수를 센다. 2026-09-02는 중단 전 OpenRouter 2,724회가 이미 있어 자동 backfill은 `daily_limit`로 종료되며 2026-09-03 00:00 UTC부터 재개된다.
+- PAPER 집행 Hard Risk `AI` 규칙(floor 0.50)은 이제 추천의 마지막 `kasset_ai_review` evidence를 본다. `status=agrees`이고 확신도 유한일 때만 그 값을 쓰고, 부재·`disagrees`·저확신·파싱 실패는 0으로 차단한다. Position Manager 결정론 청산(`position_manager`/`position_exit` evidence)은 생성 시점과 같은 `ai_confidence=1`로 재현돼 막히지 않는다. 추천 표시용 `confidence` 수식(`(ensemble.confidence+trigger_strength)/2`)과 admission은 불변이다.
 
 ## 이번 세션에서 한 일
 - 최근 7일 원장 분석: 유료 토큰 99.7%가 `kasset_news_summary`였다. direct `gpt-5.6-luna` 1,499회 성공, OpenRouter `z-ai/glm-5.3-flash` 성공 1,022회(출력 361만 tokens, 평균 78초·최대 22분) + 실패 5,890회(HTTP 403 5,860회). 종목 검토 lane은 40회 미만이었다.
@@ -29,19 +30,22 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - B: `summary_luna` allowlist/default에 `mcp_tool` 첫 순위 추가, `build_summary_json_client`가 MCP client를 조립, `model_router`의 MCP AnalysisKind 제한 제거. 뉴스 요약을 기사 10건 indexed batch 1호출로 전환(누락·중복 항목은 해당 기사만 6시간 backoff), UTC 일일 상한을 advisory lock으로 직렬화, Google News·Truth Social 수집 직후 인라인 요약 제거(5분 backfill 단일 진입점). 공시 요약은 MCP route만 자동 포함되고 배칭·상한은 없다.
 - 검증: focused pytest 278 passed(PostgreSQL 15 임시 test DB), ruff check/format 통과, PR #29 GitHub Actions run `33587787453` 전체 통과·`ci-required` 성공. 배포 후 프로세스 한정 env(`KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT=3000`)로 backfill 1회 실행: MCP 1호출 43,288ms 성공, 10건 중 9건 한국어 요약 저장(예: article 22110 `POSITIVE/96`), 1건 항목 검증 실패로 backoff. 원장에 `provider=mcp`, token/cost NULL.
 - 임시 test DB container `kasset-testpg`와 SSH 터널은 제거했다.
+- 자동주문 0건 원인 규명: 30일간 `kasset-automation` 추천 4건 전부 `paper_execution_error=risk_preview_rejected:AI`. `job.py::_hard_risk`가 표시용 합성 confidence(≈0.28)를 `ai_confidence`로 넘겨 floor 0.50에 구조적으로 미달했다. 실제 사례 2건(09-01 003555, 09-02 11:40 KST 055550)의 AI(MCP sol)는 `disagrees, aiAction=HOLD, risk=HIGH, confidence 0.66/0.72`였으므로 수정 후에도 차단이 정당하다.
+- PR #31: `decision_evidence.latest_ai_review_from_evidence`/`is_deterministic_position_exit` 추가, `job.py::_hard_risk` 입력 교체, `evaluate_hard_risk(ai_review_status=...)` 선택 인자로 detail에 `aiStatus` 표기. 신규 `tests/extensions/kasset/automation/test_hard_risk_ai_review.py` 12건(agrees 0.72 통과, disagrees·저확신·부재·NaN 차단, 청산 통과, 타 source 위장 차단). focused pytest 20 + 94 passed. 독립 checker 1회: major "청산 추천 전면 차단" finding을 수용해 수정, FINAL PASS. CI는 새 테스트 파일이 `ci_shards/shard-3.txt`에 없어 `taskiq-smoke` exact-cover 1회 실패 → 등록 후 전체 통과.
 
 ## 다음 세션이 바로 할 일
-1. 2026-09-03 00:00 UTC 이후 첫 `news.articles.summarize`(5분 주기)에서 `daily_limit`가 아니라 MCP 호출이 발생하는지, 하루 호출 수가 100 이하로 멈추는지 원장(`provider=mcp`, `feature=kasset_news_summary`)으로 확인한다. 100회 × 10건 = 하루 최대 1,000기사다.
-2. MCP 실패 시 fallback이 없다. `AiProviderUnavailable`이 반복되면 codex 구독 한도·`ai-mcp` health·timeout(120/150)을 먼저 본다. 유료 키를 되살리지 않는다.
-3. `.env.kasset.bak-20260902-keys`는 유료 키 원본이다. 복구 결정이 없으면 폐기 대상이다.
-4. 정상 미국장 cycle을 계속 관찰하되 `intraday_trigger_not_satisfied`를 provider 실패로 오판하지 않는다. 검증 주문은 만들지 않는다.
-5. `app/services/filled_orders_service.py::_toss_fill_timestamp`의 파싱 불가 timestamp 1건이 해당 fetch window 전체를 실패시키는 low-severity fail-safe 동작을 per-order skip으로 좁힐지 별도 변경으로 검토한다.
-6. startup의 passlib/bcrypt `__about__` 경고와 yfinance cache 경고는 health를 깨지 않지만 의존성·권한 정리 후보로 남아 있다.
-7. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
+1. 다음 장중 `agrees` + 확신도 ≥0.50 진입 추천이 나오면 `review.ai_recommendations.paper_execution_status`가 `SUCCEEDED`로 가고 PAPER 주문이 생성되는지 확인한다. `FAILED`이면 `paper_execution_error`와 Hard Risk detail의 `aiStatus`를 본다. 검증 목적 주문은 만들지 않는다.
+2. 2026-09-03 00:00 UTC 이후 첫 `news.articles.summarize`(5분 주기)에서 `daily_limit`가 아니라 MCP 호출이 발생하는지, 하루 호출 수가 100 이하로 멈추는지 원장(`provider=mcp`, `feature=kasset_news_summary`)으로 확인한다. 100회 × 10건 = 하루 최대 1,000기사다.
+3. MCP 실패 시 fallback이 없다. `AiProviderUnavailable`이 반복되면 codex 구독 한도·`ai-mcp` health·timeout(120/150)을 먼저 본다. 유료 키를 되살리지 않는다.
+4. `.env.kasset.bak-20260902-keys`는 유료 키 원본이다. 복구 결정이 없으면 폐기 대상이다.
+5. 정상 미국장 cycle을 계속 관찰하되 `intraday_trigger_not_satisfied`를 provider 실패로 오판하지 않는다.
+6. `app/services/filled_orders_service.py::_toss_fill_timestamp`의 파싱 불가 timestamp 1건이 해당 fetch window 전체를 실패시키는 low-severity fail-safe 동작을 per-order skip으로 좁힐지 별도 변경으로 검토한다.
+7. startup의 passlib/bcrypt `__about__` 경고와 yfinance cache 경고는 health를 깨지 않지만 의존성·권한 정리 후보로 남아 있다.
+8. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-02: 자동주문 0건 원인(Hard Risk AI 규칙이 합성 confidence 판정)을 수정해 배포(PR #31 `3851a0ed`).
 - 2026-09-02: 전 AI lane MCP-only 전환(revision 9→10), 유료 API 키 제거, 뉴스 요약 10건 배칭·일일 상한 100 배포(PR #29 `ac2de5a9`).
 - 2026-09-02: OpenAI와 OpenRouter 로그에서 뉴스 요약 토큰 급증을 확인하고 운영 `summary_luna` route를 비활성화했다.
 - 2026-09-01: KR/US 시세를 Toss 단일 live provider로 전환하고 NH PLUG quote runtime 제거 후 운영 배포.
 - 2026-09-01: KIS production runtime을 제거하고 Toss/NH PLUG로 전환해 운영 배포, 미국 정규장·마감 관찰까지 완료.
-- 2026-09-01: CI critical path를 9분 37초에서 5분 43초로 줄이고 HANDOFF-only fast path를 fail-closed로 활성화.
