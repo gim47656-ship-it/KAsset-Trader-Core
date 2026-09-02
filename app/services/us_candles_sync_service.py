@@ -10,12 +10,13 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
 from app.core.symbol import to_db_symbol
 from app.models.manual_holdings import MarketType
+from app.models.trading import Instrument, InstrumentType, UserWatchItem
 from app.services.candles_sync_common import (
     SyncTableConfig,
     build_cursor_sql,
@@ -382,30 +383,57 @@ async def sync_us_candles(
     try:
         # 전역 Toss 자격증명은 이 user_id의 단일 운영자 계좌와 같다는 배포 계약이다.
         # 다중 사용자 계좌 매핑이 생기면 명시적 계정 스코프로 교체해야 한다.
-        snapshot = await fetch_toss_portfolio_snapshot(
-            need_sellable=False,
-            need_cash=False,
-        )
-        toss_positions = [
-            position
-            for position in snapshot.positions
-            if position.instrument_type == "equity_us"
-        ]
+        holdings_snapshot_ok = True
+        try:
+            snapshot = await fetch_toss_portfolio_snapshot(
+                need_sellable=False,
+                need_cash=False,
+            )
+        except Exception as exc:
+            holdings_snapshot_ok = False
+            toss_positions = []
+            logger.warning(
+                "Toss portfolio snapshot unavailable during US candle sync error_type=%s",
+                type(exc).__name__,
+            )
+        else:
+            toss_positions = [
+                position
+                for position in snapshot.positions
+                if position.instrument_type == "equity_us"
+            ]
+
         manual_service = ManualHoldingsService(session)
         manual_holdings = await manual_service.get_holdings_by_user(
             user_id=user_id,
             market_type=MarketType.US,
         )
+        # watchlist는 사용자별로 저장되지만 분봉 저장은 종목 단위 시계열이므로
+        # 소유자 구분이 없다. 스케줄 job은 ``user_id=1``로 돌고 실제 관심종목은
+        # 다른 사용자에 붙어 있어, owner 스코프를 걸면 대상이 비어 버린다.
+        # 계좌 보유(``toss_positions``)와 수동 보유만 owner 스코프를 유지한다.
+        watchlist_result = await session.execute(
+            select(Instrument.symbol)
+            .join(UserWatchItem, UserWatchItem.instrument_id == Instrument.id)
+            .where(Instrument.type == InstrumentType.equity_us)
+            .distinct()
+        )
+        watchlist_symbols = watchlist_result.scalars().all()
         target_symbols = build_symbol_union(
             toss_positions,
             manual_holdings,
             holdings_field="symbol",
             normalize_fn=_normalize_symbol,
         )
+        for raw_symbol in watchlist_symbols:
+            symbol = _normalize_symbol(raw_symbol)
+            if symbol is not None:
+                target_symbols.add(symbol)
         if not target_symbols:
             return {
                 "mode": normalized_mode,
                 "sessions": session_count,
+                "holdings_snapshot_ok": holdings_snapshot_ok,
                 "skipped": True,
                 "reason": "no_target_symbols",
                 "skip_reasons": {},
@@ -438,6 +466,7 @@ async def sync_us_candles(
                 return {
                     "mode": normalized_mode,
                     "sessions": session_count,
+                    "holdings_snapshot_ok": holdings_snapshot_ok,
                     "skipped": True,
                     "skip_reasons": skipped_reasons,
                     "skipped_symbols": skipped_symbols,
@@ -521,6 +550,7 @@ async def sync_us_candles(
         return {
             "mode": normalized_mode,
             "sessions": session_count,
+            "holdings_snapshot_ok": holdings_snapshot_ok,
             "skipped": pairs_processed == 0,
             "skip_reasons": skipped_reasons,
             "skipped_symbols": skipped_symbols,
