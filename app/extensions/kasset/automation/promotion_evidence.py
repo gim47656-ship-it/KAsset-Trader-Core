@@ -70,7 +70,9 @@ from app.services.strategy_experiment_registry import (
     register_experiment,
 )
 
-_FALLBACK_SOURCES = frozenset({"toss", "toss_fallback", "yahoo", "yahoo_fallback"})
+_FALLBACK_SOURCES = frozenset(
+    {"toss", "toss_regular", "toss_fallback", "yahoo", "yahoo_fallback"}
+)
 _SYMBOL_EXCLUSION_REASONS = frozenset(
     {
         "insufficient_history",

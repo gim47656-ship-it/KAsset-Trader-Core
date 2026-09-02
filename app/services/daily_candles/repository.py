@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import enum
 import logging
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import cast
 
 from sqlalchemy import bindparam, text
@@ -16,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
 from app.services.candles_sync_common import SyncTableConfig
+from app.services.daily_candles.kr_regular_daily import (
+    KR_REGULAR_SOURCE,
+    KrTossMinuteCandle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +143,104 @@ class DailyCandlesRepository:
         that should share the repository's session and transaction context.
         """
         return self._session
+
+    async def fetch_kr_toss_minutes(
+        self,
+        *,
+        session_date: date,
+        symbols: list[str],
+    ) -> dict[str, list[KrTossMinuteCandle]]:
+        """특정 KST 거래일의 Toss 1분봉을 심볼별 시간순으로 읽는다."""
+
+        normalized = sorted(
+            {
+                normalized_symbol
+                for symbol in symbols
+                if (normalized_symbol := str(symbol).strip().upper())
+            }
+        )
+        out: dict[str, list[KrTossMinuteCandle]] = {symbol: [] for symbol in normalized}
+        if not normalized:
+            return out
+
+        sql = text(
+            """
+            SELECT time_utc, session_date_kst, symbol, session_segment,
+                   open, high, low, close, volume, value,
+                   value_semantics, is_padding
+            FROM research.kr_candles_1m_toss
+            WHERE session_date_kst = :session_date
+              AND symbol IN :symbols
+            ORDER BY symbol, time_utc
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+        result = await self._session.execute(
+            sql,
+            {"session_date": session_date, "symbols": normalized},
+        )
+        for row in result.mappings().all():
+            symbol = str(row["symbol"]).strip().upper()
+            out.setdefault(symbol, []).append(
+                KrTossMinuteCandle(
+                    time_utc=cast(datetime, row["time_utc"]),
+                    session_date_kst=cast(date, row["session_date_kst"]),
+                    symbol=symbol,
+                    session_segment=str(row["session_segment"]),
+                    open=cast(Decimal, row["open"]),
+                    high=cast(Decimal, row["high"]),
+                    low=cast(Decimal, row["low"]),
+                    close=cast(Decimal, row["close"]),
+                    volume=cast(Decimal, row["volume"]),
+                    value=cast(Decimal, row["value"]),
+                    value_semantics=str(row["value_semantics"]),
+                    is_padding=bool(row["is_padding"]),
+                )
+            )
+        return out
+
+    async def upsert_kr_regular_rows(self, *, rows: list[DailyCandleRow]) -> int:
+        """KRX 정규장 집계 행을 저장하고 실제 보호 source 행 수를 반환한다."""
+
+        prepared = [
+            (
+                row
+                if row.source == KR_REGULAR_SOURCE
+                else replace(row, source=KR_REGULAR_SOURCE)
+            )
+            for row in rows
+        ]
+        if not prepared:
+            return 0
+
+        await self.upsert_rows(market=MarketKey.KR, rows=prepared)
+        expected_keys = {(row.time_utc, row.symbol, row.partition) for row in prepared}
+        sql = text(
+            """
+            SELECT time, symbol, venue, source
+            FROM public.kr_candles_1d
+            WHERE symbol IN :symbols
+              AND venue IN :venues
+              AND time BETWEEN :time_start AND :time_end
+            """
+        ).bindparams(
+            bindparam("symbols", expanding=True),
+            bindparam("venues", expanding=True),
+        )
+        result = await self._session.execute(
+            sql,
+            {
+                "symbols": sorted({row.symbol for row in prepared}),
+                "venues": sorted({row.partition for row in prepared}),
+                "time_start": min(row.time_utc for row in prepared),
+                "time_end": max(row.time_utc for row in prepared),
+            },
+        )
+        stored_regular_keys = {
+            (row.time, str(row.symbol), str(row.venue))
+            for row in result
+            if str(row.source) == KR_REGULAR_SOURCE
+        }
+        return len(expected_keys & stored_regular_keys)
 
     @staticmethod
     def _config(market: MarketKey) -> SyncTableConfig:
@@ -457,15 +560,43 @@ class DailyCandlesRepository:
             excluded_from_update.add("adj_close")
         update_cols = [c for c in cols if c not in excluded_from_update]
         update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+        # 정규장 source 보호는 KR 테이블에만 적용해 US 충돌 정책을 보존한다.
+        if cfg.table_name == "kr_candles_1d":
+            # 같은 날 두 source의 시가는 같다는 운영 가정 아래, 1% 초과 차이는
+            # 액면분할·무상증자 adjusted 재적용으로 보고 Toss 갱신을 허용한다.
+            conflict_guard = f"""
+                public.{cfg.table_name}.source = 'yahoo_fallback'
+                OR (
+                    EXCLUDED.source IN ('toss', 'toss_index')
+                    AND (
+                        public.{cfg.table_name}.source <> 'toss_regular'
+                        OR ABS(
+                            EXCLUDED.open
+                            / NULLIF(public.{cfg.table_name}.open, 0)
+                            - 1
+                        ) > 0.01
+                    )
+                )
+                OR (
+                    EXCLUDED.source = 'toss_regular'
+                    AND public.{cfg.table_name}.source
+                        IN ('toss', 'yahoo_fallback', 'toss_regular')
+                )
+                OR EXCLUDED.source = public.{cfg.table_name}.source
+            """
+        else:
+            conflict_guard = f"""
+                public.{cfg.table_name}.source = 'yahoo_fallback'
+                OR EXCLUDED.source IN ('toss', 'toss_index')
+                OR EXCLUDED.source = public.{cfg.table_name}.source
+            """
         return text(
             f"""
             INSERT INTO public.{cfg.table_name} ({col_list})
             VALUES ({placeholders})
             ON CONFLICT (time, symbol, {cfg.partition_col}) DO UPDATE
             SET {update_clause}, ingested_at = now()
-            WHERE public.{cfg.table_name}.source = 'yahoo_fallback'
-               OR EXCLUDED.source IN ('toss', 'toss_index')
-               OR EXCLUDED.source = public.{cfg.table_name}.source
+            WHERE {conflict_guard}
             """
         )
 

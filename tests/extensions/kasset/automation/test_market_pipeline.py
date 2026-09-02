@@ -399,6 +399,16 @@ def test_market_event_task_is_registered() -> None:
         {"cron": "*/10 9-15 * * 1-5", "cron_offset": "America/New_York"},
     ]
     assert (
+        kasset_market_events_tasks.kasset_watchlist_candles_sync.task_name
+        == "kasset_watchlist_candles.sync"
+    )
+    assert kasset_market_events_tasks.kasset_watchlist_candles_sync.labels[
+        "schedule"
+    ] == [
+        {"cron": "5 9-16 * * 1-5", "cron_offset": "Asia/Seoul"},
+        {"cron": "5 20 * * 1-5", "cron_offset": "Asia/Seoul"},
+    ]
+    assert (
         kasset_market_events_tasks.kasset_google_news_kr_sync.task_name
         == "kasset.news.google.kr.sync"
     )
@@ -527,25 +537,100 @@ async def test_watchlist_candle_sync_isolates_per_symbol_failures(
     from app.tasks import kasset_market_events_tasks
 
     monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    events: list[str] = []
 
     async def fake_symbols() -> list[str]:
         return ["000660", "005930"]
 
     async def fake_sync(symbol: str) -> dict[str, object]:
+        events.append(f"sync:{symbol}")
         if symbol == "000660":
             raise RuntimeError("toss unavailable")
         return {"symbol": symbol, "rows": 60, "upserted": 60}
 
+    async def fake_override(symbols: list[str]) -> dict[str, object]:
+        events.append(f"override:{','.join(symbols)}")
+        return {"status": "completed", "rows_upserted": len(symbols)}
+
     monkeypatch.setattr(
         kasset_market_events_tasks, "_watchlist_kr_symbols", fake_symbols
     )
-    monkeypatch.setattr(kasset_market_events_tasks, "_sync_watchlist_symbol", fake_sync)
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_sync_watchlist_symbol",
+        fake_sync,
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_override_recent_completed_kr_regular",
+        fake_override,
+    )
     assert await kasset_market_events_tasks.kasset_watchlist_candles_sync() == {
         "enabled": True,
         "synced": [
             {"symbol": "000660", "error": "toss unavailable"},
             {"symbol": "005930", "rows": 60, "upserted": 60},
         ],
+        "regularOverride": {"status": "completed", "rows_upserted": 2},
+    }
+    assert events == [
+        "sync:000660",
+        "sync:005930",
+        "override:000660,005930",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_watchlist_candle_sync_preserves_daily_result_when_override_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.services.daily_candles import kr_regular_daily, sync_service
+    from app.tasks import kasset_market_events_tasks
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+
+    async def fake_symbols() -> list[str]:
+        return ["005930"]
+
+    async def fake_sync(symbol: str) -> dict[str, object]:
+        return {"symbol": symbol, "rows": 60, "upserted": 60}
+
+    async def failed_service_factory() -> None:
+        raise RuntimeError("override db unavailable")
+
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_watchlist_kr_symbols",
+        fake_symbols,
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_sync_watchlist_symbol",
+        fake_sync,
+    )
+    monkeypatch.setattr(
+        kr_regular_daily,
+        "latest_completed_kr_session_date",
+        lambda _: datetime(2026, 9, 1).date(),
+    )
+    monkeypatch.setattr(
+        sync_service,
+        "_build_default_service",
+        failed_service_factory,
+    )
+
+    result = await kasset_market_events_tasks.kasset_watchlist_candles_sync()
+
+    assert result == {
+        "enabled": True,
+        "synced": [{"symbol": "005930", "rows": 60, "upserted": 60}],
+        "regularOverride": {
+            "status": "failed",
+            "session_date": "2026-09-01",
+            "error": "RuntimeError: override db unavailable",
+            "rows_upserted": 0,
+        },
     }
 
 
