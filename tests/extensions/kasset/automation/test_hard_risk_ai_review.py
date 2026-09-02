@@ -1,4 +1,9 @@
-"""PAPER Hard Risk가 최종 AI 검토 근거를 사용하는 계약."""
+"""PAPER Hard Risk에서 AI 검토가 SHADOW로만 기록되는 계약.
+
+AI와 뉴스·공시는 검증되지 않은 입력을 보므로 실제 주문 veto를 갖지 않는다.
+Hard Risk 차단은 kill switch, 손실·포지션·주문 한도, 현금, 거래시간 같은
+결정론적 안전장치만 담당한다.
+"""
 
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ async def _evaluate(
     *,
     evidence: list[dict[str, object]],
     recommendation_confidence: str,
+    kill_switch: bool = False,
 ):
     recommendation = SimpleNamespace(
         reference_price="70000",
@@ -60,13 +66,12 @@ async def _evaluate(
         "AIRecommendationService",
         lambda _db: recommendation_service,
     )
-
     policy = AITradingPolicyService()
     snapshot = AITradingSnapshot(
         mode=OperatingMode.AUTO_PAPER,
         limits=AITradingLimits(),
         usage=AITradingUsage(),
-        kill_switch=False,
+        kill_switch=kill_switch,
         updated_at=_NOW,
     )
     monkeypatch.setattr(
@@ -75,7 +80,6 @@ async def _evaluate(
         AsyncMock(return_value=snapshot),
     )
     monkeypatch.setattr(job_module, "AITradingPolicyService", lambda: policy)
-
     request = OrderRequest(
         client_order_id="ai-rec:rec-ai-review",
         broker="PAPER",
@@ -94,58 +98,47 @@ async def _evaluate(
     )
 
 
-def _ai_check(result: HardRiskResult):
-    return next(check for check in result.checks if check.rule == "AI")
+def _ai_shadow_check(result: HardRiskResult):
+    return next(check for check in result.checks if check.rule == "AI_SHADOW")
+
+
+def _rules(result: HardRiskResult) -> set[str]:
+    return {check.rule for check in result.checks}
 
 
 @pytest.mark.asyncio
-async def test_agreeing_ai_review_above_floor_passes_ai_rule(
+@pytest.mark.parametrize(
+    ("status", "confidence"),
+    [
+        ("agrees", "0.72"),
+        ("disagrees", "0.72"),
+        ("agrees", "0.40"),
+        ("disagrees", "0.05"),
+        ("agrees", "not-a-decimal"),
+        ("agrees", "NaN"),
+        ("agrees", "Infinity"),
+    ],
+)
+async def test_ai_review_never_blocks_a_paper_order(
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    confidence: str,
 ) -> None:
+    """동의·반대·저확신·파싱불가 모두 주문을 차단하지 않는다."""
     result = await _evaluate(
         monkeypatch,
-        evidence=[_ai_review(status="agrees", confidence="0.72")],
+        evidence=[_ai_review(status=status, confidence=confidence)],
         recommendation_confidence="0.99",
     )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is True
-    assert "confidence=0.72" in ai_check.detail
-    assert "aiStatus=agrees" in ai_check.detail
+    shadow = _ai_shadow_check(result)
+    assert shadow.passed is True
+    assert f"aiStatus={status}" in shadow.detail
+    assert "shadow" in shadow.detail
+    assert result.passed is True
 
 
 @pytest.mark.asyncio
-async def test_disagreeing_ai_review_blocks_even_with_high_confidence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await _evaluate(
-        monkeypatch,
-        evidence=[_ai_review(status="disagrees", confidence="0.72")],
-        recommendation_confidence="0.99",
-    )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is False
-    assert "aiStatus=disagrees" in ai_check.detail
-
-
-@pytest.mark.asyncio
-async def test_agreeing_ai_review_below_floor_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await _evaluate(
-        monkeypatch,
-        evidence=[_ai_review(status="agrees", confidence="0.40")],
-        recommendation_confidence="0.99",
-    )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is False
-    assert "confidence=0.40" in ai_check.detail
-
-
-@pytest.mark.asyncio
-async def test_missing_ai_review_evidence_blocks(
+async def test_missing_ai_review_evidence_does_not_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = await _evaluate(
@@ -153,16 +146,42 @@ async def test_missing_ai_review_evidence_blocks(
         evidence=[],
         recommendation_confidence="0.99",
     )
-
-    assert _ai_check(result).passed is False
+    assert _ai_shadow_check(result).passed is True
+    assert result.passed is True
 
 
 @pytest.mark.asyncio
-async def test_deterministic_position_exit_passes_ai_rule_without_ai_review(
+async def test_no_hard_risk_rule_is_named_ai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Position Manager 청산은 AI evidence가 없어도 생성 시점과 같은 값(1)으로 통과한다."""
+    """AI가 관문 이름으로 남아 주문을 거절하는 경로가 없어야 한다."""
+    result = await _evaluate(
+        monkeypatch,
+        evidence=[_ai_review(status="disagrees", confidence="0.90")],
+        recommendation_confidence="0.99",
+    )
+    assert "AI" not in _rules(result)
+    assert "AI_SHADOW" in _rules(result)
 
+
+@pytest.mark.asyncio
+async def test_kill_switch_still_blocks_regardless_of_ai_agreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _evaluate(
+        monkeypatch,
+        evidence=[_ai_review(status="agrees", confidence="0.99")],
+        recommendation_confidence="0.99",
+        kill_switch=True,
+    )
+    assert result.passed is False
+    assert result.blocked_reason == "kill switch가 켜져 있습니다."
+
+
+@pytest.mark.asyncio
+async def test_deterministic_position_exit_records_deterministic_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result = await _evaluate(
         monkeypatch,
         evidence=[
@@ -174,39 +193,9 @@ async def test_deterministic_position_exit_passes_ai_rule_without_ai_review(
         ],
         recommendation_confidence="1",
     )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is True
-    assert "confidence=1" in ai_check.detail
-    assert "aiStatus=deterministic_exit" in ai_check.detail
-
-
-@pytest.mark.asyncio
-async def test_exit_marker_from_other_source_does_not_bypass_ai_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await _evaluate(
-        monkeypatch,
-        evidence=[{"source": "kasset_ai_review", "kind": "position_exit"}],
-        recommendation_confidence="1",
-    )
-
-    assert _ai_check(result).passed is False
-
-
-@pytest.mark.asyncio
-async def test_recommendation_confidence_does_not_replace_ai_review_confidence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await _evaluate(
-        monkeypatch,
-        evidence=[_ai_review(status="agrees", confidence="0.72")],
-        recommendation_confidence="0.28",
-    )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is True
-    assert "confidence=0.72" in ai_check.detail
+    shadow = _ai_shadow_check(result)
+    assert shadow.passed is True
+    assert "aiStatus=deterministic_exit" in shadow.detail
 
 
 def test_latest_ai_review_uses_the_last_matching_entry() -> None:
@@ -216,7 +205,6 @@ def test_latest_ai_review_uses_the_last_matching_entry() -> None:
         _ai_review(status="disagrees", confidence="0.72"),
     ]
     evidence[-1]["action"] = "HOLD"
-
     assert latest_ai_review_from_evidence(evidence) == (
         "disagrees",
         "HOLD",
@@ -228,23 +216,4 @@ def test_latest_ai_review_keeps_invalid_confidence_fail_closed() -> None:
     review = latest_ai_review_from_evidence(
         [_ai_review(status="agrees", confidence="not-a-decimal")]
     )
-
     assert review == ("agrees", "BUY", None)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("confidence", ["not-a-decimal", "NaN", "Infinity"])
-async def test_invalid_or_non_finite_ai_confidence_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-    confidence: str,
-) -> None:
-    result = await _evaluate(
-        monkeypatch,
-        evidence=[_ai_review(status="agrees", confidence=confidence)],
-        recommendation_confidence="0.99",
-    )
-
-    ai_check = _ai_check(result)
-    assert ai_check.passed is False
-    assert "confidence=0" in ai_check.detail
-    assert "aiStatus=agrees" in ai_check.detail

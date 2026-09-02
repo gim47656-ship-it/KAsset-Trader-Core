@@ -661,6 +661,8 @@ class AIRecommendationVerticalSlice:
         review_rejections: Counter[str] = Counter()
         trigger_evidence: list[dict[str, object]] = []
         trigger_statuses: Counter[str] = Counter()
+        # 어느 관문이 몇 건을 죽였는지 운영 로그로 분리하기 위한 funnel 계측.
+        trigger_failures: Counter[str] = Counter()
 
         # 2단계: 선택된 setup만 장중 완료 bar를 읽는다. 세션·신선도 검증은
         # intraday_data가 fail-closed로 하고, 여기서는 그 결과만 정책에 넣는다.
@@ -707,6 +709,12 @@ class AIRecommendationVerticalSlice:
             trigger_statuses[trigger_decision.status.value] += 1
             trigger_evidence.append(trigger_decision.as_evidence())
             if not trigger_decision.triggered:
+                for failure_code in (
+                    trigger_decision.blocked_reason or "unspecified"
+                ).split(","):
+                    normalized_failure = failure_code.strip()
+                    if normalized_failure:
+                        trigger_failures[normalized_failure] += 1
                 review_rejections[_NO_INTRADAY_TRIGGER] += 1
                 pre_ai_exclusion_evidence.append(
                     _trigger_exclusion_evidence(item, trigger_decision)
@@ -842,6 +850,7 @@ class AIRecommendationVerticalSlice:
             "dailySetups": [item.as_evidence() for item in selected_setups],
             "intradayTriggerPolicy": self._trigger_policy.as_evidence(),
             "intradayTriggerStatuses": dict(sorted(trigger_statuses.items())),
+            "intradayTriggerFailures": dict(sorted(trigger_failures.items())),
             "intradayTriggers": trigger_evidence,
             "decisionCohortPolicy": {
                 "liveCohort": LIVE_COHORT,
@@ -2011,7 +2020,9 @@ async def run_ai_recommendation_cycle_once(
             "kasset AI recommendation cycle owner=%s trace=%s skipped=%s "
             "candidates=%s "
             "markets=%s sources=%s ranked=%s evaluated=%s "
-            "actionable=%s pre_ai_exclusions=%s reviewed=%s review_cap_reached=%s "
+            "actionable=%s setup_selected=%s setup_statuses=%s "
+            "setup_rejections=%s trigger_statuses=%s trigger_failures=%s "
+            "pre_ai_exclusions=%s reviewed=%s review_cap_reached=%s "
             "review_rejections=%s recommendations=%d",
             owner_id,
             cycle_trace_id,
@@ -2022,6 +2033,11 @@ async def run_ai_recommendation_cycle_once(
             result.get("rankedCount"),
             result.get("strategyEvaluatedCount"),
             result.get("strategyActionableCount"),
+            result.get("dailySetupSelectedCount"),
+            result.get("dailySetupStatuses"),
+            result.get("dailySetupRejections"),
+            result.get("intradayTriggerStatuses"),
+            result.get("intradayTriggerFailures"),
             result.get("preAiExclusions"),
             result.get("aiReviewedCount"),
             result.get("strategyReviewCapReached"),
