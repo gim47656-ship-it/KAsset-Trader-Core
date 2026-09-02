@@ -64,7 +64,15 @@ def _approved_recommendation(
         currency="KRW",
         rationale=["automation wiring"],
         risks=[],
-        evidence=[],
+        evidence=[
+            {
+                "source": "kasset_ai_review",
+                "status": "agrees",
+                "action": "BUY",
+                "confidence": "0.9",
+            }
+        ],
+        confidence="0.28",
         suggested_quantity="1",
         source="kasset-automation",
         created_at=now - timedelta(minutes=5),
@@ -781,7 +789,6 @@ async def test_approved_decision_places_order_in_the_owner_paper_account(
 
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation_id = recommendation.id
     try:
@@ -925,8 +932,6 @@ async def test_in_session_fresh_reference_quote_still_places_the_order(
     """장중에 실시간 시세가 살아 있으면 게이트가 과차단하지 않는다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
-    # Hard Risk가 요구하는 수치 근거. 이게 있어야 주문이 체결까지 간다.
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation_id = recommendation.id
     try:
@@ -969,7 +974,6 @@ async def test_after_hours_stale_reference_quote_is_not_blocked(
     """장 마감 후 종가는 정상 최신값이라 같은 시세로도 차단되지 않는다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id)
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation_id = recommendation.id
     try:
@@ -1036,7 +1040,6 @@ async def test_auto_paper_sweep_records_its_origin_recommendation_and_order(
     """무인 sweep 한 건이 원장에 정확히 한 행으로, AUTO_PAPER로 남는다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation.cycle_trace_id = "cyc-sweep-trace"
     recommendation_id = recommendation.id
@@ -1087,7 +1090,6 @@ async def test_approval_execution_records_the_approval_origin(
     """사람이 누른 승인 실행은 같은 원장에 APPROVAL로 구분돼 남는다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation_id = recommendation.id
     try:
@@ -1129,7 +1131,6 @@ async def test_a_ledger_write_failure_cannot_change_the_execution_result(
     """원장 쓰기가 터져도 체결과 반환 결과는 그대로여야 한다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
-    recommendation.confidence = "0.9"
     recommendation.reference_price = "70000"
     recommendation_id = recommendation.id
     try:

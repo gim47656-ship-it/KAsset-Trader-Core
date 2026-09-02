@@ -1,9 +1,8 @@
-"""매매 판단에 참여하지 않는 근거: AI 검토, 뉴스/공시 shadow, 비교 코호트.
+"""기술 추천 판정의 보조 근거: AI 검토, 뉴스/공시 shadow, 비교 코호트.
 
-여기 있는 어떤 값도 BUY/SELL을 허용하거나 차단하지 않는다. 기술 판정
-(완료 일봉 Daily Setup + 장중 Trigger)과 Hard Risk만 그 권한을 가진다.
-이 모듈은 "그때 AI는 뭐라고 했나", "뉴스는 있었나", "AI나 뉴스를 관문으로
-썼다면 결과가 달라졌을까"를 같은 결정에 나란히 기록만 한다.
+이 모듈의 값은 기술 BUY/SELL 추천 판정을 바꾸지 않는다. 다만 PAPER 집행
+직전 Hard Risk는 저장된 최종 AI 검토의 상태와 확신도를 fail-closed 관문으로
+재사용한다. 뉴스와 비교 코호트는 계속 관측·사후분석 용도로만 기록한다.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Final
 
@@ -78,7 +77,7 @@ class AiReviewEvidence:
 
     def as_evidence(self) -> dict[str, object]:
         return {
-            "title": "AI candidate review (advisory only)",
+            "title": "AI candidate review (advisory for admission; gates PAPER execution)",
             "source": "kasset_ai_review",
             "kind": "ai_review",
             "schemaVersion": AI_REVIEW_SCHEMA_VERSION,
@@ -271,6 +270,60 @@ def ai_review_from_observation(
     )
 
 
+def latest_ai_review_from_evidence(
+    evidence: object,
+) -> tuple[str | None, str | None, Decimal | None] | None:
+    """추천 evidence에서 마지막 AI 검토의 상태·행동·확신도를 읽는다.
+
+    마지막 항목이 최종 tier 결과다. 그 항목의 확신도를 해석할 수 없으면 이전
+    항목으로 되돌아가지 않고 확신도 자리에 ``None``을 반환한다.
+    """
+
+    if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
+        return None
+    review = next(
+        (
+            item
+            for item in reversed(evidence)
+            if isinstance(item, Mapping) and item.get("source") == "kasset_ai_review"
+        ),
+        None,
+    )
+    if review is None:
+        return None
+
+    confidence = None
+    confidence_text = _optional_text(review.get("confidence"))
+    if confidence_text is not None:
+        try:
+            confidence = Decimal(confidence_text)
+        except (InvalidOperation, ValueError):
+            pass
+    return (
+        _optional_text(review.get("status")),
+        _optional_text(review.get("action")),
+        confidence,
+    )
+
+
+def is_deterministic_position_exit(evidence: object) -> bool:
+    """Position Manager가 만든 결정론 청산 추천인지 판별한다.
+
+    청산 추천은 AI 검토 없이 ``position_manager``/``position_exit`` evidence만
+    갖고 생성 시점 Hard Risk를 ``ai_confidence=1``로 통과했다. 집행 시 AI 규칙을
+    같은 값으로 재현해야 청산이 AI evidence 부재로 막히지 않는다.
+    """
+
+    if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and item.get("source") == "position_manager"
+        and item.get("kind") == "position_exit"
+        for item in evidence
+    )
+
+
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -302,6 +355,8 @@ __all__ = [
     "NewsShadowEvidence",
     "NewsShadowStatus",
     "ai_review_from_observation",
+    "latest_ai_review_from_evidence",
+    "is_deterministic_position_exit",
     "build_decision_cohorts",
     "build_news_shadow",
     "unknown_news_shadow",

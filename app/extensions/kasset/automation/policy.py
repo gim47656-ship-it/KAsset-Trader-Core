@@ -634,6 +634,7 @@ class AITradingPolicyService:
         reference_price: Decimal,
         ai_confidence: Decimal,
         now: datetime,
+        ai_review_status: str | None = None,
         base_risk_reasons: Sequence[Any] = (),
     ) -> HardRiskResult:
         snapshot = await self.get_snapshot(
@@ -765,7 +766,12 @@ class AITradingPolicyService:
             HardRiskCheck(
                 "AI",
                 ai_confidence.is_finite() and ai_confidence >= _MIN_AI_CONFIDENCE,
-                f"confidence={ai_confidence}; floor={_MIN_AI_CONFIDENCE}",
+                f"confidence={ai_confidence}; floor={_MIN_AI_CONFIDENCE}"
+                + (
+                    f"; aiStatus={ai_review_status}"
+                    if ai_review_status is not None
+                    else ""
+                ),
             ),
             HardRiskCheck(
                 "DAILY_GOAL",

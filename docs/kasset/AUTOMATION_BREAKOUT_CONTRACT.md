@@ -122,9 +122,9 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 ## AI 공급자 역할
 
 - 후보 factor, 수량, stop, exit와 deterministic backtest/promotion metrics는 AI를 호출하지 않는다.
-- AI는 추천의 설명, 보조순위, 사후분석만 담당한다. **AI는 BUY/SELL을 허용하거나 차단할 권한이 없다.** provider 실패, 기술 판정과의 불일치, 낮은 confidence는 `ai_review` evidence에 `AGREES|DISAGREES|LOW_CONFIDENCE|INVALID|UNAVAILABLE|NOT_REQUESTED` 상태로 기록되고 순위 보조 가중치에만 반영된다. AI가 전부 실패해도 기술 판정과 PAPER 적격성은 바뀌지 않는다.
+- AI는 추천 admission의 설명, 보조순위, 사후분석을 맡으며 기술 BUY/SELL 판정은 바꾸지 않는다. 단, PAPER 집행 직전 Hard Risk는 저장된 최종 `kasset_ai_review`가 `status=agrees`이고 유한한 `confidence >= 0.50`일 때만 통과시키며, evidence 부재·파싱 불가·그 외 status·낮은 confidence는 fail-closed 차단한다. Position Manager의 결정론 청산 추천(`position_manager`/`position_exit` evidence)은 AI 검토 없이 생성 시점과 같은 `ai_confidence=1`로 재현되어 이 규칙에 막히지 않는다.
 - 뉴스·공시는 `news_shadow` evidence로 격리한다. 항목이 있으면 `FOUND`, 항목이 없고 시장 뉴스 경로가 최근 24시간 안에 살아 있음이 입증되면 `NOT_FOUND`, 입증하지 못하면 `NOT_FOUND`로 단정하지 않고 `UNKNOWN`이다. 세 값 모두 매매 판단에 쓰지 않는다.
-- 같은 결정에 technical-only, technical+AI, technical+AI+news 세 코호트 evidence를 함께 기록해 AI와 뉴스가 실제로 결과를 바꾸는지 사후 비교할 수 있게 한다. 실제로 집행되는 live 코호트는 technical-only다.
+- 같은 결정에 technical-only, technical+AI, technical+AI+news 세 코호트 evidence를 함께 기록해 AI와 뉴스가 결과를 바꾸는지 사후 비교한다. 추천 admission의 live 코호트는 technical-only이며, PAPER 집행 허용 여부는 위 Hard Risk AI 규칙으로 별도 재검증한다.
 - 복잡한 후보/거래 검토는 MCP 직결을 우선하고 direct OpenAI-compatible API, OpenRouter 순으로 availability fallback한다.
 - 뉴스·공시 요약도 MCP 직결을 우선하고 direct API, OpenRouter 순으로 availability fallback한다. 일반 뉴스는 호출당 최대 10건을 묶고 UTC 일일 provider attempt 상한(기본 100)을 적용한다. OpenRouter fallback 모델은 공식 slug `z-ai/glm-5.3-flash`다.
 - 일반 뉴스 structured output은 `summary`(한국어 2~4문장)와 `translated_title`, `translated_excerpt`를 분리한다. 번역 필드는 각 원문이 영문 우세일 때만 생성하며, 본문 앞부분 4,000자만 입력하고 번역 발췌는 6,000자 이하로 저장한다. 한국어 title/body의 대응 번역 필드와 본문이 없을 때의 `translated_excerpt`, 기존 분석 행의 두 필드는 `null`을 허용하고 원문 URL은 `/market/news`와 daily routine alert에 그대로 제공한다.
