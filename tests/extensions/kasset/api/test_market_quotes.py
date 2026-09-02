@@ -736,7 +736,10 @@ async def test_public_session_vocabulary_maps_each_provider_window_once(
     )
 
 
-def test_regular_close_rejects_a_candle_at_the_after_market_boundary() -> None:
+def test_regular_close_accepts_closing_auction_bar_but_rejects_later_bars() -> None:
+    """토스 1분봉 라벨은 분의 끝이다. 마감 동시호가 체결은 end+1분 봉에 실리므로
+    그 봉은 종가로 채택하고, 그 뒤 장외 봉은 거른다."""
+
     window = _window(
         datetime.fromisoformat("2026-08-27T22:30:00+09:00"),
         datetime.fromisoformat("2026-08-28T05:00:00+09:00"),
@@ -744,13 +747,31 @@ def test_regular_close_rejects_a_candle_at_the_after_market_boundary() -> None:
     page = SimpleNamespace(
         candles=[
             SimpleNamespace(
-                timestamp="2026-08-28T05:00:00+09:00",
+                timestamp="2026-08-28T04:59:00+09:00",
+                close_price=Decimal("71.89"),
+            ),
+            SimpleNamespace(
+                timestamp="2026-08-28T05:01:00+09:00",
+                close_price=Decimal("71.70"),
+            ),
+            SimpleNamespace(
+                timestamp="2026-08-28T05:02:00+09:00",
+                close_price=Decimal("71.6995"),
+            ),
+        ]
+    )
+
+    assert _regular_close(page, window=window) == Decimal("71.70")
+
+    after_market_only = SimpleNamespace(
+        candles=[
+            SimpleNamespace(
+                timestamp="2026-08-28T05:02:00+09:00",
                 close_price=Decimal("71.6995"),
             )
         ]
     )
-
-    assert _regular_close(page, window=window) is None
+    assert _regular_close(after_market_only, window=window) is None
 
 
 @pytest.mark.asyncio
@@ -794,9 +815,9 @@ async def test_regular_close_fetches_one_candle_per_symbol_then_caches(
 
     assert first == second == {symbol: Decimal("71.89") for symbol in symbols}
     assert len(client.candle_calls) == 20
-    assert all(call[1:3] == ("1m", 1) for call in client.candle_calls)
+    assert all(call[1:3] == ("1m", 3) for call in client.candle_calls)
     assert all(
-        call[3] == "2026-08-28T04:59:59.999999+09:00" for call in client.candle_calls
+        call[3] == "2026-08-28T05:01:00.000001+09:00" for call in client.candle_calls
     )
 
 

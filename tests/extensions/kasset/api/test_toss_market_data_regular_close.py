@@ -78,4 +78,4 @@ async def test_regular_closes_reuses_same_window_and_separates_next_window(
         "005930",
     ]
     assert all(call[1]["interval"] == "1m" for call in client.calls)
-    assert all(call[1]["count"] == 1 for call in client.calls)
+    assert all(call[1]["count"] == 3 for call in client.calls)

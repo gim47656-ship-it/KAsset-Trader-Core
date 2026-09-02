@@ -208,12 +208,19 @@ def _previous_daily_close(page: object, *, boundary: date) -> Decimal | None:
     return None
 
 
+#: 토스 1분봉 timestamp는 그 분의 **끝**을 가리킨다. 정규장 마감 동시호가
+#: 체결(KRX 15:30:00, US 16:00:00 ET)은 마감 직후 분 봉(15:31 라벨)에 실리므로
+#: 그 봉까지 정규장 종가 후보에 넣어야 실제 종가와 일치한다.
+_CLOSING_AUCTION_BAR_GRACE = timedelta(minutes=1)
+
+
 def _regular_close(page: object, *, window: TossSessionWindow) -> Decimal | None:
-    """정규장 구간 안의 마지막 1분봉 종가만 채택한다."""
+    """정규장 구간(마감 동시호가 봉 포함) 안의 마지막 1분봉 종가만 채택한다."""
 
     rows = getattr(page, "candles", None)
     if not rows:
         return None
+    upper = window.end + _CLOSING_AUCTION_BAR_GRACE
     candidates: list[tuple[datetime, Decimal]] = []
     for row in rows:
         as_of = _normalized_as_of(getattr(row, "timestamp", None))
@@ -222,7 +229,7 @@ def _regular_close(page: object, *, window: TossSessionWindow) -> Decimal | None
             continue
         if not close.is_finite() or close <= 0:
             continue
-        if window.start <= as_of < window.end:
+        if window.start < as_of <= upper:
             candidates.append((as_of, close))
     if not candidates:
         return None
@@ -597,11 +604,17 @@ class TossSharedMarketData:
                 client = await self._ensure_client()
                 candles = getattr(client, "candles", None)
                 if candles is not None:
+                    # 마감 동시호가 봉(window.end + 1분 라벨)까지 받도록 상한을
+                    # 넉넉히 두고, 채택은 _regular_close가 구간으로 판정한다.
                     page = await candles(
                         symbol,
                         interval="1m",
-                        count=1,
-                        before=(window.end - timedelta(microseconds=1)).isoformat(),
+                        count=3,
+                        before=(
+                            window.end
+                            + _CLOSING_AUCTION_BAR_GRACE
+                            + timedelta(microseconds=1)
+                        ).isoformat(),
                         adjusted=True,
                     )
                     close = _regular_close(page, window=window)
