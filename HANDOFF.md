@@ -1,11 +1,11 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-02 (뉴스 요약 Luna API 긴급 중지와 장중 수집 상태 확인)
+갱신: 2026-09-02 (AI 호출 전면 MCP(codex 구독) 전환, 유료 API 키 제거, 뉴스 요약 배칭·일일 상한 배포)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
 ## 전체 진행 상태
-- PR #26 merge `1e502ebf0712feb8ef9ccff77946003c7596a2ea`를 운영 배포했다. 운영 checkout, API/worker image, `/app/.build-vcs-ref`가 모두 이 SHA와 일치한다.
+- PR #29 merge `ac2de5a957834c134812586b31247c80b319ba0a`를 운영 배포했다. `.env.kasset`의 `CORE_IMAGE_TAG`가 이 full SHA이고 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 일치한다.
 - API, analysis MCP, AI MCP sidecar의 container 내부 `/health`가 모두 `ok`다. `api`, `mcp`, `ai-mcp`, `worker`, `scheduler`, `db`, `redis`, `caddy`가 기동 중이다.
 - migration head는 `20260902_screener_toss_source`다. `20260902_toss_report_scopes`와 Toss screener source migration은 additive하게 적용됐다.
 - 배포 전 DB full custom archive는 `backups/pre-toss-cutover-20260901T191938Z/database.dump`에 저장했다. SHA-256은 `2d3af1b360b6e9fc4658af924dccb46bd16d0b7faa448572049ee80c97dddafe`이며 `pg_restore --list`와 checksum 검증을 통과했다.
@@ -17,36 +17,31 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 20:00 UTC 장 마감부터 AI recommendation cycle이 실행되지 않아 정규장 gate가 작동했다. 배포 이후 Toss live order 0건, execution fill 0건이다.
 - PR #26 GitHub Actions run `33565440250`에서 lint, security, PostgreSQL migration, TaskIQ worker/scheduler smoke, test shard 1~4, intraday, Alpaca, frontend, `ci-required`가 모두 성공했다. 최종 integration-risk 독립 검토는 `PASS`다.
 
-- 2026-09-02 09:56 KST에 OpenAI 사용량 급등을 막기 위해 운영 AI route policy revision 8의 `summary_luna`를 빈 배열로 바꿨다. 뉴스 수집 데이터는 유지하지만 뉴스·공시 AI 번역·요약 호출은 비활성이다.
+- AI 호출은 전 lane이 MCP-only다. DB `kasset_ai_runtime_config` `revision=10`: `review_luna/terra/sol=["mcp_tool"]`, `summary_luna=["mcp_tool"]`, `compat_skill=["subscription_cli"]`. `mcp_tool`은 `ai-mcp` sidecar → `codex exec`(`/opt/kasset-codex/auth.json` `auth_mode=chatgpt`, API 키 없음)이라 per-token 과금이 없다.
+- `.env.kasset`에서 `KASSET_AI_API_KEY`와 `KASSET_AI_OPENROUTER_API_KEY`를 주석 처리했다(원본은 `.env.kasset.bak-20260902-keys`, mode 600). `factory.py`가 키 없으면 direct/openrouter route를 조립하지 않으므로 정책을 되돌려도 유료 호출은 불가능하다. admin `/admin/ops/ai-routes`에서 해당 route는 `missing_api_key`로 표시된다.
+- `KASSET_AI_MCP_TIMEOUT_SECONDS=120`(설정 상한), `KASSET_AI_SIDECAR_TIMEOUT_SECONDS=150`. 10건 배치 MCP 요약 실측 43초, 30초 기본값에서는 timeout이었다.
+- 뉴스 요약 일일 상한 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT`(기본 100)은 `review.ai_call_events`의 UTC 당일 `kasset_news_summary` attempt 수를 센다. 2026-09-02는 중단 전 OpenRouter 2,724회가 이미 있어 자동 backfill은 `daily_limit`로 종료되며 2026-09-03 00:00 UTC부터 재개된다.
 
 ## 이번 세션에서 한 일
-- NH PLUG 현재가 endpoint가 운영 read-only smoke에서 HTTP 400을 반환한 원인을 provider 수용 실패로 확정하고, 활성 quote resolver·Android NH adapter·저수준 client·smoke CLI에서 NH quote runtime을 제거했다.
-- 단일/배치 한국 시세와 legacy `broker=NH` 요청을 Toss live → 저장 PAPER 일봉으로 통일했다. Toss 실패 시 자동 PAPER 주문이 저장 일봉을 stale로 차단하는 기존 guard는 유지했다.
-- 운영에서 삼성전자 `005930` Toss 시세 `255000 KRW`, `as_of=2026-09-01T10:59:59+00:00`를 read-only 실측했다. NH 계좌·잔고 smoke는 `rsp_cd=00000`, mock 계좌 3건으로 회귀 없이 통과했으며 검증 주문은 만들지 않았다.
-- PR #26을 merge하고 exact SHA image build, app service 재기동, health·migration head·SHA 검증을 수행했다.
-- runtime KIS 호출을 전수 조사해 활성 MCP registry, 계좌·보유·현금·시세·주문·정정·취소·체결, screener enrichment, scheduled task와 운영 script 배선을 Toss/NH PLUG 계약으로 전환했다. 역사 ledger와 dormant adapter만 남겼다.
-- 미국 장중봉의 KIS 의존을 제거하고 Toss 1분봉 pagination·5분 집계 경로를 공용화했다. cancellation 전파, 완료된 정규장 봉, provenance와 양쪽 실패 fail-closed 테스트를 추가했다.
-- 뉴스 health query의 aware/naive subtraction을 naive UTC cutoff로 정규화하고 회귀 테스트를 추가했다.
-- KIS-only metric과 intent는 묵시적 Toss 전환 대신 `provider_unsupported`로 닫았다. PAPER/owner/kill switch/hard risk/approval/idempotency 경계는 유지했다.
-- 최종 checker finding에 따라 Upbit crypto accepted-order reconcile을 복구하고 Toss fill poller의 KIS session factory 의존을 제거했다. 문서의 watch auto-execute 계약을 Android `PaperOrderFacade` owner-scoped `db_simulated`로 바로잡았다.
-- PR #24를 merge하고 DB 백업, image build, 두 migration, app service 재기동, health·SHA 검증을 수행했다.
-- 미국 정규장 19:40/19:50 UTC cycle과 20:00 UTC 마감 전이를 read-only 관찰했다. 실주문이나 검증 주문은 만들지 않았다.
-- OpenAI Platform Responses 로그 1,727건 중 화면에 로드된 최근 160건을 확인했으며, 160건 모두 뉴스 payload와 `gpt-5.6-luna` 호출이었다.
-- 운영 `review.ai_call_events` 최근 2시간 집계에서 OpenRouter 442회가 전부 `kasset_news_summary/news-summary`였다. 성공 157회 1,049,618 tokens, 실패 285회 265,145 tokens로 합계 1,314,763 tokens였다.
-- 운영 worker를 재시작해 진행 중이던 뉴스 요약 호출을 종료했다. DB `kasset_ai_runtime_config`는 `revision=8`, `summary_luna=[]`다.
-- worker 재기동 완료 시각인 09:56:33 KST 이후 10:00:02 KST까지 AI 호출 원장 신규 행과 소비 token은 모두 0이었다.
+- 최근 7일 원장 분석: 유료 토큰 99.7%가 `kasset_news_summary`였다. direct `gpt-5.6-luna` 1,499회 성공, OpenRouter `z-ai/glm-5.3-flash` 성공 1,022회(출력 361만 tokens, 평균 78초·최대 22분) + 실패 5,890회(HTTP 403 5,860회). 종목 검토 lane은 40회 미만이었다.
+- A: 운영 정책 revision 9로 review 3 lane을 `["mcp_tool"]` 단독으로 저장했다. 이전 `review_luna`는 `openrouter_flash`가 1순위였다. sidecar `run_skill` smoke는 7.2초에 `{"ok":true,"answer":"pong"}`.
+- C: 유료 API 키 2개를 env에서 제거하고 api/worker/scheduler를 재기동했다. 이때 `.env.kasset`의 `CORE_IMAGE_TAG=8a698873`이 적용돼 세 서비스가 PR #26 이전 이미지로 내려갔던 것을 이번 배포에서 발견·정정했다(약 2.5시간 동안 api/worker가 `8a698873`, mcp/ai-mcp가 `1e502ebf`로 혼재).
+- B: `summary_luna` allowlist/default에 `mcp_tool` 첫 순위 추가, `build_summary_json_client`가 MCP client를 조립, `model_router`의 MCP AnalysisKind 제한 제거. 뉴스 요약을 기사 10건 indexed batch 1호출로 전환(누락·중복 항목은 해당 기사만 6시간 backoff), UTC 일일 상한을 advisory lock으로 직렬화, Google News·Truth Social 수집 직후 인라인 요약 제거(5분 backfill 단일 진입점). 공시 요약은 MCP route만 자동 포함되고 배칭·상한은 없다.
+- 검증: focused pytest 278 passed(PostgreSQL 15 임시 test DB), ruff check/format 통과, PR #29 GitHub Actions run `33587787453` 전체 통과·`ci-required` 성공. 배포 후 프로세스 한정 env(`KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT=3000`)로 backfill 1회 실행: MCP 1호출 43,288ms 성공, 10건 중 9건 한국어 요약 저장(예: article 22110 `POSITIVE/96`), 1건 항목 검증 실패로 backoff. 원장에 `provider=mcp`, token/cost NULL.
+- 임시 test DB container `kasset-testpg`와 SSH 터널은 제거했다.
 
 ## 다음 세션이 바로 할 일
-1. 뉴스 요약은 사용자가 비용 정책을 정하기 전까지 다시 켜지 않는다. 재개 시 5분마다 최대 20건을 처리하는 현재 schedule을 그대로 복구하지 말고, 기사 선별·일일 상한·입출력 토큰 상한을 먼저 확정한다.
-2. 정상 미국장 cycle을 계속 관찰하되 `intraday_trigger_not_satisfied`를 provider 실패로 오판하지 않는다. 검증 주문은 만들지 않는다.
-3. `app/services/filled_orders_service.py::_toss_fill_timestamp`의 파싱 불가 timestamp 1건이 해당 fetch window 전체를 실패시키는 low-severity fail-safe 동작을 per-order skip으로 좁힐지 별도 변경으로 검토한다.
-4. startup의 passlib/bcrypt `__about__` 경고와 yfinance cache 경고는 health를 깨지 않지만 의존성·권한 정리 후보로 남아 있다.
-5. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
+1. 2026-09-03 00:00 UTC 이후 첫 `news.articles.summarize`(5분 주기)에서 `daily_limit`가 아니라 MCP 호출이 발생하는지, 하루 호출 수가 100 이하로 멈추는지 원장(`provider=mcp`, `feature=kasset_news_summary`)으로 확인한다. 100회 × 10건 = 하루 최대 1,000기사다.
+2. MCP 실패 시 fallback이 없다. `AiProviderUnavailable`이 반복되면 codex 구독 한도·`ai-mcp` health·timeout(120/150)을 먼저 본다. 유료 키를 되살리지 않는다.
+3. `.env.kasset.bak-20260902-keys`는 유료 키 원본이다. 복구 결정이 없으면 폐기 대상이다.
+4. 정상 미국장 cycle을 계속 관찰하되 `intraday_trigger_not_satisfied`를 provider 실패로 오판하지 않는다. 검증 주문은 만들지 않는다.
+5. `app/services/filled_orders_service.py::_toss_fill_timestamp`의 파싱 불가 timestamp 1건이 해당 fetch window 전체를 실패시키는 low-severity fail-safe 동작을 per-order skip으로 좁힐지 별도 변경으로 검토한다.
+6. startup의 passlib/bcrypt `__about__` 경고와 yfinance cache 경고는 health를 깨지 않지만 의존성·권한 정리 후보로 남아 있다.
+7. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-02: 전 AI lane MCP-only 전환(revision 9→10), 유료 API 키 제거, 뉴스 요약 10건 배칭·일일 상한 100 배포(PR #29 `ac2de5a9`).
 - 2026-09-02: OpenAI와 OpenRouter 로그에서 뉴스 요약 토큰 급증을 확인하고 운영 `summary_luna` route를 비활성화했다.
 - 2026-09-01: KR/US 시세를 Toss 단일 live provider로 전환하고 NH PLUG quote runtime 제거 후 운영 배포.
 - 2026-09-01: KIS production runtime을 제거하고 Toss/NH PLUG로 전환해 운영 배포, 미국 정규장·마감 관찰까지 완료.
 - 2026-09-01: CI critical path를 9분 37초에서 5분 43초로 줄이고 HANDOFF-only fast path를 fail-closed로 활성화.
-- 2026-09-01: 종목별 readiness와 양시장 benchmark calendar를 수정하고 197종목 Forward PAPER backtest 결과를 반영.
-- 2026-09-01: Toss 분봉·시장지표, Forward PAPER 승격 경계, FCM 실기기 종단 경로를 운영 배포.
