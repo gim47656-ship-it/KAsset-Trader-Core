@@ -101,14 +101,6 @@ _REASONING_EFFORT: dict[AnalysisKind, Literal["low", "medium", "high"]] = {
     AnalysisKind.CRITICAL_REVIEW: "high",
 }
 
-_MCP_REVIEW_KINDS = frozenset(
-    {
-        AnalysisKind.CANDIDATE_REVIEW,
-        AnalysisKind.TRADE_REVIEW,
-        AnalysisKind.CRITICAL_REVIEW,
-    }
-)
-
 
 _TIER_ANALYSIS_SCHEMA: dict[str, object] = _TierAnalysis.model_json_schema()
 
@@ -273,7 +265,7 @@ class OpenAiModelRouter:
         correlation_id: str | None,
         address_instruction: str | None,
     ) -> TierVerdict:
-        routes = self._lane_routes(tier, kind)
+        routes = self._lane_routes(tier)
 
         routed_client = AvailabilityRoutedJsonClient(
             name=f"{kind.value}:{tier}",
@@ -297,21 +289,19 @@ class OpenAiModelRouter:
     def _lane_routes(
         self,
         tier: _Tier,
-        kind: AnalysisKind,
     ) -> list[StructuredJsonRoute]:
         """정책 순서대로 사용 가능한 route만 조립한다.
 
         credential이나 model이 비어 있는 route는 조용히 빠진다(기존 fail-closed
-        동작). MCP는 정책에 있어도 MCP 대상 분석 종류에서만 쓰인다. lane이 비어
-        있으면 route가 하나도 없고 ``AvailabilityRoutedJsonClient``가
-        ``AiProviderUnavailable``로 끝낸다.
+        동작). lane이 비어 있으면 route가 하나도 없고
+        ``AvailabilityRoutedJsonClient``가 ``AiProviderUnavailable``로 끝낸다.
         """
 
         routes: list[StructuredJsonRoute] = []
         for route_id in self._route_policy.get(_TIER_LANE[tier], ()):
             provider = ai_route_provider(route_id)
             if provider == "mcp":
-                if self._mcp_client is None or kind not in _MCP_REVIEW_KINDS:
+                if self._mcp_client is None:
                     continue
                 tool_name = str(getattr(self._mcp_client, "tool_name", "run_skill"))
                 routes.append(

@@ -75,13 +75,10 @@ _ROUTE_PROVIDERS: Final[Mapping[AiRouteId, AiProviderName]] = MappingProxyType(
 
 
 #: lane별 허용 route allowlist. 여기 없는 조합은 읽기/쓰기 모두에서 거부한다.
-#:
-#: ``summary_luna``에 ``mcp_tool``이 없는 것은 의도다. 요약 lane은
-#: ``build_summary_json_client``의 API route builder만 쓰고 ``mcp`` provider를
-#: 만들지 않으므로, 허용하면 저장은 되지만 요약이 조용히 꺼진다.
 LANE_ROUTE_IDS: Final[AiRoutePolicy] = MappingProxyType(
     {
         AiLane.SUMMARY_LUNA: (
+            AiRouteId.MCP_TOOL,
             AiRouteId.DIRECT_LUNA,
             AiRouteId.OPENROUTER_FLASH,
         ),
@@ -109,14 +106,14 @@ LANE_ROUTE_IDS: Final[AiRoutePolicy] = MappingProxyType(
 )
 
 
-#: 환경변수만 있던 시절의 순서를 그대로 재현하는 기본 정책.
+#: singleton이 없을 때 현재 서버가 읽기 전용으로 쓰는 환경변수 동등 기본 정책.
 #:
-#: 마이그레이션이 삽입하는 값이자, singleton이 없을 때 읽기 전용으로 쓰는 값이다.
-#: 오늘은 lane allowlist와 순서가 일치하지만(그 시절 코드가 설정된 route를
-#: catalog 순서대로 모두 시도했으므로) 의미가 다르므로 따로 적는다.
+#: 이미 적용된 마이그레이션의 과거 리터럴은 수정하지 않는다. 현재 허용 route와
+#: 운영 기본 순서가 바뀌면 이 값만 명시적으로 갱신한다.
 DEFAULT_ROUTE_POLICY: Final[AiRoutePolicy] = MappingProxyType(
     {
         AiLane.SUMMARY_LUNA: (
+            AiRouteId.MCP_TOOL,
             AiRouteId.DIRECT_LUNA,
             AiRouteId.OPENROUTER_FLASH,
         ),

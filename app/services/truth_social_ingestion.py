@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import symbol_news_store
 from app.services.market_news_briefing_formatter import format_market_news_briefing
-from app.services.news_summary_service import summarize_ingested_news
 from app.services.symbol_news_store import FeedArticleInput
 
 logger = logging.getLogger(__name__)
@@ -82,9 +81,6 @@ class TruthSocialIngestionResult:
     inserted: int
     updated: int
     skipped: int
-    summary_status: str
-    summarized: int
-    summary_failed: int
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -257,7 +253,7 @@ async def ingest_truth_social(
     *,
     http_client: TruthSocialHttpClient | None = None,
 ) -> TruthSocialIngestionResult:
-    """공식 계정을 검증하고 시장 관련 게시물만 저장한 뒤 한국어로 요약한다."""
+    """공식 계정을 검증하고 시장 관련 게시물만 통합 뉴스 저장소에 적재한다."""
 
     run_uuid = f"truth-social-{uuid.uuid4().hex}"
     if http_client is None:
@@ -299,15 +295,12 @@ async def ingest_truth_social(
     )
     await db.commit()
 
-    summary = await summarize_ingested_news(db, [item.url for item in items])
     logger.info(
-        "Truth Social 공식 피드 수집: fetched=%d relevant=%d inserted=%d updated=%d summarized=%d failed=%d",
+        "Truth Social 공식 피드 수집: fetched=%d relevant=%d inserted=%d updated=%d",
         fetched,
         len(items),
         counts.inserted,
         counts.updated,
-        summary.summarized,
-        summary.failed,
     )
     return TruthSocialIngestionResult(
         run_uuid=run_uuid,
@@ -316,9 +309,6 @@ async def ingest_truth_social(
         inserted=counts.inserted,
         updated=counts.updated,
         skipped=counts.skipped + fetched - len(items),
-        summary_status=summary.status,
-        summarized=summary.summarized,
-        summary_failed=summary.failed,
     )
 
 

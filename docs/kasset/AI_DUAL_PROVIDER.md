@@ -1,6 +1,6 @@
 # KAsset AI Provider Routing
 
-갱신: 2026-08-31
+갱신: 2026-09-02
 
 ## 실행 경로
 
@@ -13,9 +13,11 @@ API / worker
   → OpenRouter
 ```
 
-뉴스·공시 요약은 MCP를 건너뛰고 direct API → OpenRouter 순서다. 429, timeout,
+뉴스·공시 요약도 같은 MCP → direct API → OpenRouter 순서를 사용한다. 429, timeout,
 연결 실패처럼 모델 응답을 얻지 못한 경우만 다음 provider로 넘어간다. malformed
-output, schema 위반, refusal, safety 오류는 fail-closed한다.
+output, schema 위반, refusal, safety 오류는 fail-closed한다. 일반 뉴스는 호출당
+최대 10건을 묶고 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT`(기본 100)로 UTC 일일
+provider attempt 수를 제한하며, 공시 요약에는 이 상한을 적용하지 않는다.
 
 ## 내부 AI MCP sidecar
 

@@ -9,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import settings
+from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
 from app.services.disclosures.summary_service import (
     DisclosureSummaryInput,
     build_disclosure_summary_generator,
@@ -50,17 +51,29 @@ def _patch_transports(
 
 
 def _response(payload: dict[str, object]) -> httpx.Response:
+    wire_payload = (
+        payload if set(payload) == {"summary"} else {"items": [{"index": 0, **payload}]}
+    )
     return httpx.Response(
         200,
         json={
             "output": [
                 {
                     "type": "message",
-                    "content": [{"type": "output_text", "text": json.dumps(payload)}],
+                    "content": [
+                        {"type": "output_text", "text": json.dumps(wire_payload)}
+                    ],
                 }
             ]
         },
     )
+
+
+async def _summarize_one(generator, news: NewsSummaryInput):
+    generated = await generator.summarize_batch((news,))
+    if 0 not in generated:
+        raise ValueError("news summary item failed validation")
+    return generated[0]
 
 
 def _configure_routes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,12 +102,66 @@ def _configure_routes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_news_summary_ignores_configured_mcp_and_uses_direct_api(
+async def test_news_summary_mcp_route_receives_the_batch_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_routes(monkeypatch)
     monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "https://mcp.test/rpc")
-    monkeypatch.setattr(settings, "KASSET_AI_MCP_TOKEN", SecretStr("mcp-token"))
+    captured: dict[str, object] = {}
+
+    async def fake_request_json(
+        self: McpStructuredJsonClient,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "items": [
+                {
+                    "index": 0,
+                    "summary": (
+                        "테스트 기업이 신제품을 공개했다. "
+                        "회사는 고객 공급 확대 계획을 밝혔다."
+                    ),
+                    "translated_title": "테스트 기업의 신제품 공개",
+                    "translated_excerpt": (
+                        "테스트 기업이 신제품을 공개하고 고객 공급을 확대할 계획이라고 "
+                        "밝혔다."
+                    ),
+                    "sentiment": "neutral",
+                    "confidence": 88,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(McpStructuredJsonClient, "request_json", fake_request_json)
+    news = NewsSummaryInput(
+        title="Test company unveils a new product",
+        source="Wire",
+        article_content=(
+            "The test company unveiled a new product and said it plans "
+            "to expand supply to customers."
+        ),
+        raw_excerpt=None,
+    )
+
+    generator = build_news_summary_generator()
+    assert generator is not None
+    generated = await _summarize_one(generator, news)
+
+    assert generated.model_name == "tool:run_skill"
+    assert captured["schema_name"] == "kasset_news_summary"
+    assert captured["input_payload"] == {"items": [{"index": 0, **news.to_payload()}]}
+    schema = captured["schema"]
+    assert isinstance(schema, dict)
+    assert schema["required"] == ["items"]
+    assert schema["properties"]["items"]["maxItems"] == 10
+
+
+@pytest.mark.asyncio
+async def test_news_summary_uses_direct_api_when_mcp_is_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_routes(monkeypatch)
     direct = _Transport(
         [
             _response(
@@ -118,7 +185,8 @@ async def test_news_summary_ignores_configured_mcp_and_uses_direct_api(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    generated = await generator.summarize(
+    generated = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Test company unveils a new product",
             source="Wire",
@@ -127,7 +195,7 @@ async def test_news_summary_ignores_configured_mcp_and_uses_direct_api(
                 "to expand supply to customers."
             ),
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert generated.model_name == "direct-luna"
@@ -167,7 +235,8 @@ async def test_news_summary_falls_back_direct_to_openrouter_and_audits_model(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    generated = await generator.summarize(
+    generated = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Test company unveils a new product",
             source="Wire",
@@ -176,7 +245,7 @@ async def test_news_summary_falls_back_direct_to_openrouter_and_audits_model(
                 "to expand supply to customers."
             ),
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert generated.model_name == "z-ai/glm-5.3-flash"
@@ -267,7 +336,8 @@ async def test_summary_refusal_fails_closed_without_openrouter(
     generator = build_news_summary_generator()
     assert generator is not None
     with pytest.raises(ValueError, match="refused"):
-        await generator.summarize(
+        await _summarize_one(
+            generator,
             NewsSummaryInput(
                 title="Test headline",
                 source="Wire",
@@ -275,7 +345,7 @@ async def test_summary_refusal_fails_closed_without_openrouter(
                     "A sufficiently detailed article body for summary input."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
 
     assert len(direct.requests) == 1
@@ -311,8 +381,9 @@ async def test_summary_schema_failure_does_not_fallback(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    with pytest.raises(ValueError, match="response shape is invalid"):
-        await generator.summarize(
+    with pytest.raises(ValueError, match="item failed validation"):
+        await _summarize_one(
+            generator,
             NewsSummaryInput(
                 title="Test headline",
                 source="Wire",
@@ -320,7 +391,7 @@ async def test_summary_schema_failure_does_not_fallback(
                     "A sufficiently detailed article body for summary input."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
 
     assert len(direct.requests) == 1
@@ -342,7 +413,8 @@ async def test_summary_non_rate_limit_4xx_does_not_fallback(
     generator = build_news_summary_generator()
     assert generator is not None
     with pytest.raises(ValueError, match="HTTP 401"):
-        await generator.summarize(
+        await _summarize_one(
+            generator,
             NewsSummaryInput(
                 title="Test headline",
                 source="Wire",
@@ -350,7 +422,7 @@ async def test_summary_non_rate_limit_4xx_does_not_fallback(
                     "A sufficiently detailed article body for summary input."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
 
     assert len(direct.requests) == 1
@@ -388,13 +460,14 @@ async def test_summary_429_falls_back_to_openrouter(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    generated = await generator.summarize(
+    generated = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Test headline",
             source="Wire",
             article_content="A sufficiently detailed article body for summary input.",
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert generated.model_name == "z-ai/glm-5.3-flash"
@@ -446,8 +519,9 @@ async def test_summary_safety_validation_does_not_fallback(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    with pytest.raises(ValueError, match="investment advice"):
-        await generator.summarize(
+    with pytest.raises(ValueError, match="item failed validation"):
+        await _summarize_one(
+            generator,
             NewsSummaryInput(
                 title="Test headline",
                 source="Wire",
@@ -455,7 +529,7 @@ async def test_summary_safety_validation_does_not_fallback(
                     "A sufficiently detailed article body for summary input."
                 ),
                 raw_excerpt=None,
-            )
+            ),
         )
 
     assert len(direct.requests) == 1
@@ -491,7 +565,8 @@ async def test_summary_skips_unconfigured_direct_provider(
 
     generator = build_news_summary_generator()
     assert generator is not None
-    generated = await generator.summarize(
+    generated = await _summarize_one(
+        generator,
         NewsSummaryInput(
             title="Test company unveils a new product",
             source="Wire",
@@ -500,7 +575,7 @@ async def test_summary_skips_unconfigured_direct_provider(
                 "to expand supply to customers."
             ),
             raw_excerpt=None,
-        )
+        ),
     )
 
     assert generated.model_name == "z-ai/glm-5.3-flash"

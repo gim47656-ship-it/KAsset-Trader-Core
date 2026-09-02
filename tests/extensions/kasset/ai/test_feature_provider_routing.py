@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
 from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
+from app.extensions.kasset.ai.runtime_config import AiLane, AiRouteId
 
 
 class _DispatchTransport(httpx.AsyncBaseTransport):
@@ -138,6 +139,7 @@ def _router(
     with_mcp: bool = True,
     api_key: str | None = "direct-key",
     openrouter_key: str | None = "openrouter-key",
+    mcp_only: bool = False,
 ) -> OpenAiModelRouter:
     mcp = (
         McpStructuredJsonClient(
@@ -159,6 +161,15 @@ def _router(
         openrouter_api_key=openrouter_key,
         openrouter_flash_model="z-ai/glm-5.3-flash",
         openrouter_pro_model="z-ai/glm-5.3-flash",
+        route_policy=(
+            {
+                AiLane.REVIEW_LUNA: (AiRouteId.MCP_TOOL,),
+                AiLane.REVIEW_TERRA: (AiRouteId.MCP_TOOL,),
+                AiLane.REVIEW_SOL: (AiRouteId.MCP_TOOL,),
+            }
+            if mcp_only
+            else None
+        ),
         mcp_client=mcp,
     )
 
@@ -271,22 +282,28 @@ async def test_candidate_review_skips_unconfigured_mcp(
     assert result.model_id == "direct-terra"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        AnalysisKind.NEWS_TRIAGE,
+        AnalysisKind.MARKET_STATE,
+        AnalysisKind.CANDIDATE_SCAN,
+    ],
+)
 @pytest.mark.asyncio
-async def test_candidate_scan_does_not_use_mcp(
+async def test_luna_kinds_use_mcp_when_policy_allows_it(
     monkeypatch: pytest.MonkeyPatch,
+    kind: AnalysisKind,
 ) -> None:
-    transport = _DispatchTransport({"direct.test": [_responses_result(_verdict())]})
+    transport = _DispatchTransport({"mcp.test": [_mcp_result(_verdict())]})
     _patch_transport(monkeypatch, transport)
 
-    result = await _router().analyze(
-        AnalysisKind.CANDIDATE_SCAN,
-        {"symbol": "005930"},
-    )
+    result = await _router(mcp_only=True).analyze(kind, {"symbol": "005930"})
 
-    assert [
-        request.url.host for request in _provider_attempt_requests(transport.requests)
-    ] == ["direct.test"]
-    assert result.tier_used == "direct-luna"
+    attempts = _provider_attempt_requests(transport.requests)
+    assert [request.url.host for request in attempts] == ["mcp.test"]
+    assert result.tier_used == "tool:run_skill"
+    assert result.provider == "mcp"
 
 
 @pytest.mark.asyncio

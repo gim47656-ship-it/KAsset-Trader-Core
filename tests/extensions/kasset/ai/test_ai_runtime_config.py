@@ -303,16 +303,30 @@ def test_compat_lane_is_not_covered_by_the_call_ledger() -> None:
 # ---- 기본 정책: 마이그레이션 직후 순서 보존 ----
 
 
-def test_default_policy_matches_the_migration_literal() -> None:
-    """마이그레이션이 삽입하는 리터럴과 코드 기본값이 어긋나지 않게 고정한다.
-
-    마이그레이션은 상수를 import하지 않고 리터럴을 적는다(적용된 이력의 의미가
-    나중에 조용히 바뀌면 안 되므로). 그래서 드리프트는 이 테스트가 잡는다.
-    """
+def test_runtime_default_extends_the_immutable_migration_default() -> None:
+    """적용 이력은 그대로 두고 현재 env 동등 기본값의 MCP 선순위만 검증한다."""
 
     module = _load_migration_module()
+    runtime_policy = serialize_route_policy(DEFAULT_ROUTE_POLICY)
 
-    assert module.DEFAULT_ROUTE_POLICY == serialize_route_policy(DEFAULT_ROUTE_POLICY)
+    assert module.DEFAULT_ROUTE_POLICY["summary_luna"] == [
+        "direct_luna",
+        "openrouter_flash",
+    ]
+    assert runtime_policy["summary_luna"] == [
+        "mcp_tool",
+        "direct_luna",
+        "openrouter_flash",
+    ]
+    assert {
+        lane: routes
+        for lane, routes in module.DEFAULT_ROUTE_POLICY.items()
+        if lane != "summary_luna"
+    } == {
+        lane: routes
+        for lane, routes in runtime_policy.items()
+        if lane != "summary_luna"
+    }
     assert module.revision == "20260830_ai_runtime_config"
     assert module.down_revision == "20260830_admin_recovery"
 
@@ -352,18 +366,15 @@ def test_normalize_accepts_the_default_payload() -> None:
     assert normalized == dict(DEFAULT_ROUTE_POLICY)
 
 
-def test_summary_lane_does_not_advertise_the_mcp_route() -> None:
-    assert AiRouteId.MCP_TOOL not in LANE_ROUTE_IDS[AiLane.SUMMARY_LUNA]
+def test_summary_lane_advertises_the_mcp_route_first() -> None:
+    assert LANE_ROUTE_IDS[AiLane.SUMMARY_LUNA][0] is AiRouteId.MCP_TOOL
 
 
-def test_normalize_rejects_mcp_only_summary_policy() -> None:
+def test_normalize_accepts_mcp_only_summary_policy() -> None:
     payload = _valid_payload()
     payload["summary_luna"] = ["mcp_tool"]
 
-    with pytest.raises(AiRoutePolicyError) as exc:
-        normalize_route_policy(payload)
-
-    assert exc.value.code == "lane_route_mismatch"
+    assert normalize_route_policy(payload)[AiLane.SUMMARY_LUNA] == (AiRouteId.MCP_TOOL,)
 
 
 def test_normalize_rejects_unknown_route() -> None:
@@ -631,7 +642,7 @@ def test_summary_lane_policy_orders_routes(configured_ai) -> None:
     ]
 
 
-def test_summary_lane_default_keeps_direct_first(configured_ai) -> None:
+def test_summary_lane_default_keeps_mcp_first(configured_ai) -> None:
     client = build_summary_json_client(
         name="news-summary",
         direct_model="model-luna",
@@ -640,6 +651,7 @@ def test_summary_lane_default_keeps_direct_first(configured_ai) -> None:
 
     assert client is not None
     assert [route.client.name for route in client._routes] == [
+        "mcp",
         "direct-api",
         "openrouter",
     ]
@@ -651,6 +663,35 @@ def test_empty_summary_lane_reports_unconfigured(configured_ai) -> None:
         direct_model="model-luna",
         fallback_model="model-flash",
         snapshot=_snapshot({}),
+    )
+
+    assert client is None
+
+
+def test_mcp_only_summary_lane_builds_one_route(configured_ai) -> None:
+    client = build_summary_json_client(
+        name="news-summary",
+        direct_model="model-luna",
+        fallback_model="model-flash",
+        snapshot=_snapshot({AiLane.SUMMARY_LUNA: (AiRouteId.MCP_TOOL,)}),
+    )
+
+    assert client is not None
+    assert [route.client.name for route in client._routes] == ["mcp"]
+    assert [route.model for route in client._routes] == ["tool:review_market"]
+
+
+def test_mcp_only_summary_lane_without_url_reports_unconfigured(
+    configured_ai,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "KASSET_AI_MCP_URL", "")
+
+    client = build_summary_json_client(
+        name="news-summary",
+        direct_model="model-luna",
+        fallback_model="model-flash",
+        snapshot=_snapshot({AiLane.SUMMARY_LUNA: (AiRouteId.MCP_TOOL,)}),
     )
 
     assert client is None
@@ -728,7 +769,7 @@ def test_serialize_route_policy_stores_only_route_ids() -> None:
     serialized = serialize_route_policy(DEFAULT_ROUTE_POLICY)
 
     assert serialized == {
-        "summary_luna": ["direct_luna", "openrouter_flash"],
+        "summary_luna": ["mcp_tool", "direct_luna", "openrouter_flash"],
         "review_luna": ["mcp_tool", "direct_luna", "openrouter_flash"],
         "review_terra": ["mcp_tool", "direct_terra", "openrouter_pro"],
         "review_sol": ["mcp_tool", "direct_sol", "openrouter_pro"],
