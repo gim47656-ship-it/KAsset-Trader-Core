@@ -47,9 +47,11 @@ def _previous_regular_window() -> TossSessionWindow:
 
 
 @pytest.mark.asyncio
-async def test_kr_regular_session_resolves_latest_completed_regular_window(
+async def test_kr_session_context_uses_previous_trading_day_regular_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """국내 기준가 window는 장중·마감 후 모두 '직전 거래일' 정규장이어야 한다."""
+
     window = _previous_regular_window()
     resolve_state = AsyncMock(return_value="REGULAR")
     latest_window = AsyncMock(return_value=window)
@@ -60,18 +62,26 @@ async def test_kr_regular_session_resolves_latest_completed_regular_window(
         latest_window,
     )
 
-    states, resolved_window = await krx_quotes._quote_session_context(
+    states, regular_window, previous_window = await krx_quotes._quote_session_context(
         object(),  # type: ignore[arg-type]
         market="KRX",
         symbols=["000660"],
     )
 
     assert states == {"000660": "REGULAR"}
-    assert resolved_window == window
+    # 정규장 중에는 장외 표시용 window를 만들지 않는다.
+    assert regular_window is None
+    assert previous_window == window
     latest_window.assert_awaited_once()
     market, moment = latest_window.await_args.args
     assert market == "kr"
+    # 당일 KST 0시를 기준으로 조회해 마감 후에도 당일이 아닌 전일 정규장이 잡힌다.
     assert moment.tzinfo is not None
+    assert (moment.hour, moment.minute, moment.second) == (0, 0, 0)
+    assert (
+        moment.utcoffset() is not None
+        and moment.utcoffset().total_seconds() == 9 * 3600
+    )
 
 
 @pytest.mark.asyncio
@@ -100,7 +110,7 @@ async def test_resolve_quotes_kr_prefers_regular_close_over_stored_nxt_close(
     monkeypatch.setattr(
         krx_quotes,
         "_quote_session_context",
-        AsyncMock(return_value=(dict.fromkeys(symbols, "REGULAR"), window)),
+        AsyncMock(return_value=(dict.fromkeys(symbols, "REGULAR"), None, window)),
     )
     monkeypatch.setattr(krx_quotes, "_toss_points", AsyncMock(return_value=points))
     monkeypatch.setattr(krx_quotes, "_candle_rows", AsyncMock(return_value=candles))
@@ -120,7 +130,8 @@ async def test_resolve_quotes_kr_prefers_regular_close_over_stored_nxt_close(
         ("000660", "1692000", "-4.73"),
         ("005930", "70000", "2.86"),
     ]
-    regular_lookup.assert_awaited_once_with(points, window=window)
+    # 장외 표시용 조회(window=None)와 별개로 직전 거래일 정규장 window로 기준가를 구한다.
+    regular_lookup.assert_any_await(points, window=window)
     daily_lookup.assert_not_awaited()
 
 
@@ -135,7 +146,7 @@ async def test_resolve_quote_kr_prefers_regular_close_over_stored_nxt_close(
     monkeypatch.setattr(
         krx_quotes,
         "_quote_session_context",
-        AsyncMock(return_value=({symbol: "REGULAR"}, window)),
+        AsyncMock(return_value=({symbol: "REGULAR"}, None, window)),
     )
     monkeypatch.setattr(
         krx_quotes, "_toss_points", AsyncMock(return_value={symbol: point})
@@ -182,7 +193,7 @@ async def test_resolve_quote_kr_falls_back_to_stored_close_when_regular_unavaila
     monkeypatch.setattr(
         krx_quotes,
         "_quote_session_context",
-        AsyncMock(return_value=({symbol: "REGULAR"}, window)),
+        AsyncMock(return_value=({symbol: "REGULAR"}, None, window)),
     )
     monkeypatch.setattr(
         krx_quotes, "_toss_points", AsyncMock(return_value={symbol: point})
@@ -224,7 +235,7 @@ async def test_resolve_quote_us_keeps_stored_previous_close_priority(
     monkeypatch.setattr(
         krx_quotes,
         "_quote_session_context",
-        AsyncMock(return_value=({symbol: "REGULAR"}, None)),
+        AsyncMock(return_value=({symbol: "REGULAR"}, None, None)),
     )
     monkeypatch.setattr(
         krx_quotes, "_toss_points", AsyncMock(return_value={symbol: point})

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
@@ -174,7 +174,15 @@ async def _quote_session_context(
 ) -> tuple[
     dict[str, MarketSessionState | None],
     TossSessionWindow | None,
+    TossSessionWindow | None,
 ]:
+    """세션 상태와 두 정규장 window를 돌려준다.
+
+    두 번째는 장외 세션 표시용 "최신 완료 정규장"(당일 마감 후면 당일)이고,
+    세 번째는 국내 등락 기준용 "직전 거래일 정규장"이다. 토스 앱 등락률은
+    하루 내내 전일 정규장 종가 기준이므로 둘을 구분해야 한다.
+    """
+
     moment = datetime.now(UTC)
     market_state = await resolve_market_session_state(market, moment=moment)
     tradability: dict[str, NxtTradability] = {}
@@ -198,17 +206,23 @@ async def _quote_session_context(
         )
         for symbol in symbols
     }
+    calendar_market = "us" if _wire_market(market) == "US" else "kr"
     regular_window = None
-    if _wire_market(market) == "KRX" or (
-        market_state is not None and market_state != "REGULAR"
-    ):
-        # 국내 정규장 시세도 직전 완료 정규장의 마지막 1분봉을 등락 기준으로 쓴다.
-        # 장외 구간에서는 같은 조회가 최신 완료 정규장 종가를 계속 제공한다.
+    if market_state is not None and market_state != "REGULAR":
         regular_window = await get_latest_completed_regular_window_from_toss(
-            "us" if _wire_market(market) == "US" else "kr",
-            moment,
+            calendar_market, moment
         )
-    return states, regular_window
+    previous_regular_window = None
+    if _wire_market(market) == "KRX":
+        # 당일 KST 0시 이전에 끝난 가장 최근 정규장 = 직전 거래일 정규장.
+        # 토스 1d 종가는 NXT 야간 체결까지 포함하므로 기준가로 쓸 수 없다.
+        day_start = datetime.combine(
+            _market_trading_date("KRX", moment), time.min, tzinfo=_KST
+        )
+        previous_regular_window = await get_latest_completed_regular_window_from_toss(
+            "kr", day_start
+        )
+    return states, regular_window, previous_regular_window
 
 
 async def quote_for_market(db: AsyncSession, *, market: str, symbol: str) -> Quote:
@@ -230,7 +244,7 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     """Resolve one quote through Toss, then persisted PAPER candles."""
     normalized = symbol.strip().upper()
     wire_market = _wire_market(market)
-    sessions, regular_window = await _quote_session_context(
+    sessions, regular_window, previous_regular_window = await _quote_session_context(
         db, market=market, symbols=[normalized]
     )
     session = sessions.get(normalized)
@@ -241,11 +255,14 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
         regular_close = await _regular_closes(
             {normalized: point}, window=regular_window
         )
-        known_previous_close = (
-            regular_close
-            if wire_market == "KRX" or session in {"DAY_MARKET", "PRE_MARKET"}
-            else {}
-        )
+        if wire_market == "KRX":
+            known_previous_close = await _regular_closes(
+                {normalized: point}, window=previous_regular_window
+            )
+        else:
+            known_previous_close = (
+                regular_close if session in {"DAY_MARKET", "PRE_MARKET"} else {}
+            )
         fallback = await _previous_close_fallback(
             market,
             {normalized: point},
@@ -272,18 +289,23 @@ async def resolve_quotes(
 ) -> list[Quote]:
     requested = list(symbols)
     wire_market = _wire_market(market)
-    sessions, regular_window = await _quote_session_context(
+    sessions, regular_window, previous_regular_window = await _quote_session_context(
         db, market=market, symbols=requested
     )
     points = await _toss_points(market, requested)
     candles = await _candle_rows(db, market, requested)
     names = await _instrument_names(db, requested)
     regular_closes = await _regular_closes(points, window=regular_window)
-    known_previous_closes = {
-        symbol: close
-        for symbol, close in regular_closes.items()
-        if wire_market == "KRX" or sessions.get(symbol) in {"DAY_MARKET", "PRE_MARKET"}
-    }
+    if wire_market == "KRX":
+        known_previous_closes = await _regular_closes(
+            points, window=previous_regular_window
+        )
+    else:
+        known_previous_closes = {
+            symbol: close
+            for symbol, close in regular_closes.items()
+            if sessions.get(symbol) in {"DAY_MARKET", "PRE_MARKET"}
+        }
     fallback = await _previous_close_fallback(
         market,
         points,
@@ -385,8 +407,8 @@ def _toss_quote(
 ) -> Quote:
     previous_close = _previous_close(rows, market=market, before=point.as_of)
     if market == "KRX" and previous_close_fallback is not None:
-        # 국내 일봉 종가는 NXT 야간 체결까지 포함될 수 있으므로, 완료된 KRX
-        # 정규장 1분봉 종가가 확보되면 저장 일봉보다 먼저 쓴다.
+        # 국내 저장 일봉 종가는 NXT 야간 체결까지 포함될 수 있으므로, 직전
+        # 거래일 KRX 정규장 1분봉 종가가 확보되면 저장 일봉보다 먼저 쓴다.
         previous_close = previous_close_fallback
     elif previous_close is None:
         previous_close = previous_close_fallback
