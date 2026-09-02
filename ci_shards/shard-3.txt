@@ -15,9 +15,11 @@ tests/extensions/kasset/ai/test_ai_runtime_config.py
 tests/extensions/kasset/ai/test_feature_provider_routing.py
 tests/extensions/kasset/ai_mcp_sidecar/test_ai_mcp_sidecar.py
 tests/extensions/kasset/api/test_fcm_push.py
+tests/extensions/kasset/api/test_krx_quotes_previous_close.py
 tests/extensions/kasset/api/test_market_quotes.py
 tests/extensions/kasset/api/test_market_warmup.py
 tests/extensions/kasset/api/test_orderbook.py
+tests/extensions/kasset/api/test_toss_market_data_regular_close.py
 tests/extensions/kasset/api/test_watchlist.py
 tests/extensions/kasset/automation/test_backtest.py
 tests/extensions/kasset/automation/test_consumer.py
