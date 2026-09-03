@@ -382,7 +382,12 @@ class AITradingDerivedLimits(BaseModel):
     max_custom_orders_per_day: int = Field(ge=2, alias="maxCustomOrdersPerDay")
     risk_per_trade_rate: Decimal = Field(ge=0, le=1, alias="riskPerTradeRate")
     same_symbol_reentry_limit: int = Field(ge=0, alias="sameSymbolReentryLimit")
-    min_ai_confidence: Decimal = Field(ge=0, le=1, alias="minAiConfidence")
+    min_ai_confidence: Decimal = Field(
+        ge=0,
+        le=1,
+        alias="minAiConfidence",
+        description="SHADOW 추적용 참고 하한이며 주문을 차단하지 않습니다.",
+    )
 
     @field_serializer(
         "daily_target_amount",

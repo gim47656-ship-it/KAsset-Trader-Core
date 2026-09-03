@@ -32,7 +32,7 @@ _EXPECTED_PRIORITY = [
     "BUDGET",
     "POSITION",
     "ORDER_COUNT",
-    "AI",
+    "AI_SHADOW",
     "DAILY_GOAL",
 ]
 
@@ -326,10 +326,11 @@ async def test_hard_risk_order_is_fixed_and_daily_goal_never_forces_a_trade(
         )
 
         assert [check.rule for check in result.checks] == _EXPECTED_PRIORITY
-        assert result.passed is False
-        assert (
-            next(check for check in result.checks if check.rule == "AI").passed is False
-        )
+        # 낮은 AI 확신도는 SHADOW 근거로만 남고 주문을 막지 않는다.
+        assert result.passed is True
+        shadow = next(check for check in result.checks if check.rule == "AI_SHADOW")
+        assert shadow.passed is True
+        assert "confidence=0.49" in shadow.detail
         goal = next(check for check in result.checks if check.rule == "DAILY_GOAL")
         assert goal.passed is True
         assert "referenceGoal=3000" in goal.detail

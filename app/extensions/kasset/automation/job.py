@@ -37,7 +37,6 @@ from app.extensions.kasset.automation.contracts import (
     PaperExecutionOutcome,
 )
 from app.extensions.kasset.automation.decision_evidence import (
-    AiReviewStatus,
     is_deterministic_position_exit,
     latest_ai_review_from_evidence,
 )
@@ -127,9 +126,35 @@ def _is_reclaimable_execution_claim(
 STALE_QUOTE_BLOCK_REASON = "stale_quote_fallback"
 STALE_QUOTE_UNRESOLVED_REASON = "stale_quote_unresolved"
 
+# 무인 sweep은 해당 시장의 정규장 안에서만 주문을 만든다. PAPER 체결 시뮬레이터는
+# 마지막 시세로 즉시 채워 주므로, 장이 닫힌 시각에 집행하면 실제 시장에서 성립할 수
+# 없는 체결이 원장에 남고 전략 성과가 왜곡된다. 사람이 화면을 보고 결정하는 수동
+# 경로(`POST /orders`, ``run_approved_recommendation_once``)는 이 관문을 쓰지 않는다.
+OUT_OF_SESSION_BLOCK_REASON = "out_of_regular_session"
+OUT_OF_SESSION_UNKNOWN_MARKET_REASON = "unsupported_session_market"
+
 # 추천 와이어 시장 → 공용 거래소 캘린더 시장 키. 자동 주문은
 # ``PaperAutomationConsumer``가 KRX/US로만 만든다.
 _CALENDAR_MARKET: dict[str, str] = {"KRX": "kr", "KR": "kr", "US": "us"}
+
+
+async def _out_of_session_block_reason(
+    db: AsyncSession,
+    recommendation_id: str,
+    *,
+    now: datetime,
+) -> str | None:
+    """정규장 밖이면 무인 집행 차단 사유를 돌려준다."""
+    recommendation = await db.get(AIRecommendation, recommendation_id)
+    if recommendation is None:
+        return None
+    calendar_market = _CALENDAR_MARKET.get(str(recommendation.market).strip().upper())
+    if calendar_market is None:
+        # 시장을 캘린더로 증명할 수 없으면 집행하지 않는다.
+        return OUT_OF_SESSION_UNKNOWN_MARKET_REASON
+    if is_market_open(calendar_market, now=now):
+        return None
+    return OUT_OF_SESSION_BLOCK_REASON
 
 
 async def _stale_quote_block_reason(
@@ -569,8 +594,8 @@ class OwnerScopedPaperOrders:
             ai_review_status: str | None = "deterministic_exit"
             confidence = Decimal("1")
         else:
-            # 진입 추천은 실제 AI 검토가 동의하고 확신도가 유한할 때만 그 값을
-            # 쓴다. 부재·반대·저확신·파싱 실패는 0으로 넘겨 AI 규칙이 차단한다.
+            # AI는 주문을 차단하지 않는다. SHADOW 기록에는 마지막 검토의 실제
+            # confidence를 넘기고, 부재·파싱 실패·비유한 값만 0으로 남긴다.
             ai_review = latest_ai_review_from_evidence(evidence)
             ai_review_confidence: Decimal | None = None
             if ai_review is None:
@@ -579,9 +604,7 @@ class OwnerScopedPaperOrders:
                 ai_review_status, _, ai_review_confidence = ai_review
             confidence = (
                 ai_review_confidence
-                if ai_review_status == AiReviewStatus.AGREES.value
-                and ai_review_confidence is not None
-                and ai_review_confidence.is_finite()
+                if ai_review_confidence is not None and ai_review_confidence.is_finite()
                 else Decimal("0")
             )
         return await AITradingPolicyService().evaluate_hard_risk(
@@ -708,11 +731,21 @@ async def run_paper_automation_once(
                             current,
                         )
                     )
-                    # 주문을 만들기 전에 기준 시세 신선도를 검사한다. 후보가
-                    # 없으면 검사할 종목도 없다.
+                    # 주문을 만들기 전에 정규장 여부와 기준 시세 신선도를
+                    # 검사한다. 후보가 없으면 검사할 종목도 없다.
+                    out_of_session_reason = (
+                        None
+                        if recommendation_id is None
+                        else await _out_of_session_block_reason(
+                            db,
+                            recommendation_id,
+                            now=current,
+                        )
+                    )
                     stale_quote_reason = (
                         None
                         if recommendation_id is None
+                        or out_of_session_reason is not None
                         else await _stale_quote_block_reason(
                             db,
                             recommendation_id,
@@ -727,6 +760,20 @@ async def run_paper_automation_once(
                                 if promotion_bypassed
                                 else "strategy_promotion_required"
                             ),
+                        )
+                    elif out_of_session_reason is not None:
+                        logger.info(
+                            "kasset paper automation blocked outside the regular "
+                            "session: owner_user_id=%s recommendation_id=%s "
+                            "reason=%s",
+                            owner_id,
+                            recommendation_id,
+                            out_of_session_reason,
+                        )
+                        outcome = PaperExecutionOutcome(
+                            status="BLOCKED",
+                            reason=out_of_session_reason,
+                            recommendation_id=recommendation_id,
                         )
                     elif stale_quote_reason is not None:
                         logger.warning(

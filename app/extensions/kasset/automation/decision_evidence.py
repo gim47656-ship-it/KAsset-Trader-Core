@@ -309,9 +309,9 @@ def latest_ai_review_from_evidence(
 def is_deterministic_position_exit(evidence: object) -> bool:
     """Position Manager가 만든 결정론 청산 추천인지 판별한다.
 
-    청산 추천은 AI 검토 없이 ``position_manager``/``position_exit`` evidence만
-    갖고 생성 시점 Hard Risk를 ``ai_confidence=1``로 통과했다. 집행 시 AI 규칙을
-    같은 값으로 재현해야 청산이 AI evidence 부재로 막히지 않는다.
+    청산 추천은 AI 검토 없이 ``position_manager``/``position_exit`` marker를
+    남긴다. AI는 주문 관문이 아니며, 이 marker는 집행 시 결정론적 정리 경로의
+    SHADOW 기록을 생성 시점과 같은 ``ai_confidence=1``로 재현하는 데 사용한다.
     """
 
     if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):

@@ -37,9 +37,13 @@ logger = logging.getLogger(__name__)
 #: 공용 OHLCV 서비스에 보내는 시장 키.
 _OHLCV_MARKET: Final[dict[str, str]] = {"KRX": "equity_kr", "US": "equity_us"}
 
-#: KR 분봉 DB/KIS 경로는 시간대 없는 KST를 돌려준다는 기존 계약이 있다.
-#: 그 규약을 그대로 적용하고, 다른 시장은 시간대 없는 값을 받지 않는다.
-_NAIVE_TIMEZONE: Final[dict[str, ZoneInfo]] = {"KRX": ZoneInfo("Asia/Seoul")}
+#: KR 분봉 DB/KIS 경로는 시간대 없는 KST를, US Toss 분봉 경로는 시간대 없는
+#: ET(America/New_York, DST 포함)를 돌려준다는 provider 계약이 있다. 그 규약을
+#: 그대로 적용하고, 매핑이 없는 시장은 시간대 없는 값을 받지 않는다.
+_NAIVE_TIMEZONE: Final[dict[str, ZoneInfo]] = {
+    "KRX": ZoneInfo("Asia/Seoul"),
+    "US": ZoneInfo("America/New_York"),
+}
 
 #: 진입 판정에 쓰는 완료 bucket 길이. 5m 하나로 5분·20분 창을 모두 만든다.
 INTRADAY_BAR_PERIOD: Final = "5m"

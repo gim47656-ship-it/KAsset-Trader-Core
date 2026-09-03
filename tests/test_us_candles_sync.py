@@ -11,6 +11,17 @@ from app.services import us_candles_sync_service as service
 from app.services.candles_sync_common import build_symbol_union
 
 
+def _mock_session(*watchlist_symbols: str) -> MagicMock:
+    session = MagicMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    session.close = AsyncMock()
+    watchlist_result = MagicMock()
+    watchlist_result.scalars.return_value.all.return_value = list(watchlist_symbols)
+    session.execute = AsyncMock(return_value=watchlist_result)
+    return session
+
+
 def test_target_union_combines_toss_positions_and_manual_holdings() -> None:
     symbols = build_symbol_union(
         [SimpleNamespace(symbol="AAPL"), SimpleNamespace(symbol="MSFT")],
@@ -86,10 +97,7 @@ async def test_collect_window_uses_toss_only(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_sync_uses_manual_and_toss_position_union(monkeypatch) -> None:
-    session = MagicMock()
-    session.commit = AsyncMock()
-    session.rollback = AsyncMock()
-    session.close = AsyncMock()
+    session = _mock_session()
     monkeypatch.setattr(service, "AsyncSessionLocal", lambda: session)
     monkeypatch.setattr(
         service,
@@ -130,10 +138,99 @@ async def test_sync_uses_manual_and_toss_position_union(monkeypatch) -> None:
 
     assert result["symbols_total"] == 2
     assert result["pairs_processed"] == 2
+    assert result["holdings_snapshot_ok"] is True
     assert {call.kwargs["symbol"] for call in collect.await_args_list} == {
         "AAPL",
         "MSFT",
     }
+    session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_uses_us_watchlist_when_holdings_are_empty(monkeypatch) -> None:
+    session = _mock_session(" nvda ")
+    monkeypatch.setattr(service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(
+        service,
+        "fetch_toss_portfolio_snapshot",
+        AsyncMock(return_value=SimpleNamespace(positions=[])),
+    )
+    manual = SimpleNamespace(get_holdings_by_user=AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "ManualHoldingsService", lambda _session: manual)
+    resolve = AsyncMock(
+        return_value=service.ResolvedSymbolPairs(
+            symbol_pairs=[("NVDA", "NASD")],
+            skipped_symbols=[],
+            lookup_refresh_attempted=False,
+        )
+    )
+    monkeypatch.setattr(service, "_resolve_symbol_pairs", resolve)
+    monkeypatch.setattr(service, "_select_closed_sessions", lambda *_: [])
+
+    result = await service.sync_us_candles(mode="backfill", sessions=1)
+
+    assert resolve.await_args.kwargs["target_symbols"] == {"NVDA"}
+    assert result["symbols_total"] == 1
+    assert "reason" not in result
+    assert result["holdings_snapshot_ok"] is True
+    session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_continues_with_watchlist_when_snapshot_fails(
+    monkeypatch, caplog
+) -> None:
+    session = _mock_session("AAPL")
+    monkeypatch.setattr(service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(
+        service,
+        "fetch_toss_portfolio_snapshot",
+        AsyncMock(side_effect=RuntimeError("snapshot unavailable")),
+    )
+    manual = SimpleNamespace(get_holdings_by_user=AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "ManualHoldingsService", lambda _session: manual)
+    resolve = AsyncMock(
+        return_value=service.ResolvedSymbolPairs(
+            symbol_pairs=[("AAPL", "NASD")],
+            skipped_symbols=[],
+            lookup_refresh_attempted=False,
+        )
+    )
+    monkeypatch.setattr(service, "_resolve_symbol_pairs", resolve)
+    monkeypatch.setattr(service, "_select_closed_sessions", lambda *_: [])
+    caplog.set_level("WARNING", logger=service.__name__)
+
+    result = await service.sync_us_candles(mode="backfill", sessions=1)
+
+    assert resolve.await_args.kwargs["target_symbols"] == {"AAPL"}
+    assert result["symbols_total"] == 1
+    assert result["holdings_snapshot_ok"] is False
+    assert "RuntimeError" in caplog.text
+    session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_returns_no_target_when_all_symbol_sources_are_empty(
+    monkeypatch,
+) -> None:
+    session = _mock_session()
+    monkeypatch.setattr(service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(
+        service,
+        "fetch_toss_portfolio_snapshot",
+        AsyncMock(return_value=SimpleNamespace(positions=[])),
+    )
+    manual = SimpleNamespace(get_holdings_by_user=AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "ManualHoldingsService", lambda _session: manual)
+    resolve = AsyncMock()
+    monkeypatch.setattr(service, "_resolve_symbol_pairs", resolve)
+
+    result = await service.sync_us_candles(mode="backfill", sessions=1)
+
+    assert result["reason"] == "no_target_symbols"
+    assert result["symbols_total"] == 0
+    assert result["holdings_snapshot_ok"] is True
+    resolve.assert_not_awaited()
     session.close.assert_awaited_once()
 
 

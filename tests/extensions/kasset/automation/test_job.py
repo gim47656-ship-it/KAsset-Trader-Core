@@ -310,8 +310,8 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
     try:
         db_session.add_all(
             [
-                _approved_recommendation(owner_a_id),
-                _approved_recommendation(owner_b_id),
+                _approved_recommendation(owner_a_id, now=_NOW_IN_SESSION),
+                _approved_recommendation(owner_b_id, now=_NOW_IN_SESSION),
             ]
         )
         await db_session.commit()
@@ -319,6 +319,10 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
         await _set_auto_policy(db_session, owner_b_id, kill_switch=True)
         # Owner B never reaches the claim stage: the kill switch blocks first.
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
 
         async def _approved_promotion(
             self: object,
@@ -348,7 +352,7 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
             _broken_claim,
         )
 
-        report = await run_paper_automation_once(now=_NOW)
+        report = await run_paper_automation_once(now=_NOW_IN_SESSION)
 
         by_owner = {
             outcome["owner_user_id"]: outcome
@@ -554,7 +558,7 @@ async def test_promotion_bypass_executes_unpromoted_recommendation_with_evidence
 ) -> None:
     """override를 켜면 승격 없는 추천도 실행되고 그 사실이 결과에 남는다."""
     owner_id, username = await _seed_owner(db_session)
-    recommendation = _approved_recommendation(owner_id)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
     recommendation_id = recommendation.id
     try:
         db_session.add(recommendation)
@@ -563,6 +567,10 @@ async def test_promotion_bypass_executes_unpromoted_recommendation_with_evidence
         await _enable_promotion_bypass(db_session, owner_id)
         monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
 
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
         assert await _promotion_bypass_snapshot(db_session, owner_id) is True
 
         # 실행 직전 게이트도 승격 근거를 요구하지 않는다.
@@ -571,11 +579,11 @@ async def test_promotion_bypass_executes_unpromoted_recommendation_with_evidence
             automatic=True,
             recommendation_id=recommendation_id,
         )
-        policy = await gate.get_policy(owner_user_id=str(owner_id), now=_NOW)
+        policy = await gate.get_policy(owner_user_id=str(owner_id), now=_NOW_IN_SESSION)
         assert policy.promotion_bypassed is True
         assert policy.paper_automation_enabled is True
 
-        report = await run_paper_automation_once(now=_NOW)
+        report = await run_paper_automation_once(now=_NOW_IN_SESSION)
 
         outcome = next(
             item
@@ -967,11 +975,16 @@ async def test_in_session_fresh_reference_quote_still_places_the_order(
 
 
 @pytest.mark.asyncio
-async def test_after_hours_stale_reference_quote_is_not_blocked(
+async def test_after_hours_sweep_is_blocked_out_of_regular_session(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """장 마감 후 종가는 정상 최신값이라 같은 시세로도 차단되지 않는다."""
+    """장 마감 후에는 무인 sweep이 주문을 만들지 않는다.
+
+    PAPER 체결 시뮬레이터는 마지막 시세로 즉시 채워 주므로, 장이 닫힌 시각에
+    집행하면 실제 시장에서 성립할 수 없는 체결이 원장에 남는다. 실제 장중과
+    같은 조건에서만 재현되도록 정규장 밖 집행을 차단한다.
+    """
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id)
     recommendation.reference_price = "70000"
@@ -985,17 +998,56 @@ async def test_after_hours_stale_reference_quote_is_not_blocked(
         monkeypatch.setattr(settings, "TRADING_ENABLED", True)
         calls = _record_quote_for_market(
             monkeypatch,
-            _krx_quote(source=krx_quotes.CANDLE_QUOTE_SOURCE, as_of=_NOW),
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW),
         )
 
         outcome = await _outcome_for_owner(owner_id, now=_NOW)
 
-        # 장중이면 같은 시세로 BLOCKED가 됐을 조건인데 그대로 체결됐다.
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == job.OUT_OF_SESSION_BLOCK_REASON
+        assert outcome["recommendation_id"] == recommendation_id
+        assert await _owner_order_count(db_session, owner_id) == 0
+        # 정규장 관문이 먼저 끊었으므로 시세 조회조차 하지 않는다.
+        assert calls == []
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        # 차단은 claim을 태우지 않는다. 다음 정규장 sweep이 다시 잡는다.
+        assert stored is None
+    finally:
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_in_session_sweep_still_places_the_order(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정규장 안에서는 같은 조건이 그대로 주문으로 이어진다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
         assert outcome["status"] == "SUBMITTED"
-        assert not str(outcome["reason"]).startswith("stale_quote")
         assert outcome["recommendation_id"] == recommendation_id
         assert await _owner_order_count(db_session, owner_id) == 1
-        assert set(calls) == {("KRX", "005930")}
         stored = await db_session.scalar(
             select(AIRecommendation.paper_execution_status).where(
                 AIRecommendation.id == recommendation_id

@@ -764,14 +764,19 @@ class AITradingPolicyService:
                 ),
             ),
             HardRiskCheck(
-                "AI",
-                ai_confidence.is_finite() and ai_confidence >= _MIN_AI_CONFIDENCE,
-                f"confidence={ai_confidence}; floor={_MIN_AI_CONFIDENCE}"
+                # AI 검토는 SHADOW다. 뉴스·공시 등 검증되지 않은 입력을 보는
+                # 판단에 실제 주문 veto를 주지 않는다. 값은 근거로만 남기고
+                # 이 관문은 결정론적 안전장치가 아니므로 차단하지 않는다.
+                "AI_SHADOW",
+                True,
+                f"shadow; confidence={ai_confidence}; "
+                f"shadowFloor={_MIN_AI_CONFIDENCE}"
                 + (
                     f"; aiStatus={ai_review_status}"
                     if ai_review_status is not None
                     else ""
-                ),
+                )
+                + "; AI는 주문을 차단하지 않습니다.",
             ),
             HardRiskCheck(
                 "DAILY_GOAL",
