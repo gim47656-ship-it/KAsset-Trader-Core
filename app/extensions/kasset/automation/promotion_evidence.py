@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, DecimalException
 from typing import Any, cast
 
@@ -20,6 +20,7 @@ from app.extensions.kasset.automation.candidate_ranker import (
 )
 from app.extensions.kasset.automation.contracts import PriceBar
 from app.extensions.kasset.automation.portfolio_backtest import (
+    BacktestWindow,
     CandidateBenchmarkSeries,
     PortfolioBacktestConfig,
     PortfolioBacktestDiagnostics,
@@ -40,12 +41,15 @@ from app.extensions.kasset.automation.strategy_artifact import (
 from app.extensions.kasset.automation.strategy_promotion import (
     FORWARD_PAPER_TRACK,
     HISTORICAL_PIT_TRACK,
-    PROMOTION_TRACKS,
+    PROMOTION_EVIDENCE_TRACKS,
     PromotionMetrics,
     PromotionThresholds,
     PromotionTrack,
     evaluate_thresholds,
     promotion_thresholds_for_track,
+)
+from app.extensions.kasset.automation.trade_bootstrap import (
+    calculate_trade_bootstrap,
 )
 from app.models.research_backtest import (
     ResearchBacktestRun,
@@ -58,6 +62,7 @@ from app.schemas.research_backtest import (
     StrategyExperimentIdentity,
 )
 from app.services.daily_candles.readiness import (
+    HISTORICAL_PIT_ONLY_BLOCKERS,
     REQUIRED_BENCHMARK_BARS,
     DailyCandlesReadiness,
     DailyCandlesReadinessService,
@@ -96,7 +101,6 @@ class PromotionEvidenceBuildError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class PortfolioEvidenceSource:
-    track: PromotionTrack
     as_of: datetime
     readiness: DailyCandlesReadiness
     candidates: tuple[CandidateMetadata, ...]
@@ -107,6 +111,10 @@ class PortfolioEvidenceSource:
     dataset_content_hash: str
     period_start: datetime
     period_end: datetime
+    evidence_track: str = HISTORICAL_PIT_TRACK
+    # forward_paper 트랙에서 시그널/주문이 허용되는 첫 시점(코호트 effective_date의
+    # UTC 자정). 그 이전 봉은 지표 warm-up 전용이다. historical_pit에서는 None.
+    signal_start_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,17 +248,25 @@ async def load_portfolio_evidence_source(
     *,
     as_of: datetime | None = None,
     cohort_ids: Mapping[str, str] | None = None,
-    track: str = FORWARD_PAPER_TRACK,
+    evidence_track: str = HISTORICAL_PIT_TRACK,
 ) -> PortfolioEvidenceSource:
     """Read readiness denominator and exact rank-bounded active-core evidence."""
 
-    resolved_track = _require_track(track)
+    track = _require_track(evidence_track)
     measured_at = _aware_utc(as_of or datetime.now(UTC))
     readiness = await DailyCandlesReadinessService(db).measure(
         as_of=measured_at,
         cohort_ids=cast(Any, cohort_ids),
+        evidence_track=track,
     )
-    _require_readiness(readiness, track=resolved_track)
+    signal_start_at = (
+        _forward_signal_start_at(readiness) if track == FORWARD_PAPER_TRACK else None
+    )
+    _require_readiness(
+        readiness,
+        evidence_track=track,
+        signal_start=_date_of(signal_start_at),
+    )
 
     candidates: list[CandidateMetadata] = []
     selected_evidence: list[Mapping[str, object]] = []
@@ -410,10 +426,13 @@ async def load_portfolio_evidence_source(
         raise PromotionEvidenceBuildError("daily_candles_missing")
     period_start = min(all_timestamps)
     period_end = max(all_timestamps)
+    # historical_pit: 적재된 첫 봉(warm-up 포함)까지 코호트 확정일 이후여야 한다.
+    # forward_paper: warm-up 봉은 확정일 이전이어도 되고 signal_start만 검사한다.
     _require_readiness(
         readiness,
-        track=resolved_track,
+        evidence_track=track,
         period_start=period_start.date(),
+        signal_start=_date_of(signal_start_at),
     )
     content_hash = _dataset_content_hash(
         candidates=tuple(candidates),
@@ -423,7 +442,6 @@ async def load_portfolio_evidence_source(
         selected_universe=tuple(selected_evidence),
     )
     return PortfolioEvidenceSource(
-        track=resolved_track,
         as_of=measured_at,
         readiness=readiness,
         candidates=tuple(candidates),
@@ -434,6 +452,8 @@ async def load_portfolio_evidence_source(
         dataset_content_hash=content_hash,
         period_start=period_start,
         period_end=period_end,
+        evidence_track=track,
+        signal_start_at=signal_start_at,
     )
 
 
@@ -442,24 +462,46 @@ async def build_and_store_portfolio_evidence(
     *,
     as_of: datetime | None = None,
     cohort_ids: Mapping[str, str] | None = None,
-    track: str = FORWARD_PAPER_TRACK,
+    evidence_track: str = HISTORICAL_PIT_TRACK,
 ) -> PromotionEvidenceBuildResult:
-    """Run deterministic engines and persist experiment -> run -> candidate."""
+    """Run deterministic engines and persist experiment -> run -> candidate.
 
+    ``evidence_track``(``PROMOTION_EVIDENCE_TRACKS``)은 readiness 요구와 엔진
+    평가 구간을 정한다. 기본 ``historical_pit``은 오늘과 동일하다. ``forward_paper``
+    는 코호트 effective_date 이전 봉을 지표 warm-up으로만 읽고, 시그널/주문은
+    ``source.signal_start_at`` 이후에만 허용한다. 성과 임계값은 두 트랙이 같다.
+    """
+
+    track = _require_track(evidence_track)
     artifact = current_strategy_artifact()
     source = await load_portfolio_evidence_source(
         db,
         as_of=as_of,
         cohort_ids=cohort_ids,
-        track=track,
+        evidence_track=track,
     )
     config = PortfolioBacktestConfig(
         strategy_key=artifact.strategy_key,
         strategy_version=artifact.strategy_version,
     )
     walk_config = WalkForwardConfig()
+    track_thresholds = promotion_thresholds_for_track(track)
     universe_evidence = _engine_universe_evidence(source)
+    window: BacktestWindow | None = None
+    walk_forward_bars = source.bars_by_candidate
+    if source.signal_start_at is not None:
+        walk_forward_bars = _forward_walk_forward_bars(
+            source.bars_by_candidate,
+            signal_start_at=source.signal_start_at,
+            walk_config=walk_config,
+            min_folds=track_thresholds.min_walk_forward_folds,
+        )
     try:
+        if source.signal_start_at is not None:
+            window = BacktestWindow(
+                signal_start_at=source.signal_start_at,
+                end_at=source.period_end,
+            )
         diagnostics = run_portfolio_diagnostics(
             source.candidates,
             source.bars_by_candidate,
@@ -467,10 +509,11 @@ async def build_and_store_portfolio_evidence(
             benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
             benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
+            window=window,
         )
         walk_forward = run_walk_forward(
             source.candidates,
-            source.bars_by_candidate,
+            walk_forward_bars,
             config=config,
             walk_forward=walk_config,
             benchmark_bars_by_market=cast(Any, source.benchmark_bars_by_market),
@@ -486,9 +529,10 @@ async def build_and_store_portfolio_evidence(
         diagnostics,
         walk_forward,
         source.readiness,
-        track=source.track,
+        evidence_track=track,
+        signal_start_at=source.signal_start_at,
     )
-    threshold_profile = promotion_thresholds_for_track(source.track)
+    threshold_profile = promotion_thresholds_for_track(track)
     thresholds = _thresholds_snapshot(threshold_profile)
     evaluation = evaluate_thresholds(metrics, threshold_profile)
     raw_payload = build_promotion_raw_payload(
@@ -594,12 +638,25 @@ def derive_promotion_metrics(
     walk_forward: WalkForwardResult,
     readiness: DailyCandlesReadiness,
     *,
-    track: str = FORWARD_PAPER_TRACK,
+    evidence_track: str = HISTORICAL_PIT_TRACK,
+    signal_start_at: datetime | None = None,
 ) -> PromotionMetrics:
-    """Derive the only accepted promotion metric snapshot from engine results."""
+    """Derive the only accepted promotion metric snapshot from engine results.
 
-    resolved_track = _require_track(track)
-    _require_readiness(readiness, track=resolved_track)
+    forward_paper 트랙은 ``signal_start_at``이 필수이며, 엔진 출력의 baseline
+    기록 시작과 모든 fold의 signal 시작(``train_end_at``)이 그 이후임을 확인한다.
+    survivorship_evidence는 historical_pit에서만 True다.
+    """
+
+    track = _require_track(evidence_track)
+    forward = track == FORWARD_PAPER_TRACK
+    if forward and signal_start_at is None:
+        raise PromotionEvidenceBuildError("forward_signal_start_missing")
+    _require_readiness(
+        readiness,
+        evidence_track=track,
+        signal_start=_date_of(signal_start_at) if forward else None,
+    )
     baseline = diagnostics.baseline
     _require_benchmark_window_coverage(baseline, readiness)
     if baseline.excess_return is None:
@@ -609,6 +666,10 @@ def derive_promotion_metrics(
         raise PromotionEvidenceBuildError("walk_forward_folds_missing")
     for fold in folds:
         _require_benchmark_window_coverage(fold.test_result, readiness)
+    if forward:
+        _require_forward_signal_window(
+            diagnostics, walk_forward, cast(datetime, signal_start_at)
+        )
     hashes = (
         diagnostics.determinism_hash,
         baseline.determinism_hash,
@@ -660,6 +721,25 @@ def derive_promotion_metrics(
     )
 
 
+def _require_forward_signal_window(
+    diagnostics: PortfolioBacktestDiagnostics,
+    walk_forward: WalkForwardResult,
+    signal_start_at: datetime,
+) -> None:
+    """엔진이 forward 구간(코호트 확정일 이후)에서만 시그널을 만들었는지 확인한다.
+
+    baseline/delayed_execution은 ``BacktestWindow.signal_start_at``부터 equity를
+    기록하므로 첫 기록 시점이 signal_start 이후여야 하고, 각 fold는 ``train_end``
+    봉에서 첫 시그널을 만들므로 ``train_end_at``이 signal_start 이후여야 한다.
+    """
+    start = _aware_utc(signal_start_at)
+    for result in (diagnostics.baseline, diagnostics.delayed_execution):
+        if not result.equity_curve or result.equity_curve[0].timestamp < start:
+            raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
+    if any(fold.train_end_at < start for fold in walk_forward.folds):
+        raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
+
+
 def _require_benchmark_window_coverage(
     result: PortfolioBacktestResult,
     readiness: DailyCandlesReadiness,
@@ -697,6 +777,10 @@ def build_promotion_raw_payload(
     metrics: PromotionMetrics,
     thresholds: Mapping[str, object],
 ) -> dict[str, object]:
+    track = _require_track(source.evidence_track)
+    forward = track == FORWARD_PAPER_TRACK
+    if forward and source.signal_start_at is None:
+        raise PromotionEvidenceBuildError("forward_signal_start_missing")
     markets = {
         item.market: _readiness_market_payload(item)
         for item in source.readiness.markets
@@ -721,14 +805,17 @@ def build_promotion_raw_payload(
             "testStartAt": _timestamp(fold.test_start_at),
             "testEndAt": _timestamp(fold.test_end_at),
             "passed": _fold_passed(fold),
-            "train": _backtest_summary(fold.train_result),
+            "train": {
+                **_backtest_summary(fold.train_result),
+                **({"warmupOnly": True} if forward else {}),
+            },
             "test": _backtest_summary(fold.test_result),
         }
         for fold in walk_forward.folds
     ]
     return {
         "schemaVersion": PROMOTION_EVIDENCE_SCHEMA_VERSION,
-        "promotionTrack": source.track,
+        "evidenceTrack": track,
         "strategy": {
             "key": artifact.strategy_key,
             "version": artifact.strategy_version,
@@ -801,6 +888,13 @@ def build_promotion_raw_payload(
                 item.benchmark.status == "available"
                 for item in source.readiness.markets
             ),
+            # 트랙 증거. forward_paper는 PIT 생존편향을 증명하지 않으므로 생략한
+            # readiness 검사를 그대로 기록하고, 시그널이 허용된 첫 시점을 남긴다.
+            "evidenceTrack": track,
+            "forwardSignalStartAt": _timestamp_optional(source.signal_start_at),
+            "historicalPitChecksWaived": (
+                list(HISTORICAL_PIT_ONLY_BLOCKERS) if forward else []
+            ),
         },
         "portfolioDiagnostics": {
             "config": _json_config(config),
@@ -808,10 +902,14 @@ def build_promotion_raw_payload(
                 "KR": {
                     "feeRate": str(config.kr_cost.fee_rate),
                     "slippageRate": str(config.kr_cost.slippage_rate),
+                    "sellTaxRate": str(config.kr_cost.sell_tax_rate),
+                    "minFeeAbsolute": str(config.kr_cost.min_fee_absolute),
                 },
                 "US": {
                     "feeRate": str(config.us_cost.fee_rate),
                     "slippageRate": str(config.us_cost.slippage_rate),
+                    "sellTaxRate": str(config.us_cost.sell_tax_rate),
+                    "minFeeAbsolute": str(config.us_cost.min_fee_absolute),
                 },
             },
             "baseline": _backtest_summary(diagnostics.baseline),
@@ -844,6 +942,8 @@ def build_promotion_raw_payload(
             "evidence": [_backtest_evidence(item) for item in diagnostics.evidence],
             "determinismHash": diagnostics.determinism_hash,
         },
+        # Advisory only: 이 분포는 승인/거절 임계값과 determinism hash에 들어가지 않는다.
+        "tradeBootstrap": _trade_bootstrap_payload(diagnostics.baseline),
         "walkForward": {
             "config": {
                 "trainBars": walk_config.train_bars,
@@ -876,25 +976,95 @@ def build_promotion_raw_payload(
     }
 
 
-def _require_track(track: str) -> PromotionTrack:
-    if track not in PROMOTION_TRACKS:
-        raise PromotionEvidenceBuildError(f"promotion_track_invalid:{track}")
-    return cast(PromotionTrack, track)
+def _require_track(value: object) -> PromotionTrack:
+    if not isinstance(value, str) or value not in PROMOTION_EVIDENCE_TRACKS:
+        raise PromotionEvidenceBuildError("evidence_track_invalid")
+    return cast(PromotionTrack, value)
+
+
+def _date_of(value: datetime | None) -> date | None:
+    return _aware_utc(value).date() if value is not None else None
+
+
+def _forward_signal_start_at(readiness: DailyCandlesReadiness) -> datetime | None:
+    """forward_paper 트랙에서 시그널이 허용되는 첫 시점.
+
+    KR/US는 하나의 포트폴리오로 평가되므로 두 코호트 effective_date 중 늦은 날의
+    UTC 자정을 쓴다. readiness는 봉의 세션 날짜를 ``(time AT TIME ZONE 'UTC')::date``
+    로 비교하므로 ``bar.timestamp >= signal_start_at``이 "확정일 이후 세션"과 같다.
+    코호트가 하나라도 없으면 None을 돌려 ``_require_readiness``가 사유를 낸다.
+    """
+    effective_dates = [
+        item.cohort.effective_date
+        for item in readiness.markets
+        if item.cohort is not None
+    ]
+    if len(effective_dates) != len(readiness.markets) or not effective_dates:
+        return None
+    return datetime.combine(max(effective_dates), time.min, tzinfo=UTC)
+
+
+def _forward_walk_forward_bars(
+    bars_by_candidate: Mapping[CandidateKey, tuple[PriceBar, ...]],
+    *,
+    signal_start_at: datetime,
+    walk_config: WalkForwardConfig,
+    min_folds: int,
+) -> dict[CandidateKey, tuple[PriceBar, ...]]:
+    """forward_paper walk-forward 입력을 잘라 모든 fold의 시그널을 forward 구간에 둔다.
+
+    ``run_walk_forward``는 전 종목 union timestamps에서 ``[k*step, k*step+train_bars)``
+    를 train으로 잡고 그 마지막 봉(``train_end``)을 test window의
+    ``signal_start_at``으로 쓴다. 첫 forward 봉 인덱스 ``f`` 앞에 warm-up 봉을
+    정확히 ``train_bars - 1``개만 남기면 첫 fold의 ``train_end == timestamps[f]``가
+    되고 이후 fold는 모두 그보다 늦다. warm-up 봉은 지표 계산에만 쓰이고 주문을
+    만들 수 없다. 조건을 만족하는 fold가 ``min_folds``보다 적으면 임계값을 낮추는
+    대신 실패한다.
+    """
+    start = _aware_utc(signal_start_at)
+    timestamps = sorted(
+        {bar.timestamp for bars in bars_by_candidate.values() for bar in bars}
+    )
+    first_forward = next(
+        (index for index, stamp in enumerate(timestamps) if stamp >= start), None
+    )
+    if first_forward is None:
+        raise PromotionEvidenceBuildError("forward_window_empty")
+    cut_index = max(first_forward - (walk_config.train_bars - 1), 0)
+    usable = len(timestamps) - cut_index
+    required = walk_config.train_bars + walk_config.test_bars
+    fold_count = (
+        (usable - required) // walk_config.step_bars + 1 if usable >= required else 0
+    )
+    if fold_count < min_folds:
+        raise PromotionEvidenceBuildError(
+            f"forward_window_insufficient_bars:folds={fold_count},min_folds={min_folds}"
+        )
+    cut = timestamps[cut_index]
+    return {
+        key: tuple(bar for bar in bars if bar.timestamp >= cut)
+        for key, bars in bars_by_candidate.items()
+    }
 
 
 def _require_readiness(
     readiness: DailyCandlesReadiness,
     *,
-    track: PromotionTrack,
+    evidence_track: str = HISTORICAL_PIT_TRACK,
     period_start: date | None = None,
+    signal_start: date | None = None,
 ) -> None:
-    """Fail closed on the evidence the requested track actually claims.
+    """트랙별 readiness 계약. 공통 검사는 두 트랙에서 동일하다.
 
-    Both tracks require the full obtainable daily-history evidence. Only the
-    historical track additionally requires point-in-time membership, delisted
-    survivors, the corporate-action ledger and a primary-provider price series;
-    on the forward track those facts stay recorded as unresolved evidence.
+    historical_pit: 코호트 scope, 평가 window/적재 시작(``period_start``)이 확정일
+    이후, PIT 구성원 이력 증거 전부를 요구한다.
+    forward_paper: 코호트 scope 일치와 ``signal_start``(시그널/주문이 시작되는
+    세션 날짜)가 확정일 이후임을 요구한다. 그 이전 warm-up 봉은 허용된다.
     """
+    track = _require_track(evidence_track)
+    if readiness.evidence_track != track:
+        raise PromotionEvidenceBuildError("evidence_track_mismatch")
+    historical = track == HISTORICAL_PIT_TRACK
     if not readiness.promotion_ready:
         detail = ",".join(readiness.blockers) or "readiness_not_ready"
         raise PromotionEvidenceBuildError(detail)
@@ -914,14 +1084,38 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_not_found")
         if cohort.method != "latest_market_cap":
             raise PromotionEvidenceBuildError(f"{market.market}:cohort_method_invalid")
+        if historical:
+            if cohort.evidence_scope != HISTORICAL_PIT_TRACK:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:cohort_not_historical_pit"
+                )
+            if (
+                market.evaluated_window_start is None
+                or market.evaluated_window_start < cohort.effective_date
+            ):
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:cohort_window_predates_effective_date"
+                )
+            if period_start is not None and period_start < cohort.effective_date:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:cohort_window_predates_effective_date"
+                )
+        else:
+            if cohort.evidence_scope != track:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:cohort_scope_mismatch"
+                )
+            # forward 트랙의 생존편향 방어 전부: 시그널/거래 시작이 코호트 확정일
+            # 이후여야 한다. 그 앞의 warm-up 봉(period_start)은 검사하지 않는다.
+            if signal_start is None or signal_start < cohort.effective_date:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:forward_window_predates_effective_date"
+                )
         if market.total_symbol_count <= 0 or market.eligible_symbol_count <= 0:
             raise PromotionEvidenceBuildError(
                 f"{market.market}:cohort_members_not_ready"
             )
-        if (
-            track == HISTORICAL_PIT_TRACK
-            and market.eligible_symbol_count != market.total_symbol_count
-        ):
+        if historical and market.eligible_symbol_count != market.total_symbol_count:
             raise PromotionEvidenceBuildError(
                 f"{market.market}:cohort_members_not_ready"
             )
@@ -935,53 +1129,36 @@ def _require_readiness(
             raise PromotionEvidenceBuildError(
                 f"{market.market}:calendar_session_unevidenced"
             )
-        if track == FORWARD_PAPER_TRACK and cohort.evidence_scope != "forward_paper":
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:cohort_not_forward_paper"
-            )
-        if track != HISTORICAL_PIT_TRACK:
-            continue
-        if cohort.evidence_scope != "historical_pit":
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:cohort_not_historical_pit"
-            )
-        if (
-            market.evaluated_window_start is None
-            or market.evaluated_window_start < cohort.effective_date
-        ):
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:cohort_window_predates_effective_date"
-            )
-        if period_start is not None and period_start < cohort.effective_date:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:cohort_window_predates_effective_date"
-            )
         if market.fallback_only:
             raise PromotionEvidenceBuildError(f"{market.market}:fallback_only")
-        if not market.point_in_time_available:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:point_in_time_unavailable"
-            )
-        if market.list_date_covered_symbol_count != market.total_symbol_count:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:list_date_coverage_incomplete"
-            )
-        if market.members_listed_after_cohort_start:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:member_listed_after_cohort_start"
-            )
-        if market.delist_date_covered_inactive_count != market.inactive_symbol_count:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:delist_date_coverage_incomplete"
-            )
-        if not market.includes_delisted:
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:delisted_members_absent"
-            )
-        if market.corporate_action_status != "clear":
-            raise PromotionEvidenceBuildError(
-                f"{market.market}:corporate_action_unknown"
-            )
+        if historical:
+            if not market.point_in_time_available:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:point_in_time_unavailable"
+                )
+            if market.list_date_covered_symbol_count != market.total_symbol_count:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:list_date_coverage_incomplete"
+                )
+            if market.members_listed_after_cohort_start:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:member_listed_after_cohort_start"
+                )
+            if (
+                market.delist_date_covered_inactive_count
+                != market.inactive_symbol_count
+            ):
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:delist_date_coverage_incomplete"
+                )
+            if not market.includes_delisted:
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:delisted_members_absent"
+                )
+            if market.corporate_action_status != "clear":
+                raise PromotionEvidenceBuildError(
+                    f"{market.market}:corporate_action_unknown"
+                )
         if set(market.benchmark.sources) <= _FALLBACK_SOURCES:
             raise PromotionEvidenceBuildError(
                 f"{market.market}:benchmark_fallback_only"
@@ -1287,6 +1464,21 @@ def _readiness_market_payload(item: MarketReadiness) -> dict[str, object]:
     }
 
 
+def _trade_bootstrap_payload(
+    result: PortfolioBacktestResult,
+) -> dict[str, object] | None:
+    try:
+        distribution = calculate_trade_bootstrap(
+            tuple(trade.net_pnl for trade in result.trades),
+            result.initial_cash,
+        )
+    except ValueError as exc:
+        raise PromotionEvidenceBuildError(
+            f"backtest_evidence_unavailable:{exc}"
+        ) from exc
+    return distribution.as_payload() if distribution is not None else None
+
+
 def _backtest_summary(result: PortfolioBacktestResult) -> dict[str, object]:
     return {
         "strategyKey": result.strategy_key,
@@ -1321,6 +1513,7 @@ def _backtest_summary(result: PortfolioBacktestResult) -> dict[str, object]:
             )
         ),
         "feesPaid": str(result.fees_paid),
+        "taxesPaid": str(result.taxes_paid),
         "slippageCost": str(result.slippage_cost),
         "openPositionCount": len(result.open_positions),
         "benchmarkMarkets": [item.market for item in result.benchmark_by_market],
@@ -1389,20 +1582,26 @@ def _json_config(config: PortfolioBacktestConfig) -> dict[str, object]:
         "riskPerTradeRate": str(config.risk_per_trade_rate),
         "maxSymbolAllocation": str(config.max_symbol_allocation),
         "executionDelayBars": config.execution_delay_bars,
+        "entryFill": config.entry_fill,
+        "slippageMode": config.slippage_mode,
     }
 
 
 def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
-    """Validate a persisted evidence payload and derive its metric snapshot."""
+    """Validate a persisted evidence payload and derive its metric snapshot.
+
+    ``evidenceTrack``이 없는 과거 payload는 historical_pit으로 읽는다. 그 payload는
+    이 검증기가 이미 ``evidenceScope == historical_pit``을 요구했으므로 트랙이
+    증명된다. forward_paper payload는 코호트 scope, ``forwardSignalStartAt``이
+    확정일 이후, 그리고 baseline/fold 시그널 시작이 그 이후임을 대신 요구한다.
+    """
 
     payload = _required_mapping(raw, "raw_payload")
     if payload.get("schemaVersion") != PROMOTION_EVIDENCE_SCHEMA_VERSION:
         raise PromotionEvidenceBuildError("evidence_schema_version_mismatch")
-    declared_track = payload.get("promotionTrack")
-    if not isinstance(declared_track, str) or declared_track not in PROMOTION_TRACKS:
-        raise PromotionEvidenceBuildError("promotion_track_invalid")
-    track = cast(PromotionTrack, declared_track)
-    historical = track == HISTORICAL_PIT_TRACK
+    track = _require_track(payload.get("evidenceTrack", HISTORICAL_PIT_TRACK))
+    forward = track == FORWARD_PAPER_TRACK
+    historical = not forward
     # The threshold profile is derived from the track, never trusted from the
     # payload: a stored payload cannot smuggle in a laxer profile.
     expected_thresholds = _thresholds_snapshot(promotion_thresholds_for_track(track))
@@ -1427,6 +1626,23 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     if not _is_source_commit(strategy["sourceCommit"]):
         raise PromotionEvidenceBuildError("strategy_source_commit_invalid")
 
+    validation = _required_mapping(payload.get("validation"), "validation")
+    if _require_track(validation.get("evidenceTrack", HISTORICAL_PIT_TRACK)) != track:
+        raise PromotionEvidenceBuildError("evidence_track_mismatch")
+    signal_start_at: datetime | None = None
+    if forward:
+        signal_start_at = _required_timestamp(validation, "forwardSignalStartAt")
+    elif validation.get("forwardSignalStartAt") is not None:
+        raise PromotionEvidenceBuildError("evidence_track_mismatch")
+    waived = list(
+        _required_sequence(
+            validation.get("historicalPitChecksWaived", []),
+            "validation.historicalPitChecksWaived",
+        )
+    )
+    if waived != (list(HISTORICAL_PIT_ONLY_BLOCKERS) if forward else []):
+        raise PromotionEvidenceBuildError("required_validation_evidence_missing")
+
     data = _required_mapping(payload.get("data"), "data")
     universe_counts = _required_mapping(data.get("universeCounts"), "universeCounts")
     eligible = _required_mapping(data.get("eligible252Counts"), "eligible252Counts")
@@ -1436,6 +1652,14 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     cohorts = _required_mapping(data.get("cohorts"), "cohorts")
     period = _required_mapping(data.get("period"), "period")
     period_start = _required_timestamp(period, "startAt").date()
+    # historical_pit은 적재 시작(warm-up 포함)이, forward_paper는 시그널 시작이
+    # 코호트 확정일 이후여야 한다.
+    window_start = period_start if signal_start_at is None else signal_start_at.date()
+    window_reason = (
+        "cohort_window_predates_effective_date"
+        if signal_start_at is None
+        else "forward_window_predates_effective_date"
+    )
     if any(_required_int(eligible, market) <= 0 for market in ("kr", "us")):
         raise PromotionEvidenceBuildError("eligible_symbols_zero")
     if any(_required_int(selected, market) <= 0 for market in ("kr", "us")):
@@ -1508,18 +1732,15 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         cohort_id = cohort.get("cohortId")
         selection_date = _required_date(cohort, "selectionDate")
         effective_date = _required_date(cohort, "effectiveDate")
-        expected_scope = "historical_pit" if historical else "forward_paper"
         if (
             not isinstance(cohort_id, str)
             or not cohort_id.strip()
             or cohort.get("method") != "latest_market_cap"
-            or cohort.get("evidenceScope") != expected_scope
+            or cohort.get("evidenceScope") != track
         ):
             raise PromotionEvidenceBuildError(f"{market}:cohort_identity_invalid")
-        if historical and period_start < effective_date:
-            raise PromotionEvidenceBuildError(
-                f"{market}:cohort_window_predates_effective_date"
-            )
+        if window_start < effective_date:
+            raise PromotionEvidenceBuildError(f"{market}:{window_reason}")
         market_rows = tuple(
             item
             for item in selected_rows
@@ -1545,7 +1766,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
             or row.get("cohortMethod") != "latest_market_cap"
             or row.get("cohortSelectionDate") != selection_date.isoformat()
             or row.get("cohortEffectiveDate") != effective_date.isoformat()
-            or row.get("cohortEvidenceScope") != expected_scope
+            or row.get("cohortEvidenceScope") != track
             or row.get("memberKind") not in {"active", "forced"}
             or _required_int(row, "memberRank") <= 0
             for row in market_rows
@@ -1612,15 +1833,14 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
             raise PromotionEvidenceBuildError("historical_evidence_blocked")
         if unresolved:
             raise PromotionEvidenceBuildError("historical_evidence_unresolved")
-    validation = _required_mapping(payload.get("validation"), "validation")
     required_validation: dict[str, bool] = {
         "eligibleNonzero": True,
+        "fallbackOnly": False,
         "benchmarkProven": True,
     }
     if historical:
         required_validation.update(
             {
-                "fallbackOnly": False,
                 "pointInTimeProven": True,
                 "delistedIncluded": True,
                 "corporateActionLedgerProven": True,
@@ -1669,6 +1889,16 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     ):
         raise PromotionEvidenceBuildError("baseline_strategy_identity_mismatch")
     _require_stored_benchmark_window_coverage(baseline, selected)
+    if (
+        signal_start_at is not None
+        and _required_timestamp(baseline, "recordStartAt") < signal_start_at
+    ):
+        raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
+    config = _required_mapping(diagnostics.get("config"), "config")
+    if config.get("entryFill", "next_open") != "next_open":
+        raise PromotionEvidenceBuildError("promotion_entry_fill_invalid")
+    if config.get("slippageMode", "adverse_rate") != "adverse_rate":
+        raise PromotionEvidenceBuildError("promotion_slippage_mode_invalid")
     cost_slippage = _required_mapping(diagnostics.get("costSlippage"), "costSlippage")
     for market in ("KR", "US"):
         cost = _required_mapping(cost_slippage.get(market), f"costSlippage.{market}")
@@ -1684,7 +1914,12 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     one_bar_delay = _required_mapping(diagnostics.get("oneBarDelay"), "oneBarDelay")
     if _required_int(one_bar_delay, "additionalBars") != 1:
         raise PromotionEvidenceBuildError("one_bar_delay_missing")
-    _required_mapping(one_bar_delay.get("result"), "oneBarDelay.result")
+    delayed = _required_mapping(one_bar_delay.get("result"), "oneBarDelay.result")
+    if (
+        signal_start_at is not None
+        and _required_timestamp(delayed, "recordStartAt") < signal_start_at
+    ):
+        raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
     symbol_removal = _required_sequence(
         diagnostics.get("symbolRemoval"), "symbolRemoval"
     )
@@ -1707,6 +1942,11 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         fold = _required_mapping(item, "walkForward.fold")
         test = _required_mapping(fold.get("test"), "walkForward.fold.test")
         _require_stored_benchmark_window_coverage(test, selected)
+        if (
+            signal_start_at is not None
+            and _required_timestamp(fold, "trainEndAt") < signal_start_at
+        ):
+            raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
         passed = _stored_fold_passed(test)
         if fold.get("passed") is not passed:
             raise PromotionEvidenceBuildError("walk_forward_pass_mismatch")
@@ -1925,6 +2165,7 @@ def _date_text(value: date | None) -> str | None:
 __all__ = [
     "FORWARD_PAPER_TRACK",
     "HISTORICAL_PIT_TRACK",
+    "PROMOTION_EVIDENCE_TRACKS",
     "PortfolioEvidenceSource",
     "PromotionEvidenceBuildError",
     "PromotionEvidenceBuildResult",

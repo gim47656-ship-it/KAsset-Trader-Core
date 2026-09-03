@@ -22,6 +22,7 @@ from app.core.db import AsyncSessionLocal  # noqa: E402
 from app.extensions.kasset.automation.promotion_evidence import (  # noqa: E402
     FORWARD_PAPER_TRACK,
     HISTORICAL_PIT_TRACK,
+    PROMOTION_EVIDENCE_TRACKS,
     PromotionEvidenceBuildError,
     build_and_store_portfolio_evidence,
 )
@@ -152,13 +153,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     backtest.add_argument("--as-of", type=_aware_datetime)
     backtest.add_argument(
-        "--track",
-        choices=[FORWARD_PAPER_TRACK, HISTORICAL_PIT_TRACK],
-        default=FORWARD_PAPER_TRACK,
+        "--evidence-track",
+        choices=PROMOTION_EVIDENCE_TRACKS,
+        default=HISTORICAL_PIT_TRACK,
         help=(
-            "근거 트랙. forward_paper는 수집 가능한 근거만 요구하고 미해결 "
-            "historical 근거를 payload에 남깁니다. historical_pit은 "
-            "point-in-time/상장폐지/KSD 원장까지 모두 증명돼야 통과합니다."
+            "증거 트랙. historical_pit(기본)은 PIT 코호트와 생존편향 증명을 요구하고, "
+            "forward_paper는 코호트 effective_date 이후 구간만 평가하며 PIT "
+            "survivorship을 증명하지 않습니다."
         ),
     )
 
@@ -236,15 +237,21 @@ async def run(args: argparse.Namespace) -> int:
                 return 0 if report.promotion_ready else 2
 
             if args.command == "backtest-build":
+                if args.evidence_track == FORWARD_PAPER_TRACK:
+                    print(
+                        "경고: forward_paper는 PIT survivorship 무증명 트랙입니다. "
+                        "코호트 effective_date 이후 구간만 평가하며 "
+                        "survivorshipEvidence=false로 기록됩니다."
+                    )
                 result = await build_and_store_portfolio_evidence(
                     db,
                     as_of=args.as_of,
-                    track=args.track,
+                    evidence_track=args.evidence_track,
                 )
                 _print(
                     {
                         "명령": "backtest-build",
-                        "track": result.raw_payload["promotionTrack"],
+                        "track": result.raw_payload["evidenceTrack"],
                         "experimentId": result.experiment.experiment_id,
                         "runId": result.run.id,
                         "promotionCandidateId": result.candidate.id,

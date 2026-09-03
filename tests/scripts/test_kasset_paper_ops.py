@@ -413,11 +413,67 @@ def test_recovery_plan_names_manual_repair_for_integrity_blockers() -> None:
     assert "public.kr_candles_1d" in plan[1]["명령"]
 
 
-def test_backtest_build_defaults_to_the_forward_paper_track() -> None:
-    assert cli.parse_args(["backtest-build"]).track == "forward_paper"
-    assert (
-        cli.parse_args(["backtest-build", "--track", "historical_pit"]).track
-        == "historical_pit"
-    )
+def test_backtest_build_defaults_to_historical_pit_track() -> None:
+    args = cli.parse_args(["backtest-build"])
+
+    assert args.evidence_track == "historical_pit"
+
     with pytest.raises(SystemExit):
-        cli.parse_args(["backtest-build", "--track", "anything_else"])
+        cli.parse_args(["backtest-build", "--evidence-track", "bogus"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected_track", "warns"),
+    [
+        (["backtest-build"], "historical_pit", False),
+        (
+            ["backtest-build", "--evidence-track", "forward_paper"],
+            "forward_paper",
+            True,
+        ),
+    ],
+)
+async def test_backtest_build_forwards_track_and_warns_only_for_forward_paper(
+    monkeypatch,
+    capsys,
+    argv: list[str],
+    expected_track: str,
+    warns: bool,
+) -> None:
+    args = cli.parse_args(argv)
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.__aexit__.return_value = None
+    calls: list[dict[str, object]] = []
+
+    async def fake_build(db: object, **kwargs: object) -> SimpleNamespace:
+        assert db is session
+        calls.append(kwargs)
+        return SimpleNamespace(
+            experiment=SimpleNamespace(experiment_id="exp-1"),
+            run=SimpleNamespace(id=7),
+            candidate=SimpleNamespace(
+                id=9,
+                status="non_promotable",
+                reason_code="threshold_failed:total_return",
+            ),
+            raw_payload={
+                "evidenceTrack": expected_track,
+                "strategy": {"artifactFingerprint": "a" * 64},
+                "readiness": {"unresolvedEvidence": []},
+            },
+            metrics=SimpleNamespace(as_snapshot=lambda: {"tradeCount": 0}),
+        )
+
+    monkeypatch.setattr(cli, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(cli, "build_and_store_portfolio_evidence", fake_build)
+
+    rc = await cli.run(args)
+
+    assert rc == 0
+    assert calls == [{"as_of": None, "evidence_track": expected_track}]
+    output = capsys.readouterr().out
+    assert ("PIT survivorship 무증명 트랙" in output) is warns
+    assert '"promotionCandidateId": 9' in output
+    assert '"candidateReasonCode": "threshold_failed:total_return"' in output

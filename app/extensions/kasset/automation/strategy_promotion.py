@@ -16,6 +16,10 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 DEFAULT_PAPER_STRATEGY_KEY = "qullamaggie_breakout_portfolio"
 DEFAULT_PAPER_STRATEGY_VERSION = "1.0.0"
+# 승격 증거 트랙의 단일 정본. historical_pit은 PIT 생존편향 증명을 요구하고,
+# forward_paper는 코호트 effective_date 이후 forward 구간만 평가하되 PIT
+# survivorship은 증명하지 않는다. promotion_evidence가 이 이름으로 재노출한다.
+PROMOTION_EVIDENCE_TRACKS: tuple[str, ...] = ("historical_pit", "forward_paper")
 
 
 class PromotionState(StrEnum):
@@ -202,9 +206,6 @@ class PromotionThresholds:
 PromotionTrack = Literal["forward_paper", "historical_pit"]
 FORWARD_PAPER_TRACK: PromotionTrack = "forward_paper"
 HISTORICAL_PIT_TRACK: PromotionTrack = "historical_pit"
-PROMOTION_TRACKS: frozenset[str] = frozenset(
-    {FORWARD_PAPER_TRACK, HISTORICAL_PIT_TRACK}
-)
 
 #: historical 근거를 모두 증명한 트랙의 임계. 기존 값에서 하나도 완화하지 않는다.
 DEFAULT_PROMOTION_THRESHOLDS = PromotionThresholds()
@@ -887,8 +888,8 @@ __all__ = [
     "FORWARD_PAPER_TRACK",
     "HISTORICAL_PIT_PROMOTION_THRESHOLDS",
     "HISTORICAL_PIT_TRACK",
-    "PROMOTION_TRACKS",
     "IllegalPromotionTransition",
+    "PROMOTION_EVIDENCE_TRACKS",
     "PaperApprovalDecision",
     "PromotionEvidence",
     "PromotionIdentityMismatch",

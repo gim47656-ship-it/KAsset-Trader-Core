@@ -20,12 +20,12 @@ from app.extensions.kasset.automation.strategy_artifact import (
     current_strategy_artifact,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
+    PROMOTION_EVIDENCE_TRACKS,
     PaperApprovalDecision,
     PromotionEvidence,
     PromotionMetrics,
     PromotionState,
     PromotionThresholds,
-    PromotionTrack,
     StrategyPromotion,
     ThresholdCheck,
     ThresholdEvaluation,
@@ -81,11 +81,11 @@ class _CandidateTrust:
     run: ResearchBacktestRun
     experiment: ResearchStrategyExperiment
     metrics: PromotionMetrics
+    evidence_track: str
     artifact_fingerprint: str
     source_commit: str
     evidence_schema_version: str
     #: 근거 payload가 선언한 트랙과 그 트랙에만 허용된 임계 프로필.
-    track: PromotionTrack
     thresholds: PromotionThresholds
 
 
@@ -606,6 +606,11 @@ class StrategyPromotionService:
             or run.artifact_hash != payload_hash
         ):
             raise PromotionCandidateTrustError("backtest_run_hash_mismatch")
+        raw_track = raw.get("evidenceTrack", "historical_pit")
+        if not isinstance(raw_track, str) or raw_track not in PROMOTION_EVIDENCE_TRACKS:
+            raise PromotionCandidateTrustError("evidence_track_invalid")
+        evidence_track = raw_track
+        track_thresholds = promotion_thresholds_for_track(evidence_track)
         metrics = derive_metrics_from_stored_payload(raw)
         strategy = cast(Mapping[str, object], raw["strategy"])
         fingerprint = str(strategy["artifactFingerprint"])
@@ -625,12 +630,10 @@ class StrategyPromotionService:
             != canonical_sha256(raw.get("promotionThresholds"))
         ):
             raise PromotionCandidateTrustError("candidate_run_experiment_hash_mismatch")
-        # ``derive_metrics_from_stored_payload`` already pinned the stored
+        # ``derive_metrics_from_stored_payload`` already pins the stored
         # threshold snapshot to this track, so the profile below is the only
         # one this candidate could ever have been evaluated against.
-        track = cast(PromotionTrack, str(raw["promotionTrack"]))
-        thresholds = promotion_thresholds_for_track(track)
-        evaluation = evaluate_thresholds(metrics, thresholds)
+        evaluation = evaluate_thresholds(metrics, track_thresholds)
         expected_status = "eligible" if evaluation.passed else "non_promotable"
         expected_reason = (
             "thresholds_passed"
@@ -649,11 +652,11 @@ class StrategyPromotionService:
             run=run,
             experiment=experiment,
             metrics=metrics,
+            evidence_track=evidence_track,
             artifact_fingerprint=fingerprint,
             source_commit=source_commit,
             evidence_schema_version=schema_version,
-            track=track,
-            thresholds=thresholds,
+            thresholds=track_thresholds,
         )
 
 

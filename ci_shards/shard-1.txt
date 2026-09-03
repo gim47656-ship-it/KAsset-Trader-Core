@@ -27,9 +27,11 @@ tests/extensions/kasset/api/test_secret_security.py
 tests/extensions/kasset/api/test_session_token_lifecycle.py
 tests/extensions/kasset/automation/test_ai_trading_policy.py
 tests/extensions/kasset/automation/test_daily_setup.py
+tests/extensions/kasset/automation/test_promotion_evidence_tracks.py
 tests/extensions/kasset/automation/test_shadow_selection.py
 tests/extensions/kasset/automation/test_shadow_setups.py
 tests/extensions/kasset/automation/test_strategy_promotion.py
+tests/extensions/kasset/automation/test_trade_bootstrap.py
 tests/extensions/kasset/test_fcm_push_service.py
 tests/extensions/kasset/test_multi_user_migration_guards.py
 tests/integration/test_paper_positions_market_filter.py

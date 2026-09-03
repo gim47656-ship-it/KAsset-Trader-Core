@@ -10,12 +10,18 @@ import pytest
 from app.extensions.kasset.automation.candidate_ranker import CandidateMetadata
 from app.extensions.kasset.automation.contracts import Action, PriceBar
 from app.extensions.kasset.automation.portfolio_backtest import (
+    CONSERVATIVE_COST_PROFILE,
+    LIVE_MATCHED_COST_PROFILE,
     CandidateBenchmarkSeries,
+    EquityPoint,
     MarketExecutionCost,
     PortfolioBacktestConfig,
     SignalStatus,
     UniverseEvidence,
     WalkForwardConfig,
+    _annualization_periods_per_year,
+    _risk_adjusted_metrics,
+    _stable_hash,
     run_portfolio_backtest,
     run_portfolio_diagnostics,
     run_walk_forward,
@@ -25,6 +31,7 @@ from app.extensions.kasset.automation.promotion_evidence import (
     PortfolioEvidenceSource,
     PromotionEvidenceBuildError,
     _dataset_content_hash,
+    _experiment_identity,
     _require_readiness,
     _require_stored_benchmark_window_coverage,
     _select_universe_rows,
@@ -51,6 +58,18 @@ from app.services.daily_candles.readiness import (
     DailyCandlesReadiness,
     MarketReadiness,
     SymbolReadinessExclusion,
+)
+from app.services.paper_trading_service import FEE_RATES
+from app.services.research_canonical_hash import (
+    compute_identity_hashes,
+    derive_experiment_id,
+)
+from scripts.kasset_bias_audit import (
+    format_bias_audit_table,
+    run_bias_audit,
+)
+from scripts.kasset_bias_audit import (
+    parse_args as parse_bias_audit_args,
 )
 
 _START = datetime(2025, 1, 1, tzinfo=UTC)
@@ -287,6 +306,273 @@ def test_drawdown_and_expectancy_are_derived_from_observed_paths() -> None:
     ).quantize(Decimal("0.00000001"))
 
 
+def test_live_matched_cost_profile_tracks_paper_fee_source() -> None:
+    kr = LIVE_MATCHED_COST_PROFILE["KR"]
+    us = LIVE_MATCHED_COST_PROFILE["US"]
+    assert CONSERVATIVE_COST_PROFILE["KR"] == MarketExecutionCost(
+        fee_rate=Decimal("0.0015"),
+        slippage_rate=Decimal("0.0010"),
+    )
+    assert CONSERVATIVE_COST_PROFILE["US"] == MarketExecutionCost(
+        fee_rate=Decimal("0.0010"),
+        slippage_rate=Decimal("0.0005"),
+    )
+
+    assert FEE_RATES["equity_kr"] == {
+        "buy": 0.00015,
+        "sell": 0.00015,
+        "tax_sell": 0.0018,
+    }
+    assert kr.fee_rate == Decimal(str(FEE_RATES["equity_kr"]["buy"]))
+    assert kr.fee_rate == Decimal(str(FEE_RATES["equity_kr"]["sell"]))
+    assert kr.sell_tax_rate == Decimal(str(FEE_RATES["equity_kr"]["tax_sell"]))
+    assert kr.fee_rate * 2 + kr.sell_tax_rate == Decimal("0.00210")
+
+    assert FEE_RATES["equity_us"] == {
+        "buy": 0.0007,
+        "sell": 0.0007,
+        "min_fee_usd": 1.0,
+    }
+    assert us.fee_rate == Decimal(str(FEE_RATES["equity_us"]["buy"]))
+    assert us.fee_rate == Decimal(str(FEE_RATES["equity_us"]["sell"]))
+    assert us.fee_rate * 2 == Decimal("0.0014")
+    assert us.min_fee_absolute == Decimal("1.0")
+    assert kr.slippage_rate == us.slippage_rate == Decimal("0")
+
+
+def test_new_execution_cost_fields_reject_invalid_values() -> None:
+    with pytest.raises(ValueError, match="sell_tax_rate"):
+        MarketExecutionCost(
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            sell_tax_rate=Decimal("1"),
+        )
+    with pytest.raises(ValueError, match="min_fee_absolute"):
+        MarketExecutionCost(
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
+            min_fee_absolute=Decimal("-0.01"),
+        )
+
+
+def test_sell_tax_is_separate_and_applies_only_after_a_sell() -> None:
+    candidate = _candidate()
+    tax_cost = MarketExecutionCost(
+        fee_rate=Decimal("0"),
+        slippage_rate=Decimal("0"),
+        sell_tax_rate=Decimal("0.0018"),
+    )
+    config = replace(
+        _config(costs=False),
+        kr_cost=tax_cost,
+        us_cost=tax_cost,
+    )
+    buy_only_bars = _bars(count=257)
+    buy_only = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: buy_only_bars},
+        config=config,
+    )
+    completed = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: _bars()},
+        config=config,
+    )
+
+    assert buy_only.open_positions
+    assert buy_only.taxes_paid == Decimal("0E-8")
+    assert completed.trade_count >= 1
+    assert completed.fees_paid == Decimal("0E-8")
+    assert completed.taxes_paid > 0
+
+
+def test_minimum_fee_and_none_slippage_are_applied_per_fill() -> None:
+    candidate = _candidate()
+    cost = MarketExecutionCost(
+        fee_rate=Decimal("0"),
+        slippage_rate=Decimal("0.05"),
+        min_fee_absolute=Decimal("1"),
+    )
+    result = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: _bars()},
+        config=replace(
+            _config(costs=False),
+            kr_cost=cost,
+            us_cost=cost,
+            slippage_mode="none",
+        ),
+    )
+    executed = [
+        signal for signal in result.signals if signal.status == SignalStatus.EXECUTED
+    ]
+
+    assert executed
+    assert result.slippage_cost == Decimal("0E-8")
+    assert all(signal.fill_price == signal.reference_open for signal in executed)
+    assert all(signal.fee >= Decimal("1") for signal in executed)
+
+
+def test_signal_close_fill_is_explicitly_marked_as_lookahead_prone() -> None:
+    bars = _bars()
+    candidate = _candidate()
+    result = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        config=replace(_config(), entry_fill="signal_close"),
+    )
+    first_buy = next(
+        signal
+        for signal in result.signals
+        if signal.status == SignalStatus.EXECUTED and signal.action == Action.BUY
+    )
+
+    assert first_buy.signal_at == bars[255].timestamp
+    assert first_buy.execution_at == first_buy.signal_at
+    assert first_buy.reference_open == bars[255].close.quantize(Decimal("0.00000001"))
+    assert {item.code for item in result.evidence} >= {
+        "ENTRY_FILL",
+        "LOOKAHEAD_RISK",
+    }
+    assert "NO_LOOKAHEAD_BOUNDARY" not in {item.code for item in result.evidence}
+
+
+def test_signal_close_future_changes_do_not_rewrite_prior_paths() -> None:
+    base = list(_bars(count=300))
+    cutoff_index = 270
+    cutoff = base[cutoff_index].timestamp
+    falling_list = list(base)
+    for index in range(cutoff_index + 1, len(falling_list)):
+        original = falling_list[index]
+        close = Decimal("90") - Decimal(index - cutoff_index) / Decimal("10")
+        falling_list[index] = replace(
+            original,
+            open=close + Decimal("0.2"),
+            high=close + Decimal("1"),
+            low=close - Decimal("1"),
+            close=close,
+        )
+    candidate = _candidate()
+    config = replace(_config(), entry_fill="signal_close")
+
+    rising = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: tuple(base)},
+        config=config,
+    )
+    falling = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: tuple(falling_list)},
+        config=config,
+    )
+
+    assert tuple(signal for signal in rising.signals if signal.signal_at <= cutoff) == (
+        tuple(signal for signal in falling.signals if signal.signal_at <= cutoff)
+    )
+    assert tuple(
+        point for point in rising.equity_curve if point.timestamp <= cutoff
+    ) == (tuple(point for point in falling.equity_curve if point.timestamp <= cutoff))
+
+
+def test_risk_adjusted_metrics_use_the_observed_equity_grid() -> None:
+    equity_curve = tuple(
+        EquityPoint(
+            timestamp=_START + timedelta(days=days),
+            cash=equity,
+            market_value=Decimal("0"),
+            equity=equity,
+            drawdown=drawdown,
+        )
+        for days, equity, drawdown in (
+            (0, Decimal("100"), Decimal("0")),
+            (120, Decimal("110"), Decimal("0")),
+            (240, Decimal("99"), Decimal("0.10")),
+            (365, Decimal("120"), Decimal("0")),
+        )
+    )
+
+    sharpe, calmar = _risk_adjusted_metrics(
+        equity_curve,
+        max_drawdown=Decimal("0.10"),
+    )
+
+    # 수익률은 1/10, -1/10, 7/33이고 평균은 7/99,
+    # 표본분산은 8167/326700이다. 365일에 3구간이므로
+    # Sharpe = (7/99)/sqrt(8167/326700)*sqrt(3) = 70/sqrt(8167).
+    assert sharpe == Decimal("0.77458086")
+    # Calmar = ((120/100) ** (3/3) - 1) / 0.10.
+    assert calmar == Decimal("2.00000000")
+
+
+def test_calendar_padding_correction_is_sqrt_365_over_252() -> None:
+    seconds_per_year = 365 * 86400
+    trading_grid = tuple(
+        _START + timedelta(seconds=round(index * seconds_per_year / 252))
+        for index in range(253)
+    )
+    padded_calendar_grid = tuple(_START + timedelta(days=index) for index in range(366))
+
+    trading_periods = _annualization_periods_per_year(trading_grid)
+    calendar_periods = _annualization_periods_per_year(padded_calendar_grid)
+
+    assert trading_periods is not None
+    assert calendar_periods is not None
+    returns = tuple(
+        Decimal("0.001") if index % 2 else Decimal("-0.0002") for index in range(252)
+    )
+    mean = sum(returns, start=Decimal("0")) / Decimal(len(returns))
+    variance = sum(
+        ((value - mean) ** 2 for value in returns),
+        start=Decimal("0"),
+    ) / Decimal(len(returns) - 1)
+    unannualized_sharpe = mean / variance.sqrt()
+    trading_sharpe = unannualized_sharpe * trading_periods.sqrt()
+    padded_calendar_sharpe = unannualized_sharpe * calendar_periods.sqrt()
+
+    correction = padded_calendar_sharpe / trading_sharpe
+    expected = (Decimal(365) / Decimal(252)).sqrt()
+    assert abs(correction - expected) < Decimal("0.000001")
+
+
+def test_bias_audit_produces_four_cumulative_rows_and_footnote() -> None:
+    bars = _bars()
+    candidate = _candidate()
+
+    rows = run_bias_audit(
+        (candidate,),
+        {candidate.key: bars},
+        base_config=_config(),
+        benchmark_bars_by_market={"US": _benchmark(bars)},
+    )
+    table = format_bias_audit_table(rows)
+
+    assert tuple(row.scenario for row in rows) == (
+        "baseline",
+        "cost_profile",
+        "slippage_mode",
+        "entry_fill",
+    )
+    assert len(rows) == 4
+    assert "position sizing이 running equity를 따라가므로 경로 의존적" in table
+    assert (
+        sum(
+            line.startswith(
+                ("baseline ", "cost_profile ", "slippage_mode ", "entry_fill ")
+            )
+            for line in table.splitlines()
+        )
+        == 4
+    )
+
+
+def test_bias_audit_help_is_available(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        parse_bias_audit_args(["--help"])
+
+    assert raised.value.code == 0
+    assert "cumulative bias audit" in capsys.readouterr().out
+
+
 def test_diagnostics_cover_cost_stress_turnover_period_regime_and_delay() -> None:
     bars = _bars()
     candidate = _candidate()
@@ -326,6 +612,22 @@ def test_diagnostics_cover_cost_stress_turnover_period_regime_and_delay() -> Non
         "COUNTERFACTUAL",
         "TURNOVER",
     }
+    excluded = replace(
+        result,
+        baseline=replace(
+            result.baseline,
+            sharpe=Decimal("999"),
+            calmar=Decimal("999"),
+            taxes_paid=Decimal("999"),
+        ),
+        delayed_execution=replace(
+            result.delayed_execution,
+            sharpe=Decimal("-999"),
+            calmar=Decimal("-999"),
+            taxes_paid=Decimal("-999"),
+        ),
+    )
+    assert _stable_hash(excluded) == result.determinism_hash
 
 
 def test_diagnostics_run_each_symbol_removal_counterfactual() -> None:
@@ -380,6 +682,23 @@ def test_walk_forward_returns_separate_rolling_train_and_test_folds() -> None:
             for signal in fold.test_result.signals
         )
     assert result.determinism_hash
+    first_fold = result.folds[0]
+    excluded = replace(
+        result,
+        folds=(
+            replace(
+                first_fold,
+                train_result=replace(
+                    first_fold.train_result,
+                    sharpe=Decimal("999"),
+                    calmar=Decimal("999"),
+                    taxes_paid=Decimal("999"),
+                ),
+            ),
+            *result.folds[1:],
+        ),
+    )
+    assert _stable_hash(excluded) == result.determinism_hash
 
 
 def test_kr_and_us_mapping_never_exceeds_the_position_cap() -> None:
@@ -604,6 +923,7 @@ def _readiness(*, track: str = HISTORICAL_PIT_TRACK) -> DailyCandlesReadiness:
         historical_evidence_blockers=historical_blockers,
         unresolved_evidence=historical_blockers,
         reasons=historical_blockers,
+        evidence_track=track,
     )
 
 
@@ -643,13 +963,18 @@ def test_promotion_metrics_require_every_ready_market_benchmark() -> None:
             diagnostics,
             walk,
             _readiness(),
-            track=HISTORICAL_PIT_TRACK,
+            evidence_track=HISTORICAL_PIT_TRACK,
         )
 
 
 def _stored_evidence_payload(
     *, track: str = HISTORICAL_PIT_TRACK
-) -> tuple[dict[str, object], PromotionMetrics]:
+) -> tuple[
+    dict[str, object],
+    PromotionMetrics,
+    PortfolioEvidenceSource,
+    StrategyArtifactManifest,
+]:
     bars = _bars(count=330)
     kr_bars = _bars(count=330, scale=Decimal("10"))
     candidate = _candidate()
@@ -693,9 +1018,16 @@ def _stored_evidence_payload(
         universe_evidence=universe,
     )
     readiness = _readiness(track=track)
-    metrics = derive_promotion_metrics(diagnostics, walk, readiness, track=track)
+    signal_start_at = _START if track == FORWARD_PAPER_TRACK else None
+    metrics = derive_promotion_metrics(
+        diagnostics,
+        walk,
+        readiness,
+        evidence_track=track,
+        signal_start_at=signal_start_at,
+    )
     source = PortfolioEvidenceSource(
-        track=track,  # type: ignore[arg-type]
+        evidence_track=track,
         as_of=readiness.as_of,
         readiness=readiness,
         candidates=candidates,
@@ -743,6 +1075,7 @@ def _stored_evidence_payload(
         dataset_content_hash="d" * 64,
         period_start=bars[0].timestamp,
         period_end=bars[-1].timestamp,
+        signal_start_at=signal_start_at,
     )
     artifact = StrategyArtifactManifest(
         schema_version="kasset.strategy-artifact.v1",
@@ -751,7 +1084,15 @@ def _stored_evidence_payload(
         fingerprint="a" * 64,
         source_commit="b" * 40,
         code_files=(),
-        effective_config={},
+        effective_config={
+            "strategyRegistry": {},
+            "candidateRanker": {},
+            "portfolioBacktest": {},
+            "walkForward": {},
+            "positionSizer": {},
+            "positionManager": {},
+            "regimeWeights": {},
+        },
     )
     raw = build_promotion_raw_payload(
         artifact=artifact,
@@ -764,18 +1105,22 @@ def _stored_evidence_payload(
         thresholds=_thresholds(track=track),
     )
     assert raw["schemaVersion"] == PROMOTION_EVIDENCE_SCHEMA_VERSION
-    assert raw["promotionTrack"] == track
-    return raw, metrics
+    assert raw["evidenceTrack"] == track
+    return raw, metrics, source, artifact
 
 
 @pytest.fixture(scope="module")
 def historical_stored_evidence() -> tuple[dict[str, object], PromotionMetrics]:
-    return _stored_evidence_payload()
+    raw, metrics, _source, _artifact = _stored_evidence_payload()
+    return raw, metrics
 
 
 @pytest.fixture(scope="module")
 def forward_stored_evidence() -> tuple[dict[str, object], PromotionMetrics]:
-    return _stored_evidence_payload(track=FORWARD_PAPER_TRACK)
+    raw, metrics, _source, _artifact = _stored_evidence_payload(
+        track=FORWARD_PAPER_TRACK
+    )
+    return raw, metrics
 
 
 def test_stored_portfolio_result_derives_exact_promotion_metrics(
@@ -864,7 +1209,7 @@ def test_forward_track_payload_replays_without_historical_proof(
 
     raw, expected = copy.deepcopy(forward_stored_evidence)
 
-    assert raw["promotionTrack"] == FORWARD_PAPER_TRACK
+    assert raw["evidenceTrack"] == FORWARD_PAPER_TRACK
     validation = raw["validation"]
     assert isinstance(validation, dict)
     assert validation["pointInTimeProven"] is False
@@ -910,6 +1255,85 @@ def test_forward_payload_cannot_claim_historical_thresholds(
         derive_metrics_from_stored_payload(tampered)
 
 
+def test_stored_payload_records_execution_and_cost_contract() -> None:
+    raw, _metrics, _source, _artifact = _stored_evidence_payload()
+    diagnostics = raw["portfolioDiagnostics"]
+    assert diagnostics["config"]["entryFill"] == "next_open"
+    assert diagnostics["config"]["slippageMode"] == "adverse_rate"
+    expected_cost = {
+        "feeRate": "0.001",
+        "slippageRate": "0.0005",
+        "sellTaxRate": "0",
+        "minFeeAbsolute": "0",
+    }
+    assert diagnostics["costSlippage"]["KR"] == expected_cost
+    assert diagnostics["costSlippage"]["US"] == expected_cost
+    assert diagnostics["baseline"]["taxesPaid"] == "0E-8"
+
+
+def test_legacy_stored_payload_defaults_missing_execution_contract_fields() -> None:
+    raw, expected, _source, _artifact = _stored_evidence_payload()
+    legacy = copy.deepcopy(raw)
+    config = legacy["portfolioDiagnostics"]["config"]
+    config.pop("entryFill")
+    config.pop("slippageMode")
+
+    derived = derive_metrics_from_stored_payload(legacy)
+
+    assert derived.as_snapshot() == expected.as_snapshot()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("entryFill", "signal_close", "promotion_entry_fill_invalid"),
+        ("slippageMode", "none", "promotion_slippage_mode_invalid"),
+    ],
+)
+def test_stored_evidence_rejects_non_promotion_execution_contract(
+    field: str,
+    value: str,
+    reason: str,
+) -> None:
+    raw, _metrics, _source, _artifact = _stored_evidence_payload()
+    tampered = copy.deepcopy(raw)
+    tampered["portfolioDiagnostics"]["config"][field] = value
+
+    with pytest.raises(PromotionEvidenceBuildError, match=reason):
+        derive_metrics_from_stored_payload(tampered)
+
+
+def test_sell_tax_rate_partitions_experiment_identity() -> None:
+    raw, _metrics, source, artifact = _stored_evidence_payload()
+    changed = copy.deepcopy(raw)
+    changed["portfolioDiagnostics"]["costSlippage"]["KR"]["sellTaxRate"] = "0.001"
+    base_identity = _experiment_identity(
+        artifact=artifact,
+        source=source,
+        raw_payload=raw,
+        thresholds=_thresholds(),
+    )
+    changed_identity = _experiment_identity(
+        artifact=artifact,
+        source=source,
+        raw_payload=changed,
+        thresholds=_thresholds(),
+    )
+    base_hashes = compute_identity_hashes(base_identity.components())
+    changed_hashes = compute_identity_hashes(changed_identity.components())
+
+    assert base_hashes["cost_hash"] != changed_hashes["cost_hash"]
+    assert derive_experiment_id(
+        base_identity.strategy_key,
+        base_identity.strategy_version,
+        base_hashes,
+    ) != derive_experiment_id(
+        changed_identity.strategy_key,
+        changed_identity.strategy_version,
+        changed_hashes,
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -929,9 +1353,9 @@ def test_forward_payload_cannot_claim_historical_thresholds(
         (("data", "selectedUniverse"), []),
         (("portfolioDiagnostics", "symbolRemoval"), []),
         (("walkForward", "folds"), []),
-        (("promotionTrack",), "forward_paper"),
-        (("promotionTrack",), "paper_live"),
-        (("promotionTrack",), None),
+        (("evidenceTrack",), "forward_paper"),
+        (("evidenceTrack",), "paper_live"),
+        (("evidenceTrack",), None),
         (("readiness", "unresolvedEvidence"), ["us:fallback_only"]),
         (("readiness", "historicalEvidenceReady"), False),
         (("validation", "corporateActionLedgerProven"), False),
@@ -1157,7 +1581,7 @@ def test_require_readiness_rejects_current_forward_historical_use() -> None:
         PromotionEvidenceBuildError,
         match="us:cohort_not_historical_pit",
     ):
-        _require_readiness(tampered, track="historical_pit")
+        _require_readiness(tampered, evidence_track="historical_pit")
 
 
 def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
@@ -1173,7 +1597,7 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
             ),
             point_in_time_available=False,
             includes_delisted=False,
-            fallback_only=True,
+            fallback_only=False,
             corporate_action_status="unknown",
             historical_evidence_ready=False,
             historical_evidence_blockers=(
@@ -1199,15 +1623,23 @@ def test_require_readiness_forward_track_accepts_a_forward_cohort() -> None:
         unresolved_evidence=tuple(
             code for item in forward_markets for code in item.unresolved_evidence
         ),
+        evidence_track="forward_paper",
     )
 
-    _require_readiness(forward, track="forward_paper")
+    _require_readiness(
+        forward,
+        evidence_track=FORWARD_PAPER_TRACK,
+        signal_start=date(2024, 1, 3),
+    )
 
     with pytest.raises(
         PromotionEvidenceBuildError,
         match="cohort_not_historical_pit",
     ):
-        _require_readiness(forward, track="historical_pit")
+        _require_readiness(
+            replace(forward, evidence_track="historical_pit"),
+            evidence_track="historical_pit",
+        )
 
 
 def test_forward_track_accepts_partial_eligible_cohort_but_historical_rejects() -> None:
@@ -1232,14 +1664,18 @@ def test_forward_track_accepts_partial_eligible_cohort_but_historical_rejects() 
         )
 
     forward = _partial_readiness(_readiness(track=FORWARD_PAPER_TRACK))
-    _require_readiness(forward, track=FORWARD_PAPER_TRACK)
+    _require_readiness(
+        forward,
+        evidence_track=FORWARD_PAPER_TRACK,
+        signal_start=date(2024, 1, 3),
+    )
 
     historical = _partial_readiness(_readiness(track=HISTORICAL_PIT_TRACK))
     with pytest.raises(
         PromotionEvidenceBuildError,
         match="kr:cohort_members_not_ready",
     ):
-        _require_readiness(historical, track=HISTORICAL_PIT_TRACK)
+        _require_readiness(historical, evidence_track=HISTORICAL_PIT_TRACK)
 
 
 def test_require_readiness_forward_track_rejects_the_wrong_cohort_scope() -> None:
@@ -1247,9 +1683,12 @@ def test_require_readiness_forward_track_rejects_the_wrong_cohort_scope() -> Non
 
     with pytest.raises(
         PromotionEvidenceBuildError,
-        match="kr:cohort_not_forward_paper",
+        match="kr:cohort_scope_mismatch",
     ):
-        _require_readiness(readiness, track="forward_paper")
+        _require_readiness(
+            replace(readiness, evidence_track="forward_paper"),
+            evidence_track="forward_paper",
+        )
 
 
 def test_require_readiness_rejects_a_whole_market_unevidenced_session() -> None:
@@ -1269,16 +1708,16 @@ def test_require_readiness_rejects_a_whole_market_unevidenced_session() -> None:
         PromotionEvidenceBuildError,
         match="kr:calendar_session_unevidenced",
     ):
-        _require_readiness(tampered, track="historical_pit")
+        _require_readiness(tampered, evidence_track="historical_pit")
 
 
 def test_require_readiness_rejects_an_unknown_track() -> None:
-    with pytest.raises(PromotionEvidenceBuildError, match="promotion_track_invalid"):
+    with pytest.raises(PromotionEvidenceBuildError, match="evidence_track_invalid"):
         derive_promotion_metrics(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             _readiness(),
-            track="paper_live",
+            evidence_track="paper_live",
         )
 
 
@@ -1315,4 +1754,4 @@ def test_require_readiness_rejects_missing_constituent_lifecycle_evidence(
     )
 
     with pytest.raises(PromotionEvidenceBuildError, match=expected):
-        _require_readiness(tampered, track="historical_pit")
+        _require_readiness(tampered, evidence_track="historical_pit")

@@ -24,10 +24,12 @@ from app.extensions.kasset.automation.strategy_artifact import (
     load_current_strategy_artifact,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
+    DEFAULT_PROMOTION_THRESHOLDS,
     FORWARD_PAPER_PROMOTION_THRESHOLDS,
     FORWARD_PAPER_TRACK,
     HISTORICAL_PIT_PROMOTION_THRESHOLDS,
     HISTORICAL_PIT_TRACK,
+    PROMOTION_EVIDENCE_TRACKS,
     IllegalPromotionTransition,
     PromotionEvidence,
     PromotionIdentityMismatch,
@@ -302,6 +304,115 @@ def test_optional_boolean_threshold_does_not_reject_stronger_evidence() -> None:
     assert evaluation.passed is True
 
 
+def test_track_thresholds_only_waive_survivorship_for_forward_paper() -> None:
+    assert PROMOTION_EVIDENCE_TRACKS == ("historical_pit", "forward_paper")
+    assert (
+        promotion_thresholds_for_track("historical_pit") == DEFAULT_PROMOTION_THRESHOLDS
+    )
+    forward = promotion_thresholds_for_track("forward_paper")
+    assert forward.require_survivorship_evidence is False
+    # 성과 임계값과 나머지 증거 요구는 기본값과 완전히 같다.
+    assert (
+        replace(forward, require_survivorship_evidence=True)
+        == DEFAULT_PROMOTION_THRESHOLDS
+    )
+    with pytest.raises(ValueError, match="unsupported promotion track"):
+        promotion_thresholds_for_track("bogus")
+
+
+def _forward_backtested() -> StrategyPromotion:
+    draft = create_draft("qullamaggie_breakout_portfolio", "3.0.0", at=_NOW)
+    return transition_promotion(
+        draft,
+        PromotionState.BACKTESTED,
+        strategy_key=draft.strategy_key,
+        version=draft.version,
+        at=_NOW + timedelta(minutes=1),
+        metrics=replace(_passing_metrics(), survivorship_evidence=False),
+        evidence=(_evidence(),),
+    )
+
+
+def test_forward_metrics_need_forward_thresholds_and_keep_performance_gates() -> None:
+    backtested = _forward_backtested()
+
+    with pytest.raises(PromotionThresholdNotMet, match="survivorship_evidence"):
+        transition_promotion(
+            backtested,
+            PromotionState.PAPER_APPROVED,
+            strategy_key=backtested.strategy_key,
+            version=backtested.version,
+            at=_NOW + timedelta(minutes=2),
+        )
+
+    forward_thresholds = promotion_thresholds_for_track("forward_paper")
+    approved = transition_promotion(
+        backtested,
+        PromotionState.PAPER_APPROVED,
+        strategy_key=backtested.strategy_key,
+        version=backtested.version,
+        at=_NOW + timedelta(minutes=2),
+        thresholds=forward_thresholds,
+    )
+    assert approved.state == PromotionState.PAPER_APPROVED
+
+    # forward 임계값도 성과 게이트는 기본값 그대로다.
+    weak = replace(
+        _passing_metrics(),
+        survivorship_evidence=False,
+        max_drawdown=Decimal("0.30"),
+    )
+    weak_backtested = replace(
+        backtested, metrics=weak, metrics_hash=hash_metrics_snapshot(weak)
+    )
+    with pytest.raises(PromotionThresholdNotMet, match="max_drawdown"):
+        transition_promotion(
+            weak_backtested,
+            PromotionState.PAPER_APPROVED,
+            strategy_key=weak_backtested.strategy_key,
+            version=weak_backtested.version,
+            at=_NOW + timedelta(minutes=2),
+            thresholds=forward_thresholds,
+        )
+
+
+def test_paper_gate_and_kill_switch_do_not_depend_on_evidence_track() -> None:
+    backtested = _forward_backtested()
+    approved = transition_promotion(
+        backtested,
+        PromotionState.PAPER_APPROVED,
+        strategy_key=backtested.strategy_key,
+        version=backtested.version,
+        at=_NOW + timedelta(minutes=2),
+        thresholds=promotion_thresholds_for_track("forward_paper"),
+    )
+    suspended = transition_promotion(
+        approved,
+        PromotionState.PAPER_SUSPENDED,
+        strategy_key=approved.strategy_key,
+        version=approved.version,
+        at=_NOW + timedelta(minutes=3),
+        evidence=(_evidence("KILL_SWITCH"),),
+    )
+
+    live = paper_approval_for(
+        (approved,), strategy_key=approved.strategy_key, version=approved.version
+    )
+    killed = paper_approval_for(
+        (suspended,), strategy_key=approved.strategy_key, version=approved.version
+    )
+    unregistered = paper_approval_for(
+        (approved,), strategy_key=approved.strategy_key, version="9.9.9"
+    )
+
+    assert live.approved is True
+    assert live.metrics_hash == approved.metrics_hash
+    assert killed.approved is False
+    assert killed.reason == "state_paper_suspended"
+    assert unregistered.approved is False
+    assert unregistered.reason == "strategy_version_not_registered"
+
+
 class _PromotionDb:
     def __init__(self, row: object | None) -> None:
         self.row = row
@@ -404,12 +515,221 @@ def _trust(
             strategy_version=approved.version,
         ),
         metrics=metrics or _passing_metrics(),
+        evidence_track=track,
         artifact_fingerprint="a" * 64,
         source_commit="b" * 40,
         evidence_schema_version=PROMOTION_EVIDENCE_SCHEMA_VERSION,
-        track=track,  # type: ignore[arg-type]
         thresholds=promotion_thresholds_for_track(track),
     )
+
+
+class _CandidateChainDb:
+    def __init__(
+        self,
+        *,
+        candidate: SimpleNamespace,
+        run: SimpleNamespace,
+        experiment: SimpleNamespace,
+    ) -> None:
+        self.joined = (candidate, run, experiment)
+        self.row: object | None = None
+        self.commit_count = 0
+
+    async def execute(self, _statement: object) -> SimpleNamespace:
+        return SimpleNamespace(one_or_none=lambda: self.joined)
+
+    async def scalar(self, _statement: object) -> object | None:
+        return self.row
+
+    def add(self, row: object) -> None:
+        self.row = row
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+
+
+def _candidate_chain_db(
+    monkeypatch: pytest.MonkeyPatch,
+    metrics: PromotionMetrics,
+    *,
+    evidence_track: object = "historical_pit",
+    omit_track: bool = False,
+) -> _CandidateChainDb:
+    raw: dict[str, object] = {
+        "schemaVersion": PROMOTION_EVIDENCE_SCHEMA_VERSION,
+        "strategy": {
+            "key": "qullamaggie_breakout_portfolio",
+            "version": "1.0.0",
+            "artifactFingerprint": "a" * 64,
+            "sourceCommit": "b" * 40,
+        },
+        "promotionThresholds": {},
+    }
+    if not omit_track:
+        raw["evidenceTrack"] = evidence_track
+    track_for_status = "historical_pit" if omit_track else evidence_track
+    if (
+        isinstance(track_for_status, str)
+        and track_for_status in PROMOTION_EVIDENCE_TRACKS
+    ):
+        evaluation = evaluate_thresholds(
+            metrics, promotion_thresholds_for_track(track_for_status)
+        )
+        status = "eligible" if evaluation.passed else "non_promotable"
+        reason_code = (
+            "thresholds_passed"
+            if evaluation.passed
+            else f"threshold_failed:{evaluation.failed_metrics[0]}"
+        )
+    else:
+        status = "eligible"
+        reason_code = "thresholds_passed"
+    experiment = SimpleNamespace(
+        id=11,
+        experiment_id="experiment-id",
+        strategy_key="qullamaggie_breakout_portfolio",
+        strategy_version="1.0.0",
+        frozen_config_hash="config-hash",
+        dataset_manifest_hash="data-hash",
+    )
+    run = SimpleNamespace(
+        id=9,
+        raw_payload=raw,
+        trial_status="completed",
+        strategy_experiment_id=experiment.id,
+        artifact_hash=promotion_service.canonical_sha256(raw),
+        gate_artifact_hash="a" * 64,
+    )
+    candidate = SimpleNamespace(
+        id=7,
+        backtest_run_id=run.id,
+        experiment_id=experiment.experiment_id,
+        run_config_hash=experiment.frozen_config_hash,
+        run_data_hash=experiment.dataset_manifest_hash,
+        metrics=metrics.as_snapshot(),
+        thresholds={},
+        status=status,
+        reason_code=reason_code,
+    )
+    monkeypatch.setattr(promotion_service, "_verify_experiment", lambda _value: None)
+    monkeypatch.setattr(
+        promotion_service,
+        "derive_metrics_from_stored_payload",
+        lambda _raw: metrics,
+    )
+    return _CandidateChainDb(
+        candidate=candidate,
+        run=run,
+        experiment=experiment,
+    )
+
+
+@pytest.mark.asyncio
+async def test_forward_candidate_stored_track_reaches_paper_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = replace(_passing_metrics(), survivorship_evidence=False)
+    db = _candidate_chain_db(
+        monkeypatch,
+        metrics,
+        evidence_track="forward_paper",
+    )
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+
+    await service.create_draft(7, at=_NOW, operator_reason="forward 후보 등록")
+    approved = await service.approve_candidate(
+        7,
+        at=_NOW + timedelta(minutes=1),
+        operator_reason="forward PAPER 승인",
+    )
+
+    assert approved.state == PromotionState.PAPER_APPROVED
+    assert approved.threshold_evaluation is not None
+    assert approved.threshold_evaluation.passed is True
+
+
+@pytest.mark.asyncio
+async def test_forward_candidate_still_rejects_mdd_above_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = replace(
+        _passing_metrics(),
+        survivorship_evidence=False,
+        max_drawdown=Decimal("0.21"),
+    )
+    db = _candidate_chain_db(
+        monkeypatch,
+        metrics,
+        evidence_track="forward_paper",
+    )
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+
+    await service.create_draft(7, at=_NOW, operator_reason="forward 후보 등록")
+    with pytest.raises(PromotionThresholdNotMet, match="max_drawdown"):
+        await service.approve_candidate(
+            7,
+            at=_NOW + timedelta(minutes=1),
+            operator_reason="성과 임계값 위반 거절",
+        )
+
+
+@pytest.mark.asyncio
+async def test_historical_candidate_still_requires_survivorship_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = replace(_passing_metrics(), survivorship_evidence=False)
+    db = _candidate_chain_db(
+        monkeypatch,
+        metrics,
+        evidence_track="historical_pit",
+    )
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+
+    await service.create_draft(7, at=_NOW, operator_reason="historical 후보 등록")
+    with pytest.raises(PromotionThresholdNotMet, match="survivorship_evidence"):
+        await service.approve_candidate(
+            7,
+            at=_NOW + timedelta(minutes=1),
+            operator_reason="PIT 증거 누락 거절",
+        )
+
+
+@pytest.mark.asyncio
+async def test_candidate_without_track_keeps_historical_pit_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _candidate_chain_db(
+        monkeypatch,
+        _passing_metrics(),
+        omit_track=True,
+    )
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+
+    trust = await service._candidate_trust(7, for_update=False)
+    assert trust.evidence_track == "historical_pit"
+
+    await service.create_draft(7, at=_NOW, operator_reason="legacy 후보 등록")
+    approved = await service.approve_candidate(
+        7,
+        at=_NOW + timedelta(minutes=1),
+        operator_reason="legacy PAPER 승인",
+    )
+    assert approved.state == PromotionState.PAPER_APPROVED
+
+
+@pytest.mark.asyncio
+async def test_candidate_with_unknown_stored_track_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _candidate_chain_db(
+        monkeypatch,
+        _passing_metrics(),
+        evidence_track="unknown_track",
+    )
+    service = StrategyPromotionService(db)  # type: ignore[arg-type]
+
+    with pytest.raises(PromotionCandidateTrustError, match="evidence_track_invalid"):
+        await service._candidate_trust(7, for_update=False)
 
 
 @pytest.mark.asyncio
