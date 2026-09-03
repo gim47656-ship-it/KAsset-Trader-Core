@@ -1,8 +1,17 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-03 (KRW/USD 정산 장부 분리로 같은 owner·계좌에서 KRX·US 자동주문 동시 허용, 자동주문 표시·체결 푸시 WIP 검증 완료·PR #43)
+갱신: 2026-09-04 (관심종목 ±5% 알림을 KST 하루 동안 목록에 보존 — 이벤트 표·migration `20260903_kasset_alert_events`; KRW/USD 정산 장부 분리는 `e4e6bf51`로 배포 완료)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-04 새벽 — 급등·급락 알림 하루 보존 (PR #45, migration 있음)
+- 증상(사용자 보고): 급락 푸시는 오는데 앱 `알림` 목록에 안 쌓이고, 등락률이 −5% 안쪽으로 회복하면 사라졌다. 원인은 `daily_routine_service._load_price_alerts`가 저장 없이 조회 시점 현재가로만 ±5%를 다시 계산했기 때문이다(`kasset_push_deliveries`는 발송 dedupe 기록일 뿐 목록의 소스가 아니다).
+- 수정: 새 표 `kasset_routine_price_alert_events`(owner·KST 날짜·kind·market·symbol 유니크; `detected_rate_pct`/`detected_at`/`source`는 첫 포착 값 고정, `last_rate_pct`/`last_seen_at`만 갱신)에 임계값을 넘는 관측을 `INSERT … ON CONFLICT DO UPDATE`로 기록하고, 목록은 **오늘 기록 ∪ 지금 넘는 종목**을 돌려준다. 기록은 앱 GET과 10분 푸시 job(`get_alerts`) 양쪽에서 일어난다. 기록 실패는 로그 후 rollback하고 라이브 알림만 돌려준다(fail-open).
+- wire 계약(`DailyRoutineAlert`): 가격 알림 `id`가 하루 고정 `price:{YYYY-MM-DD}:{kind}:{market}:{symbol}`로 바뀌었다(구 `_price_alert_id`는 시각·등락률을 섞어 매 조회 바뀌었음). `headline`/`occurredAt`은 첫 포착 등락률·시각. 추가 필드 `detectedRatePct`, `currentRatePct`(소수 2자리 문자열), `recovered`(임계값 안으로 돌아왔거나 방향이 바뀜), `lastSeenAt`. 뉴스 알림은 새 필드가 `null`/`false`다.
+- 푸시: `fcm_push_service._price_alerts`가 `recovered` 알림을 제외한다 — 목록에는 남지만 이미 끝난 움직임을 새 기기에 푸시하지 않는다. dedupe 키·발송 경로는 그대로다.
+- Android(HANSE `main`): `RoutineAlert`에 위 4필드 파싱(없으면 null/false), 알림 행 아래 `현재 -2.10%` 또는 `회복 · 현재 -2.10%` 한 줄, 상세 시트에 `포착 등락률`/`현재 등락률 (회복)`/`최근 시세 시각` 행. unit 358 passed.
+- 검증: focused pytest(`test_daily_routine`+briefing+push+contract) `76 passed`; `test_migration.py`+`test_multi_user_migration_guards.py` `6 passed`(실 PostgreSQL upgrade→downgrade→upgrade 왕복); `tests/extensions/kasset` 전체는 리비전 이름 축약 전 실행에서 `1156 passed, 1 failed`였고 그 1건(`alembic_version.version_num` varchar(32) 초과 — 리비전 id 36자)은 id를 `20260903_kasset_alert_events`(28자)로 줄여 해소, 해당 두 파일 재실행 통과. `SCHEMA_BOOTSTRAP_VERSION` 51→52, `test_migration.py`/guard 경계 목록에 표 등록.
+- 배포: PR merge 뒤 서버에서 `docker compose --env-file .env.kasset -f docker-compose.kasset.yml --profile migration run --rm migration`(= `alembic upgrade head`)을 먼저 적용하고 5개 컨테이너를 새 SHA로 올린다. 이전 배포와 동일하게 `ai-mcp`는 `--profile ai-mcp up -d ai-mcp`를 따로 실행한다. **리비전 id는 32자 이하로 짓는다**(`alembic_version.version_num`이 varchar(32)).
 
 ## 2026-09-03 밤 — KRW/USD 정산 장부 분리 (PR #43 뒤 후속 PR, 배포 직전)
 - 증상: owner 4는 `AUTO_PAPER`·kill switch off·promotion bypass on인데 미국장 자동주문이 구조적으로 불가능했다. 원인은 `AITradingLimits.currency` 하나가 시장 관문 역할을 겸한 것이다 — `evaluate_hard_risk`의 `expected_market = "KRX" if limits.currency == "KRW" else "US"`가 US 주문을 `POSITION` 실패로 떨어뜨리고, `usage()`가 KRW·USD 원가·손익·주문수를 환산 없이 합산했다. 같은 PAPER 계좌에 `cash_krw`와 `cash_usd`가 나란히 있으므로 계좌·owner 분리는 해법이 아니다.

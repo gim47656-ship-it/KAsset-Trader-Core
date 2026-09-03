@@ -45,6 +45,7 @@ _BOUNDARY_TABLES = (
     "kasset_ai_runtime_config",
     "password_reset_tokens",
     "kasset_paper_position_states",
+    "kasset_routine_price_alert_events",
     "kasset_ai_daily_routine_settings",
     "kasset_push_deliveries",
     "kasset_android_paper_orders",

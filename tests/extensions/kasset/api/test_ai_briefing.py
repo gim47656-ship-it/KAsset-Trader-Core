@@ -333,6 +333,10 @@ def test_daily_routine_alerts_join_owner_ai_context_as_read_only_evidence(
             "source": "Reuters",
             "url": None,
             "occurredAt": body["routineAlerts"][0]["occurredAt"],
+            "detectedRatePct": None,
+            "currentRatePct": None,
+            "recovered": False,
+            "lastSeenAt": None,
         }
     ]
 

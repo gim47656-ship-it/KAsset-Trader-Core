@@ -46,6 +46,13 @@ class DailyRoutineAlert(AndroidWireModel):
     source: str | None = None
     url: str | None = None
     occurred_at: datetime
+    # 가격 알림은 그날 처음 포착된 등락률(detected)과 지금 등락률(current)을 함께 준다.
+    # 등락률이 임계값 안으로 돌아오면 recovered가 참이 되지만 목록에는 하루 동안 남는다.
+    # 뉴스 알림은 셋 다 비워 둔다. 등락률은 소수 문자열이다.
+    detected_rate_pct: str | None = None
+    current_rate_pct: str | None = None
+    recovered: bool = False
+    last_seen_at: datetime | None = None
 
 
 class DailyRoutineResponse(AndroidWireModel):
