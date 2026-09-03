@@ -30,6 +30,7 @@ PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
 _BOUNDARY_TABLES = (
     "review.kasset_paper_execution_events",
     "review.kasset_automation_cycle_events",
+    "review.kasset_intraday_rvol_shadow",
     "review.ai_call_events",
     "research.kr_candles_1m_toss",
     "review.ai_recommendations",
