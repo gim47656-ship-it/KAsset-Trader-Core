@@ -384,6 +384,68 @@ class KAssetDailyRoutineSetting(Base):
     )
 
 
+class KAssetRoutinePriceAlertEvent(Base):
+    """관심종목 ±5% 알림이 KST 하루 안에 처음 포착된 기록.
+
+    알림 목록은 현재가로 매번 다시 계산되므로 등락률이 임계값 안으로 돌아오면 사라진다.
+    이 표는 그날 처음 포착된 방향·등락률·시각을 붙잡아 두어 목록이 하루 동안 남게 한다.
+    ``detected_*``는 첫 포착 값으로 고정하고 ``last_*``만 이후 조회에서 갱신한다.
+    """
+
+    __tablename__ = "kasset_routine_price_alert_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "routine_date",
+            "kind",
+            "market",
+            "symbol",
+            name="uq_kasset_routine_price_alert_event_day_key",
+        ),
+        CheckConstraint(
+            "kind IN ('RAPID_RISE', 'RAPID_FALL')",
+            name="ck_kasset_routine_price_alert_event_kind",
+        ),
+        CheckConstraint(
+            "market IN ('KRX', 'US', 'CRYPTO')",
+            name="ck_kasset_routine_price_alert_event_market",
+        ),
+        Index(
+            "ix_kasset_routine_price_alert_event_owner_date",
+            "owner_user_id",
+            "routine_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    routine_date: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    market: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    detected_rate_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    last_rate_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class KAssetPaperPositionState(Base):
     """Deterministic lifecycle state for one concrete PAPER position cycle."""
 

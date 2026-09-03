@@ -517,7 +517,11 @@ async def _push_targets(
 
 
 def _price_alerts(alerts: Sequence[DailyRoutineAlert]) -> list[DailyRoutineAlert]:
-    """Only the ±5% price routines. News alerts are out of scope for push."""
+    """Only the ±5% price routines that are still beyond the threshold.
+
+    News alerts are out of scope for push. Recovered alerts stay in the app's
+    day list but must not trigger a push for a move that is already over.
+    """
 
     return [
         alert
@@ -525,6 +529,7 @@ def _price_alerts(alerts: Sequence[DailyRoutineAlert]) -> list[DailyRoutineAlert
         if alert.kind in PUSH_ALERT_KINDS
         and alert.market is not None
         and alert.symbol is not None
+        and not alert.recovered
     ]
 
 

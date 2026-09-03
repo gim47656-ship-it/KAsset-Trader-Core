@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -26,11 +27,13 @@ from app.extensions.kasset.api.daily_routine_schemas import (
 )
 from app.extensions.kasset.api.paper_schemas import Quote
 from app.extensions.kasset.api.schemas import WatchlistMarket
-from app.extensions.kasset.models import KAssetDailyRoutineSetting
+from app.extensions.kasset.models import (
+    KAssetDailyRoutineSetting,
+    KAssetRoutinePriceAlertEvent,
+)
 from app.models.news import NewsAnalysisResult, NewsArticle
 from app.models.trading import Instrument, InstrumentType, UserWatchItem
 from app.services.daily_candles.repository import (
-    DailyCandleRow,
     DailyCandlesRepository,
     MarketKey,
 )
@@ -39,6 +42,7 @@ from app.services.news_summary_service import (
     complete_korean_analysis_exists,
 )
 
+logger = logging.getLogger(__name__)
 _RAPID_CHANGE_THRESHOLD = Decimal("5")
 _NEWS_WINDOW = timedelta(hours=24)
 _NEWS_ALERT_LIMIT_PER_KIND = 10
@@ -162,6 +166,20 @@ class _ValidatedNewsAnalysis:
     translated_excerpt: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PriceObservation:
+    """관심종목 하나의 현재 일간 등락률 관측."""
+
+    market: WatchlistMarket
+    symbol: str
+    name: str
+    rate: Decimal
+    occurred_at: datetime
+    source: str
+    completed: bool
+    session_state: str | None
+
+
 async def _default_quote_loader(
     db: AsyncSession, market: str, symbols: Sequence[str]
 ) -> list[Quote]:
@@ -212,13 +230,75 @@ def _quote_occurred_at(value: str) -> datetime | None:
     return parsed
 
 
-def _price_alert_id(
-    *, kind: RoutineKey, market: str, symbol: str, occurred_at: datetime, rate: Decimal
-) -> str:
-    material = "|".join(
-        (kind, market, symbol, occurred_at.isoformat(), format(rate, "f"))
-    ).encode()
-    return f"price:{hashlib.sha256(material).hexdigest()[:24]}"
+def _rapid_kind(rate: Decimal | None) -> RoutineKey | None:
+    if rate is None:
+        return None
+    if rate >= _RAPID_CHANGE_THRESHOLD:
+        return "RAPID_RISE"
+    if rate <= -_RAPID_CHANGE_THRESHOLD:
+        return "RAPID_FALL"
+    return None
+
+
+def _rate_text(rate: Decimal) -> str:
+    """등락률 wire 문자열. Numeric(10,4) 저장값도 화면과 같은 소수 2자리로 맞춘다."""
+    return format(rate.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
+
+
+def _provenance(observation: _PriceObservation) -> str:
+    if observation.completed:
+        return "저장된 최신 완료 일봉 종가"
+    if observation.session_state == "CLOSED":
+        return "장 마감 후 최신 시세 스냅샷"
+    if observation.session_state is None:
+        return "장 상태 미확인 최신 시세 스냅샷"
+    return f"{observation.session_state} 형성 중 시세"
+
+
+def _price_alert(
+    *,
+    kind: RoutineKey,
+    market: WatchlistMarket,
+    symbol: str,
+    name: str,
+    detected_rate: Decimal,
+    detected_at: datetime,
+    source: str,
+    current_rate: Decimal | None,
+    last_seen_at: datetime | None,
+    provenance: str | None,
+    routine_date: date,
+) -> DailyRoutineAlert:
+    """하루 동안 같은 id를 유지하는 가격 알림 한 건을 만든다.
+
+    headline은 첫 포착 등락률로 고정하고, 지금 등락률은 별도 필드로 준다.
+    등락률이 임계값 안으로 돌아왔거나 방향이 바뀌면 ``recovered``다.
+    """
+
+    direction = "급등" if kind == "RAPID_RISE" else "급락"
+    if provenance is None:
+        summary = (
+            "오늘 처음 포착된 일간 등락률입니다. 원 시각과 출처를 그대로 표시합니다."
+        )
+    else:
+        summary = (
+            f"{provenance} 기준 일간 등락률입니다. 원 시각과 출처를 그대로 표시합니다."
+        )
+    return DailyRoutineAlert(
+        id=f"price:{routine_date.isoformat()}:{kind}:{market}:{symbol}",
+        kind=kind,
+        headline=f"{name}({symbol}) {format(detected_rate, '+.2f')}% {direction}",
+        summary=summary,
+        symbol=symbol,
+        market=market,
+        source=source,
+        url=None,
+        occurred_at=detected_at,
+        detected_rate_pct=_rate_text(detected_rate),
+        current_rate_pct=_rate_text(current_rate) if current_rate is not None else None,
+        recovered=current_rate is not None and _rapid_kind(current_rate) != kind,
+        last_seen_at=last_seen_at,
+    )
 
 
 def _article_occurred_at(value: datetime) -> datetime:
@@ -428,7 +508,9 @@ class DailyRoutineService:
         enabled = frozenset(selection.enabled_routines)
         alerts: list[DailyRoutineAlert] = []
         if enabled & {"RAPID_RISE", "RAPID_FALL"}:
-            alerts.extend(await self._load_price_alerts(db, owner_user_id, enabled))
+            alerts.extend(
+                await self._load_price_alerts(db, owner_user_id, enabled, now=now)
+            )
         if enabled & {"TRUMP_POLICY", "GLOBAL_FINANCIAL_NEWS"}:
             alerts.extend(await self._load_news_alerts(db, enabled, now=now))
         return sorted(
@@ -487,12 +569,11 @@ class DailyRoutineService:
             for symbol, name, instrument_type in rows
         ]
 
-    async def _load_price_alerts(
-        self,
-        db: AsyncSession,
-        owner_user_id: int,
-        enabled: frozenset[str],
-    ) -> list[DailyRoutineAlert]:
+    async def _load_price_observations(
+        self, db: AsyncSession, owner_user_id: int
+    ) -> list[_PriceObservation]:
+        """관심종목 전체의 현재 일간 등락률을 읽는다. 임계값 판정은 하지 않는다."""
+
         watch_symbols = await self._load_watch_symbols(db, owner_user_id)
         by_market: dict[WatchlistMarket, list[_WatchSymbol]] = {
             "KRX": [],
@@ -502,7 +583,7 @@ class DailyRoutineService:
         for item in watch_symbols:
             by_market[item.market].append(item)
 
-        alerts: list[DailyRoutineAlert] = []
+        observations: list[_PriceObservation] = []
         quoted_markets: tuple[WatchlistMarket, ...] = ("KRX", "US")
         for market in quoted_markets:
             items = by_market[market]
@@ -520,19 +601,18 @@ class DailyRoutineService:
                 occurred_at = _quote_occurred_at(quote.as_of)
                 if rate is None or occurred_at is None:
                     continue
-                alert = self._price_alert_from_values(
-                    market=market,
-                    symbol=quote.symbol,
-                    name=name,
-                    rate=rate,
-                    occurred_at=occurred_at,
-                    source=quote.source,
-                    completed=quote.source == krx_quotes.CANDLE_QUOTE_SOURCE,
-                    enabled=enabled,
-                    session_state=quote.session,
+                observations.append(
+                    _PriceObservation(
+                        market=market,
+                        symbol=quote.symbol,
+                        name=name,
+                        rate=rate,
+                        occurred_at=occurred_at,
+                        source=quote.source,
+                        completed=quote.source == krx_quotes.CANDLE_QUOTE_SOURCE,
+                        session_state=quote.session,
+                    )
                 )
-                if alert is not None:
-                    alerts.append(alert)
 
         crypto_items = by_market["CRYPTO"]
         if crypto_items:
@@ -543,95 +623,198 @@ class DailyRoutineService:
                 count=2,
             )
             for item in crypto_items:
-                alert = self._crypto_price_alert(
-                    item=item,
-                    rows=candles.get(item.symbol, []),
-                    enabled=enabled,
+                rows = candles.get(item.symbol, [])
+                if len(rows) < 2:
+                    continue
+                previous = _decimal(rows[-2].close)
+                current = _decimal(rows[-1].close)
+                if previous is None or current is None or previous == 0:
+                    continue
+                latest = rows[-1]
+                observations.append(
+                    _PriceObservation(
+                        market="CRYPTO",
+                        symbol=item.symbol,
+                        name=item.name,
+                        rate=(
+                            (current - previous) / previous * Decimal("100")
+                        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+                        occurred_at=_aware(latest.time_utc),
+                        source=latest.source,
+                        completed=True,
+                        session_state=None,
+                    )
                 )
-                if alert is not None:
-                    alerts.append(alert)
+        return observations
+
+    async def _load_price_alerts(
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        enabled: frozenset[str],
+        *,
+        now: datetime,
+    ) -> list[DailyRoutineAlert]:
+        """오늘(KST) 포착된 ±5% 알림을 돌려준다.
+
+        지금 임계값을 넘는 종목은 즉시 기록되고, 이미 기록된 종목은 등락률이
+        임계값 안으로 돌아와도 ``recovered``로 표시된 채 하루 동안 남는다. 기록
+        실패는 로그만 남기고 지금 넘는 종목을 그대로 돌려준다 — 알림 조회가
+        이력 저장 때문에 실패하면 안 된다.
+        """
+
+        observations = await self._load_price_observations(db, owner_user_id)
+        by_symbol = {(item.market, item.symbol): item for item in observations}
+        live: dict[tuple[str, str, str], _PriceObservation] = {}
+        for item in observations:
+            kind = _rapid_kind(item.rate)
+            if kind is not None and kind in enabled:
+                live[(kind, item.market, item.symbol)] = item
+
+        routine_date = now.astimezone(KST).date()
+        try:
+            events = await self._record_price_alert_events(
+                db,
+                owner_user_id,
+                routine_date=routine_date,
+                live=live,
+                by_symbol=by_symbol,
+                now=now,
+            )
+        except Exception:
+            logger.exception(
+                "kasset routine price alert history unavailable: owner_user_id=%s",
+                owner_user_id,
+            )
+            # 실패한 트랜잭션을 정리해야 세션을 계속 쓸 수 있다. 가짜 세션처럼
+            # rollback이 없거나 실패해도 알림 응답은 그대로 나가야 한다.
+            with suppress(Exception):
+                await db.rollback()
+            events = []
+
+        alerts: list[DailyRoutineAlert] = []
+        seen: set[tuple[str, str, str]] = set()
+        for event in events:
+            kind = event.kind
+            if kind not in enabled or kind not in ("RAPID_RISE", "RAPID_FALL"):
+                continue
+            key = (kind, event.market, event.symbol)
+            seen.add(key)
+            observation = by_symbol.get((event.market, event.symbol))
+            current_rate = (
+                observation.rate if observation is not None else event.last_rate_pct
+            )
+            alerts.append(
+                _price_alert(
+                    kind=kind,  # type: ignore[arg-type]
+                    market=event.market,  # type: ignore[arg-type]
+                    symbol=event.symbol,
+                    name=event.name,
+                    detected_rate=Decimal(event.detected_rate_pct),
+                    detected_at=_aware(event.detected_at),
+                    source=event.source,
+                    current_rate=current_rate,
+                    last_seen_at=(
+                        observation.occurred_at
+                        if observation is not None
+                        else (
+                            _aware(event.last_seen_at)
+                            if event.last_seen_at is not None
+                            else None
+                        )
+                    ),
+                    provenance=(
+                        _provenance(observation) if observation is not None else None
+                    ),
+                    routine_date=routine_date,
+                )
+            )
+        for key, item in live.items():
+            if key in seen:
+                continue
+            kind, _market, _symbol = key
+            alerts.append(
+                _price_alert(
+                    kind=kind,  # type: ignore[arg-type]
+                    market=item.market,
+                    symbol=item.symbol,
+                    name=item.name,
+                    detected_rate=item.rate,
+                    detected_at=item.occurred_at,
+                    source=item.source,
+                    current_rate=item.rate,
+                    last_seen_at=item.occurred_at,
+                    provenance=_provenance(item),
+                    routine_date=routine_date,
+                )
+            )
         return alerts
 
     @staticmethod
-    def _crypto_price_alert(
+    async def _record_price_alert_events(
+        db: AsyncSession,
+        owner_user_id: int,
         *,
-        item: _WatchSymbol,
-        rows: Sequence[DailyCandleRow],
-        enabled: frozenset[str],
-    ) -> DailyRoutineAlert | None:
-        if len(rows) < 2:
-            return None
-        previous = _decimal(rows[-2].close)
-        current = _decimal(rows[-1].close)
-        if previous is None or current is None or previous == 0:
-            return None
-        rate = ((current - previous) / previous * Decimal("100")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        latest = rows[-1]
-        return DailyRoutineService._price_alert_from_values(
-            market="CRYPTO",
-            symbol=item.symbol,
-            name=item.name,
-            rate=rate,
-            occurred_at=_aware(latest.time_utc),
-            source=latest.source,
-            completed=True,
-            enabled=enabled,
-        )
+        routine_date: date,
+        live: dict[tuple[str, str, str], _PriceObservation],
+        by_symbol: dict[tuple[str, str], _PriceObservation],
+        now: datetime,
+    ) -> list[KAssetRoutinePriceAlertEvent]:
+        """지금 넘는 종목을 오늘 기록에 넣고, 오늘 기록 전체를 최신 등락률로 돌려준다."""
 
-    @staticmethod
-    def _price_alert_from_values(
-        *,
-        market: WatchlistMarket,
-        symbol: str,
-        name: str,
-        rate: Decimal,
-        occurred_at: datetime,
-        source: str,
-        completed: bool,
-        enabled: frozenset[str],
-        session_state: str | None = None,
-    ) -> DailyRoutineAlert | None:
-        kind: RoutineKey
-        direction: str
-        if rate >= _RAPID_CHANGE_THRESHOLD and "RAPID_RISE" in enabled:
-            kind = "RAPID_RISE"
-            direction = "급등"
-        elif rate <= -_RAPID_CHANGE_THRESHOLD and "RAPID_FALL" in enabled:
-            kind = "RAPID_FALL"
-            direction = "급락"
-        else:
-            return None
-        rate_text = format(rate, "+.2f")
-        if completed:
-            provenance = "저장된 최신 완료 일봉 종가"
-        elif session_state == "CLOSED":
-            provenance = "장 마감 후 최신 시세 스냅샷"
-        elif session_state is None:
-            provenance = "장 상태 미확인 최신 시세 스냅샷"
-        else:
-            provenance = f"{session_state} 형성 중 시세"
-        return DailyRoutineAlert(
-            id=_price_alert_id(
-                kind=kind,
-                market=market,
-                symbol=symbol,
-                occurred_at=occurred_at,
-                rate=rate,
-            ),
-            kind=kind,
-            headline=f"{name}({symbol}) {rate_text}% {direction}",
-            summary=(
-                f"{provenance} 기준 일간 등락률입니다. "
-                "원 시각과 출처를 그대로 표시합니다."
-            ),
-            symbol=symbol,
-            market=market,
-            source=source,
-            url=None,
-            occurred_at=occurred_at,
+        if live:
+            statement = pg_insert(KAssetRoutinePriceAlertEvent).values(
+                [
+                    {
+                        "owner_user_id": owner_user_id,
+                        "routine_date": routine_date,
+                        "kind": kind,
+                        "market": item.market,
+                        "symbol": item.symbol,
+                        "name": item.name,
+                        "detected_rate_pct": item.rate,
+                        "detected_at": item.occurred_at,
+                        "source": item.source,
+                        "last_rate_pct": item.rate,
+                        "last_seen_at": item.occurred_at,
+                        "updated_at": now,
+                    }
+                    for (kind, _market, _symbol), item in live.items()
+                ]
+            )
+            # 첫 포착 값(detected_*)은 그대로 두고 최근 관측만 갱신한다.
+            statement = statement.on_conflict_do_update(
+                constraint="uq_kasset_routine_price_alert_event_day_key",
+                set_={
+                    "last_rate_pct": statement.excluded.last_rate_pct,
+                    "last_seen_at": statement.excluded.last_seen_at,
+                    "updated_at": now,
+                },
+            )
+            await db.execute(statement)
+
+        events = list(
+            (
+                await db.scalars(
+                    select(KAssetRoutinePriceAlertEvent).where(
+                        KAssetRoutinePriceAlertEvent.owner_user_id == owner_user_id,
+                        KAssetRoutinePriceAlertEvent.routine_date == routine_date,
+                    )
+                )
+            ).all()
         )
+        # 임계값 안으로 돌아온 종목도 관심종목에 남아 있으면 최근 등락률을 따라간다.
+        for event in events:
+            if (event.kind, event.market, event.symbol) in live:
+                continue
+            observation = by_symbol.get((event.market, event.symbol))
+            if observation is None:
+                continue
+            event.last_rate_pct = observation.rate
+            event.last_seen_at = observation.occurred_at
+            event.updated_at = now
+        await db.commit()
+        return events
 
     async def _load_news_alerts(
         self,

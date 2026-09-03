@@ -359,6 +359,150 @@ async def test_watchlist_price_alerts_include_exact_five_percent_boundaries_and_
     wire_alerts = first.model_dump(by_alias=True, mode="json")["alerts"]
     assert all(alert["translatedTitle"] is None for alert in wire_alerts)
     assert all(alert["translatedExcerpt"] is None for alert in wire_alerts)
+    assert all(not alert.recovered for alert in first.alerts)
+    assert {alert.id for alert in first.alerts} == {
+        f"price:2026-08-29:RAPID_RISE:KRX:{instruments[0].symbol}",
+        f"price:2026-08-29:RAPID_FALL:KRX:{instruments[1].symbol}",
+    }
+
+
+def _quote_loader_for(rates_by_symbol: dict[str, str], *, quote_time: datetime):
+    async def quotes(
+        _db: AsyncSession, market: str, symbols: Sequence[str]
+    ) -> list[Quote]:
+        assert market == "KRX"
+        return [
+            Quote(
+                broker="PAPER",
+                market="KRX",
+                symbol=symbol,
+                name=None,
+                currency="KRW",
+                price=str(100 + float(rates_by_symbol[symbol])),
+                previous_close="100",
+                change_amount="0",
+                change_rate="0",
+                session="REGULAR",
+                regular_close="100",
+                session_change_amount=rates_by_symbol[symbol],
+                session_change_rate=rates_by_symbol[symbol],
+                as_of=quote_time.isoformat(),
+                source="TOSS_OPENAPI",
+            )
+            for symbol in symbols
+            if symbol in rates_by_symbol
+        ]
+
+    return quotes
+
+
+@pytest.mark.asyncio
+async def test_price_alert_stays_for_the_kst_day_after_recovery_and_resets_next_day(
+    db_session: AsyncSession,
+    routine_data: dict[str, object],
+) -> None:
+    owner = routine_data["users"][0]
+    instruments: Sequence[Instrument] = routine_data["instruments"]
+    fallen = instruments[1].symbol
+    others = {instruments[0].symbol: "1.00", instruments[2].symbol: "-0.50"}
+    first_at = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)  # 10:00 KST
+    later_at = datetime(2026, 8, 29, 5, 0, tzinfo=UTC)  # 14:00 KST
+    next_day_at = datetime(2026, 8, 29, 16, 0, tzinfo=UTC)  # 01:00 KST 다음날
+    db_session.add(
+        KAssetDailyRoutineSetting(
+            owner_user_id=owner.id,
+            routine_date=first_at.astimezone(KST).date(),
+            enabled_routines=["RAPID_RISE", "RAPID_FALL"],
+            updated_at=first_at,
+        )
+    )
+    await db_session.commit()
+
+    # 1) 10:00 KST에 -6.20%로 처음 포착된다.
+    detected = await DailyRoutineService(
+        quote_loader=_quote_loader_for({fallen: "-6.20", **others}, quote_time=first_at)
+    ).get(db_session, owner.id, now=first_at)
+    assert [alert.symbol for alert in detected.alerts] == [fallen]
+    alert = detected.alerts[0]
+    assert alert.kind == "RAPID_FALL"
+    assert alert.headline.endswith("-6.20% 급락")
+    assert alert.detected_rate_pct == "-6.20"
+    assert alert.current_rate_pct == "-6.20"
+    assert alert.recovered is False
+    assert alert.occurred_at == first_at
+
+    # 2) 14:00 KST에 -2.10%로 회복했지만 같은 id로 하루 동안 남는다.
+    recovered = await DailyRoutineService(
+        quote_loader=_quote_loader_for({fallen: "-2.10", **others}, quote_time=later_at)
+    ).get(db_session, owner.id, now=later_at)
+    assert [alert.id for alert in recovered.alerts] == [alert.id]
+    kept = recovered.alerts[0]
+    assert kept.kind == "RAPID_FALL"
+    assert kept.headline == alert.headline
+    assert kept.occurred_at == first_at
+    assert kept.detected_rate_pct == "-6.20"
+    assert kept.current_rate_pct == "-2.10"
+    assert kept.recovered is True
+    assert kept.last_seen_at == later_at
+    wire = recovered.model_dump(by_alias=True, mode="json")["alerts"][0]
+    assert wire["recovered"] is True
+    assert wire["currentRatePct"] == "-2.10"
+    assert wire["detectedRatePct"] == "-6.20"
+
+    # 3) 회복된 알림은 푸시 대상이 아니다.
+    from app.extensions.kasset.fcm_push_service import _price_alerts
+
+    assert _price_alerts(detected.alerts) == detected.alerts
+    assert _price_alerts(recovered.alerts) == []
+
+    # 4) KST 날짜가 바뀌면 전날 기록은 돌아오지 않는다.
+    rolled = await DailyRoutineService(
+        quote_loader=_quote_loader_for(
+            {fallen: "-2.10", **others}, quote_time=next_day_at
+        )
+    ).get(db_session, owner.id, now=next_day_at)
+    assert rolled.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_price_alert_history_failure_still_returns_live_alerts(
+    db_session: AsyncSession,
+    routine_data: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = routine_data["users"][0]
+    instruments: Sequence[Instrument] = routine_data["instruments"]
+    # 서비스가 실패한 기록을 rollback하면 ORM 인스턴스가 만료되므로 값을 먼저 잡아 둔다.
+    rising, flat = instruments[0].symbol, instruments[1].symbol
+    moment = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
+    db_session.add(
+        KAssetDailyRoutineSetting(
+            owner_user_id=owner.id,
+            routine_date=moment.astimezone(KST).date(),
+            enabled_routines=["RAPID_RISE", "RAPID_FALL"],
+            updated_at=moment,
+        )
+    )
+    await db_session.commit()
+
+    async def broken(*_args: object, **_kwargs: object) -> list[object]:
+        raise RuntimeError("history table unavailable")
+
+    monkeypatch.setattr(
+        DailyRoutineService, "_record_price_alert_events", staticmethod(broken)
+    )
+    service = DailyRoutineService(
+        quote_loader=_quote_loader_for(
+            {rising: "7.00", flat: "0.00"},
+            quote_time=moment,
+        )
+    )
+    response = await service.get(db_session, owner.id, now=moment)
+    assert [(alert.symbol, alert.kind) for alert in response.alerts] == [
+        (rising, "RAPID_RISE")
+    ]
+    assert response.alerts[0].recovered is False
+    assert response.alerts[0].current_rate_pct == "7.00"
 
 
 def _news_article(

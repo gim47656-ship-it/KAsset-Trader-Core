@@ -112,10 +112,13 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v51: research.kr_candles_1m_toss (Toss 분봉 영속화)가 새 ORM 테이블로 들어온다.
 # app/models/__init__.py가 KRTossMinuteCandle을 등록하므로 create_all이 통째로
 # 만들고 mirrored ALTER는 없다.
+# v52: kasset_routine_price_alert_events(관심종목 ±5% 알림 하루 포착 기록)가 새
+# ORM 테이블로 들어온다. mirrored ALTER는 없으므로 create_all이 통째로 만든다.
+# 운영은 alembic/versions/20260903_kasset_alert_events.py를 따로 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 51
+SCHEMA_BOOTSTRAP_VERSION = 52
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"
