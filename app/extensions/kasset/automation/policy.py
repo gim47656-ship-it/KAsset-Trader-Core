@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -33,6 +33,7 @@ from app.models.kasset_paper_execution_events import (
     KAssetPaperExecutionEvent,
 )
 from app.models.paper_trading import PaperPosition, PaperTrade
+from app.models.trading import InstrumentType
 from app.models.user_settings import UserSetting
 from app.services.ai_recommendations.service import AIRecommendationService
 
@@ -40,7 +41,24 @@ logger = logging.getLogger(__name__)
 
 _SETTING_KEY = "kasset.ai_trading"
 _MIN_AI_CONFIDENCE = Decimal("0.50")
-_DEFAULT_OPERATING_BUDGET = Decimal("10000000")
+_DEFAULT_OPERATING_BUDGET_KRW = Decimal("10000000")
+_DEFAULT_OPERATING_BUDGET_USD = Decimal("10000")
+
+
+def settlement_book(
+    *,
+    market: str | None = None,
+    currency: str | None = None,
+) -> tuple[Literal["KRW", "USD"], InstrumentType]:
+    """시장 또는 통화 하나를 정산 장부와 포지션 유형으로 변환한다."""
+
+    if (market is None) == (currency is None):
+        raise ValueError("exactly one of market or currency is required")
+    if market == "KRX" or currency == "KRW":
+        return "KRW", InstrumentType.equity_kr
+    if market == "US" or currency == "USD":
+        return "USD", InstrumentType.equity_us
+    raise ValueError("market/currency does not map to a settlement book")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +143,8 @@ class OperatingMode(StrEnum):
 @dataclass(frozen=True, slots=True)
 class AITradingLimits:
     risk_level: int = _DEFAULT_RISK_LEVEL
-    operating_budget: Decimal = _DEFAULT_OPERATING_BUDGET
+    operating_budget_krw: Decimal = _DEFAULT_OPERATING_BUDGET_KRW
+    operating_budget_usd: Decimal = _DEFAULT_OPERATING_BUDGET_USD
     daily_target_rate_pct: Decimal = _RISK_PRESETS[
         _DEFAULT_RISK_LEVEL
     ].daily_target_rate_pct
@@ -151,7 +170,8 @@ class AITradingLimits:
         self,
         *,
         risk_level: int = _DEFAULT_RISK_LEVEL,
-        operating_budget: Decimal = _DEFAULT_OPERATING_BUDGET,
+        operating_budget_krw: Decimal = _DEFAULT_OPERATING_BUDGET_KRW,
+        operating_budget_usd: Decimal = _DEFAULT_OPERATING_BUDGET_USD,
         daily_target_rate_pct: Decimal | None = None,
         max_daily_loss_rate_pct: Decimal | None = None,
         custom_max_buys_per_day: int | None = None,
@@ -162,13 +182,17 @@ class AITradingLimits:
         level = _risk_level(risk_level, "risk_level")
         preset = _RISK_PRESETS[level]
         normalized_currency = str(currency).upper()
-        if normalized_currency not in {"KRW", "USD"}:
-            raise ValueError("currency must be KRW or USD")
+        settlement_book(currency=normalized_currency)
         object.__setattr__(self, "risk_level", level)
         object.__setattr__(
             self,
-            "operating_budget",
-            _positive_decimal(operating_budget, "operating_budget"),
+            "operating_budget_krw",
+            _positive_decimal(operating_budget_krw, "operating_budget_krw"),
+        )
+        object.__setattr__(
+            self,
+            "operating_budget_usd",
+            _positive_decimal(operating_budget_usd, "operating_budget_usd"),
         )
         object.__setattr__(
             self,
@@ -239,13 +263,35 @@ class AITradingLimits:
         )
         object.__setattr__(self, "currency", normalized_currency)
 
+    def operating_budget_for(self, currency: str) -> Decimal:
+        book, _ = settlement_book(currency=currency)
+        return self.operating_budget_krw if book == "KRW" else self.operating_budget_usd
+
+    def daily_target_amount_for(self, currency: str) -> Decimal:
+        return (
+            self.operating_budget_for(currency)
+            * self.daily_target_rate_pct
+            / Decimal("100")
+        )
+
+    def max_daily_loss_amount_for(self, currency: str) -> Decimal:
+        return (
+            self.operating_budget_for(currency)
+            * self.max_daily_loss_rate_pct
+            / Decimal("100")
+        )
+
+    @property
+    def operating_budget(self) -> Decimal:
+        return self.operating_budget_for(self.currency)
+
     @property
     def daily_target_amount(self) -> Decimal:
-        return self.operating_budget * self.daily_target_rate_pct / Decimal("100")
+        return self.daily_target_amount_for(self.currency)
 
     @property
     def max_daily_loss_amount(self) -> Decimal:
-        return self.operating_budget * self.max_daily_loss_rate_pct / Decimal("100")
+        return self.max_daily_loss_amount_for(self.currency)
 
     @property
     def max_symbol_allocation_pct(self) -> Decimal:
@@ -258,7 +304,8 @@ class AITradingLimits:
     def to_storage(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "risk_level": self.risk_level,
-            "operating_budget": str(self.operating_budget),
+            "operating_budget_krw": str(self.operating_budget_krw),
+            "operating_budget_usd": str(self.operating_budget_usd),
             "daily_target_rate_pct": str(self.daily_target_rate_pct),
             "max_daily_loss_rate_pct": str(self.max_daily_loss_rate_pct),
             "kill_switch": self.kill_switch,
@@ -304,6 +351,7 @@ class AITradingSnapshot:
     mode: OperatingMode
     limits: AITradingLimits
     usage: AITradingUsage
+    usage_by_currency: Mapping[str, AITradingUsage]
     kill_switch: bool
     updated_at: datetime
     executions: tuple[PaperExecutionView, ...] = ()
@@ -372,7 +420,17 @@ class AITradingPolicyService:
         mode, limits = _decode_setting(row.value if row is not None else None)
         state = await runtime_state.get(db, owner_user_id)
         global_state = await runtime_state.get_global(db)
-        usage = await self.usage(db, owner_user_id, limits=limits, now=current)
+        usage_by_currency = {
+            currency: await self.usage(
+                db,
+                owner_user_id,
+                limits=limits,
+                now=current,
+                currency=currency,
+            )
+            for currency in ("KRW", "USD")
+        }
+        usage = usage_by_currency[limits.currency]
         executions = await self._executions(
             db, owner_user_id, limit=max(0, min(execution_limit, 100))
         )
@@ -386,6 +444,7 @@ class AITradingPolicyService:
             mode=mode,
             limits=limits,
             usage=usage,
+            usage_by_currency=usage_by_currency,
             kill_switch=kill_switch,
             updated_at=_aware_utc(updated_at),
             executions=tuple(executions),
@@ -408,6 +467,17 @@ class AITradingPolicyService:
         current = _aware_utc(now)
         state = await runtime_state.get(db, owner_user_id, for_update=True)
         row = await self._setting_row(db, owner_user_id, for_update=True)
+        stored_limits = (
+            _decode_setting(row.value)[1] if row is not None else AITradingLimits()
+        )
+        limits = (
+            replace(limits, operating_budget_usd=stored_limits.operating_budget_usd)
+            if limits.currency == "KRW"
+            else replace(
+                limits,
+                operating_budget_krw=stored_limits.operating_budget_krw,
+            )
+        )
         payload = {"mode": OperatingMode(mode).value, "settings": limits.to_storage()}
         if row is None:
             row = UserSetting(user_id=owner_user_id, key=_SETTING_KEY, value=payload)
@@ -454,7 +524,9 @@ class AITradingPolicyService:
         *,
         limits: AITradingLimits,
         now: datetime,
+        currency: str,
     ) -> AITradingUsage:
+        book, instrument_type = settlement_book(currency=currency)
         account_id = await db.scalar(
             select(AndroidPaperAccount.paper_account_id)
             .where(AndroidPaperAccount.owner_user_id == owner_user_id)
@@ -463,15 +535,17 @@ class AITradingPolicyService:
         )
         if account_id is None:
             return AITradingUsage()
-        start = _trading_day_start(now, limits.currency)
+        start = _trading_day_start(now, book)
+        order_filters = (
+            AndroidPaperOrder.owner_user_id == owner_user_id,
+            AndroidPaperOrder.currency == book,
+            AndroidPaperOrder.created_at >= start,
+        )
         orders_today = int(
             await db.scalar(
                 select(func.count())
                 .select_from(AndroidPaperOrder)
-                .where(
-                    AndroidPaperOrder.owner_user_id == owner_user_id,
-                    AndroidPaperOrder.created_at >= start,
-                )
+                .where(*order_filters)
             )
             or 0
         )
@@ -479,11 +553,7 @@ class AITradingPolicyService:
             await db.scalar(
                 select(func.count())
                 .select_from(AndroidPaperOrder)
-                .where(
-                    AndroidPaperOrder.owner_user_id == owner_user_id,
-                    AndroidPaperOrder.side == "BUY",
-                    AndroidPaperOrder.created_at >= start,
-                )
+                .where(*order_filters, AndroidPaperOrder.side == "BUY")
             )
             or 0
         )
@@ -491,30 +561,25 @@ class AITradingPolicyService:
             await db.scalar(
                 select(func.count())
                 .select_from(AndroidPaperOrder)
-                .where(
-                    AndroidPaperOrder.owner_user_id == owner_user_id,
-                    AndroidPaperOrder.side == "SELL",
-                    AndroidPaperOrder.created_at >= start,
-                )
+                .where(*order_filters, AndroidPaperOrder.side == "SELL")
             )
             or 0
         )
+        position_filters = (
+            PaperPosition.account_id == account_id,
+            PaperPosition.instrument_type == instrument_type,
+            PaperPosition.quantity > 0,
+        )
         concurrent_holdings = int(
             await db.scalar(
-                select(func.count())
-                .select_from(PaperPosition)
-                .where(
-                    PaperPosition.account_id == account_id,
-                    PaperPosition.quantity > 0,
-                )
+                select(func.count()).select_from(PaperPosition).where(*position_filters)
             )
             or 0
         )
         budget_used = _decimal_or_zero(
             await db.scalar(
                 select(func.coalesce(func.sum(PaperPosition.total_invested), 0)).where(
-                    PaperPosition.account_id == account_id,
-                    PaperPosition.quantity > 0,
+                    *position_filters
                 )
             )
         )
@@ -522,6 +587,7 @@ class AITradingPolicyService:
             await db.scalar(
                 select(func.coalesce(func.sum(PaperTrade.realized_pnl), 0)).where(
                     PaperTrade.account_id == account_id,
+                    PaperTrade.currency == book,
                     PaperTrade.executed_at >= start,
                 )
             )
@@ -557,6 +623,8 @@ class AITradingPolicyService:
         strategy_quantity: Decimal | None = None,
         sizing_config: PositionSizingConfig = DEFAULT_POSITION_SIZING_CONFIG,
     ) -> PortfolioPlan:
+        book, instrument_type = settlement_book(market=market)
+        operating_budget = limits.operating_budget_for(book)
         account_id = await db.scalar(
             select(AndroidPaperAccount.paper_account_id)
             .where(AndroidPaperAccount.owner_user_id == owner_user_id)
@@ -569,6 +637,7 @@ class AITradingPolicyService:
                 select(PaperPosition).where(
                     PaperPosition.account_id == account_id,
                     PaperPosition.symbol == symbol,
+                    PaperPosition.instrument_type == instrument_type,
                     PaperPosition.quantity > 0,
                 )
             )
@@ -585,7 +654,7 @@ class AITradingPolicyService:
                 entry_price=reference_price,
                 price_as_of=price_as_of,
                 evaluated_at=evaluated_at,
-                operating_budget=limits.operating_budget,
+                operating_budget=operating_budget,
                 budget_used=usage.budget_used,
                 max_symbol_allocation=target_weight,
                 current_symbol_invested=current_invested,
@@ -603,16 +672,14 @@ class AITradingPolicyService:
         quantity = sizing.quantity
         if normalized_action == "SELL":
             cash_after = min(
-                limits.operating_budget,
-                max(Decimal("0"), limits.operating_budget - usage.budget_used)
+                operating_budget,
+                max(Decimal("0"), operating_budget - usage.budget_used)
                 + quantity * reference_price,
             )
         else:
             cash_after = max(
                 Decimal("0"),
-                limits.operating_budget
-                - usage.budget_used
-                - quantity * reference_price,
+                operating_budget - usage.budget_used - quantity * reference_price,
             )
         if sizing.actionable:
             caps = ",".join(cap.value for cap in sizing.limiting_caps)
@@ -647,7 +714,21 @@ class AITradingPolicyService:
             db, owner_user_id, now=now, execution_limit=0
         )
         limits = snapshot.limits
-        usage = snapshot.usage
+        try:
+            currency, instrument_type = settlement_book(market=market)
+        except ValueError:
+            currency = None
+            instrument_type = None
+        usage = (
+            snapshot.usage_by_currency.get(currency, AITradingUsage())
+            if currency is not None
+            else AITradingUsage()
+        )
+        operating_budget = (
+            limits.operating_budget_for(currency)
+            if currency is not None
+            else Decimal("0")
+        )
         order_notional = quantity * reference_price
         account_id = await db.scalar(
             select(AndroidPaperAccount.paper_account_id)
@@ -656,10 +737,11 @@ class AITradingPolicyService:
             .limit(1)
         )
         position = None
-        if account_id is not None:
+        if account_id is not None and instrument_type is not None:
             position = await db.scalar(
                 select(PaperPosition).where(
                     PaperPosition.account_id == account_id,
+                    PaperPosition.instrument_type == instrument_type,
                     PaperPosition.symbol == symbol,
                     PaperPosition.quantity > 0,
                 )
@@ -670,26 +752,29 @@ class AITradingPolicyService:
         current_quantity = _decimal_or_zero(
             position.quantity if position is not None else None
         )
-        start = _trading_day_start(now, limits.currency)
-        same_symbol_buys = int(
-            await db.scalar(
-                select(func.count())
-                .select_from(AndroidPaperOrder)
-                .where(
-                    AndroidPaperOrder.owner_user_id == owner_user_id,
-                    AndroidPaperOrder.symbol == symbol,
-                    AndroidPaperOrder.side == "BUY",
-                    AndroidPaperOrder.created_at >= start,
+        if currency is None:
+            same_symbol_buys = 0
+        else:
+            start = _trading_day_start(now, currency)
+            same_symbol_buys = int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(AndroidPaperOrder)
+                    .where(
+                        AndroidPaperOrder.owner_user_id == owner_user_id,
+                        AndroidPaperOrder.currency == currency,
+                        AndroidPaperOrder.symbol == symbol,
+                        AndroidPaperOrder.side == "BUY",
+                        AndroidPaperOrder.created_at >= start,
+                    )
                 )
+                or 0
             )
-            or 0
-        )
 
-        expected_market = "KRX" if limits.currency == "KRW" else "US"
         is_buy = action == "BUY"
         valid_shape = (
             action in {"BUY", "SELL"}
-            and market == expected_market
+            and currency is not None
             and quantity.is_finite()
             and quantity > 0
             and reference_price.is_finite()
@@ -698,12 +783,21 @@ class AITradingPolicyService:
         base_risk_details = [
             str(getattr(reason, "message", reason)) for reason in base_risk_reasons
         ]
-        daily_loss_limit = limits.max_daily_loss_amount
-        daily_target_amount = limits.daily_target_amount
+        daily_loss_limit = (
+            limits.max_daily_loss_amount_for(currency)
+            if currency is not None
+            else Decimal("0")
+        )
+        daily_target_amount = (
+            limits.daily_target_amount_for(currency)
+            if currency is not None
+            else Decimal("0")
+        )
         budget_passed = (not is_buy) or (
-            usage.budget_used + order_notional <= limits.operating_budget
+            valid_shape
+            and usage.budget_used + order_notional <= operating_budget
             and current_invested + order_notional
-            <= limits.operating_budget * limits.max_symbol_allocation
+            <= operating_budget * limits.max_symbol_allocation
         )
         position_passed = (
             valid_shape
@@ -725,12 +819,15 @@ class AITradingPolicyService:
             and same_symbol_buys < limits.same_symbol_reentry_limit
         ) or (action == "SELL" and usage.sells_today < limits.max_sells_per_day)
         order_count_passed = (
-            usage.orders_today < limits.max_orders_per_day and side_count_passed
+            valid_shape
+            and usage.orders_today < limits.max_orders_per_day
+            and side_count_passed
         )
         checks = [
             HardRiskCheck(
                 "DAILY_MAX_LOSS",
-                (not is_buy) or usage.realized_loss_today < daily_loss_limit,
+                (not is_buy)
+                or (valid_shape and usage.realized_loss_today < daily_loss_limit),
                 (
                     f"realizedLossToday={usage.realized_loss_today}; "
                     f"limit={daily_loss_limit}"
@@ -741,7 +838,7 @@ class AITradingPolicyService:
                 budget_passed,
                 (
                     f"budgetUsed={usage.budget_used}; order={order_notional}; "
-                    f"operatingBudget={limits.operating_budget}; "
+                    f"operatingBudget={operating_budget}; "
                     f"symbolCurrent={current_invested}; "
                     f"symbolRatio={limits.max_symbol_allocation}"
                 ),
@@ -750,7 +847,7 @@ class AITradingPolicyService:
                 "POSITION",
                 position_passed,
                 (
-                    f"action={action}; market={market}; expectedMarket={expected_market}; "
+                    f"action={action}; market={market}; currency={currency or 'INVALID'}; "
                     f"held={current_quantity}; holdings={usage.concurrent_holdings}; "
                     f"limit={limits.max_concurrent_holdings}; "
                     f"paperRisk={'; '.join(base_risk_details) or 'clear'}"
@@ -936,25 +1033,46 @@ def _decode_setting(value: object) -> tuple[OperatingMode, AITradingLimits]:
     if not isinstance(raw, dict):
         raise ValueError("stored AI trading limits must be an object")
 
-    budget = _positive_decimal(
-        raw.get("operating_budget", _DEFAULT_OPERATING_BUDGET),
-        "operating_budget",
-    )
     currency = str(raw.get("currency", "KRW")).upper()
-    if currency not in {"KRW", "USD"}:
-        raise ValueError("stored AI trading currency is invalid")
+    settlement_book(currency=currency)
+    if "operating_budget_krw" in raw or "operating_budget_usd" in raw:
+        operating_budget_krw = _positive_decimal(
+            raw.get("operating_budget_krw", _DEFAULT_OPERATING_BUDGET_KRW),
+            "operating_budget_krw",
+        )
+        operating_budget_usd = _positive_decimal(
+            raw.get("operating_budget_usd", _DEFAULT_OPERATING_BUDGET_USD),
+            "operating_budget_usd",
+        )
+    else:
+        legacy_default = (
+            _DEFAULT_OPERATING_BUDGET_KRW
+            if currency == "KRW"
+            else _DEFAULT_OPERATING_BUDGET_USD
+        )
+        legacy_budget = _positive_decimal(
+            raw.get("operating_budget", legacy_default),
+            "operating_budget",
+        )
+        operating_budget_krw = (
+            legacy_budget if currency == "KRW" else _DEFAULT_OPERATING_BUDGET_KRW
+        )
+        operating_budget_usd = (
+            legacy_budget if currency == "USD" else _DEFAULT_OPERATING_BUDGET_USD
+        )
+    display_budget = operating_budget_krw if currency == "KRW" else operating_budget_usd
 
     if "risk_level" in raw:
         risk_level = _risk_level(raw["risk_level"], "risk_level")
     else:
-        risk_level = _nearest_risk_level(raw, budget)
+        risk_level = _nearest_risk_level(raw, display_budget)
     preset = _RISK_PRESETS[risk_level]
 
     target_rate = _stored_percentage(
         raw,
         canonical_key="daily_target_rate_pct",
         legacy_amount_key="conservative_daily_goal",
-        budget=budget,
+        budget=display_budget,
         default=preset.daily_target_rate_pct,
         maximum=Decimal("10"),
     )
@@ -962,13 +1080,14 @@ def _decode_setting(value: object) -> tuple[OperatingMode, AITradingLimits]:
         raw,
         canonical_key="max_daily_loss_rate_pct",
         legacy_amount_key="daily_max_loss",
-        budget=budget,
+        budget=display_budget,
         default=preset.max_daily_loss_rate_pct,
         maximum=Decimal("20"),
     )
     limits = AITradingLimits(
         risk_level=risk_level,
-        operating_budget=budget,
+        operating_budget_krw=operating_budget_krw,
+        operating_budget_usd=operating_budget_usd,
         daily_target_rate_pct=target_rate,
         max_daily_loss_rate_pct=loss_rate,
         custom_max_buys_per_day=raw.get("custom_max_buys_per_day"),
@@ -987,7 +1106,8 @@ def _aware_utc(value: datetime) -> datetime:
 
 def _trading_day_start(value: datetime, currency: str) -> datetime:
     current = _aware_utc(value)
-    zone = ZoneInfo("Asia/Seoul" if currency == "KRW" else "America/New_York")
+    book, _ = settlement_book(currency=currency)
+    zone = ZoneInfo("Asia/Seoul" if book == "KRW" else "America/New_York")
     local = current.astimezone(zone)
     return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
@@ -1168,4 +1288,5 @@ __all__ = [
     "OperatingMode",
     "PaperExecutionView",
     "PortfolioPlan",
+    "settlement_book",
 ]

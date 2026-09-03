@@ -22,8 +22,9 @@ from app.extensions.kasset.automation.policy import (
     AITradingUsage,
     OperatingMode,
     _decode_setting,
+    _trading_day_start,
 )
-from app.models.trading import User, UserRole
+from app.models.trading import InstrumentType, User, UserRole
 from app.models.user_settings import UserSetting
 from app.services.kasset_automation_audit import build_paper_execution_event
 
@@ -117,6 +118,8 @@ def test_default_limits_are_stable_level_two() -> None:
     defaults = AITradingLimits()
 
     assert defaults.risk_level == 2
+    assert defaults.operating_budget_krw == Decimal("10000000")
+    assert defaults.operating_budget_usd == Decimal("10000")
     assert defaults.daily_target_rate_pct == Decimal("0.5")
     assert defaults.max_daily_loss_rate_pct == Decimal("1.0")
     assert defaults.max_symbol_allocation == Decimal("0.15")
@@ -124,6 +127,29 @@ def test_default_limits_are_stable_level_two() -> None:
     assert defaults.max_buys_per_day == 2
     assert defaults.max_sells_per_day == 1
     assert defaults.max_orders_per_day == 3
+
+
+def test_display_accessors_select_the_configured_book() -> None:
+    limits = AITradingLimits(
+        operating_budget_krw=Decimal("5000000"),
+        operating_budget_usd=Decimal("20000"),
+        daily_target_rate_pct=Decimal("1"),
+        max_daily_loss_rate_pct=Decimal("2"),
+        currency="USD",
+    )
+
+    assert limits.operating_budget == Decimal("20000")
+    assert limits.daily_target_amount == Decimal("200")
+    assert limits.max_daily_loss_amount == Decimal("400")
+    assert limits.operating_budget_for("KRW") == Decimal("5000000")
+    assert limits.daily_target_amount_for("KRW") == Decimal("50000")
+    assert limits.max_daily_loss_amount_for("KRW") == Decimal("100000")
+
+
+@pytest.mark.parametrize("field", ["operating_budget_krw", "operating_budget_usd"])
+def test_each_operating_budget_must_be_positive(field: str) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be positive"):
+        AITradingLimits(**{field: Decimal("0")})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -161,6 +187,39 @@ def test_invalid_persisted_custom_daily_limit_fails_closed() -> None:
         )
 
 
+def test_legacy_krw_budget_populates_only_krw_book() -> None:
+    _, limits = _decode_setting(
+        {
+            "mode": "AUTO_PAPER",
+            "settings": {
+                "currency": "KRW",
+                "operating_budget": "5000000",
+            },
+        }
+    )
+
+    assert limits.operating_budget_krw == Decimal("5000000")
+    assert limits.operating_budget_usd == Decimal("10000")
+    assert limits.to_storage()["operating_budget_krw"] == "5000000"
+    assert "operating_budget" not in limits.to_storage()
+
+
+def test_legacy_usd_budget_populates_only_usd_book() -> None:
+    _, limits = _decode_setting(
+        {
+            "mode": "AUTO_PAPER",
+            "settings": {
+                "currency": "USD",
+                "operating_budget": "25000",
+            },
+        }
+    )
+
+    assert limits.operating_budget_krw == Decimal("10000000")
+    assert limits.operating_budget_usd == Decimal("25000")
+    assert limits.operating_budget == Decimal("25000")
+
+
 @pytest.mark.asyncio
 async def test_settings_round_trip_writes_only_canonical_fields(
     db_session: AsyncSession,
@@ -175,7 +234,7 @@ async def test_settings_round_trip_writes_only_canonical_fields(
     )
     limits = AITradingLimits(
         risk_level=4,
-        operating_budget=Decimal("9000000"),
+        operating_budget_krw=Decimal("9000000"),
         daily_target_rate_pct=Decimal("0.7"),
         max_daily_loss_rate_pct=Decimal("1.8"),
         custom_max_buys_per_day=7,
@@ -184,6 +243,17 @@ async def test_settings_round_trip_writes_only_canonical_fields(
         currency="KRW",
     )
     try:
+        await service.put_snapshot(
+            db_session,
+            owner_id,
+            mode=OperatingMode.AUTO_PAPER,
+            limits=replace(
+                limits,
+                currency="USD",
+                operating_budget_usd=Decimal("20000"),
+            ),
+            now=_NOW,
+        )
         saved = await service.put_snapshot(
             db_session,
             owner_id,
@@ -206,7 +276,10 @@ async def test_settings_round_trip_writes_only_canonical_fields(
         state = await runtime_state.get(db_session, owner_id)
 
         assert saved.mode == loaded.mode == OperatingMode.AUTO_PAPER
-        assert loaded.limits == limits
+        assert loaded.limits == replace(
+            limits,
+            operating_budget_usd=Decimal("20000"),
+        )
         assert loaded.limits.max_buys_per_day == 7
         assert loaded.limits.max_sells_per_day == 18
         assert loaded.limits.max_orders_per_day == 25
@@ -216,7 +289,8 @@ async def test_settings_round_trip_writes_only_canonical_fields(
         assert row is not None
         assert row.value["settings"] == {
             "risk_level": 4,
-            "operating_budget": "9000000",
+            "operating_budget_krw": "9000000",
+            "operating_budget_usd": "20000",
             "daily_target_rate_pct": "0.7",
             "max_daily_loss_rate_pct": "1.8",
             "kill_switch": False,
@@ -285,7 +359,8 @@ async def test_legacy_amounts_and_hidden_limits_migrate_on_next_put(
         assert row is not None
         assert row.value["settings"] == {
             "risk_level": 2,
-            "operating_budget": "9000000",
+            "operating_budget_krw": "9000000",
+            "operating_budget_usd": "10000",
             "daily_target_rate_pct": "0.5",
             "max_daily_loss_rate_pct": "1",
             "kill_switch": False,
@@ -303,7 +378,7 @@ async def test_hard_risk_order_is_fixed_and_daily_goal_never_forces_a_trade(
     service = AITradingPolicyService()
     try:
         limits = AITradingLimits(
-            operating_budget=Decimal("1000000"),
+            operating_budget_krw=Decimal("1000000"),
             daily_target_rate_pct=Decimal("0.3"),
         )
         await service.put_snapshot(
@@ -389,12 +464,74 @@ async def test_usage_counts_buy_and_sell_orders_separately() -> None:
         _UsageDb(),  # type: ignore[arg-type]
         101,
         limits=AITradingLimits(),
+        currency="KRW",
         now=_NOW,
     )
 
     assert usage.orders_today == 10
     assert usage.buys_today == 4
     assert usage.sells_today == 6
+
+
+class _SeparatedUsageDb:
+    async def scalar(self, statement: object) -> object:
+        sql = str(statement)
+        params = set(statement.compile().params.values())  # type: ignore[attr-defined]
+        if "kasset_android_paper_accounts" in sql:
+            return 91
+        if "kasset_android_paper_orders" in sql:
+            if "USD" in params:
+                return 0
+            if "BUY" in params:
+                return 2
+            if "SELL" in params:
+                return 1
+            return 3
+        if "paper_positions" in sql:
+            if InstrumentType.equity_us in params:
+                return Decimal("0")
+            return Decimal("1200") if "sum(" in sql.lower() else 2
+        if "paper_trades" in sql:
+            return Decimal("0") if "USD" in params else Decimal("-75")
+        raise AssertionError(f"unexpected query: {sql}")
+
+
+@pytest.mark.asyncio
+async def test_usage_separates_krw_rows_from_usd_book() -> None:
+    service = AITradingPolicyService()
+    db = _SeparatedUsageDb()
+
+    krw = await service.usage(
+        db,
+        101,
+        limits=AITradingLimits(),
+        now=_NOW,
+        currency="KRW",  # type: ignore[arg-type]
+    )
+    usd = await service.usage(
+        db,
+        101,
+        limits=AITradingLimits(),
+        now=_NOW,
+        currency="USD",  # type: ignore[arg-type]
+    )
+
+    assert krw == AITradingUsage(
+        realized_pnl_today=Decimal("-75"),
+        realized_loss_today=Decimal("75"),
+        buys_today=2,
+        sells_today=1,
+        orders_today=3,
+        concurrent_holdings=2,
+        budget_used=Decimal("1200"),
+    )
+    assert usd == AITradingUsage()
+
+
+def test_us_trading_day_starts_at_new_york_midnight() -> None:
+    now = datetime(2026, 9, 1, 1, 0, tzinfo=UTC)
+
+    assert _trading_day_start(now, "USD") == datetime(2026, 8, 31, 4, 0, tzinfo=UTC)
 
 
 class _EmptyRiskDb:
@@ -407,7 +544,7 @@ async def test_daily_loss_gate_uses_budget_derived_amount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     limits = AITradingLimits(
-        operating_budget=Decimal("2000000"),
+        operating_budget_krw=Decimal("2000000"),
         max_daily_loss_rate_pct=Decimal("1.5"),
     )
     snapshot = AITradingSnapshot(
@@ -417,6 +554,13 @@ async def test_daily_loss_gate_uses_budget_derived_amount(
             realized_pnl_today=Decimal("-30000"),
             realized_loss_today=Decimal("30000"),
         ),
+        usage_by_currency={
+            "KRW": AITradingUsage(
+                realized_pnl_today=Decimal("-30000"),
+                realized_loss_today=Decimal("30000"),
+            ),
+            "USD": AITradingUsage(),
+        },
         kill_switch=False,
         updated_at=_NOW,
     )
@@ -451,7 +595,7 @@ async def test_daily_loss_gate_allows_risk_reducing_sell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     limits = AITradingLimits(
-        operating_budget=Decimal("2000000"),
+        operating_budget_krw=Decimal("2000000"),
         max_daily_loss_rate_pct=Decimal("1.5"),
     )
     snapshot = AITradingSnapshot(
@@ -461,6 +605,13 @@ async def test_daily_loss_gate_allows_risk_reducing_sell(
             realized_pnl_today=Decimal("-30000"),
             realized_loss_today=Decimal("30000"),
         ),
+        usage_by_currency={
+            "KRW": AITradingUsage(
+                realized_pnl_today=Decimal("-30000"),
+                realized_loss_today=Decimal("30000"),
+            ),
+            "USD": AITradingUsage(),
+        },
         kill_switch=False,
         updated_at=_NOW,
     )
@@ -507,6 +658,100 @@ async def test_daily_loss_gate_allows_risk_reducing_sell(
 
 
 @pytest.mark.asyncio
+async def test_us_buy_uses_usd_book_under_krw_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limits = AITradingLimits(
+        operating_budget_krw=Decimal("1000000"),
+        operating_budget_usd=Decimal("10000"),
+        currency="KRW",
+    )
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=limits,
+        usage=AITradingUsage(concurrent_holdings=4),
+        usage_by_currency={
+            "KRW": AITradingUsage(concurrent_holdings=4),
+            "USD": AITradingUsage(),
+        },
+        kill_switch=False,
+        updated_at=_NOW,
+    )
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+
+    result = await service.evaluate_hard_risk(
+        _EmptyRiskDb(),  # type: ignore[arg-type]
+        101,
+        action="BUY",
+        market="US",
+        symbol="AAPL",
+        quantity=Decimal("1"),
+        reference_price=Decimal("100"),
+        ai_confidence=Decimal("0.9"),
+        now=_NOW,
+    )
+
+    position = next(check for check in result.checks if check.rule == "POSITION")
+    assert position.passed is True
+    assert "currency=USD" in position.detail
+    assert result.passed is True
+
+
+class _HeldUsRiskDb:
+    def __init__(self) -> None:
+        self._step = 0
+
+    async def scalar(self, statement: object) -> object:
+        self._step += 1
+        params = set(statement.compile().params.values())  # type: ignore[attr-defined]
+        if self._step == 1:
+            return 91
+        if self._step == 2:
+            assert InstrumentType.equity_us in params
+            return SimpleNamespace(
+                total_invested=Decimal("250"),
+                quantity=Decimal("3"),
+            )
+        assert "USD" in params
+        assert datetime(2026, 8, 31, 4, 0, tzinfo=UTC) in params
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_us_sell_of_held_position_passes_under_krw_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limits = AITradingLimits(currency="KRW")
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=limits,
+        usage=AITradingUsage(),
+        usage_by_currency={"KRW": AITradingUsage(), "USD": AITradingUsage()},
+        kill_switch=False,
+        updated_at=_NOW,
+    )
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+
+    result = await service.evaluate_hard_risk(
+        _HeldUsRiskDb(),  # type: ignore[arg-type]
+        101,
+        action="SELL",
+        market="US",
+        symbol="AAPL",
+        quantity=Decimal("2"),
+        reference_price=Decimal("100"),
+        ai_confidence=Decimal("1"),
+        now=_NOW,
+    )
+
+    position = next(check for check in result.checks if check.rule == "POSITION")
+    assert position.passed is True
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "usage", "expected"),
     [
@@ -543,6 +788,7 @@ async def test_order_count_gate_separates_buy_sell_and_total_limits(
         mode=OperatingMode.AUTO_PAPER,
         limits=limits,
         usage=usage,
+        usage_by_currency={"KRW": usage, "USD": AITradingUsage()},
         kill_switch=False,
         updated_at=_NOW,
     )

@@ -286,7 +286,7 @@ class _HeldPositionDb:
 async def test_portfolio_plan_delegates_buy_quantity_to_atr_sizer() -> None:
     limits = AITradingLimits(
         risk_level=4,
-        operating_budget=Decimal("100000"),
+        operating_budget_krw=Decimal("100000"),
     )
     plan = await AITradingPolicyService().portfolio_plan(
         _NoPositionDb(),  # type: ignore[arg-type]
@@ -316,6 +316,39 @@ async def test_portfolio_plan_delegates_buy_quantity_to_atr_sizer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_us_portfolio_plan_uses_usd_budget_and_usage() -> None:
+    limits = AITradingLimits(
+        risk_level=4,
+        operating_budget_krw=Decimal("1000000"),
+        operating_budget_usd=Decimal("10000"),
+        currency="KRW",
+    )
+
+    plan = await AITradingPolicyService().portfolio_plan(
+        _NoPositionDb(),  # type: ignore[arg-type]
+        42,
+        action="BUY",
+        market="US",
+        symbol="AAPL",
+        reference_price=Decimal("100"),
+        limits=limits,
+        usage=AITradingUsage(budget_used=Decimal("9000")),
+        strategy_stop=Decimal("90"),
+        strategy_atr=Decimal("5"),
+        price_as_of=_PRICE_AS_OF,
+        evaluated_at=_NOW,
+        regime=MarketRegime.BULL,
+        average_volume=Decimal("1000000"),
+        average_turnover=Decimal("100000000"),
+    )
+
+    assert plan.target_quantity == Decimal("10.0000")
+    assert plan.position_sizing is not None
+    assert plan.position_sizing.risk_budget == Decimal("100.00")
+    assert plan.cash_after == Decimal("0.0000")
+
+
+@pytest.mark.asyncio
 async def test_portfolio_plan_sell_uses_actual_paper_holding_without_atr() -> None:
     plan = await AITradingPolicyService().portfolio_plan(
         _HeldPositionDb(),  # type: ignore[arg-type]
@@ -326,7 +359,7 @@ async def test_portfolio_plan_sell_uses_actual_paper_holding_without_atr() -> No
         reference_price=Decimal("25"),
         limits=AITradingLimits(
             risk_level=2,
-            operating_budget=Decimal("100000"),
+            operating_budget_usd=Decimal("100000"),
             currency="USD",
         ),
         usage=AITradingUsage(budget_used=Decimal("50")),

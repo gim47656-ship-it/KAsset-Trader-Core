@@ -486,6 +486,7 @@ def _stub_review_cycle(
             return_value=SimpleNamespace(
                 limits=SimpleNamespace(currency="KRW"),
                 usage=object(),
+                usage_by_currency={"KRW": object(), "USD": object()},
             )
         ),
         portfolio_plan=portfolio_plan,
@@ -586,6 +587,31 @@ def _stub_review_cycle(
     )
     instance._persist_recommendation = persist_recommendation  # type: ignore[method-assign]
     return instance, analyze_for_owner, portfolio_plan, persist_recommendation
+
+
+@pytest.mark.asyncio
+async def test_pre_ai_sizing_selects_usage_for_candidate_book() -> None:
+    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
+    portfolio_plan = AsyncMock(return_value=_affordable_plan())
+    instance._policy = SimpleNamespace(  # type: ignore[assignment]
+        portfolio_plan=portfolio_plan
+    )
+    krw_usage = object()
+    usd_usage = object()
+
+    result = await instance._pre_ai_sizing(  # noqa: SLF001 - 장부 선택 계약
+        7,
+        _evaluated_candidate("AAPL", market="US"),
+        _BULL,
+        snapshot=SimpleNamespace(
+            limits=object(),
+            usage=krw_usage,
+            usage_by_currency={"KRW": krw_usage, "USD": usd_usage},
+        ),
+    )
+
+    assert isinstance(result, vertical_slice._PreAiSizing)  # noqa: SLF001
+    assert portfolio_plan.await_args.kwargs["usage"] is usd_usage
 
 
 @pytest.mark.asyncio
@@ -929,7 +955,11 @@ async def test_vertical_slice_ranking_includes_schema_required_total(
         4,
         evaluated,
         _BULL,
-        snapshot=SimpleNamespace(limits=object(), usage=object()),
+        snapshot=SimpleNamespace(
+            limits=object(),
+            usage=object(),
+            usage_by_currency={"KRW": object(), "USD": object()},
+        ),
     )
     assert isinstance(sizing, vertical_slice._PreAiSizing)  # noqa: SLF001
 

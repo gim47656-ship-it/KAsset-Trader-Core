@@ -71,6 +71,7 @@ async def _evaluate(
         mode=OperatingMode.AUTO_PAPER,
         limits=AITradingLimits(),
         usage=AITradingUsage(),
+        usage_by_currency={"KRW": AITradingUsage(), "USD": AITradingUsage()},
         kill_switch=kill_switch,
         updated_at=_NOW,
     )

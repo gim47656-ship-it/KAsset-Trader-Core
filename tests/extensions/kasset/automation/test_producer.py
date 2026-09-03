@@ -204,12 +204,12 @@ async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
     )
     hard_risk = {
         "passed": False,
-        "blockedReason": "currency-market mismatch",
+        "blockedReason": "budgetUsed=9950; order=200; operatingBudget=10000",
         "checks": [
             {
-                "rule": "POSITION",
+                "rule": "BUDGET",
                 "passed": False,
-                "detail": "market=US; expectedMarket=KRX",
+                "detail": "budgetUsed=9950; order=200; operatingBudget=10000",
             }
         ],
     }
@@ -229,7 +229,9 @@ async def test_us_buy_survives_hard_risk_review_block_with_evidence() -> None:
     assert draft.suggested_quantity == Decimal("2")  # type: ignore[attr-defined]
     risks = draft.risks  # type: ignore[attr-defined]
     evidence = draft.evidence  # type: ignore[attr-defined]
-    assert "hard risk blocked: currency-market mismatch" in risks
+    assert (
+        "hard risk blocked: budgetUsed=9950; order=200; operatingBudget=10000" in risks
+    )
     detail = next(item for item in evidence if item["kind"] == "ai_vertical_slice")
     assert detail["hardRisk"] == hard_risk
 

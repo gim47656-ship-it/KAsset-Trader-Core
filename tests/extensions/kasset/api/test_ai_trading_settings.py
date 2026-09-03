@@ -117,7 +117,8 @@ def test_request_rejects_client_hidden_limit_overrides(hidden_field: str) -> Non
 def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
     limits = AITradingLimits(
         risk_level=4,
-        operating_budget=Decimal("2500000"),
+        operating_budget_krw=Decimal("2500000"),
+        operating_budget_usd=Decimal("12500"),
         daily_target_rate_pct=Decimal("0.7"),
         max_daily_loss_rate_pct=Decimal("1.8"),
         custom_max_buys_per_day=10,
@@ -129,6 +130,10 @@ def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
             mode=OperatingMode.AUTO_PAPER,
             limits=limits,
             usage=AITradingUsage(sells_today=3),
+            usage_by_currency={
+                "KRW": AITradingUsage(sells_today=3),
+                "USD": AITradingUsage(),
+            },
             kill_switch=False,
             updated_at=datetime(2026, 9, 1, tzinfo=UTC),
         )
@@ -139,6 +144,8 @@ def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
     assert set(settings) == {
         "riskLevel",
         "operatingBudget",
+        "operatingBudgetKrw",
+        "operatingBudgetUsd",
         "dailyTargetRatePct",
         "maxDailyLossRatePct",
         "killSwitch",
@@ -148,6 +155,9 @@ def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
         "derivedLimits",
     }
     assert settings["riskLevel"] == 4
+    assert settings["operatingBudget"] == "2500000"
+    assert settings["operatingBudgetKrw"] == "2500000"
+    assert settings["operatingBudgetUsd"] == "12500"
     assert settings["customMaxBuysPerDay"] == 10
     assert settings["customMaxSellsPerDay"] == 18
     assert settings["dailyTargetRatePct"] == "0.7"
@@ -176,6 +186,7 @@ def test_router_response_exposes_order_execution_origin() -> None:
             mode=OperatingMode.AUTO_PAPER,
             limits=AITradingLimits(),
             usage=AITradingUsage(),
+            usage_by_currency={"KRW": AITradingUsage(), "USD": AITradingUsage()},
             kill_switch=False,
             updated_at=moment,
             executions=(
