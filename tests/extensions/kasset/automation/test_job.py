@@ -307,6 +307,12 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
     """A claim-stage crash for one owner is recorded and the sweep continues."""
     owner_a_id, username_a = await _seed_owner(db_session)
     owner_b_id, username_b = await _seed_owner(db_session)
+    push_calls: list[tuple[object, ...]] = []
+
+    async def _record_push(*args: object, **kwargs: object) -> None:
+        push_calls.append((*args, *kwargs.values()))
+
+    monkeypatch.setattr(job, "dispatch_order_execution_pushes", _record_push)
     try:
         db_session.add_all(
             [
@@ -363,6 +369,7 @@ async def test_one_owner_failure_does_not_abort_the_remaining_owners(
         assert by_owner[owner_a_id]["reason"] == "owner_sweep_failed:RuntimeError"
         assert by_owner[owner_b_id]["status"] == "BLOCKED"
         assert by_owner[owner_b_id]["reason"] == "global_kill_switch_enabled"
+        assert push_calls == []
     finally:
         await _cleanup_owner(db_session, username_a)
         await _cleanup_owner(db_session, username_b)
@@ -1085,11 +1092,12 @@ async def _cleanup_execution_events(db_session: AsyncSession, owner_id: int) -> 
 
 
 @pytest.mark.asyncio
-async def test_auto_paper_sweep_records_its_origin_recommendation_and_order(
+async def test_push_failure_cannot_change_sweep_order_or_execution_ledger(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """무인 sweep 한 건이 원장에 정확히 한 행으로, AUTO_PAPER로 남는다."""
+    """푸시 예외가 나도 체결, sweep 결과, AUTO_PAPER 원장은 유지된다."""
     owner_id, username = await _seed_owner(db_session)
     recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
     recommendation.reference_price = "70000"
@@ -1107,9 +1115,17 @@ async def test_auto_paper_sweep_records_its_origin_recommendation_and_order(
             _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
         )
 
+        async def _broken_push(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("firebase unavailable")
+
+        monkeypatch.setattr(job, "dispatch_order_execution_pushes", _broken_push)
+        caplog.set_level("WARNING", logger=job.__name__)
+
         outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
 
         assert outcome["status"] == "SUBMITTED"
+        assert outcome["reason"] == "submitted"
+        assert await _owner_order_count(db_session, owner_id) == 1
         events = await _execution_events(db_session, owner_id)
         assert len(events) == 1
         event = events[0]
@@ -1128,6 +1144,15 @@ async def test_auto_paper_sweep_records_its_origin_recommendation_and_order(
         )
         assert stored_order_id is not None
         assert event.paper_order_id == stored_order_id
+        push_error = next(
+            record
+            for record in caplog.records
+            if record.getMessage().startswith(
+                "kasset auto PAPER execution push failed:"
+            )
+        )
+        assert push_error.exc_info is not None
+        assert push_error.exc_info[0] is RuntimeError
     finally:
         await _cleanup_execution_events(db_session, owner_id)
         await _cleanup_paper_wiring(db_session, owner_id)

@@ -432,6 +432,52 @@ def test_market_event_task_is_registered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_price_alert_task_runs_price_and_order_retry_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.extensions.kasset import fcm_push_service
+    from app.tasks import kasset_market_events_tasks
+
+    session = object()
+    expected = {
+        "enabled": True,
+        "sent": 2,
+        "orderExecutions": {"sent": 1},
+    }
+    calls: list[object] = []
+
+    async def fake_dispatch(candidate: object) -> dict[str, object]:
+        calls.append(candidate)
+        return expected
+
+    @asynccontextmanager
+    async def acquired_lease(lock_key: int):
+        assert lock_key == kasset_market_events_tasks._PUSH_LOCK_KEY
+        yield True
+
+    @asynccontextmanager
+    async def fake_session():
+        yield session
+
+    monkeypatch.setattr(settings, "KASSET_FCM_ENABLED", True)
+    monkeypatch.setattr(
+        fcm_push_service,
+        "dispatch_scheduled_pushes",
+        fake_dispatch,
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks,
+        "_advisory_single_flight",
+        acquired_lease,
+    )
+    monkeypatch.setattr(kasset_market_events_tasks, "_session", fake_session)
+
+    assert await kasset_market_events_tasks.kasset_price_alert_push() is expected
+    assert calls == [session]
+
+
+@pytest.mark.asyncio
 async def test_market_event_task_delegates_to_canonical_vertical_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

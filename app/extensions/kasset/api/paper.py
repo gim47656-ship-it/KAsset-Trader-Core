@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from app.extensions.kasset.api.paper_schemas import (
 from app.extensions.kasset.api.toss_market_data import toss_market_data
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.paper_trading import PaperAccount, PaperTrade
+from app.models.symbol_master import SymbolMaster
 from app.models.trading import Instrument, InstrumentType
 from app.services.exchange_rate_service import (
     UsdKrwExchangeRateQuote,
@@ -377,9 +379,6 @@ class PaperAccountAdapter:
         account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
         raw_positions = await service.get_positions(account.id)
-        names = await self._instrument_names(
-            db, [item["symbol"] for item in raw_positions]
-        )
         observed_at = datetime.now(UTC)
         fx_snapshot = self._empty_krw_reference()
         if any(
@@ -393,46 +392,48 @@ class PaperAccountAdapter:
             )
 
         now = iso_z(observed_at)
-        return PositionsResponse(
-            positions=[
-                Position(
-                    broker="PAPER",
-                    account_id=self.account_id(account),
-                    market=self.market_name(item["instrument_type"]),
-                    symbol=item["symbol"],
-                    name=names.get(item["symbol"]),
-                    # Settlement currency as resolved by the service, the same
-                    # value its trades and per-currency metrics are keyed by.
-                    currency=str(item["currency"]),
-                    quantity=decimal_text(item["quantity"]),
-                    average_price=decimal_text(item["avg_price"]),
-                    current_price=(
-                        decimal_text(item["current_price"])
-                        if item["current_price"] is not None
-                        else None
-                    ),
-                    market_value=(
-                        decimal_text(item["evaluation_amount"])
-                        if item["evaluation_amount"] is not None
-                        else None
-                    ),
-                    **self._position_krw_reference(item, fx_snapshot),  # type: ignore[arg-type]
-                    unrealized_pnl=(
-                        decimal_text(item["unrealized_pnl"])
-                        if item["unrealized_pnl"] is not None
-                        else None
-                    ),
-                    unrealized_pnl_rate=(
-                        decimal_text(item["pnl_pct"])
-                        if item["pnl_pct"] is not None
-                        else None
-                    ),
-                    **self._quote_provenance(item),  # type: ignore[arg-type]
-                    updated_at=now,
-                )
-                for item in raw_positions
-            ]
-        )
+        positions = [
+            Position(
+                broker="PAPER",
+                account_id=self.account_id(account),
+                market=self.market_name(item["instrument_type"]),
+                symbol=item["symbol"],
+                name=None,
+                # Settlement currency as resolved by the service, the same
+                # value its trades and per-currency metrics are keyed by.
+                currency=str(item["currency"]),
+                quantity=decimal_text(item["quantity"]),
+                average_price=decimal_text(item["avg_price"]),
+                current_price=(
+                    decimal_text(item["current_price"])
+                    if item["current_price"] is not None
+                    else None
+                ),
+                market_value=(
+                    decimal_text(item["evaluation_amount"])
+                    if item["evaluation_amount"] is not None
+                    else None
+                ),
+                **self._position_krw_reference(item, fx_snapshot),  # type: ignore[arg-type]
+                unrealized_pnl=(
+                    decimal_text(item["unrealized_pnl"])
+                    if item["unrealized_pnl"] is not None
+                    else None
+                ),
+                unrealized_pnl_rate=(
+                    decimal_text(item["pnl_pct"])
+                    if item["pnl_pct"] is not None
+                    else None
+                ),
+                **self._quote_provenance(item),  # type: ignore[arg-type]
+                updated_at=now,
+            )
+            for item in raw_positions
+        ]
+        resolved_names = await self._position_names(db, positions)
+        for position in positions:
+            position.name = resolved_names.get((position.market, position.symbol))
+        return PositionsResponse(positions=positions)
 
     async def _quote_from_candles(
         self,
@@ -555,9 +556,11 @@ class PaperAccountAdapter:
             if previous_close not in {None, Decimal("0")}
             else None
         )
-        name = (await self._instrument_names(db, [normalized_symbol])).get(
-            normalized_symbol
-        )
+        from app.extensions.kasset.api import krx_quotes
+
+        name = (
+            await krx_quotes._instrument_names(db, market_name, [normalized_symbol])
+        ).get(normalized_symbol)
         as_of_raw = raw.get("price_as_of")
         if isinstance(as_of_raw, datetime):
             as_of = iso_z(as_of_raw)
@@ -611,6 +614,79 @@ class PaperAccountAdapter:
             ]
         )
 
+    @classmethod
+    async def _position_names(
+        cls,
+        db: AsyncSession,
+        positions: Sequence[Position],
+    ) -> dict[tuple[str, str], str]:
+        """주식은 SymbolMaster, 비주식은 기존 Instrument에서 이름을 찾는다."""
+        equity_keys = tuple(
+            dict.fromkeys(
+                (position.market, position.symbol)
+                for position in positions
+                if position.market in {"KRX", "US"}
+            )
+        )
+        names: dict[tuple[str, str], str] = {}
+        if equity_keys:
+            master_rows = (
+                await db.execute(
+                    select(
+                        SymbolMaster.market,
+                        SymbolMaster.symbol,
+                        SymbolMaster.name,
+                    ).where(
+                        tuple_(
+                            SymbolMaster.market,
+                            SymbolMaster.symbol,
+                        ).in_(equity_keys)
+                    )
+                )
+            ).all()
+            names.update(
+                {
+                    (market, symbol): name.strip()
+                    for market, symbol, name in master_rows
+                    if name and name.strip() and name.strip() != symbol
+                }
+            )
+
+        legacy_types = {
+            "CRYPTO": InstrumentType.crypto,
+            "FOREX": InstrumentType.forex,
+            "INDEX": InstrumentType.index,
+        }
+        requested_legacy_types = {
+            legacy_types[position.market]
+            for position in positions
+            if position.market in legacy_types
+        }
+        legacy_symbols = {
+            position.symbol for position in positions if position.market in legacy_types
+        }
+        if requested_legacy_types and legacy_symbols:
+            instrument_rows = (
+                await db.execute(
+                    select(
+                        Instrument.type,
+                        Instrument.symbol,
+                        Instrument.name,
+                    ).where(
+                        Instrument.type.in_(requested_legacy_types),
+                        Instrument.symbol.in_(legacy_symbols),
+                    )
+                )
+            ).all()
+            names.update(
+                {
+                    (cls.market_name(instrument_type.value), symbol): name.strip()
+                    for instrument_type, symbol, name in instrument_rows
+                    if name and name.strip() and name.strip() != symbol
+                }
+            )
+        return names
+
     @staticmethod
     def account_id(account: PaperAccount) -> str:
         return f"PAPER-{account.id}"
@@ -622,17 +698,6 @@ class PaperAccountAdapter:
             "equity_us": "US",
             "crypto": "CRYPTO",
         }.get(instrument_type, instrument_type.upper())
-
-    @staticmethod
-    async def _instrument_names(db: AsyncSession, symbols: list[str]) -> dict[str, str]:
-        if not symbols:
-            return {}
-        result = await db.execute(
-            select(Instrument.symbol, Instrument.name).where(
-                Instrument.symbol.in_(set(symbols))
-            )
-        )
-        return {symbol: name for symbol, name in result.all() if name}
 
     @staticmethod
     def _required_decimal(value: object) -> Decimal:

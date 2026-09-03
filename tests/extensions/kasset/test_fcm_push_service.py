@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import date
+from decimal import Decimal
 
 import httpx
 import jwt
@@ -25,11 +26,14 @@ from app.extensions.kasset.fcm_push_service import (
     DeliveryOutcome,
     FcmClient,
     FcmConfigurationError,
+    OrderExecutionPushMessage,
     PushMessage,
     ServiceAccountCredentials,
     dedupe_key,
+    dispatch_order_execution_pushes,
     dispatch_price_alert_pushes,
     load_service_account_credentials,
+    order_execution_dedupe_key,
 )
 
 PROJECT_ID = "kasset-trader-e17c3"
@@ -274,6 +278,100 @@ async def test_send_posts_the_http_v1_notification_and_data_contract(
 
 
 @pytest.mark.asyncio
+async def test_send_posts_the_order_execution_notification_and_data_contract(
+    credentials: ServiceAccountCredentials,
+) -> None:
+    requests: list[httpx.Request] = []
+    client = FcmClient(
+        credentials,
+        transport=_transport(
+            _accepted,
+            recorded=requests,
+        ),
+    )
+    message = OrderExecutionPushMessage(
+        token=DEVICE_TOKEN,
+        body="메리츠금융지주 3주 매수 · 135,100원",
+        order_id="4dd8953f-1111-2222-3333-444444444444",
+        market="KRX",
+        symbol="138040",
+        name="메리츠금융지주",
+        side="BUY",
+        quantity="3",
+        price="135100",
+    )
+    try:
+        result = await client.send(message)
+    finally:
+        await client.aclose()
+
+    assert result.outcome is DeliveryOutcome.SENT
+    payload = json.loads(requests[1].content)["message"]
+    assert payload["notification"] == {
+        "title": "자동주문 체결",
+        "body": "메리츠금융지주 3주 매수 · 135,100원",
+    }
+    assert payload["data"] == {
+        "version": "1",
+        "type": "ORDER_EXECUTION",
+        "orderId": "4dd8953f-1111-2222-3333-444444444444",
+        "market": "KRX",
+        "symbol": "138040",
+        "name": "메리츠금융지주",
+        "side": "BUY",
+        "quantity": "3",
+        "price": "135100",
+        "origin": "AUTO_PAPER",
+    }
+    assert all(isinstance(value, str) for value in payload["data"].values())
+    assert payload["android"]["notification"]["channel_id"] == (
+        push.ORDER_EXECUTION_CHANNEL_ID
+    )
+    assert payload["android"]["collapse_key"] == (
+        "ORDER_EXECUTION:4dd8953f-1111-2222-3333-444444444444"
+    )
+    assert "click_action" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("market", "side", "quantity", "price", "expected"),
+    [
+        (
+            "KRX",
+            "BUY",
+            Decimal("3.00000000"),
+            Decimal("135100.00000000"),
+            "메리츠금융지주 3주 매수 · 135,100원",
+        ),
+        (
+            "US",
+            "SELL",
+            Decimal("1.50000000"),
+            Decimal("135.1"),
+            "Apple 1.5주 매도 · $135.10",
+        ),
+    ],
+)
+def test_order_execution_body_uses_market_currency_format(
+    market: str,
+    side: str,
+    quantity: Decimal,
+    price: Decimal,
+    expected: str,
+) -> None:
+    assert (
+        push._order_execution_body(
+            name="메리츠금융지주" if market == "KRX" else "Apple",
+            market=market,
+            side=side,
+            quantity=quantity,
+            price=price,
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
 async def test_access_token_is_minted_once_and_reused(
     credentials: ServiceAccountCredentials,
 ) -> None:
@@ -462,6 +560,13 @@ def test_dedupe_key_is_one_slot_per_day_kind_market_symbol() -> None:
     assert len(dedupe_key(**base)) == 64
 
 
+def test_order_execution_dedupe_key_is_unique_per_order() -> None:
+    first = order_execution_dedupe_key(order_id="paper-order-1")
+    assert first == order_execution_dedupe_key(order_id="paper-order-1")
+    assert first != order_execution_dedupe_key(order_id="paper-order-2")
+    assert len(first) == 64
+
+
 # --------------------------------------------------------------------------
 # fail-closed dispatch (no database access on either branch)
 # --------------------------------------------------------------------------
@@ -485,8 +590,14 @@ async def test_disabled_dispatch_sends_nothing_and_touches_nothing(
 
     session = _ForbiddenSession()
     result = await dispatch_price_alert_pushes(session)  # type: ignore[arg-type]
+    order_result = await dispatch_order_execution_pushes(
+        session,  # type: ignore[arg-type]
+        owner_user_id=1,
+        order_id="paper-order-1",
+    )
 
     assert result == {"enabled": False, "reason": "disabled"}
+    assert order_result == {"enabled": False, "reason": "disabled"}
 
 
 @pytest.mark.asyncio
@@ -498,8 +609,14 @@ async def test_enabled_but_unconfigured_dispatch_makes_no_outbound_request(
 
     session = _ForbiddenSession()
     result = await dispatch_price_alert_pushes(session)  # type: ignore[arg-type]
+    order_result = await dispatch_order_execution_pushes(
+        session,  # type: ignore[arg-type]
+        owner_user_id=1,
+        order_id="paper-order-1",
+    )
 
     assert result == {"enabled": False, "reason": "credentials_missing"}
+    assert order_result == {"enabled": False, "reason": "credentials_missing"}
 
 
 @pytest.mark.asyncio

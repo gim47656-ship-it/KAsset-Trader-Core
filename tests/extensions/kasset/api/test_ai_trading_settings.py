@@ -14,6 +14,7 @@ from app.extensions.kasset.automation.policy import (
     AITradingSnapshot,
     AITradingUsage,
     OperatingMode,
+    PaperExecutionView,
 )
 from app.schemas.ai_recommendations import AITradingStateUpdate
 
@@ -166,3 +167,40 @@ def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
     assert derived["sameSymbolReentryLimit"] == 1
     assert derived["minAiConfidence"] == "0.50"
     assert payload["usage"]["sellsToday"] == 3
+
+
+def test_router_response_exposes_order_execution_origin() -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+    response = _ai_trading_state_response(
+        AITradingSnapshot(
+            mode=OperatingMode.AUTO_PAPER,
+            limits=AITradingLimits(),
+            usage=AITradingUsage(),
+            kill_switch=False,
+            updated_at=moment,
+            executions=(
+                PaperExecutionView(
+                    id="paper-1",
+                    recommendation_id="rec-1",
+                    execution_origin="AUTO_PAPER",
+                    market="KRX",
+                    symbol="005930",
+                    name="삼성전자",
+                    side="BUY",
+                    quantity=Decimal("1"),
+                    price=Decimal("70100"),
+                    currency="KRW",
+                    status="FILLED",
+                    at=moment,
+                    reject_reason=None,
+                ),
+            ),
+        )
+    )
+
+    assert (
+        response.model_dump(mode="json", by_alias=True)["executions"][0][
+            "executionOrigin"
+        ]
+        == "AUTO_PAPER"
+    )

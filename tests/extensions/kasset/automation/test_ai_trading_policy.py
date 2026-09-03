@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,6 +25,7 @@ from app.extensions.kasset.automation.policy import (
 )
 from app.models.trading import User, UserRole
 from app.models.user_settings import UserSetting
+from app.services.kasset_automation_audit import build_paper_execution_event
 
 _NOW = datetime(2026, 9, 1, 1, 0, tzinfo=UTC)
 _EXPECTED_PRIORITY = [
@@ -570,3 +571,241 @@ async def test_order_count_gate_separates_buy_sell_and_total_limits(
     assert "sellsToday=" in order_count.detail
     assert "hardMaxBuys=8" in order_count.detail
     assert "hardMaxSells=16" in order_count.detail
+
+
+@pytest.mark.asyncio
+async def test_executions_enrich_missing_names_in_one_master_query() -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+
+    def stored_order(order_id: str, symbol: str, name: str | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=order_id,
+            market="KRX",
+            symbol=symbol,
+            name=name,
+            side="BUY",
+            quantity=Decimal("1"),
+            average_fill_price=Decimal("135100"),
+            limit_price=None,
+            currency="KRW",
+            status="FILLED",
+            created_at=moment,
+            reject_reason=None,
+        )
+
+    orders = [
+        stored_order("null-name", "138040", None),
+        stored_order("blank-name", "138040", "  "),
+        stored_order("code-name", "138040", "138040"),
+        stored_order("unknown-name", "999999", None),
+    ]
+
+    class Result:
+        def __init__(self, rows: list[object]) -> None:
+            self.rows = rows
+
+        def all(self) -> list[object]:
+            return self.rows
+
+    class ExecutionSession:
+        def __init__(self) -> None:
+            self.name_reads = 0
+            self.ledger_reads = 0
+
+        async def scalars(self, statement: object) -> Result:
+            assert "kasset_android_paper_orders" in str(statement)
+            return Result(list(orders))
+
+        async def execute(self, statement: object) -> Result:
+            if "ai_recommendations" in str(statement):
+                return Result([])
+            if "kasset_paper_execution_events" in str(statement):
+                self.ledger_reads += 1
+                return Result([])
+            assert "symbol_master" in str(statement)
+            self.name_reads += 1
+            return Result([("KRX", "138040", "메리츠금융지주")])
+
+    db = ExecutionSession()
+    executions = await AITradingPolicyService()._executions(
+        db,
+        101,
+        limit=50,  # type: ignore[arg-type]
+    )
+
+    assert [execution.name for execution in executions] == [
+        "메리츠금융지주",
+        "메리츠금융지주",
+        "메리츠금융지주",
+        None,
+    ]
+    assert executions[-1].symbol == "999999"
+    assert db.name_reads == 1
+    assert db.ledger_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_executions_resolve_order_origins_in_one_ledger_query() -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+
+    def stored_order(order_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=order_id,
+            market="KRX",
+            symbol="005930",
+            name="삼성전자",
+            side="BUY",
+            quantity=Decimal("1"),
+            average_fill_price=Decimal("70100"),
+            limit_price=None,
+            currency="KRW",
+            status="FILLED",
+            created_at=moment,
+            reject_reason=None,
+        )
+
+    orders = [
+        stored_order("auto-order"),
+        stored_order("approval-order"),
+        stored_order("direct-order"),
+        stored_order("unknown-ledger-order"),
+    ]
+
+    class Result:
+        def __init__(self, rows: list[object]) -> None:
+            self.rows = rows
+
+        def all(self) -> list[object]:
+            return self.rows
+
+    class ExecutionSession:
+        def __init__(self) -> None:
+            self.ledger_reads = 0
+
+        async def scalars(self, statement: object) -> Result:
+            assert "kasset_android_paper_orders" in str(statement)
+            return Result(list(orders))
+
+        async def execute(self, statement: object) -> Result:
+            sql = str(statement)
+            if "ai_recommendations" in sql:
+                return Result(
+                    [
+                        ("auto-order", "rec-auto"),
+                        ("approval-order", "rec-approved"),
+                        ("unknown-ledger-order", "rec-unknown"),
+                    ]
+                )
+            if "kasset_paper_execution_events" in sql:
+                self.ledger_reads += 1
+                return Result(
+                    [
+                        ("auto-order", "AUTO_PAPER"),
+                        ("auto-order", "APPROVAL"),
+                        ("unknown-ledger-order", "UNKNOWN"),
+                    ]
+                )
+            assert "symbol_master" in sql
+            return Result([])
+
+    db = ExecutionSession()
+    executions = await AITradingPolicyService()._executions(
+        db,
+        101,
+        limit=50,  # type: ignore[arg-type]
+    )
+    origins = {execution.id: execution.execution_origin for execution in executions}
+
+    assert origins == {
+        "auto-order": "AUTO_PAPER",
+        "approval-order": None,
+        "direct-order": "DIRECT",
+        "unknown-ledger-order": None,
+    }
+    assert db.ledger_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_executions_keep_auto_origin_when_approval_is_replayed(
+    db_session: AsyncSession,
+) -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+    owner_user_id = 101
+    order_id = f"auto-order-{uuid4().hex}"
+    recommendation_id = f"rec-auto-{uuid4().hex}"
+    order = SimpleNamespace(
+        id=order_id,
+        market="KRX",
+        symbol="005930",
+        name="삼성전자",
+        side="BUY",
+        quantity=Decimal("1"),
+        average_fill_price=Decimal("70100"),
+        limit_price=None,
+        currency="KRW",
+        status="FILLED",
+        created_at=moment,
+        reject_reason=None,
+    )
+    db_session.add_all(
+        [
+            build_paper_execution_event(
+                owner_user_id=owner_user_id,
+                origin="AUTO_PAPER",
+                status="SUBMITTED",
+                reason="submitted",
+                recommendation_id=recommendation_id,
+                observed_at=moment,
+                replayed=False,
+                paper_order_id=order_id,
+            ),
+            build_paper_execution_event(
+                owner_user_id=owner_user_id,
+                origin="APPROVAL",
+                status="SUBMITTED",
+                reason="idempotent_replay",
+                recommendation_id=recommendation_id,
+                observed_at=moment + timedelta(minutes=1),
+                replayed=True,
+                paper_order_id=order_id,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    class Result:
+        def __init__(self, rows: list[object]) -> None:
+            self.rows = rows
+
+        def all(self) -> list[object]:
+            return self.rows
+
+    class ExecutionSession:
+        def __init__(self) -> None:
+            self.ledger_reads = 0
+
+        async def scalars(self, statement: object) -> Result:
+            return Result([order])
+
+        async def execute(self, statement: object) -> object:
+            sql = str(statement)
+            if "ai_recommendations" in sql:
+                return Result([(order_id, recommendation_id)])
+            if "kasset_paper_execution_events" in sql:
+                self.ledger_reads += 1
+                return await db_session.execute(statement)
+            raise AssertionError(f"unexpected query: {sql}")
+
+    db = ExecutionSession()
+    try:
+        executions = await AITradingPolicyService()._executions(
+            db,
+            owner_user_id,
+            limit=50,  # type: ignore[arg-type]
+        )
+
+        assert len(executions) == 1
+        assert executions[0].execution_origin == "AUTO_PAPER"
+        assert db.ledger_reads == 1
+    finally:
+        await db_session.rollback()

@@ -122,25 +122,24 @@ async def kasset_google_news_us_sync() -> dict[str, object]:
 
 @broker.task(
     task_name="kasset.push.price_alerts",
-    # 10분마다 그날의 미발송 ±5% 알림만 밀어낸다. 실제 발송 여부는
-    # KASSET_FCM_ENABLED와 service-account 설정이 최종 결정하며, 둘 중 하나라도
-    # 없으면 외부 요청 없이 끝난다.
+    # 기존 10분 스위프가 그날의 미발송 ±5% 알림과 기한이 된 체결 알림
+    # 재시도를 함께 처리한다. 설정이 없으면 외부 요청 없이 끝난다.
     schedule=[{"cron": "*/10 * * * *", "cron_offset": "Asia/Seoul"}],
 )
 async def kasset_price_alert_push() -> dict[str, object]:
-    """Deliver today's outstanding rapid-rise/fall alerts to registered devices."""
+    """가격 알림과 기한이 된 체결 알림 재시도를 등록 기기에 전달한다."""
 
     if not settings.KASSET_FCM_ENABLED:
         return {"enabled": False, "reason": "disabled"}
 
-    from app.extensions.kasset.fcm_push_service import dispatch_price_alert_pushes
+    from app.extensions.kasset.fcm_push_service import dispatch_scheduled_pushes
 
     async with _advisory_single_flight(_PUSH_LOCK_KEY) as acquired:
         if not acquired:
             logger.info("kasset FCM push skipped: push_already_running")
             return {"enabled": True, "skipped": "push_already_running"}
         async with _session() as session:
-            return await dispatch_price_alert_pushes(session)
+            return await dispatch_scheduled_pushes(session)
 
 
 async def _sync_google_news_market(market: str) -> dict[str, object]:

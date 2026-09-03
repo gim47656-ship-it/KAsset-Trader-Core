@@ -31,6 +31,7 @@ from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.models import AndroidPaperOrder
 from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.trading import InstrumentType
+from app.services.ai_recommendations.service import AIRecommendationService
 from app.services.paper_trading_service import PaperTradingService, calculate_fee
 
 
@@ -412,8 +413,16 @@ class PaperOrderFacade:
         result = await db.execute(
             stmt.order_by(AndroidPaperOrder.created_at.desc()).limit(limit)
         )
+        orders = list(result.scalars().all())
+        symbol_names = await AIRecommendationService(db).load_symbol_names(orders)
         return OrdersResponse(
-            orders=[self.serialize_order(order) for order in result.scalars().all()]
+            orders=[
+                self.serialize_order(
+                    order,
+                    resolved_name=symbol_names.get((order.market, order.symbol)),
+                )
+                for order in orders
+            ]
         )
 
     async def list_fills(
@@ -447,8 +456,13 @@ class PaperOrderFacade:
     ) -> OrderDetail:
         order = await self.get(db, owner_user_id, order_id)
         fill = await self._fill_for_order(db, owner_user_id, order)
+        symbol_names = await AIRecommendationService(db).load_symbol_names([order])
         return OrderDetail(
-            order=self.serialize_order(order), fills=[fill] if fill is not None else []
+            order=self.serialize_order(
+                order,
+                resolved_name=symbol_names.get((order.market, order.symbol)),
+            ),
+            fills=[fill] if fill is not None else [],
         )
 
     async def envelope(
@@ -462,8 +476,12 @@ class PaperOrderFacade:
     ) -> OrderEnvelope:
         self._assert_owned(order, owner_user_id)
         fill = await self._fill_for_order(db, owner_user_id, order)
+        symbol_names = await AIRecommendationService(db).load_symbol_names([order])
         return OrderEnvelope(
-            order=self.serialize_order(order),
+            order=self.serialize_order(
+                order,
+                resolved_name=symbol_names.get((order.market, order.symbol)),
+            ),
             risk=risk,
             fills=[fill] if fill is not None else [],
             idempotent_replay=replay,
@@ -673,9 +691,17 @@ class PaperOrderFacade:
         return await self.envelope(db, owner_user_id, order, replay=True)
 
     @staticmethod
-    def serialize_order(order: AndroidPaperOrder) -> Order:
+    def serialize_order(
+        order: AndroidPaperOrder, *, resolved_name: str | None = None
+    ) -> Order:
         created = order.created_at or datetime.now(UTC)
         updated = order.updated_at or created
+        stored_name = str(order.name or "").strip()
+        display_name = (
+            resolved_name
+            if not stored_name or stored_name == str(order.symbol).strip()
+            else stored_name
+        )
         return Order(
             id=order.id,
             client_order_id=order.client_order_id,
@@ -683,7 +709,7 @@ class PaperOrderFacade:
             account_id=f"PAPER-{order.paper_account_id}",
             market=order.market,
             symbol=order.symbol,
-            name=order.name,
+            name=display_name,
             currency=order.currency,
             side=order.side,
             order_type=order.order_type,

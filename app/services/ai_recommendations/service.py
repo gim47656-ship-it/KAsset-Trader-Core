@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -174,21 +174,21 @@ class AIRecommendationService:
 
     async def load_symbol_names(
         self,
-        recommendations: list[AIRecommendation],
+        rows: Sequence[AIRecommendation | AndroidPaperOrder],
     ) -> dict[tuple[str, str], str]:
-        """이름이 비었거나 코드뿐인 기존 추천을 종목 마스터에서 한 번에 보강한다."""
+        """이름이 비었거나 코드뿐인 기존 행을 종목 마스터에서 한 번에 보강한다."""
 
         keys = tuple(
             dict.fromkeys(
                 (str(row.market), str(row.symbol))
-                for row in recommendations
+                for row in rows
                 if not (row.name or "").strip()
                 or (row.name or "").strip() == str(row.symbol).strip()
             )
         )
         if not keys:
             return {}
-        rows = (
+        name_rows = (
             await self._session.execute(
                 select(
                     SymbolMaster.market,
@@ -204,7 +204,7 @@ class AIRecommendationService:
         ).all()
         return {
             (market, symbol): name.strip()
-            for market, symbol, name in rows
+            for market, symbol, name in name_rows
             if name and name.strip() and name.strip() != symbol
         }
 

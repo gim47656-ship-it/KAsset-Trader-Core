@@ -27,7 +27,7 @@ from app.extensions.kasset.api.toss_market_data import (
     toss_market_data,
 )
 from app.extensions.kasset.automation.market_pipeline import _market_route
-from app.models.trading import Instrument
+from app.models.symbol_master import SymbolMaster
 from app.services.brokers.toss.market_calendar import (
     TossSessionWindow,
     get_kr_toss_session_from_toss,
@@ -251,7 +251,7 @@ async def resolve_quote(db: AsyncSession, *, market: str, symbol: str) -> Quote:
     point = (await _toss_points(market, [normalized])).get(normalized)
     if point is not None:
         rows = (await _candle_rows(db, market, [normalized])).get(normalized, ())
-        names = await _instrument_names(db, [normalized])
+        names = await _instrument_names(db, market, [normalized])
         regular_close = await _regular_closes(
             {normalized: point}, window=regular_window
         )
@@ -294,7 +294,7 @@ async def resolve_quotes(
     )
     points = await _toss_points(market, requested)
     candles = await _candle_rows(db, market, requested)
-    names = await _instrument_names(db, requested)
+    names = await _instrument_names(db, market, requested)
     regular_closes = await _regular_closes(points, window=regular_window)
     if wire_market == "KRX":
         known_previous_closes = await _regular_closes(
@@ -587,19 +587,26 @@ async def _candle_rows(
         return {}
 
 
-async def _instrument_names(db: AsyncSession, symbols: Sequence[str]) -> dict[str, str]:
+async def _instrument_names(
+    db: AsyncSession, market: str, symbols: Sequence[str]
+) -> dict[str, str]:
     if not symbols:
         return {}
     try:
         result = await db.execute(
-            select(Instrument.symbol, Instrument.name).where(
-                Instrument.symbol.in_(set(symbols))
+            select(SymbolMaster.symbol, SymbolMaster.name).where(
+                SymbolMaster.market == _wire_market(market),
+                SymbolMaster.symbol.in_(set(symbols)),
             )
         )
-        return {symbol: name for symbol, name in result.all() if name}
+        return {
+            symbol: name.strip()
+            for symbol, name in result.all()
+            if name and name.strip() and name.strip() != symbol
+        }
     except Exception as exc:  # noqa: BLE001 — 종목명은 없으면 null이다
         logger.warning(
-            "kasset krx quote name read failed (%s): name omitted",
+            "kasset quote symbol master read failed (%s): name omitted",
             type(exc).__name__,
         )
         return {}

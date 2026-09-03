@@ -1,8 +1,23 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-03 (동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge·운영 배포 — 주문 판정 무변경)
+갱신: 2026-09-03 (자동주문 표시·체결 푸시 WIP를 `main`에 보존하고 로컬 작업 브랜치 정리)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-03 중단 지점 — 집에서 이어서 할 작업
+- 사용자 실기기에서 확인한 결함: 정상 AUTO_PAPER 주문 `4dd8953f-2e82-4278-9f2e-220345836fc9`(추천 `rec-6835c14e`, KRX `138040`, BUY 3주 @135,100)이 최근 주문·주문/체결 내역·보유자산에서 종목명 대신 코드로 보였고, 자동주문 체결 FCM이 없었다. AI픽 `완료` 필터는 `GET /api/v1/ai/recommendations?status=RESOLVED&limit=50`에서 저장된 `strategyVotes[*].family`를 응답 스키마가 거절해 HTTP 500이었다.
+- 현재 `main` 작업 내용: `SymbolMaster` 기반 종목명 보강을 주문 목록·상세·주문 응답·포지션·execution 응답에 연결했다. AI 추천 응답은 `strategyVotes.family`를 선택 문자열로 수용한다. execution 응답에는 원장의 최초 유효 `SUBMITTED` 이벤트를 기준으로 `AUTO_PAPER`/`APPROVAL`/`DIRECT` 출처를 넣고, 원장이 없는 추천 연결 주문은 추측하지 않고 `null`로 둔다.
+- 자동주문 `SUBMITTED` 뒤 owner의 활성 기기에 `ORDER_EXECUTION` mixed FCM을 보낸다. payload는 `orderId`, `recommendationId`, `market`, `symbol`, `name`, `side`, `quantity`, `filledPrice`, `status`, `executionOrigin`을 포함하며 주문 ID별 dedupe, transient backoff 재시도, stale `PENDING` 회수, owner 격리를 구현했다. 푸시 실패는 주문·execution 원장 결과를 바꾸지 않는다.
+- 통합 checker 1회 결과는 CRITICAL 0, MAJOR 2였다. 둘 다 수용해 (1) 원장 없는 추천 주문을 `APPROVAL`로 오표시하지 않게 하고, (2) Android가 `executionOrigin=null`을 승인 주문으로 추측하지 않게 수정했다. 추가 수용 항목으로 재생된 SUBMITTED가 출처를 뒤집지 않도록 최초 이벤트를 사용하고, 주문 상세/주문 응답 이름 보강, 비주식 legacy `Instrument` fallback, transient FCM 재시도를 반영했다.
+- **아직 완료 아님 / 운영 미배포.** 최종 수정 후 DB 통합 테스트는 미통과 상태가 아니라 **실행 환경 실패로 미검증**이다. 225개 선택 테스트를 두 번 실행했으나 둘 다 시작 단계에서 `127.0.0.1` PostgreSQL `ConnectionRefusedError [WinError 1225]`로 전부 ERROR가 났다. `kasset-test-db`는 서버의 `127.0.0.1:55432`에 살아 있었지만 로컬 `pg-tunnel`이 실제 포트를 열지 못했다. 동일 실패를 반복하지 말고 터널부터 새로 만든 뒤 실행한다.
+- 최종 정적 상태: 변경 파일 `ruff check`는 오류 2건을 고친 뒤 통과했고, `ruff format`으로 9개 파일을 정리했다. **포맷 후 `ruff check`/`ruff format --check`와 pytest는 다시 실행해야 한다.**
+- 브랜치 정리 완료: 이 저장소는 `main` checkout이다. 로컬 `feat/order-name-and-push`는 `main`과 동일 커밋이라 삭제했고, 이미 merge된 `feat/same-time-rvol-shadow`도 삭제했다. 운영 서버는 여전히 기존 배포 `acf093d8`; 이번 WIP는 배포하지 않았다.
+
+집에서 재개 순서:
+1. `main` 최신 상태를 받은 뒤 서버 테스트 DB 터널을 새로 연다: `ssh -N -L 55432:127.0.0.1:55432 kasset-server`. 별도 셸에서 `DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/test_db`를 명시하고 이번 변경의 10개 테스트 파일을 다시 실행한다.
+2. `uv run ruff check <변경 파일>`과 `uv run ruff format --check <변경 파일>`을 다시 실행한다. pytest와 정적 검증이 모두 통과하기 전에는 배포하지 않는다.
+3. Android 최종 APK와 함께 실기기에서 4개 원래 증상을 재검증한다: AI픽 `완료`가 200/목록 표시, 최근 주문·주문/체결·보유자산에 `메리츠금융지주`, 최근 주문에 자동주문/3주/단가/총액과 AI픽 상세 링크, 자동주문 체결 FCM 탭 시 해당 주문 또는 추천 상세 이동.
+4. 검증 후에만 Core 이미지를 빌드해 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개를 같은 SHA로 배포한다. migration 추가는 없다. 검증 목적으로 새 주문을 만들지 말고 기존 주문 `4dd8953f-...`의 알림 발송 경로만 owner 4 범위에서 확인한다.
 
 ## 전체 진행 상태
 - 운영 배포 이미지는 `kasset-trader-core:acf093d81e62c4bb2e41b5c4d3889dfd32972321`다(PR #41 merge, `main`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 이 SHA이고 `/health`는 `ok`다. 서버 checkout도 `main` 같은 커밋이라 tree diff가 없다. migration head는 `20260903_kasset_rvol_shadow`다. 직전 이미지는 `d73a4e55`(PR #39 merge `1c74f3f2`)였다.

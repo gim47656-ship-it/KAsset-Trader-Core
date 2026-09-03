@@ -251,14 +251,12 @@ def test_paper_kr_quote_falls_back_to_stored_candles(
     from datetime import UTC, datetime
     from decimal import Decimal
 
+    from app.extensions.kasset.api import krx_quotes
     from app.extensions.kasset.api import paper as paper_module
 
     adapter = paper_module.PaperAccountAdapter()
-    monkeypatch.setattr(
-        adapter,
-        "_instrument_names",
-        AsyncMock(return_value={"005930": "삼성전자"}),
-    )
+    instrument_names = AsyncMock(return_value={"005930": "삼성전자"})
+    monkeypatch.setattr(krx_quotes, "_instrument_names", instrument_names)
     monkeypatch.setattr(
         adapter,
         "_quote_from_candles",
@@ -272,12 +270,15 @@ def test_paper_kr_quote_falls_back_to_stored_candles(
         ),
     )
 
-    quote = asyncio.run(adapter.quote(object(), market="KRX", symbol="005930"))
+    db = object()
+    quote = asyncio.run(adapter.quote(db, market="KRX", symbol="005930"))
 
     assert quote.price == "71500"
     assert quote.previous_close == "71000"
     assert quote.change_amount == "500"
     assert quote.source == "PAPER_CANDLES"
+    assert quote.name == "삼성전자"
+    instrument_names.assert_awaited_once_with(db, "KRX", ["005930"])
 
 
 def test_paper_us_quote_uses_active_symbol_toss_snapshot(
