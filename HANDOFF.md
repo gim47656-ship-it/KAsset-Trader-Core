@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-04 (승격 검증·bias audit를 최신 main에 통합하고 로컬 검증 완료; 관심종목 알림 PR #45와 KRW/USD 장부 운영 이력 보존)
+갱신: 2026-09-04 (승격 검증·bias audit PR #46 CI 통과 및 운영 배포 완료; 관심종목 알림 PR #45와 KRW/USD 장부 운영 이력 보존)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
@@ -8,6 +8,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 최신 `main`(`fd547c13`, PR #45 포함) 위에 18개 경로의 promotion WIP를 통합했다. `evidence_track`은 기본 `historical_pit`과 명시적 `forward_paper`만 허용하며, forward 시그널은 코호트 `effective_date` 이후로 제한한다. 기본 `promotion_ready`/`blockers`는 ops/dashboard·CLI의 공통 readiness 의미를 보존하고, historical PIT 전용 blocker는 `historical_evidence_ready`/`historical_evidence_blockers`로 분리한다. historical 증거 생성은 `promotion_evidence._require_readiness`에서 계속 fail-closed다. 알 수 없는 트랙과 불충분한 forward window도 fail-closed하며 성과 임계값 11개는 완화하지 않는다.
 - 저장 근거는 `next_open`·`adverse_rate` 체결 규약과 수수료·매도세·최소 수수료·슬리피지를 고정한다. 거래일 격자 Sharpe/Calmar는 bias-audit/backtest 결과의 감사 지표이며 저장된 `PromotionMetrics`가 아니다. 결정론적 block bootstrap은 advisory payload일 뿐 승인 판정과 determinism hash에서 제외한다. bias audit CLI를 함께 추가했다.
 - PAPER 고정, Kill Switch, Hard Risk, promotion gate를 유지하며 LIVE 경로는 추가하지 않았다. DB schema/migration 변경도 없다. 최신 `main` 통합 후 focused pytest **184 passed**, changed-path `ruff check`·`ruff format --check`, `ty check app/ --error-on-warning`, `kasset_bias_audit.py --help`, `git diff --check`를 통과했다.
+- 반영: PR #46을 merge commit `194cd447`로 병합했고 PR CI run `33783380035`와 `main` push CI run `33784107485`가 모두 `ci-required` 포함 통과했다. 운영 `/opt/kasset-trader-core`에 DB migration 없이 배포해 `api`·`worker`·`scheduler`·`mcp`·`ai-mcp` 5개 컨테이너의 이미지와 `/app/.build-vcs-ref`가 모두 `194cd447`로 일치한다. API·MCP·AI MCP health와 운영 컨테이너의 `kasset_bias_audit.py --help`, 트랙별 survivorship 임계값 smoke를 통과했고 기동 완료 이후 ERROR/Traceback/CRITICAL은 0줄이다. 17:35 UTC scheduler가 PAPER execution sweep을 전달하고 worker가 `owners=0 outcomes=[]`로 정상 완료했다(집행할 유효 추천 없음). 기존 production candidate 1건은 `forward_paper`이지만 임계값 미달 `non_promotable` 상태, promotion registry 0건, 배포 이후 주문 0건을 유지했다.
 
 ## 2026-09-04 새벽 — 급등·급락 알림 하루 보존 (PR #45, migration 있음)
 - 증상(사용자 보고): 급락 푸시는 오는데 앱 `알림` 목록에 안 쌓이고, 등락률이 −5% 안쪽으로 회복하면 사라졌다. 원인은 `daily_routine_service._load_price_alerts`가 저장 없이 조회 시점 현재가로만 ±5%를 다시 계산했기 때문이다(`kasset_push_deliveries`는 발송 dedupe 기록일 뿐 목록의 소스가 아니다).
