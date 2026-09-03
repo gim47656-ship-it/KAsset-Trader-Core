@@ -114,6 +114,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "review.ai_recommendations",
     "review.kasset_strategy_promotions",
     "kasset_paper_position_states",
+    "kasset_routine_price_alert_events",
     "kasset_ai_daily_routine_settings",
     "kasset_push_deliveries",
     "kasset_android_paper_orders",
