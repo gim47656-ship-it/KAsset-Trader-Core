@@ -6,7 +6,10 @@ from typing import Any
 import pytest
 
 from app.services.daily_candles import readiness as readiness_module
-from app.services.daily_candles.readiness import DailyCandlesReadinessService
+from app.services.daily_candles.readiness import (
+    HISTORICAL_PIT_ONLY_BLOCKERS,
+    DailyCandlesReadinessService,
+)
 
 _AS_OF = datetime(2026, 1, 6, 12, tzinfo=UTC)
 _ACTION_SPECS = (
@@ -256,6 +259,7 @@ async def _measure(
     sessions: tuple[date, ...] | None = None,
     session_rows: list[dict[str, object]] | None = None,
     cohort_ids: dict[str, str] | None = None,
+    evidence_track: str = "historical_pit",
 ) -> tuple[Any, _ReadOnlySession]:
     candidates = _sessions() if sessions is None else sessions
     monkeypatch.setattr(
@@ -278,6 +282,7 @@ async def _measure(
         as_of=_AS_OF,
         markets=(market,),  # type: ignore[arg-type]
         cohort_ids=cohort_ids,  # type: ignore[arg-type]
+        evidence_track=evidence_track,
     )
     return result, db
 
@@ -499,9 +504,10 @@ async def test_ineligible_member_is_excluded_without_blocking_ready_peers(
                 invalid_adjustment=1,
             ),
         ],
-        cohort=_cohort("us", requested_size=2),
+        cohort=_cohort("us", scope="forward_paper", requested_size=2),
         sessions=sessions,
         session_rows=_session_rows(sessions, member_count=2),
+        evidence_track="forward_paper",
     )
 
     market = result.for_market("us")
@@ -537,6 +543,7 @@ async def test_forward_cohort_reaches_promotion_ready_with_unresolved_history(
         ),
         members=[_member("AAPL", sessions=sessions)],
         sessions=sessions,
+        evidence_track="forward_paper",
     )
 
     market = result.for_market("us")
@@ -559,7 +566,7 @@ async def test_forward_cohort_reaches_promotion_ready_with_unresolved_history(
 
 
 @pytest.mark.asyncio
-async def test_historical_pit_label_without_delisted_evidence_is_not_proven(
+async def test_missing_delisted_evidence_stays_separate_from_promotion_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -574,9 +581,11 @@ async def test_historical_pit_label_without_delisted_evidence_is_not_proven(
     assert market.includes_delisted is False
     assert market.daily_history_ready is True
     assert market.promotion_ready is True
+    assert result.promotion_ready is True
     assert market.historical_evidence_ready is False
     assert result.historical_evidence_ready is False
     assert "us:delisted_members_absent" in market.historical_evidence_blockers
+    assert market.blockers == ()
     cohort_sql = next(
         sql for sql in db.statements if "daily_candles_readiness:cohort:us" in sql
     )
@@ -616,7 +625,7 @@ async def test_historical_pit_cohort_with_delisted_survivor_is_fully_proven(
 
 
 @pytest.mark.asyncio
-async def test_missing_list_date_blocks_history_evidence_only(
+async def test_missing_list_date_blocks_only_historical_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -639,10 +648,11 @@ async def test_missing_list_date_blocks_history_evidence_only(
     assert market.historical_evidence_ready is False
     assert "us:list_date_coverage_incomplete" in market.historical_evidence_blockers
     assert "us:point_in_time_unavailable" in market.historical_evidence_blockers
+    assert market.blockers == ()
 
 
 @pytest.mark.asyncio
-async def test_member_listed_after_cohort_start_blocks_history_evidence(
+async def test_member_listed_after_cohort_start_blocks_only_historical_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = _sessions()
@@ -665,6 +675,7 @@ async def test_member_listed_after_cohort_start_blocks_history_evidence(
     assert market.promotion_ready is True
     assert market.historical_evidence_ready is False
     assert "us:member_listed_after_cohort_start" in market.historical_evidence_blockers
+    assert market.blockers == ()
 
 
 @pytest.mark.asyncio
@@ -871,9 +882,10 @@ async def test_fallback_only_history_never_proves_historical_evidence(
 
     market = result.for_market("us")
     assert market.daily_history_ready is True
-    assert market.promotion_ready is True
+    assert market.promotion_ready is False
     assert market.historical_evidence_ready is False
     assert "us:fallback_only" in market.historical_evidence_blockers
+    assert "us:fallback_only" in market.blockers
 
 
 @pytest.mark.asyncio
@@ -1085,3 +1097,91 @@ async def test_member_delisted_inside_the_window_is_not_stale_or_missing(
     assert market.missing_expected_trading_day_count == 0
     assert market.eligible_symbol_count == 2
     assert market.daily_history_ready is True
+
+
+@pytest.mark.asyncio
+async def test_forward_track_accepts_current_forward_cohort_without_pit_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """forward_paper 트랙은 PIT 전용 blocker를 요구하지 않는다.
+
+    같은 입력이 기본 트랙에서는 cohort_not_historical_pit 등으로 막힌다는 사실은
+    test_current_forward_history_can_be_ready_while_promotion_is_blocked가 지킨다.
+    """
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", scope="forward_paper", effective_date=date(2025, 6, 1)),
+        members=[_member("AAPL", sessions=sessions)],
+        sessions=sessions,
+        evidence_track="forward_paper",
+    )
+
+    market = result.for_market("us")
+    assert result.evidence_track == "forward_paper"
+    assert market.daily_history_ready is True
+    assert market.promotion_ready is True
+    assert result.promotion_ready is True
+    assert market.blockers == ()
+    assert market.point_in_time_available is False
+    assert market.includes_delisted is False
+    assert not {f"us:{code}" for code in HISTORICAL_PIT_ONLY_BLOCKERS} & set(
+        market.blockers
+    )
+
+
+@pytest.mark.asyncio
+async def test_forward_track_rejects_historical_pit_cohort_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", scope="historical_pit"),
+        members=[_member("AAPL", sessions=sessions)],
+        sessions=sessions,
+        evidence_track="forward_paper",
+    )
+
+    market = result.for_market("us")
+    assert market.promotion_ready is False
+    assert "us:cohort_scope_mismatch" in market.blockers
+
+
+@pytest.mark.asyncio
+async def test_forward_track_keeps_fallback_only_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", scope="forward_paper", effective_date=date(2025, 6, 1)),
+        members=[_member("AAPL", sessions=sessions, fallback_only=True)],
+        sessions=sessions,
+        evidence_track="forward_paper",
+    )
+
+    market = result.for_market("us")
+    assert market.promotion_ready is False
+    assert "us:fallback_only" in market.blockers
+
+
+@pytest.mark.asyncio
+async def test_unknown_track_never_becomes_promotion_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _sessions()
+    result, _ = await _measure(
+        monkeypatch,
+        market="us",
+        cohort=_cohort("us", scope="forward_paper", effective_date=date(2025, 6, 1)),
+        members=[_member("AAPL", sessions=sessions)],
+        sessions=sessions,
+        evidence_track="not_a_track",
+    )
+
+    assert result.promotion_ready is False
+    assert "us:cohort_scope_mismatch" in result.for_market("us").blockers

@@ -1,4 +1,4 @@
-"""Pure, deterministic KR/US portfolio backtesting with next-bar execution."""
+"""명시적 비용·체결 규약을 지원하는 결정론적 KR/US 포트폴리오 백테스트."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 from app.extensions.kasset.automation.benchmark_relative_strength import (
     compute_benchmark_return_60_from_bars,
@@ -54,6 +54,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PAPER_STRATEGY_KEY,
     DEFAULT_PAPER_STRATEGY_VERSION,
 )
+from app.services.paper_trading_service import FEE_RATES
 
 MarketKey = Literal["KR", "US"]
 ExecutionMarket = Literal["KRX", "US"]
@@ -65,19 +66,52 @@ _SUPPORTED_MARKETS = frozenset({"KR", "US"})
 
 @dataclass(frozen=True, slots=True)
 class MarketExecutionCost:
-    """One market's proportional fee and adverse open-price slippage."""
+    """한 시장의 수수료, 매도세, 불리한 가격 슬리피지 규약."""
 
     fee_rate: Decimal
     slippage_rate: Decimal
+    sell_tax_rate: Decimal = Decimal("0")
+    min_fee_absolute: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
-        for field_name in ("fee_rate", "slippage_rate"):
+        for field_name in ("fee_rate", "slippage_rate", "sell_tax_rate"):
             value = getattr(self, field_name)
             if not isinstance(value, Decimal):
                 value = Decimal(str(value))
                 object.__setattr__(self, field_name, value)
             if not value.is_finite() or not _ZERO <= value < _ONE:
                 raise ValueError(f"{field_name} must be finite and in [0, 1)")
+        minimum = self.min_fee_absolute
+        if not isinstance(minimum, Decimal):
+            minimum = Decimal(str(minimum))
+            object.__setattr__(self, "min_fee_absolute", minimum)
+        if not minimum.is_finite() or minimum < _ZERO:
+            raise ValueError("min_fee_absolute must be finite and non-negative")
+
+
+CONSERVATIVE_COST_PROFILE: Mapping[MarketKey, MarketExecutionCost] = {
+    "KR": MarketExecutionCost(
+        fee_rate=Decimal("0.0015"),
+        slippage_rate=Decimal("0.0010"),
+    ),
+    "US": MarketExecutionCost(
+        fee_rate=Decimal("0.0010"),
+        slippage_rate=Decimal("0.0005"),
+    ),
+}
+
+LIVE_MATCHED_COST_PROFILE: Mapping[MarketKey, MarketExecutionCost] = {
+    "KR": MarketExecutionCost(
+        fee_rate=Decimal(str(FEE_RATES["equity_kr"]["buy"])),
+        slippage_rate=Decimal("0"),
+        sell_tax_rate=Decimal(str(FEE_RATES["equity_kr"]["tax_sell"])),
+    ),
+    "US": MarketExecutionCost(
+        fee_rate=Decimal(str(FEE_RATES["equity_us"]["buy"])),
+        slippage_rate=Decimal("0"),
+        min_fee_absolute=Decimal(str(FEE_RATES["equity_us"]["min_fee_usd"])),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,17 +157,15 @@ class PortfolioBacktestConfig:
     candidate_top_n: int = 12
     risk_per_trade_rate: Decimal = Decimal("0.01")
     max_symbol_allocation: Decimal = Decimal("0.20")
-    kr_cost: MarketExecutionCost = MarketExecutionCost(
-        fee_rate=Decimal("0.0015"), slippage_rate=Decimal("0.0010")
-    )
-    us_cost: MarketExecutionCost = MarketExecutionCost(
-        fee_rate=Decimal("0.0010"), slippage_rate=Decimal("0.0005")
-    )
+    kr_cost: MarketExecutionCost = CONSERVATIVE_COST_PROFILE["KR"]
+    us_cost: MarketExecutionCost = CONSERVATIVE_COST_PROFILE["US"]
     strategy_key: str = DEFAULT_PAPER_STRATEGY_KEY
     strategy_version: str = DEFAULT_PAPER_STRATEGY_VERSION
     position_sizing: PositionSizingConfig = DEFAULT_POSITION_SIZING_CONFIG
     position_manager: PositionManagerConfig = PositionManagerConfig()
     execution_delay_bars: int = 1
+    entry_fill: Literal["next_open", "signal_close"] = "next_open"
+    slippage_mode: Literal["adverse_rate", "none"] = "adverse_rate"
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -159,6 +191,10 @@ class PortfolioBacktestConfig:
             raise ValueError("candidate_top_n must cover max_positions")
         if type(self.execution_delay_bars) is not int or self.execution_delay_bars < 1:
             raise ValueError("execution_delay_bars must be a positive integer")
+        if self.entry_fill not in {"next_open", "signal_close"}:
+            raise ValueError("entry_fill must be 'next_open' or 'signal_close'")
+        if self.slippage_mode not in {"adverse_rate", "none"}:
+            raise ValueError("slippage_mode must be 'adverse_rate' or 'none'")
         strategy_key = self.strategy_key.strip()
         strategy_version = self.strategy_version.strip()
         if not strategy_key or not strategy_version:
@@ -269,6 +305,10 @@ class BacktestEvidence:
 
 @dataclass(frozen=True, slots=True)
 class PortfolioBacktestResult:
+    _HASH_EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"sharpe", "calmar", "taxes_paid"}
+    )
+
     strategy_key: str
     strategy_version: str
     initial_cash: Decimal
@@ -278,10 +318,13 @@ class PortfolioBacktestResult:
     benchmark_return: Decimal | None
     excess_return: Decimal | None
     max_drawdown: Decimal
+    sharpe: Decimal | None
+    calmar: Decimal | None
     trade_count: int
     win_rate: Decimal
     expectancy: Decimal
     fees_paid: Decimal
+    taxes_paid: Decimal
     slippage_cost: Decimal
     signals: tuple[PortfolioSignal, ...]
     trades: tuple[PortfolioTrade, ...]
@@ -434,6 +477,7 @@ class _RunState:
     equity_curve: list[EquityPoint]
     fees_paid: Decimal = _ZERO
     slippage_cost: Decimal = _ZERO
+    taxes_paid: Decimal = _ZERO
     peak_equity: Decimal = _ZERO
 
 
@@ -451,11 +495,11 @@ def run_portfolio_backtest(
     ranker: CandidateRanker | None = None,
     window: BacktestWindow | None = None,
 ) -> PortfolioBacktestResult:
-    """Run a long-only portfolio over completed bars without same-bar fills.
+    """설정에 명시된 체결 규약으로 long-only 포트폴리오를 실행한다.
 
-    The event loop exposes only ``_OpenPrice`` to the execution functions. Full
-    OHLCV bars are appended to strategy history only after pending orders have
-    executed, so neither a same-close fill nor an intrabar fill is representable.
+    ``next_open``은 기본 규약으로, 주문이 전략 이력에 들어가기 전의 다음 봉
+    open만 본다. ``signal_close``는 신호 봉이 이력에 들어간 뒤 그 close로
+    체결하는 lookahead 위험 반사실이며 결과 evidence에 이 가정을 기록한다.
     """
 
     metadata = _validate_candidates(candidates)
@@ -503,12 +547,13 @@ def run_portfolio_backtest(
 
     for timestamp in sorted(event_rows):
         current = sorted(event_rows[timestamp], key=lambda item: item[0])
-        opens = {
-            key: _OpenPrice(timestamp, bar.open, len(histories[key]))
-            for key, bar in current
-        }
-        _execute_pending_exits(state, opens, config=config)
-        _execute_pending_entries(state, opens, config=config)
+        if config.entry_fill == "next_open":
+            opens = {
+                key: _OpenPrice(timestamp, bar.open, len(histories[key]))
+                for key, bar in current
+            }
+            _execute_pending_exits(state, opens, config=config)
+            _execute_pending_entries(state, opens, config=config)
 
         current_keys: set[CandidateKey] = set()
         for key, bar in current:
@@ -518,7 +563,7 @@ def run_portfolio_backtest(
             if position is not None:
                 position.last_close = bar.close
 
-        if timestamp >= record_start:
+        if timestamp >= record_start and config.entry_fill == "next_open":
             _record_equity(state, timestamp)
 
         if window is not None and timestamp < window.signal_start_at:
@@ -566,6 +611,15 @@ def run_portfolio_backtest(
             strategies=strategy_tuple,
             regimes=regimes,
         )
+        if config.entry_fill == "signal_close":
+            closes = {
+                key: _OpenPrice(timestamp, bar.close, len(histories[key]))
+                for key, bar in current
+            }
+            _execute_pending_exits(state, closes, config=config)
+            _execute_pending_entries(state, closes, config=config)
+            if timestamp >= record_start:
+                _record_equity(state, timestamp)
 
     state.signals = [
         replace(signal, status=SignalStatus.UNFILLED_END_OF_DATA)
@@ -580,6 +634,10 @@ def run_portfolio_backtest(
     final_equity = state.equity_curve[-1].equity
     total_return = _q(final_equity / config.initial_cash - _ONE)
     max_drawdown = max((point.drawdown for point in state.equity_curve), default=_ZERO)
+    sharpe, calmar = _risk_adjusted_metrics(
+        state.equity_curve,
+        max_drawdown=max_drawdown,
+    )
     wins = sum(trade.net_pnl > _ZERO for trade in state.trades)
     win_rate = _q(Decimal(wins) / Decimal(len(state.trades))) if state.trades else _ZERO
     expectancy = (
@@ -614,20 +672,46 @@ def run_portfolio_backtest(
         )
         for _, position in sorted(state.positions.items())
     )
-    evidence = _build_evidence(
-        metadata,
-        normalized_bars,
-        universe_evidence=universe_evidence,
-        benchmark_return=benchmark_return,
-        ranking_decisions=ranking_decisions,
-        exclusion_counts=exclusion_counts,
-        open_position_count=len(open_positions),
-    ) + (
-        BacktestEvidence(
-            code="EXECUTION_DELAY",
-            value=f"bars={config.execution_delay_bars}",
-            detail="Signals fill only after the configured number of later symbol bars.",
-        ),
+    execution_evidence = (
+        (
+            BacktestEvidence(
+                code="EXECUTION_DELAY",
+                value=f"bars={config.execution_delay_bars}",
+                detail="Signals fill only after the configured number of later symbol bars.",
+            ),
+        )
+        if config.entry_fill == "next_open"
+        else (
+            BacktestEvidence(
+                code="ENTRY_FILL",
+                value="signal_close",
+                detail=(
+                    "Signals fill at the observed signal-bar close. This is a "
+                    "lookahead-prone counterfactual and must be distinguished in audits."
+                ),
+            ),
+        )
+    )
+    if config.slippage_mode == "none":
+        execution_evidence += (
+            BacktestEvidence(
+                code="SLIPPAGE_MODE",
+                value="none",
+                detail="Configured execution ignores adverse-rate slippage.",
+            ),
+        )
+    evidence = (
+        _build_evidence(
+            metadata,
+            normalized_bars,
+            universe_evidence=universe_evidence,
+            benchmark_return=benchmark_return,
+            ranking_decisions=ranking_decisions,
+            exclusion_counts=exclusion_counts,
+            open_position_count=len(open_positions),
+            entry_fill=config.entry_fill,
+        )
+        + execution_evidence
     )
     result = PortfolioBacktestResult(
         strategy_key=config.strategy_key,
@@ -639,10 +723,13 @@ def run_portfolio_backtest(
         benchmark_return=benchmark_return,
         excess_return=excess_return,
         max_drawdown=_q(max_drawdown),
+        sharpe=sharpe,
+        calmar=calmar,
         trade_count=len(state.trades),
         win_rate=win_rate,
         expectancy=expectancy,
         fees_paid=_q(state.fees_paid),
+        taxes_paid=_q(state.taxes_paid),
         slippage_cost=_q(state.slippage_cost),
         signals=tuple(state.signals),
         trades=tuple(state.trades),
@@ -1002,9 +1089,12 @@ def _performance_slice(
 
 
 def _scaled_cost(cost: MarketExecutionCost, multiplier: int) -> MarketExecutionCost:
+    scale = Decimal(multiplier)
     return MarketExecutionCost(
-        fee_rate=cost.fee_rate * Decimal(multiplier),
-        slippage_rate=cost.slippage_rate * Decimal(multiplier),
+        fee_rate=cost.fee_rate * scale,
+        slippage_rate=cost.slippage_rate * scale,
+        sell_tax_rate=cost.sell_tax_rate * scale,
+        min_fee_absolute=cost.min_fee_absolute * scale,
     )
 
 
@@ -1318,6 +1408,23 @@ def _queue_position_exits(
         )
 
 
+def _execution_is_due(
+    reference: _OpenPrice,
+    signal: PortfolioSignal,
+    config: PortfolioBacktestConfig,
+) -> bool:
+    if config.entry_fill == "signal_close":
+        return (
+            reference.timestamp == signal.signal_at
+            and reference.observed_bar_count >= signal.observed_bar_count
+        )
+    return (
+        reference.timestamp > signal.signal_at
+        and reference.observed_bar_count
+        >= signal.observed_bar_count + config.execution_delay_bars - 1
+    )
+
+
 def _execute_pending_entries(
     state: _RunState,
     opens: Mapping[CandidateKey, _OpenPrice],
@@ -1329,11 +1436,11 @@ def _execute_pending_entries(
             order
             for key, order in state.pending_entries.items()
             if key in opens
-            and opens[key].timestamp > state.signals[order.signal_index].signal_at
-            and opens[key].observed_bar_count
-            >= state.signals[order.signal_index].observed_bar_count
-            + config.execution_delay_bars
-            - 1
+            and _execution_is_due(
+                opens[key],
+                state.signals[order.signal_index],
+                config,
+            )
         ),
         key=lambda order: (order.rank_position, order.key),
     )
@@ -1352,7 +1459,10 @@ def _execute_pending_entries(
             continue
         market, symbol = order.key
         cost = config.cost_for(market)
-        fill_price = open_price.price * (_ONE + cost.slippage_rate)
+        slippage_rate = (
+            cost.slippage_rate if config.slippage_mode == "adverse_rate" else _ZERO
+        )
+        fill_price = open_price.price * (_ONE + slippage_rate)
         budget_used = sum(
             (
                 position.entry_price * position.quantity
@@ -1391,7 +1501,14 @@ def _execute_pending_entries(
                 reason=f"position_sizing:{codes}",
             )
             continue
-        affordable = state.cash / (fill_price * (_ONE + cost.fee_rate))
+        if cost.min_fee_absolute == _ZERO:
+            affordable = state.cash / (fill_price * (_ONE + cost.fee_rate))
+        else:
+            affordable_notional = min(
+                state.cash / (_ONE + cost.fee_rate),
+                max(state.cash - cost.min_fee_absolute, _ZERO),
+            )
+            affordable = affordable_notional / fill_price
         quantity = _round_down(min(sizing.quantity, affordable), sizing.lot_size)
         if quantity <= _ZERO:
             state.signals[order.signal_index] = replace(
@@ -1422,8 +1539,8 @@ def _execute_pending_entries(
             )
             continue
         notional = fill_price * quantity
-        fee = notional * cost.fee_rate
-        slippage = open_price.price * cost.slippage_rate * quantity
+        fee = max(notional * cost.fee_rate, cost.min_fee_absolute)
+        slippage = open_price.price * slippage_rate * quantity
         state.cash -= notional + fee
         state.fees_paid += fee
         state.slippage_cost += slippage
@@ -1439,7 +1556,7 @@ def _execute_pending_entries(
             entry_slippage_remaining=slippage,
             manager_state=manager_state,
             bars_held=0,
-            last_close=fill_price,
+            last_close=open_price.price,
         )
         state.signals[order.signal_index] = replace(
             signal,
@@ -1462,11 +1579,11 @@ def _execute_pending_exits(
             order
             for key, order in state.pending_exits.items()
             if key in opens
-            and opens[key].timestamp > state.signals[order.signal_index].signal_at
-            and opens[key].observed_bar_count
-            >= state.signals[order.signal_index].observed_bar_count
-            + config.execution_delay_bars
-            - 1
+            and _execution_is_due(
+                opens[key],
+                state.signals[order.signal_index],
+                config,
+            )
         ),
         key=lambda order: order.key,
     )
@@ -1499,9 +1616,13 @@ def _execute_pending_exits(
                 reason="partial_exit_below_market_lot",
             )
             continue
-        fill_price = open_price.price * (_ONE - cost.slippage_rate)
+        slippage_rate = (
+            cost.slippage_rate if config.slippage_mode == "adverse_rate" else _ZERO
+        )
+        fill_price = open_price.price * (_ONE - slippage_rate)
         exit_notional = fill_price * quantity
-        exit_fee = exit_notional * cost.fee_rate
+        exit_fee = max(exit_notional * cost.fee_rate, cost.min_fee_absolute)
+        exit_tax = exit_notional * cost.sell_tax_rate
         ratio = quantity / position.quantity
         if quantity == position.quantity:
             entry_fee = position.entry_fee_remaining
@@ -1509,11 +1630,12 @@ def _execute_pending_exits(
         else:
             entry_fee = position.entry_fee_remaining * ratio
             entry_slippage = position.entry_slippage_remaining * ratio
-        exit_slippage = open_price.price * cost.slippage_rate * quantity
+        exit_slippage = open_price.price * slippage_rate * quantity
         gross_pnl = (fill_price - position.entry_price) * quantity
-        net_pnl = gross_pnl - entry_fee - exit_fee
-        state.cash += exit_notional - exit_fee
+        net_pnl = gross_pnl - entry_fee - exit_fee - exit_tax
+        state.cash += exit_notional - exit_fee - exit_tax
         state.fees_paid += exit_fee
+        state.taxes_paid += exit_tax
         state.slippage_cost += exit_slippage
         state.trades.append(
             PortfolioTrade(
@@ -1575,6 +1697,73 @@ def _record_equity(state: _RunState, timestamp: datetime) -> None:
     )
 
 
+def _annualization_periods_per_year(
+    timestamps: Sequence[datetime],
+) -> Decimal | None:
+    """관측 격자에서 연간 관측 수를 유도하고 달력일 padding은 하지 않는다.
+
+    격자에는 ``len(timestamps) - 1``개의 수익률 구간이 있다. 이 구간 수를
+    첫 시각부터 마지막 시각까지의 365일 기준 경과 연수로 나눠 일봉·분봉의
+    연율화 주기 수를 유도하므로 252를 가정하지 않는다.
+    """
+
+    if len(timestamps) < 2:
+        return None
+    elapsed = timestamps[-1] - timestamps[0]
+    elapsed_seconds = Decimal(elapsed.days * 86400 + elapsed.seconds) + Decimal(
+        elapsed.microseconds
+    ) / Decimal("1000000")
+    if elapsed_seconds <= _ZERO:
+        return None
+    return Decimal(len(timestamps) - 1) * Decimal(365 * 86400) / elapsed_seconds
+
+
+def _risk_adjusted_metrics(
+    equity_curve: Sequence[EquityPoint],
+    *,
+    max_drawdown: Decimal,
+) -> tuple[Decimal | None, Decimal | None]:
+    """관측된 거래 봉 격자에서 연율화 Sharpe와 Calmar를 계산한다.
+
+    Sharpe의 무위험 수익률은 0이며 표본 표준편차를 쓴다. 제곱근 연율화
+    계수는 실제 경과 연수당 수익률 구간 수에서 유도한다. Calmar의 분자는
+    같은 격자의 기하 연율화 수익률이다. 달력일 padding이나 forward fill은
+    하지 않는다.
+    """
+
+    if len(equity_curve) < 2:
+        return None, None
+    equities = tuple(point.equity for point in equity_curve)
+    if any(equity <= _ZERO for equity in equities):
+        return None, None
+    periods_per_year = _annualization_periods_per_year(
+        tuple(point.timestamp for point in equity_curve)
+    )
+    if periods_per_year is None:
+        return None, None
+    returns = tuple(
+        current / previous - _ONE
+        for previous, current in zip(equities[:-1], equities[1:], strict=True)
+    )
+
+    sharpe: Decimal | None = None
+    if len(returns) >= 2:
+        count = Decimal(len(returns))
+        mean = sum(returns, start=_ZERO) / count
+        variance = sum(
+            ((value - mean) ** 2 for value in returns), start=_ZERO
+        ) / Decimal(len(returns) - 1)
+        if variance > _ZERO:
+            sharpe = _q(mean / variance.sqrt() * periods_per_year.sqrt())
+
+    calmar: Decimal | None = None
+    if max_drawdown > _ZERO:
+        exponent = periods_per_year / Decimal(len(returns))
+        annualized_return = (equities[-1] / equities[0]) ** exponent - _ONE
+        calmar = _q(annualized_return / max_drawdown)
+    return sharpe, calmar
+
+
 def _benchmark_returns(
     benchmarks: Mapping[MarketKey, Sequence[PriceBar]],
     *,
@@ -1617,6 +1806,7 @@ def _build_evidence(
     ranking_decisions: int,
     exclusion_counts: Mapping[str, int],
     open_position_count: int,
+    entry_fill: Literal["next_open", "signal_close"],
 ) -> tuple[BacktestEvidence, ...]:
     missing = sorted(
         f"{candidate.market}:{candidate.symbol}"
@@ -1637,23 +1827,43 @@ def _build_evidence(
     exclusion_text = ",".join(
         f"{reason}:{count}" for reason, count in sorted(exclusion_counts.items())
     )
-    return (
-        BacktestEvidence(
-            code="EXECUTION_TIMING",
-            value="next_available_bar_open",
-            detail=(
-                "Signals are created only after a complete observation bar and are "
-                "eligible only at the first later bar open."
+    timing_evidence = (
+        (
+            BacktestEvidence(
+                code="EXECUTION_TIMING",
+                value="next_available_bar_open",
+                detail=(
+                    "Signals are created only after a complete observation bar and are "
+                    "eligible only at the first later bar open."
+                ),
             ),
-        ),
-        BacktestEvidence(
-            code="NO_LOOKAHEAD_BOUNDARY",
-            value="incremental_histories_and_open_only_execution",
-            detail=(
-                "Strategies and ranking receive incrementally appended completed bars; "
-                "execution receives timestamp and open price only."
+            BacktestEvidence(
+                code="NO_LOOKAHEAD_BOUNDARY",
+                value="incremental_histories_and_open_only_execution",
+                detail=(
+                    "Strategies and ranking receive incrementally appended completed bars; "
+                    "execution receives timestamp and open price only."
+                ),
             ),
-        ),
+        )
+        if entry_fill == "next_open"
+        else (
+            BacktestEvidence(
+                code="EXECUTION_TIMING",
+                value="signal_bar_close",
+                detail="Signals execute at the close of the bar that produced them.",
+            ),
+            BacktestEvidence(
+                code="LOOKAHEAD_RISK",
+                value="signal_close_counterfactual",
+                detail=(
+                    "Signal-close execution is lookahead-prone and is not equivalent "
+                    "to the default future-isolated next-open convention."
+                ),
+            ),
+        )
+    )
+    return timing_evidence + (
         BacktestEvidence(
             code="DATA_QUALITY",
             value=quality_value,
@@ -1694,8 +1904,15 @@ def _build_evidence(
             code="END_OF_DATA",
             value=f"openPositions={open_position_count}",
             detail=(
-                "Open positions are marked to the final close and are not liquidated at "
-                "that same close because same-bar execution is forbidden."
+                (
+                    "Open positions are marked to the final close and are not liquidated "
+                    "at that same close because same-bar execution is forbidden."
+                )
+                if entry_fill == "next_open"
+                else (
+                    "Open positions are marked to the final close after all signal-close "
+                    "orders for that bar have executed."
+                )
             ),
         ),
     )
@@ -1777,9 +1994,35 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _remove_hash_excluded_fields(
+    value: Any,
+    excluded_fields: frozenset[str],
+) -> None:
+    """결정론 hash에서 재현성 계약 밖의 파생 필드만 제거한다.
+
+    ``sharpe``와 ``calmar``는 ``Decimal.sqrt()``와 비정수 거듭제곱 같은
+    초월연산 때문에 전역 decimal context에 의존한다. ``taxes_paid``는 정확
+    산술이지만 세금 효과가 ``net_pnl``과 ``equity_curve``에 이미 반영되므로
+    중복 필드로서 제외한다.
+    """
+
+    if isinstance(value, dict):
+        for field in excluded_fields:
+            value.pop(field, None)
+        for child in value.values():
+            _remove_hash_excluded_fields(child, excluded_fields)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _remove_hash_excluded_fields(child, excluded_fields)
+
+
 def _stable_hash(value: object) -> str:
     payload = asdict(value)  # type: ignore[arg-type]
     payload.pop("determinism_hash", None)
+    _remove_hash_excluded_fields(
+        payload,
+        PortfolioBacktestResult._HASH_EXCLUDED_FIELDS,
+    )
     encoded = json.dumps(
         _json_safe(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -1787,12 +2030,14 @@ def _stable_hash(value: object) -> str:
 
 
 __all__ = [
+    "CONSERVATIVE_COST_PROFILE",
     "CandidateBenchmarkSeries",
     "BacktestPerformanceSlice",
     "BacktestEvidence",
     "BacktestWindow",
     "EquityPoint",
     "CostStressScenario",
+    "LIVE_MATCHED_COST_PROFILE",
     "MarketBenchmarkReturn",
     "MarketExecutionCost",
     "PortfolioBacktestConfig",

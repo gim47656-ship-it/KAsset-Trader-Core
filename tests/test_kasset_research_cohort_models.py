@@ -43,6 +43,13 @@ def test_cohort_model_locks_forward_method_source_size_and_date_contracts() -> N
         "ck_kasset_research_cohort_date_order",
         "ck_kasset_research_cohort_scope",
     } <= _names(KAssetResearchCohort, CheckConstraint)
+    scope_check = next(
+        constraint
+        for constraint in KAssetResearchCohort.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_kasset_research_cohort_scope"
+    )
+    assert str(scope_check.sqltext) == "evidence_scope = 'forward_paper'"
 
 
 def test_member_model_enforces_positive_kind_scoped_rank_and_identity() -> None:

@@ -35,6 +35,19 @@ MAX_INGEST_LAG_SESSIONS = 1
 #: 되감기 폭을 측정하기 위해 252 창 위에 얹는 여유 세션 수. 이보다 더 밀리면
 #: lag는 이 값에서 포화하고 blocker만 남는다.
 _INGEST_LAG_PROBE_SESSIONS = 10
+# historical_pit 트랙에서만 요구하는 promotion blocker. 순서는 blockers 출력 순서와
+# 같다. forward_paper 트랙은 이 검사를 생략하는 대신 cohort effective_date 이후
+# 구간만 평가하며, 생략 사실은 promotion_evidence가 증거 payload에 기록한다.
+HISTORICAL_PIT_ONLY_BLOCKERS: tuple[str, ...] = (
+    "cohort_not_historical_pit",
+    "cohort_window_predates_effective_date",
+    "list_date_coverage_incomplete",
+    "member_listed_after_cohort_start",
+    "delist_date_coverage_incomplete",
+    "point_in_time_unavailable",
+    "delisted_members_absent",
+    "corporate_action_unknown",
+)
 _CALENDAR_LOOKBACK_DAYS = 550
 _FALLBACK_SOURCES = frozenset(
     {"toss", "toss_regular", "toss_fallback", "yahoo", "yahoo_fallback"}
@@ -172,6 +185,9 @@ class DailyCandlesReadiness:
     historical_evidence_blockers: tuple[str, ...]
     unresolved_evidence: tuple[str, ...]
     reasons: tuple[str, ...]
+    # promotion_ready/blockers를 계산한 증거 트랙. 트랙 어휘와 검증은
+    # promotion_evidence.PROMOTION_EVIDENCE_TRACKS가 소유한다.
+    evidence_track: str = "historical_pit"
 
     @property
     def eligible_symbol_count(self) -> int:
@@ -688,6 +704,7 @@ def _evaluate_market(
     benchmark: BenchmarkCoverage,
     benchmark_member_count: int,
     coverage_rows: Sequence[Mapping[str, object]],
+    evidence_track: str = "historical_pit",
 ) -> MarketReadiness:
     expected_sessions = window.expected
     window_start = expected_sessions[0] if expected_sessions else None
@@ -940,26 +957,34 @@ def _evaluate_market(
     else:
         if not benchmark.sources:
             promotion_blockers.append(_issue(market, "benchmark_source_missing"))
-        if cohort.evidence_scope != "historical_pit":
-            historical_block("cohort_not_historical_pit")
-        if not membership_period_usable:
-            historical_block("cohort_window_predates_effective_date")
-        if list_date_covered < total:
-            historical_block("list_date_coverage_incomplete")
-        if listed_after_cohort_start:
-            historical_block("member_listed_after_cohort_start")
-        if delist_date_covered_inactive < inactive:
-            historical_block("delist_date_coverage_incomplete")
-        if not point_in_time:
-            historical_block("point_in_time_unavailable")
-        if not includes_delisted:
-            historical_block("delisted_members_absent")
-        if corporate_action != "clear":
-            historical_block("corporate_action_unknown")
+        pit_failures = (
+            cohort.evidence_scope != "historical_pit",
+            not membership_period_usable,
+            list_date_covered < total,
+            bool(listed_after_cohort_start),
+            delist_date_covered_inactive < inactive,
+            not point_in_time,
+            not includes_delisted,
+            corporate_action != "clear",
+        )
+        for code, failed in zip(
+            HISTORICAL_PIT_ONLY_BLOCKERS, pit_failures, strict=True
+        ):
+            if failed:
+                historical_block(code)
         if fallback_only:
+            promotion_blockers.append(_issue(market, "fallback_only"))
             historical_block("fallback_only")
         if benchmark.sources and set(benchmark.sources) <= _FALLBACK_SOURCES:
+            promotion_blockers.append(_issue(market, "benchmark_fallback_only"))
             historical_block("benchmark_fallback_only")
+        if (
+            evidence_track != "historical_pit"
+            and cohort.evidence_scope != evidence_track
+        ):
+            # forward 트랙은 자기 scope의 코호트만 받는다. 알 수 없는 트랙 문자열은
+            # 어떤 scope와도 일치하지 않으므로 여기서 fail-closed 된다.
+            promotion_blockers.append(_issue(market, "cohort_scope_mismatch"))
 
     unresolved = list(historical_blockers)
     if window.unevidenced:
@@ -1030,7 +1055,14 @@ class DailyCandlesReadinessService:
         as_of: datetime | None = None,
         markets: tuple[MarketName, ...] = ("kr", "us"),
         cohort_ids: Mapping[MarketName, str] | None = None,
+        evidence_track: str = "historical_pit",
     ) -> DailyCandlesReadiness:
+        """트랙별 promotion readiness를 측정한다.
+
+        ``evidence_track`` 어휘는 ``promotion_evidence.PROMOTION_EVIDENCE_TRACKS``가
+        소유하고 호출자가 검증한다. 기본값 ``historical_pit``은 PIT 전용 blocker를
+        모두 요구하고, ``forward_paper``는 그 대신 코호트 scope 일치를 요구한다.
+        """
         measured_at = _aware_utc(as_of or datetime.now(UTC))
         if not markets or len(set(markets)) != len(markets):
             raise ValueError("markets must be a non-empty unique tuple")
@@ -1073,6 +1105,7 @@ class DailyCandlesReadinessService:
                         benchmark=_empty_benchmark(market),
                         benchmark_member_count=0,
                         coverage_rows=(),
+                        evidence_track=evidence_track,
                     )
                 )
                 continue
@@ -1141,6 +1174,7 @@ class DailyCandlesReadinessService:
                     benchmark=benchmark,
                     benchmark_member_count=len(benchmark_rows),
                     coverage_rows=coverage_rows,
+                    evidence_track=evidence_track,
                 )
             )
 
@@ -1173,6 +1207,7 @@ class DailyCandlesReadinessService:
             historical_evidence_blockers=historical_blockers,
             unresolved_evidence=unresolved,
             reasons=reasons,
+            evidence_track=evidence_track,
         )
 
 
@@ -1181,6 +1216,7 @@ __all__ = [
     "CohortEvidence",
     "DailyCandlesReadiness",
     "DailyCandlesReadinessService",
+    "HISTORICAL_PIT_ONLY_BLOCKERS",
     "MAX_INGEST_LAG_SESSIONS",
     "MarketReadiness",
     "SymbolReadinessExclusion",
