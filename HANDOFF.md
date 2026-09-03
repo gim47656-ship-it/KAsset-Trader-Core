@@ -1,11 +1,11 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-03 (동시간대 RVOL을 SHADOW 관측 경로로 추가 — 주문 판정 무변경, 브랜치 `feat/same-time-rvol-shadow`)
+갱신: 2026-09-03 (동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge·운영 배포 — 주문 판정 무변경)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
 ## 전체 진행 상태
-- 운영 배포 이미지는 `kasset-trader-core:d73a4e5547399b8b76c07b81c4e572bc5f67b387`다(브랜치 `fix/us-intraday-and-ai-veto`, 커밋 `5a5f737f` → `83f44174` → `ee170aba` → `728f21ad` → `2e939c27` → `9ea4b84d` → `d73a4e55`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container가 이 태그로 기동 중이고 `/health`는 `ok`다. 이 브랜치는 PR #39 merge `1c74f3f2dfb5345bd920125ba0dc041062b23a84`로 GitHub `main`에 반영됐고 required checks(`ci-required`, `migration (PostgreSQL 15)`, `frontend`, shard test 4개)를 통과했다. 서버 checkout도 `main`으로 되돌려 `1c74f3f2`이며 배포 브랜치와 tree diff가 없다.
+- 운영 배포 이미지는 `kasset-trader-core:acf093d81e62c4bb2e41b5c4d3889dfd32972321`다(PR #41 merge, `main`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 이 SHA이고 `/health`는 `ok`다. 서버 checkout도 `main` 같은 커밋이라 tree diff가 없다. migration head는 `20260903_kasset_rvol_shadow`다. 직전 이미지는 `d73a4e55`(PR #39 merge `1c74f3f2`)였다.
 - 미국장 자동주문 0건의 실제 원인은 provider 장애가 아니라 `intraday_data._NAIVE_TIMEZONE`에 `"US"` 매핑이 없던 것이었다. Toss US 분봉은 ET-naive를 돌려주는데(`market_data/service.py::_to_contract_timestamp`가 `equity_us`를 America/New_York로 변환한 뒤 tz를 제거) 매핑 부재로 모든 미국 후보가 첫 봉에서 `intraday_timestamp_unusable`로 탈락했다. `"US": ZoneInfo("America/New_York")` 추가로 해소했다.
 - PAPER Hard Risk의 `AI` 규칙은 `AI_SHADOW`(항상 통과, 근거만 기록)로 강등됐다. AI·뉴스·공시는 검증되지 않은 입력을 보므로 주문 veto를 갖지 않는다는 운영 결정이다. 차단은 kill switch, `DAILY_MAX_LOSS`, `BUDGET`, `POSITION`, `ORDER_COUNT`, stale quote, 거래시간, promotion, position sizing만 담당한다. `AI_SHADOW` detail에는 실제 관측 confidence가 남고(반대 0.72도 0으로 붕괴하지 않음) 부재·NaN·Infinity·파싱 실패만 0으로 기록된다.
 - owner cycle 로그에 관문별 funnel이 추가됐다: `setup_selected`, `setup_statuses`, `setup_rejections`, `trigger_statuses`, `trigger_failures`, `pre_ai_exclusions`, `review_rejections`. 어느 관문이 몇 건을 죽였는지 로그만으로 분리된다.
@@ -44,7 +44,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 토스 1분봉 timestamp는 분의 끝 라벨이다. 15:30:00 마감 동시호가 체결은 15:31 봉에 실리므로 `_regular_close`는 `(window.start, window.end+1분]` 구간을 채택한다(US 16:00 ET도 동일 규칙).
 
 ## 이번 세션에서 한 일
-### 2026-09-03 — 동시간대 RVOL SHADOW 관측 (브랜치 `feat/same-time-rvol-shadow`, 미배포)
+### 2026-09-03 — 동시간대 RVOL SHADOW 관측 (PR #41 merge `acf093d81e62c4bb2e41b5c4d3889dfd32972321`, 운영 배포 완료)
 - KR 개장 후 자동주문 0건을 다시 규명했다. 장애가 아니라 관문 결과다. 09:00~09:50 사이클 6건 전부 `intraday_trigger_not_satisfied`이고, 09:53 실측 완료 5분봉은 10개였다. `relative_volume`은 5m가 13봉(개장 후 65분), 20m가 16봉(80분)을 요구하므로 **매일 09:00~10:05는 구조적으로 주문이 불가능**하다. 10:10 사이클에서 예측대로 `unavailable` → `not_confirmed`로 전환됐다.
 - 현행 RVOL은 baseline이 같은 세션 직전 12봉이라 오전에는 개장 러시가 분모에 들어간다. 10:12 실측 5m RVOL: 005930 0.615, 000660 0.912, 055550 0.542, 096770 2.567, 035420 0.454. 임계 1.5 자체는 달성 가능하고, 11시 이후 baseline이 개장 구간을 벗어나면 편향이 완화된다(9/2에 11:40 사이클만 통과한 것과 정합).
 - 자동주문 체인은 `trigger 0건 → 추천 0건 → claimable 0건 → sweep owners=0`이다. sweep `owners=0`은 버그가 아니라 상류 결과다(`job.py:625-653`는 `review.ai_recommendations`의 claimable owner만 센다. 실측 `fully_claimable=0`). owner 4는 mode `AUTO_PAPER`, kill switch off, `promotion_bypass_enabled=true`, 현금 9,999,865.375원, 포지션 0, 오늘 주문 0건으로 **trigger 외의 관문은 전부 통과 상태**다.
@@ -65,6 +65,19 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - `uv run --group test pytest tests/services/paper_cohort/test_migration.py -q` → `5 passed in 995.02s`(실 PostgreSQL upgrade→downgrade→upgrade 왕복, 단일 head). 이 테스트는 `Base.metadata.create_all` 후 boundary 이후 테이블을 명시적으로 DROP하는 구조라 신규 테이블을 목록에 1줄 등록해야 한다.
 - `uv run ruff check app/ tests/` → `All checks passed!`, `ruff format --check` → `3571 files already formatted`.
 - 운영 DB 읽기 전용 스모크: 종목마다 다른 마지막 bucket을 요청해 MAJOR-1 회귀를 실증했다. 005930은 10:10 → 274,293주, 055550은 10:00 → 25,973주(합집합 시절 10:10 값 13,400과 분리됨), 20m는 055550이 09:45~10:00 4-bucket 합 72,073주. `minimum_days=10`이면 전 종목 `insufficient_baseline_days`, `minimum_days=1`로 완화하면 값이 산출돼 쿼리·계산 경로가 정상임을 확인했다.
+
+배포(2026-09-03 14:23~14:27 KST, KR 정규장 중):
+- 운영 이미지는 `kasset-trader-core:acf093d81e62c4bb2e41b5c4d3889dfd32972321`다. `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 이 SHA이고 `/health`는 `ok`다. **`ai-mcp`는 `profiles: ["ai-mcp"]`라 기본 `up -d`에 포함되지 않는다.** 이번에도 처음에 `d73a4e55`로 남아 `--profile ai-mcp up -d ai-mcp`를 따로 실행해야 했다.
+- `.env.kasset`의 `CORE_IMAGE_TAG`가 배포 전 `8f965aaf`로 실행 중 이미지(`d73a4e55`)와 어긋나 있었다. 그대로 `up -d`했다면 롤백됐을 상태다. 새 SHA로 갱신했고 직전 파일은 `.env.kasset.bak-predeploy-20260903`에 남겼다.
+- 배포 전 DB full custom archive: `backups/pre-rvol-shadow-20260903T052332Z/database.dump`(42,328,261 bytes, SHA-256 `376bd831223337a3217fe77e656edae1f4217bc8b6689ce890c6c61f2ca8dbab`, `pg_restore --list` 검증 통과).
+- migration head가 `20260902_screener_toss_source` → `20260903_kasset_rvol_shadow`로 올라갔다. `review.kasset_intraday_rvol_shadow` 24개 컬럼과 partial unique index가 운영 DB에 생성된 것을 `\d`로 확인했다. 롤백 경로는 `alembic downgrade`이며 왕복은 CI에서 검증됐다.
+- 배포 후 운영 컨테이너 안에서 신규 조회 경로를 직접 실행해 정상 동작을 확인했다: `load_same_time_bucket_volumes(requests={"005930":[14:10], "138040":[14:05,14:10]})` → 005930 표본 2일(09-01 261,675 / 09-02 430,313, median 345,994), 138040 표본 1일(8,685).
+- owner cycle 로그에 `same_time_rvol_shadow=` 필드가 실제로 출력된다(배선 확인).
+- **아직 `review.kasset_intraday_rvol_shadow` 행은 0건이다.** 배포 직전 14:20 KST에 추천이 생성돼 `_OWNER_COOLDOWN`(1시간)이 걸렸고, 15:20 사이클은 경계 포함이라 여전히 `recommendation_cooldown_active`, 15:30은 마감이었다. shadow는 KRX 후보만 대상이라 미국장에서도 쌓이지 않는다. **실제 행 기록 실증은 2026-09-04 KR 개장 후가 처음이다.**
+
+배포 당일 자동주문(참고, 이번 변경과 무관):
+- 2026-09-03 14:20 KST에 `rec-6835c14e`(owner 4, KRX 138040 BUY)가 생성되고 14:25에 `AUTO_PAPER SUBMITTED`로 집행됐다. 주문 `4dd8953f-2e82-4278-9f2e-220345836fc9`, 포지션 138040 3주 @135,100, 계좌 3 현금 9,999,865.375 → 9,594,504.58. **KR 정규장 안(14:25)의 정상 체결이므로 9월 2일 장외 건과 달리 원복 대상이 아니다.**
+- 이 추천·집행은 배포 전 코드(`d73a4e55`) 판정이며 SHADOW 경로와 무관하다. 즉 이번 배포 전후로 주문 판정 경로는 동일하다.
 ### 이전 세션 (2026-09-02 ~ 09-03)
 - 미국장 개장 후 주문 0건을 서버에서 직접 관측·규명했다. `load_completed_session_bars(symbol="AAPL", market="US")`가 `intraday_timestamp_unusable`을 돌려주는 것을 확인하고, `_NAIVE_TIMEZONE["US"]` 런타임 주입으로 `CompletedIntradayBars` 3봉(`data_as_of=13:45Z`)이 되는 것을 먼저 입증한 뒤 코드에 반영했다.
 - Hard Risk `AI` 관문을 `AI_SHADOW`로 강등했다(`policy.py`). `job.py`는 AI 상태와 무관하게 파싱된 유한 confidence를 그대로 SHADOW 기록에 넘긴다. 임계값(RVOL 1.5, Daily Setup 조건)은 건드리지 않았다.
@@ -93,7 +106,8 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - KR 저장 일봉 정규장 보정(PR #37): 신규 `kr_regular_daily.py`, `converters.aggregate_kr_regular_daily_row`, `repository.fetch_kr_toss_minutes/upsert_kr_regular_rows`, `sync_service.override_kr_regular_daily`, CLI `scripts/override_kr_regular_daily.py --date [--symbols]`(완료 거래일만 허용). 독립 checker major 3건(세션 tail gate 부재로 16:05 run이 오후 중간 종가로 덮어쓰기, CLI 완료 세션 guard 부재, adjusted 재적용 차단) 수용·수정 후 PASS. focused pytest 89 passed/5 skipped, ruff·CI 통과. 배포 후 운영 수동 실행: 관심종목 4종목 completed, 1d 유니버스 703종목 중 556 upsert·147 skip(`regular_trade_rows_short` 84, `regular_first_trade_late` 36, 1분봉 부재 23, `regular_tail_missing` 4 — 저유동성·ETN). 하이닉스 9/2 정규장 행: O 1,630,000 / H 1,661,000 / L 1,612,000 / C 1,613,000 / V 3,227,484(토스 1d V 3,493,365).
 
 ## 다음 세션이 바로 할 일
-0. **P0 후속.** `feat/same-time-rvol-shadow`는 아직 PR·배포 전이다. 배포 후에는 `review.kasset_intraday_rvol_shadow`가 매 KR 사이클마다 쌓인다. 2026-09-28경 20거래일이 차면 `insufficient_baseline_days`가 사라지고 실제 값이 기록되기 시작하는지 먼저 확인한다. 그 전까지는 표본 부족이 정상이므로 장애로 오판하지 않는다.
+0. **P0 후속 (최우선).** PR #41은 merge·배포까지 끝났지만 `review.kasset_intraday_rvol_shadow`는 **아직 0행**이다. 배포 당일 KR장은 14:20 추천으로 쿨다운이 걸려 trigger 평가 사이클이 더 없었다. **2026-09-04 KR 개장 후 첫 사이클에서 행이 실제로 쌓이는지 반드시 확인한다.** 09:00~10:05는 `session_status_*`가 `unavailable:insufficient_completed_session_bars`, `same_time_status_*`는 표본 부족으로 `unavailable:insufficient_baseline_days`가 정상이다. 행 자체가 0이면 그때는 배선 문제이므로 `same_time_rvol_shadow=` 로그 요약과 `unavailable:shadow_timeout`/`shadow_write_failed` 여부를 본다.
+0-0. 2026-09-28경 20거래일이 차면 `insufficient_baseline_days`가 사라지고 `same_time_rvol_5m/20m`에 실제 값이 들어가기 시작한다. 그 전까지 표본 부족은 정상이며 장애로 오판하지 않는다.
 0-1. **P1은 데이터가 쌓인 뒤에 한다.** RS(`intraday_relative_strength`, 임계 `Decimal("0")`)를 hard AND에서 내리는 변경은 아직 하지 않았다. 10:10 실측에서 7종목 중 5건이 `intraday_relative_strength_disagrees`로 죽었지만, RVOL baseline 편향을 먼저 제거해야 원인이 분리된다. cohort 비교(A 현재 / B 동시간대+RS hard / C 동시간대+RS soft / D 동시간대+RS 없음)는 shadow 데이터로 한다.
 0-2. ORB·VWAP(`directional`)은 이번에 건드리지 않았다. 10:10 실측에서 `no_directional_trigger` 6/7이지만 RVOL 편향 제거 후 별도로 본다.
 1. 실제 주문 재현은 정규장 안에서만 한다. KR 09:00~15:30 KST, US 정규장 안에서 sweep 결과를 관찰하고, 장외 강제 집행은 하지 않는다. PAPER 보유·포지션은 현재 0이다.
@@ -114,7 +128,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
-- 2026-09-03: KR 개장 후 자동주문 0건이 RVOL 워밍업(개장 후 65~80분)과 세션 내부 baseline 편향에서 온다는 것을 실측으로 규명하고, 동시간대 RVOL을 SHADOW 관측 경로로 추가(`feat/same-time-rvol-shadow`, 미배포). 주문 판정은 무변경이며 checker MAJOR 3건 수용·수정.
+- 2026-09-03: 동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge하고 운영 배포(`acf093d8`). migration head `20260903_kasset_rvol_shadow`, 컨테이너 5개 정합. 같은 날 14:25 KST에 정규장 안 PAPER 자동주문(138040 3주 @135,100)이 정상 집행됐다.
 - 2026-09-03: 서버 로컬에만 있던 `fix/us-intraday-and-ai-veto`를 GitHub에 발행하고 PR #39를 CI 통과 후 merge(`1c74f3f2`). 운영 코드와 `main`의 괴리를 해소했다.
 - 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`). 운영 실측 1분봉 2,520행·5분봉 504행.
 - 2026-09-02: 정규장 밖 무인 PAPER 집행을 차단(`out_of_regular_session`)하고 장외 강제 체결을 원복(`2e939c27`).
