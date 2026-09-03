@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import UTC, datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -45,7 +49,9 @@ from app.extensions.kasset.automation.intraday_triggers import (
     INTRADAY_TRIGGER_SCHEMA_VERSION,
     OPENING_RANGE_BREAKOUT,
     RELATIVE_VOLUME_5M,
+    RELATIVE_VOLUME_20M,
     IntradayTriggerDecision,
+    SameTimeVolumeBaseline,
     TriggerDecisionStatus,
     TriggerResult,
     TriggerStatus,
@@ -206,6 +212,147 @@ def _completed_intraday_bars(symbol: str) -> CompletedIntradayBars:
         source="fixture:completed_intraday",
         data_as_of=data_as_of,
     )
+
+
+def _completed_intraday_window(
+    symbol: str,
+    *,
+    market: str = "KRX",
+    volumes: tuple[Decimal, ...] = (
+        Decimal("200"),
+        Decimal("200"),
+        Decimal("200"),
+        Decimal("200"),
+    ),
+) -> CompletedIntradayBars:
+    bar_interval = timedelta(minutes=5)
+    data_as_of = _NOW - timedelta(minutes=1)
+    latest_start = data_as_of - bar_interval
+    bars = tuple(
+        PriceBar(
+            timestamp=latest_start - bar_interval * (len(volumes) - index - 1),
+            open=Decimal("99"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("101"),
+            volume=volume,
+        )
+        for index, volume in enumerate(volumes)
+    )
+    return CompletedIntradayBars(
+        symbol=symbol,
+        market=market,  # type: ignore[arg-type]
+        period="5m",
+        bar_interval=bar_interval,
+        session=RegularSession(
+            market="kr" if market == "KRX" else "us",
+            session_date=_NOW.date(),
+            opens_at=_NOW - timedelta(hours=6),
+            closes_at=_NOW + timedelta(hours=1),
+        ),
+        bars=bars,
+        source="fixture:completed_intraday",
+        data_as_of=data_as_of,
+    )
+
+
+def _evaluated_candidate(
+    symbol: str,
+    *,
+    market: str = "KRX",
+) -> EvaluatedCandidate:
+    ranking = _rank_result(
+        symbol,
+        position=1,
+        market="KR" if market == "KRX" else "US",
+    )
+    setup = replace(_qualified_setup(ranking), market=market)
+    assert isinstance(setup.ensemble, WeightedEnsembleDecision)
+    return EvaluatedCandidate(
+        candidate=TradingCandidate(
+            symbol,
+            market,  # type: ignore[arg-type]
+            None,
+            "fixture",
+        ),
+        strategy_results=setup.strategy_results,
+        ensemble=setup.ensemble,
+        setup=setup,
+        factor_ranking=ranking,
+        regime=_BULL,
+    )
+
+
+def _session_rvol_decision(
+    symbol: str,
+    *,
+    triggered: bool,
+) -> IntradayTriggerDecision:
+    trigger_status = TriggerStatus.ACTIVE if triggered else TriggerStatus.INACTIVE
+    triggers = tuple(
+        TriggerResult(
+            code=code,
+            status=trigger_status,
+            value="2" if triggered else "0.5",
+            threshold="1.5",
+            source="fixture:completed_intraday",
+            as_of=_NOW - timedelta(minutes=1),
+            detail="fixture same-session RVOL",
+        )
+        for code in (RELATIVE_VOLUME_5M, RELATIVE_VOLUME_20M)
+    )
+    return IntradayTriggerDecision(
+        schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
+        symbol=symbol,
+        market="KRX",
+        direction=Action.BUY,
+        status=(
+            TriggerDecisionStatus.TRIGGERED
+            if triggered
+            else TriggerDecisionStatus.NOT_TRIGGERED
+        ),
+        triggers=triggers,
+        policy=DEFAULT_INTRADAY_TRIGGER_POLICY,
+        evaluated_at=_NOW,
+        data_as_of=_NOW - timedelta(minutes=1),
+        blocked_reason=None if triggered else "relative_volume_not_satisfied",
+    )
+
+
+def _stub_shadow_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    baseline_loader: AsyncMock,
+) -> tuple[list[object], MagicMock]:
+    shadow_db = MagicMock()
+    shadow_db.commit = AsyncMock()
+    shadow_db.rollback = AsyncMock()
+    shadow_db.execute = AsyncMock()
+
+    @asynccontextmanager
+    async def shadow_session():
+        yield shadow_db
+
+    recorded: list[object] = []
+
+    async def record_many(rows: tuple[object, ...] | list[object]) -> int:
+        recorded.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(vertical_slice, "_session", shadow_session)
+    monkeypatch.setattr(
+        vertical_slice,
+        "load_same_time_bucket_volumes",
+        baseline_loader,
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "RvolShadowRepository",
+        MagicMock(
+            return_value=SimpleNamespace(record_many=AsyncMock(side_effect=record_many))
+        ),
+    )
+    return recorded, shadow_db
 
 
 def _fresh_trigger_decision(symbol: str) -> IntradayTriggerDecision:
@@ -418,6 +565,9 @@ def _stub_review_cycle(
     )
     instance._decide_triggers = MagicMock(  # type: ignore[method-assign]
         side_effect=_decide_trigger
+    )
+    instance._record_same_time_rvol_shadow = AsyncMock(  # type: ignore[method-assign]
+        return_value={}
     )
     instance._news_source_health = AsyncMock(  # type: ignore[method-assign]
         return_value={"KR": False}
@@ -1203,3 +1353,376 @@ async def test_non_gating_ai_review_is_not_capped_after_technical_exclusions(
         "rec:000444",
     ]
     assert persist_recommendation.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_shadow_active_does_not_change_trigger_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930",),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    delattr(instance, "_record_same_time_rvol_shadow")
+    instance._load_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda setups: {
+            ("KR", setup.symbol): _completed_intraday_window(setup.symbol)
+            for setup in setups
+        }
+    )
+    session_decision = _session_rvol_decision("005930", triggered=False)
+    decision_before = (session_decision.status, session_decision.blocked_reason)
+    instance._decide_triggers = MagicMock(  # type: ignore[method-assign]
+        return_value=session_decision
+    )
+
+    async def load_baseline(_db: object, **kwargs: object):
+        requests = kwargs["requests"]
+        assert isinstance(requests, dict)
+        bucket_count = len(next(iter(requests.values())))  # type: ignore[union-attr]
+        baseline_volume = Decimal("100") * bucket_count
+        return {
+            str(symbol): [
+                SameTimeVolumeBaseline(
+                    session_date=_NOW.date() - timedelta(days=offset),
+                    volume=baseline_volume,
+                )
+                for offset in range(1, 11)
+            ]
+            for symbol in requests
+        }
+
+    baseline_loader = AsyncMock(side_effect=load_baseline)
+    recorded, _shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=baseline_loader,
+    )
+
+    result = await instance.run_owner(7)
+
+    assert (
+        session_decision.status,
+        session_decision.blocked_reason,
+    ) == decision_before
+    assert result["intradayTriggerStatuses"] == {"not_triggered": 1}
+    assert result["intradayTriggers"][0]["blockedReason"] == (
+        "relative_volume_not_satisfied"
+    )
+    assert result["sameTimeRvolShadow"] == {"active": 2}
+    assert result["recommendationIds"] == []
+    persist_recommendation.assert_not_awaited()
+    assert baseline_loader.await_count == 2
+    assert len(recorded) == 1
+    observation = recorded[0]
+    assert observation.same_time_status_5m == "active"  # type: ignore[attr-defined]
+    assert observation.same_time_status_20m == "active"  # type: ignore[attr-defined]
+    assert observation.session_status_5m == "inactive"  # type: ignore[attr-defined]
+    assert observation.session_status_20m == "inactive"  # type: ignore[attr-defined]
+    assert observation.session_decision_status == "inactive"  # type: ignore[attr-defined]
+    assert observation.session_decision_reason == (  # type: ignore[attr-defined]
+        "relative_volume_not_satisfied"
+    )
+    assert observation.same_time_baseline_median_5m == Decimal(  # type: ignore[attr-defined]
+        "100"
+    )
+    assert observation.same_time_baseline_median_20m == Decimal(  # type: ignore[attr-defined]
+        "400"
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_baseline_failure_preserves_owner_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930",),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    delattr(instance, "_record_same_time_rvol_shadow")
+    instance._load_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda setups: {
+            ("KR", setup.symbol): _completed_intraday_window(setup.symbol)
+            for setup in setups
+        }
+    )
+    baseline_loader = AsyncMock(side_effect=RuntimeError("fixture baseline failure"))
+    recorded, shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=baseline_loader,
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["intradayTriggerStatuses"] == {"triggered": 1}
+    assert result["intradayTriggers"][0]["blockedReason"] is None
+    assert result["recommendationIds"] == ["rec:005930"]
+    persist_recommendation.assert_awaited_once()
+    assert result["sameTimeRvolShadow"] == {"unavailable:baseline_load_failed": 2}
+    assert baseline_loader.await_count == 2
+    assert shadow_db.rollback.await_count == 2
+    assert len(recorded) == 1
+    observation = recorded[0]
+    assert observation.same_time_status_5m == (  # type: ignore[attr-defined]
+        "unavailable:baseline_load_failed"
+    )
+    assert observation.same_time_status_20m == (  # type: ignore[attr-defined]
+        "unavailable:baseline_load_failed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_shadow_batches_krx_candidates_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(),
+        MagicMock(),
+        now=_NOW,
+        cycle_trace_id="cyc-rvol-shadow",
+    )
+    krx_symbols = ("000001", "000002", "000003", "000004", "000005")
+    us_symbols = ("AAPL", "MSFT")
+    candidates = tuple(
+        (
+            _evaluated_candidate(symbol),
+            _completed_intraday_window(symbol),
+            _session_rvol_decision(symbol, triggered=True),
+        )
+        for symbol in krx_symbols
+    ) + tuple(
+        (
+            _evaluated_candidate(symbol, market="US"),
+            _completed_intraday_window(symbol, market="US"),
+            _session_rvol_decision(symbol, triggered=True),
+        )
+        for symbol in us_symbols
+    )
+    baseline_loader = AsyncMock(return_value={})
+    recorded, shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=baseline_loader,
+    )
+
+    summary = await instance._record_same_time_rvol_shadow(  # noqa: SLF001
+        11,
+        candidates,
+    )
+
+    assert baseline_loader.await_count == 2
+    for call in baseline_loader.await_args_list:
+        requests = call.kwargs["requests"]
+        assert tuple(requests) == krx_symbols
+    assert {
+        row.symbol  # type: ignore[attr-defined]
+        for row in recorded
+    } == set(krx_symbols)
+    assert all(row.market == "KRX" for row in recorded)  # type: ignore[attr-defined]
+    assert summary == {"unavailable:insufficient_baseline_days": 10}
+    shadow_db.commit.assert_awaited_once()
+    shadow_db.execute.assert_awaited_once_with(
+        vertical_slice._SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL  # noqa: SLF001
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_shadow_requests_each_symbols_own_latest_buckets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(),
+        MagicMock(),
+        now=_NOW,
+        cycle_trace_id="cyc-rvol-own-buckets",
+    )
+    first = _completed_intraday_window("000001")
+    second_base = _completed_intraday_window("000002")
+    second = replace(
+        second_base,
+        bars=tuple(
+            replace(bar, timestamp=bar.timestamp - timedelta(minutes=10))
+            for bar in second_base.bars
+        ),
+    )
+    baseline_loader = AsyncMock(return_value={})
+    _recorded, _shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=baseline_loader,
+    )
+
+    await instance._record_same_time_rvol_shadow(  # noqa: SLF001
+        11,
+        (
+            (
+                _evaluated_candidate("000001"),
+                first,
+                _session_rvol_decision("000001", triggered=True),
+            ),
+            (
+                _evaluated_candidate("000002"),
+                second,
+                _session_rvol_decision("000002", triggered=True),
+            ),
+        ),
+    )
+
+    assert baseline_loader.await_count == 2
+    requests_by_window = {
+        len(next(iter(call.kwargs["requests"].values()))): call.kwargs["requests"]
+        for call in baseline_loader.await_args_list
+    }
+    assert requests_by_window[1] == {
+        "000001": (time(9, 54),),
+        "000002": (time(9, 44),),
+    }
+    assert requests_by_window[4] == {
+        "000001": (time(9, 39), time(9, 44), time(9, 49), time(9, 54)),
+        "000002": (time(9, 29), time(9, 34), time(9, 39), time(9, 44)),
+    }
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_shadow_timeout_preserves_owner_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930",),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    delattr(instance, "_record_same_time_rvol_shadow")
+    instance._load_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda setups: {
+            ("KR", setup.symbol): _completed_intraday_window(setup.symbol)
+            for setup in setups
+        }
+    )
+
+    async def never_returns(_db: object, **_kwargs: object) -> object:
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    recorded, _shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=AsyncMock(side_effect=never_returns),
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "_SAME_TIME_RVOL_SHADOW_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    result = await asyncio.wait_for(instance.run_owner(7), timeout=1)
+
+    assert result["sameTimeRvolShadow"] == {"unavailable:shadow_timeout": 2}
+    assert result["recommendationIds"] == ["rec:005930"]
+    persist_recommendation.assert_awaited_once()
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_duplicate_baseline_is_logged_and_cycle_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930",),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    delattr(instance, "_record_same_time_rvol_shadow")
+    instance._load_intraday_bars = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda setups: {
+            ("KR", setup.symbol): _completed_intraday_window(setup.symbol)
+            for setup in setups
+        }
+    )
+
+    async def load_duplicate_baseline(_db: object, **kwargs: object):
+        return {
+            symbol: [
+                SameTimeVolumeBaseline(
+                    session_date=_NOW.date() - timedelta(days=max(1, offset)),
+                    volume=Decimal("100"),
+                )
+                for offset in range(10)
+            ]
+            for symbol in kwargs["requests"]
+        }
+
+    recorded, _shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=AsyncMock(side_effect=load_duplicate_baseline),
+    )
+    caplog.set_level(logging.WARNING, logger=vertical_slice.__name__)
+
+    result = await instance.run_owner(7)
+
+    assert result["sameTimeRvolShadow"] == {"unavailable:shadow_pipeline_failed": 2}
+    assert result["recommendationIds"] == ["rec:005930"]
+    persist_recommendation.assert_awaited_once()
+    assert recorded == []
+    assert any(
+        record.exc_info is not None
+        and "same-time RVOL shadow contract violation" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_time_rvol_shadow_write_failure_replaces_pending_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(),
+        MagicMock(),
+        now=_NOW,
+        cycle_trace_id="cyc-rvol-write-failure",
+    )
+
+    async def load_baseline(_db: object, **kwargs: object):
+        return {
+            symbol: [
+                SameTimeVolumeBaseline(
+                    session_date=_NOW.date() - timedelta(days=offset),
+                    volume=Decimal("100") * len(bucket_starts),
+                )
+                for offset in range(1, 11)
+            ]
+            for symbol, bucket_starts in kwargs["requests"].items()
+        }
+
+    recorded, shadow_db = _stub_shadow_storage(
+        monkeypatch,
+        baseline_loader=AsyncMock(side_effect=load_baseline),
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "RvolShadowRepository",
+        MagicMock(
+            return_value=SimpleNamespace(
+                record_many=AsyncMock(side_effect=RuntimeError("fixture write failure"))
+            )
+        ),
+    )
+
+    summary = await instance._record_same_time_rvol_shadow(  # noqa: SLF001
+        11,
+        (
+            (
+                _evaluated_candidate("005930"),
+                _completed_intraday_window("005930"),
+                _session_rvol_decision("005930", triggered=True),
+            ),
+        ),
+    )
+
+    assert summary == {"unavailable:shadow_write_failed": 2}
+    assert recorded == []
+    shadow_db.commit.assert_not_awaited()
+    shadow_db.rollback.assert_awaited_once()

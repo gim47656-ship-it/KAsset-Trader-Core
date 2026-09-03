@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-03 (US ET-naive 분봉 수용, AI Hard Risk veto 제거, funnel 계측, 정규장 밖 집행 차단, US 분봉 수집 대상 확장 배포)
+갱신: 2026-09-03 (동시간대 RVOL을 SHADOW 관측 경로로 추가 — 주문 판정 무변경, 브랜치 `feat/same-time-rvol-shadow`)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
@@ -44,6 +44,28 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - 토스 1분봉 timestamp는 분의 끝 라벨이다. 15:30:00 마감 동시호가 체결은 15:31 봉에 실리므로 `_regular_close`는 `(window.start, window.end+1분]` 구간을 채택한다(US 16:00 ET도 동일 규칙).
 
 ## 이번 세션에서 한 일
+### 2026-09-03 — 동시간대 RVOL SHADOW 관측 (브랜치 `feat/same-time-rvol-shadow`, 미배포)
+- KR 개장 후 자동주문 0건을 다시 규명했다. 장애가 아니라 관문 결과다. 09:00~09:50 사이클 6건 전부 `intraday_trigger_not_satisfied`이고, 09:53 실측 완료 5분봉은 10개였다. `relative_volume`은 5m가 13봉(개장 후 65분), 20m가 16봉(80분)을 요구하므로 **매일 09:00~10:05는 구조적으로 주문이 불가능**하다. 10:10 사이클에서 예측대로 `unavailable` → `not_confirmed`로 전환됐다.
+- 현행 RVOL은 baseline이 같은 세션 직전 12봉이라 오전에는 개장 러시가 분모에 들어간다. 10:12 실측 5m RVOL: 005930 0.615, 000660 0.912, 055550 0.542, 096770 2.567, 035420 0.454. 임계 1.5 자체는 달성 가능하고, 11시 이후 baseline이 개장 구간을 벗어나면 편향이 완화된다(9/2에 11:40 사이클만 통과한 것과 정합).
+- 자동주문 체인은 `trigger 0건 → 추천 0건 → claimable 0건 → sweep owners=0`이다. sweep `owners=0`은 버그가 아니라 상류 결과다(`job.py:625-653`는 `review.ai_recommendations`의 claimable owner만 센다. 실측 `fully_claimable=0`). owner 4는 mode `AUTO_PAPER`, kill switch off, `promotion_bypass_enabled=true`, 현금 9,999,865.375원, 포지션 0, 오늘 주문 0건으로 **trigger 외의 관문은 전부 통과 상태**다.
+- **동시간대(same-time) RVOL을 SHADOW 경로로 추가했다. 진입 정책과 same-session RVOL은 한 줄도 바꾸지 않았다.** 목적은 baseline 방식 A/B 비교 데이터 축적이며, 배포해도 주문 판정은 0% 달라지지 않는다.
+  - Toss provider는 period 무관 약 197봉이 상한이라(5m=3거래일, 1m=2거래일) 과거 분봉 backfill이 불가능하다. 동시간대 baseline의 유일한 소스는 DB `research.kr_candles_1m_toss`다. 이 테이블은 2026-09-01 수집 시작, KRX 전 종목(3931개), `KRX_REGULAR` 기준 종목당 391행/일로 자동 축적된다. **20거래일이 차는 시점은 2026-09-28경**이고 그때까지 `insufficient_baseline_days`로 관측되는 것이 정상이다. 코드 변경 없이 자동으로 살아난다.
+  - 신규: `app/services/research_candles/same_time_volume_profile.py`(종목별 bucket 조회), `rvol_shadow_repository.py`, `app/models/kasset_intraday_rvol_shadow.py`(`review.kasset_intraday_rvol_shadow`), alembic `20260903_kasset_rvol_shadow`(down_revision `20260902_screener_toss_source`).
+  - `intraday_triggers.py`에 `same_time_relative_volume`과 공개 `same_time_baseline_median`을 추가했다. 집계는 median(짝수면 가운데 두 값 평균), 전 구간 Decimal, `lookback_days=20`·`minimum_days=10`, threshold는 기존 `Decimal("1.5")` 그대로다. 음수 baseline은 조용히 제외하지 않고 `ValueError`로 거절한다.
+  - `vertical_slice.py`는 KRX 후보만 대상으로 window당 1회씩 최대 2회 배치 조회하고, 주문용과 분리된 세션에 기록한다. 전체를 `asyncio.timeout(25s)` + `SET LOCAL statement_timeout=20s`로 감싸 지연이 사이클을 막지 못하게 했다.
+- 독립 checker 1회(`integration-risk`): CRITICAL 0, **주문 판정 불변성은 6가지 근거로 입증**(정책 객체 불변, 판정 입력 불변, 호출이 추천 커밋 이후, 세션 물리 분리, 출력 미소비, 예외 격리 적정). MAJOR 3건은 전부 수용·수정했다.
+  - MAJOR-1: bucket을 종목 간 합집합으로 SUM해 baseline이 최대 3배 부풀려지는 결함(`INTRADAY_MAX_BAR_AGE=12분` 때문에 종목 간 마지막 봉이 최대 2 bucket 어긋남). 계약을 `requests: Mapping[str, Sequence[time]]`로 바꿔 종목별 bucket을 분리했다.
+  - MAJOR-2: 거래일 DISTINCT CTE가 symbol 필터 없이 매 호출 풀스캔(20일 기준 약 2920만 행). CTE를 제거하고 `session_date_kst` 물리 범위 절단(`lookback_days*2+15`일) 후 종목별로 최근 N거래일을 잘라낸다.
+  - MAJOR-3: 예외는 격리됐으나 지연은 격리되지 않아 사이클 blocking 가능. timeout 이중화로 해소.
+  - MINOR 수용분: 죽은 분기 제거, padding-only 날짜 표본 제외(`bool_or(is_padding IS false)`), `exc_info=True` 로깅과 중복 날짜 `ValueError` fail-loud 유지, 부분 실패 시 summary 정합, `session_decision_status`/`reason`·baseline median 컬럼 추가, 모델명 `KAssetIntradayRvolShadow` 관습 일치, `(cycle_trace_id, symbol)` partial unique + `on_conflict_do_update`.
+
+
+검증(로컬, 서버 test DB SSH 터널 경유):
+- `uv run --group test pytest tests/extensions/kasset/automation/ tests/services/research_candles/ -q` → `546 passed in 921.62s`.
+- `uv run --group test pytest tests/services/paper_cohort/test_migration.py -q` → `5 passed in 995.02s`(실 PostgreSQL upgrade→downgrade→upgrade 왕복, 단일 head). 이 테스트는 `Base.metadata.create_all` 후 boundary 이후 테이블을 명시적으로 DROP하는 구조라 신규 테이블을 목록에 1줄 등록해야 한다.
+- `uv run ruff check app/ tests/` → `All checks passed!`, `ruff format --check` → `3571 files already formatted`.
+- 운영 DB 읽기 전용 스모크: 종목마다 다른 마지막 bucket을 요청해 MAJOR-1 회귀를 실증했다. 005930은 10:10 → 274,293주, 055550은 10:00 → 25,973주(합집합 시절 10:10 값 13,400과 분리됨), 20m는 055550이 09:45~10:00 4-bucket 합 72,073주. `minimum_days=10`이면 전 종목 `insufficient_baseline_days`, `minimum_days=1`로 완화하면 값이 산출돼 쿼리·계산 경로가 정상임을 확인했다.
+### 이전 세션 (2026-09-02 ~ 09-03)
 - 미국장 개장 후 주문 0건을 서버에서 직접 관측·규명했다. `load_completed_session_bars(symbol="AAPL", market="US")`가 `intraday_timestamp_unusable`을 돌려주는 것을 확인하고, `_NAIVE_TIMEZONE["US"]` 런타임 주입으로 `CompletedIntradayBars` 3봉(`data_as_of=13:45Z`)이 되는 것을 먼저 입증한 뒤 코드에 반영했다.
 - Hard Risk `AI` 관문을 `AI_SHADOW`로 강등했다(`policy.py`). `job.py`는 AI 상태와 무관하게 파싱된 유한 confidence를 그대로 SHADOW 기록에 넘긴다. 임계값(RVOL 1.5, Daily Setup 조건)은 건드리지 않았다.
 - 관문별 funnel 계측을 `vertical_slice.py`에 추가했다(`trigger_failures` Counter, `intradayTriggerFailures` 근거 키, owner summary 로그 확장).
@@ -71,6 +93,9 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - KR 저장 일봉 정규장 보정(PR #37): 신규 `kr_regular_daily.py`, `converters.aggregate_kr_regular_daily_row`, `repository.fetch_kr_toss_minutes/upsert_kr_regular_rows`, `sync_service.override_kr_regular_daily`, CLI `scripts/override_kr_regular_daily.py --date [--symbols]`(완료 거래일만 허용). 독립 checker major 3건(세션 tail gate 부재로 16:05 run이 오후 중간 종가로 덮어쓰기, CLI 완료 세션 guard 부재, adjusted 재적용 차단) 수용·수정 후 PASS. focused pytest 89 passed/5 skipped, ruff·CI 통과. 배포 후 운영 수동 실행: 관심종목 4종목 completed, 1d 유니버스 703종목 중 556 upsert·147 skip(`regular_trade_rows_short` 84, `regular_first_trade_late` 36, 1분봉 부재 23, `regular_tail_missing` 4 — 저유동성·ETN). 하이닉스 9/2 정규장 행: O 1,630,000 / H 1,661,000 / L 1,612,000 / C 1,613,000 / V 3,227,484(토스 1d V 3,493,365).
 
 ## 다음 세션이 바로 할 일
+0. **P0 후속.** `feat/same-time-rvol-shadow`는 아직 PR·배포 전이다. 배포 후에는 `review.kasset_intraday_rvol_shadow`가 매 KR 사이클마다 쌓인다. 2026-09-28경 20거래일이 차면 `insufficient_baseline_days`가 사라지고 실제 값이 기록되기 시작하는지 먼저 확인한다. 그 전까지는 표본 부족이 정상이므로 장애로 오판하지 않는다.
+0-1. **P1은 데이터가 쌓인 뒤에 한다.** RS(`intraday_relative_strength`, 임계 `Decimal("0")`)를 hard AND에서 내리는 변경은 아직 하지 않았다. 10:10 실측에서 7종목 중 5건이 `intraday_relative_strength_disagrees`로 죽었지만, RVOL baseline 편향을 먼저 제거해야 원인이 분리된다. cohort 비교(A 현재 / B 동시간대+RS hard / C 동시간대+RS soft / D 동시간대+RS 없음)는 shadow 데이터로 한다.
+0-2. ORB·VWAP(`directional`)은 이번에 건드리지 않았다. 10:10 실측에서 `no_directional_trigger` 6/7이지만 RVOL 편향 제거 후 별도로 본다.
 1. 실제 주문 재현은 정규장 안에서만 한다. KR 09:00~15:30 KST, US 정규장 안에서 sweep 결과를 관찰하고, 장외 강제 집행은 하지 않는다. PAPER 보유·포지션은 현재 0이다.
 2. owner 1·5로 자동주문을 내려면 승격이 필요하다(`strategy_promotion_required`). 승격 승인 시 런타임 fingerprint와 승격 레코드 fingerprint 일치를 반드시 대조한다 — `intraday_data.py`·`vertical_slice.py` 수정이 fingerprint를 바꾼다.
 2. 관문 탈락률을 3~5 거래일 측정한 뒤에만 임계값을 논의한다. 지금 funnel은 `setup_rejections`(최다 `no_breakout_family_direction`)와 `trigger_failures`(`no_directional_trigger`, `relative_volume_not_confirmed`)를 분리해 남긴다. RVOL 1.5나 Daily Setup 조건을 측정 없이 낮추지 않는다.
@@ -89,6 +114,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-03: KR 개장 후 자동주문 0건이 RVOL 워밍업(개장 후 65~80분)과 세션 내부 baseline 편향에서 온다는 것을 실측으로 규명하고, 동시간대 RVOL을 SHADOW 관측 경로로 추가(`feat/same-time-rvol-shadow`, 미배포). 주문 판정은 무변경이며 checker MAJOR 3건 수용·수정.
 - 2026-09-03: 서버 로컬에만 있던 `fix/us-intraday-and-ai-veto`를 GitHub에 발행하고 PR #39를 CI 통과 후 merge(`1c74f3f2`). 운영 코드와 `main`의 괴리를 해소했다.
 - 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`). 운영 실측 1분봉 2,520행·5분봉 504행.
 - 2026-09-02: 정규장 밖 무인 PAPER 집행을 차단(`out_of_regular_session`)하고 장외 강제 체결을 원복(`2e939c27`).

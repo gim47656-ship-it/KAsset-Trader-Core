@@ -107,6 +107,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "kasset_shadow_loss_locks",
     "review.kasset_paper_execution_events",
     "review.kasset_automation_cycle_events",
+    "review.kasset_intraday_rvol_shadow",
     "review.telegram_callback_recovery_cursor",
     "review.telegram_callback_inbox",
     "review.screener_pick_log",

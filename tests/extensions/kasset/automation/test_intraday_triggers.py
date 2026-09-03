@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,8 +13,11 @@ from app.extensions.kasset.automation.intraday_triggers import (
     OPENING_RANGE_BREAKOUT,
     RELATIVE_VOLUME_5M,
     RELATIVE_VOLUME_20M,
+    SAME_TIME_RELATIVE_VOLUME_5M,
+    SAME_TIME_RELATIVE_VOLUME_20M,
     SESSION_VWAP_RECLAIM,
     IntradayTriggerPolicy,
+    SameTimeVolumeBaseline,
     TriggerDecisionStatus,
     TriggerResult,
     TriggerStatus,
@@ -22,6 +25,8 @@ from app.extensions.kasset.automation.intraday_triggers import (
     intraday_relative_strength,
     opening_range_breakout,
     relative_volume,
+    same_time_baseline_median,
+    same_time_relative_volume,
     session_vwap,
     session_vwap_reclaim,
 )
@@ -59,6 +64,16 @@ def _flat(index: int, price: str = "101", volume: str = "1000") -> PriceBar:
         close=price,
         volume=volume,
     )
+
+
+def _same_time_baseline(*volumes: str) -> list[SameTimeVolumeBaseline]:
+    return [
+        SameTimeVolumeBaseline(
+            session_date=date(2026, 8, day),
+            volume=Decimal(volume),
+        )
+        for day, volume in enumerate(volumes, start=1)
+    ]
 
 
 def _long_session() -> list[PriceBar]:
@@ -255,6 +270,182 @@ def test_relative_volume_fails_closed_on_a_zero_baseline() -> None:
 
     assert result.status is TriggerStatus.UNAVAILABLE
     assert result.unavailable_reason == "zero_baseline_volume"
+
+
+def test_same_time_baseline_median_returns_none_without_samples() -> None:
+    assert same_time_baseline_median([]) is None
+
+
+def test_same_time_baseline_median_averages_the_middle_even_samples() -> None:
+    baseline = _same_time_baseline("100", "200", "400", "500")
+
+    assert same_time_baseline_median(baseline) == Decimal("300")
+
+
+def test_same_time_baseline_median_rejects_negative_volume() -> None:
+    with pytest.raises(ValueError, match="baseline volume must not be negative"):
+        same_time_baseline_median(_same_time_baseline("-1"))
+
+
+def test_same_time_relative_volume_needs_minimum_baseline_days() -> None:
+    result = same_time_relative_volume(
+        [_flat(0, volume="150")],
+        _same_time_baseline("100"),
+        code=SAME_TIME_RELATIVE_VOLUME_5M,
+        window_bars=1,
+        minimum_days=2,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.available is False
+    assert result.unavailable_reason == "insufficient_baseline_days"
+    assert result.detail == "2 baseline days are required and 1 are available"
+
+
+def test_same_time_relative_volume_needs_completed_session_bars() -> None:
+    result = same_time_relative_volume(
+        [_flat(index) for index in range(3)],
+        _same_time_baseline("100"),
+        code=SAME_TIME_RELATIVE_VOLUME_20M,
+        window_bars=4,
+        minimum_days=1,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.available is False
+    assert result.unavailable_reason == "insufficient_completed_session_bars"
+
+
+def test_same_time_relative_volume_fails_closed_on_a_zero_median() -> None:
+    result = same_time_relative_volume(
+        [_flat(0, volume="100")],
+        _same_time_baseline("0", "0", "100"),
+        code=SAME_TIME_RELATIVE_VOLUME_5M,
+        window_bars=1,
+        minimum_days=3,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.available is False
+    assert result.unavailable_reason == "zero_baseline_volume"
+
+
+def test_same_time_relative_volume_averages_the_middle_even_samples() -> None:
+    result = same_time_relative_volume(
+        [_flat(0, volume="600")],
+        _same_time_baseline("100", "200", "400", "500"),
+        code=SAME_TIME_RELATIVE_VOLUME_5M,
+        window_bars=1,
+        minimum_days=4,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "2.000000"
+    assert "baselineMedian=300.000000" in result.detail
+
+
+def test_same_time_relative_volume_median_resists_one_extreme_value() -> None:
+    result = same_time_relative_volume(
+        [_flat(0, volume="200")],
+        _same_time_baseline("100", "100", "100", "10000"),
+        code=SAME_TIME_RELATIVE_VOLUME_5M,
+        window_bars=1,
+        minimum_days=4,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "2.000000"
+
+
+def test_same_time_relative_volume_is_active_at_the_threshold() -> None:
+    result = same_time_relative_volume(
+        [_flat(0, volume="150")],
+        _same_time_baseline("100", "100", "100"),
+        code=SAME_TIME_RELATIVE_VOLUME_5M,
+        window_bars=1,
+        minimum_days=3,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "1.500000"
+    assert result.threshold == "1.500000"
+
+
+def test_same_time_relative_volume_20m_sums_only_the_latest_four_bars() -> None:
+    volumes = ("9000", "8000", "10", "20", "30", "40")
+    bars = [_flat(index, volume=volume) for index, volume in enumerate(volumes)]
+
+    result = same_time_relative_volume(
+        bars,
+        _same_time_baseline("50", "50", "50"),
+        code=SAME_TIME_RELATIVE_VOLUME_20M,
+        window_bars=4,
+        minimum_days=3,
+        threshold=Decimal("1.5"),
+        bar_interval=_INTERVAL,
+        source="research.kr_candles_1m_toss",
+    )
+
+    assert result.status is TriggerStatus.ACTIVE
+    assert result.value == "2.000000"
+    assert "window=4 bars todayVolume=100.000000" in result.detail
+    assert result.as_of == bars[-1].timestamp + _INTERVAL
+
+
+def test_same_time_relative_volume_rejects_duplicate_session_dates() -> None:
+    duplicated_date = date(2026, 8, 1)
+    baseline = [
+        SameTimeVolumeBaseline(duplicated_date, Decimal("100")),
+        SameTimeVolumeBaseline(duplicated_date, Decimal("200")),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate same-time baseline session_date"):
+        same_time_relative_volume(
+            [_flat(0, volume="150")],
+            baseline,
+            code=SAME_TIME_RELATIVE_VOLUME_5M,
+            window_bars=1,
+            minimum_days=2,
+            threshold=Decimal("1.5"),
+            bar_interval=_INTERVAL,
+            source="research.kr_candles_1m_toss",
+        )
+
+
+@pytest.mark.parametrize(
+    ("window_bars", "minimum_days"),
+    [(0, 1), (1, 0)],
+)
+def test_same_time_relative_volume_requires_positive_windows(
+    window_bars: int,
+    minimum_days: int,
+) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        same_time_relative_volume(
+            [_flat(0)],
+            _same_time_baseline("100"),
+            code=SAME_TIME_RELATIVE_VOLUME_5M,
+            window_bars=window_bars,
+            minimum_days=minimum_days,
+            threshold=Decimal("1.5"),
+            bar_interval=_INTERVAL,
+            source="research.kr_candles_1m_toss",
+        )
 
 
 def test_intraday_relative_strength_uses_the_shared_completed_window() -> None:

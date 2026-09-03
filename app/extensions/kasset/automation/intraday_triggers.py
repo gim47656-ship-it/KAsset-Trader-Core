@@ -4,6 +4,9 @@
 :mod:`app.extensions.kasset.automation.intraday_data`가 맡고 이 모듈은 이미
 "완료·정규장·검증됨"으로 좁혀진 bar만 받는다.
 
+동시간대 상대거래량은 과거 거래일의 같은 시각 기준선과 비교하며, 같은 세션
+내부의 직전 bar를 기준선으로 삼는 기존 상대거래량과 의미가 다르다.
+
 fail-closed 규칙은 하나다: 값을 만들 수 없으면 값을 추정하지 않고
 ``UNAVAILABLE``과 그 사유를 남긴다. 가격/거래량 bar가 stale이거나 부분
 bar이면 개별 trigger가 아니라 판정 전체가 막힌다.
@@ -13,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
 from typing import Final, Literal
@@ -27,6 +30,8 @@ OPENING_RANGE_BREAKOUT: Final = "opening_range_breakout"
 SESSION_VWAP_RECLAIM: Final = "session_vwap_reclaim"
 RELATIVE_VOLUME_5M: Final = "relative_volume_5m"
 RELATIVE_VOLUME_20M: Final = "relative_volume_20m"
+SAME_TIME_RELATIVE_VOLUME_5M: Final = "same_time_relative_volume_5m"
+SAME_TIME_RELATIVE_VOLUME_20M: Final = "same_time_relative_volume_20m"
 INTRADAY_RELATIVE_STRENGTH: Final = "intraday_relative_strength"
 
 #: 지수 분봉을 공용 경로에서 실제로 받지 못했을 때의 사유 코드.
@@ -83,6 +88,44 @@ class TriggerResult:
             "detail": self.detail,
             "unavailableReason": self.unavailable_reason,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SameTimeVolumeBaseline:
+    """과거 한 거래일의 동시간대 완료 구간 거래량."""
+
+    session_date: date
+    volume: Decimal
+
+
+def same_time_baseline_median(
+    baseline: Sequence[SameTimeVolumeBaseline],
+) -> Decimal | None:
+    """과거 거래일의 동시간대 거래량 중앙값을 계산한다."""
+
+    volumes: list[Decimal] = []
+    seen_dates: set[date] = set()
+    for sample in baseline:
+        if sample.session_date in seen_dates:
+            raise ValueError(
+                "duplicate same-time baseline session_date: "
+                f"{sample.session_date.isoformat()}"
+            )
+        seen_dates.add(sample.session_date)
+        if sample.volume < _ZERO:
+            raise ValueError(
+                "same-time baseline volume must not be negative: "
+                f"{sample.session_date.isoformat()}={sample.volume}"
+            )
+        volumes.append(sample.volume)
+
+    if not volumes:
+        return None
+    ordered = sorted(volumes)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal("2")
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +415,79 @@ def relative_volume(
     )
 
 
+def same_time_relative_volume(
+    bars: Sequence[PriceBar],
+    baseline: Sequence[SameTimeVolumeBaseline],
+    *,
+    code: str,
+    window_bars: int,
+    minimum_days: int,
+    threshold: Decimal,
+    bar_interval: timedelta,
+    source: str,
+) -> TriggerResult:
+    """과거 거래일의 동시간대 거래량 중앙값과 비교하는 상대거래량.
+
+    :func:`relative_volume`이 같은 세션 내부의 직전 완료 bar를 기준선으로
+    삼는 것과 달리, 이 계산은 과거 거래일의 동일 시각 완료 구간만 비교한다.
+    """
+
+    if window_bars < 1 or minimum_days < 1:
+        raise ValueError("same-time relative volume windows must be positive")
+    ordered = _ordered(bars)
+    if len(ordered) < window_bars:
+        return _unavailable(
+            code,
+            reason="insufficient_completed_session_bars",
+            detail=(
+                f"{window_bars} completed bars are required and "
+                f"{len(ordered)} are available"
+            ),
+            source=source,
+        )
+
+    baseline_median = same_time_baseline_median(baseline)
+    sample_days = len(baseline)
+    if baseline_median is None or sample_days < minimum_days:
+        return _unavailable(
+            code,
+            reason="insufficient_baseline_days",
+            detail=(
+                f"{minimum_days} baseline days are required and "
+                f"{sample_days} are available"
+            ),
+            source=source,
+        )
+    if baseline_median <= _ZERO:
+        return _unavailable(
+            code,
+            reason="zero_baseline_volume",
+            detail="the same-time baseline median is zero, so no ratio exists",
+            source=source,
+        )
+
+    today_volume = sum(
+        (bar.volume for bar in ordered[-window_bars:]),
+        start=_ZERO,
+    )
+    ratio = today_volume / baseline_median
+    latest = ordered[-1]
+    return TriggerResult(
+        code=code,
+        status=(TriggerStatus.ACTIVE if ratio >= threshold else TriggerStatus.INACTIVE),
+        value=_decimal_text(ratio),
+        threshold=_decimal_text(threshold),
+        source=source,
+        as_of=_aware_utc(latest.timestamp, "bar.timestamp") + bar_interval,
+        detail=(
+            f"window={window_bars} bars "
+            f"todayVolume={_decimal_text(today_volume)} "
+            f"baselineMedian={_decimal_text(baseline_median)} "
+            f"sampleDays={sample_days}"
+        ),
+    )
+
+
 def intraday_relative_strength(
     bars: Sequence[PriceBar],
     index_bars: Sequence[PriceBar] | None,
@@ -619,7 +735,10 @@ __all__ = [
     "OPENING_RANGE_BREAKOUT",
     "RELATIVE_VOLUME_20M",
     "RELATIVE_VOLUME_5M",
+    "SAME_TIME_RELATIVE_VOLUME_20M",
+    "SAME_TIME_RELATIVE_VOLUME_5M",
     "SESSION_VWAP_RECLAIM",
+    "SameTimeVolumeBaseline",
     "TriggerDecisionStatus",
     "TriggerResult",
     "TriggerStatus",
@@ -627,6 +746,8 @@ __all__ = [
     "intraday_relative_strength",
     "opening_range_breakout",
     "relative_volume",
+    "same_time_baseline_median",
+    "same_time_relative_volume",
     "session_vwap",
     "session_vwap_reclaim",
 ]
