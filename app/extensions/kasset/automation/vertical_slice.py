@@ -11,9 +11,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -82,13 +83,19 @@ from app.extensions.kasset.automation.intraday_triggers import (
     DEFAULT_INTRADAY_TRIGGER_POLICY,
     RELATIVE_VOLUME_5M,
     RELATIVE_VOLUME_20M,
+    SAME_TIME_RELATIVE_VOLUME_5M,
+    SAME_TIME_RELATIVE_VOLUME_20M,
     IntradayTriggerDecision,
     IntradayTriggerPolicy,
+    SameTimeVolumeBaseline,
+    TriggerDecisionStatus,
     TriggerResult,
     decide_intraday_triggers,
     intraday_relative_strength,
     opening_range_breakout,
     relative_volume,
+    same_time_baseline_median,
+    same_time_relative_volume,
     session_vwap_reclaim,
 )
 from app.extensions.kasset.automation.market_session import (
@@ -143,6 +150,13 @@ from app.services.kasset_automation_audit import (
     new_cycle_trace_id,
     record_automation_cycle_event,
 )
+from app.services.research_candles.rvol_shadow_repository import (
+    RvolShadowObservation,
+    RvolShadowRepository,
+)
+from app.services.research_candles.same_time_volume_profile import (
+    load_same_time_bucket_volumes,
+)
 from app.services.symbol_news_store import load_symbol_news
 
 logger = logging.getLogger(__name__)
@@ -181,6 +195,22 @@ _RELATIVE_VOLUME_WINDOWS: tuple[tuple[str, int, int], ...] = (
     (RELATIVE_VOLUME_5M, 1, 12),
     (RELATIVE_VOLUME_20M, 4, 12),
 )
+#: 동시간대 상대거래량의 5분·20분 창을 완료 5분 bucket 개수로 표현한다.
+_SAME_TIME_RVOL_WINDOWS: tuple[tuple[str, int], ...] = (
+    (SAME_TIME_RELATIVE_VOLUME_5M, 1),
+    (SAME_TIME_RELATIVE_VOLUME_20M, 4),
+)
+#: DB에서 동시간대 기준선으로 조회할 최근 거래일 수.
+_SAME_TIME_BASELINE_LOOKBACK_DAYS = 20
+#: 최소 10거래일이 쌓여야 값을 만들며, 수집 초기 20거래일 조회 창이 차기
+#: 전까지 ``insufficient_baseline_days``로 관측되는 것은 정상이다.
+_SAME_TIME_BASELINE_MIN_DAYS = 10
+#: 10분 owner cycle을 shadow I/O가 막지 않도록 전체 조회·계산·기록을 25초로
+#: 제한한다. PostgreSQL은 그보다 먼저 20초에 statement를 취소해 정리 시간을 남긴다.
+_SAME_TIME_RVOL_SHADOW_TIMEOUT_SECONDS = 25.0
+_SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL = text("SET LOCAL statement_timeout = '20s'")
+#: KRX 분봉 bucket 시작 시각을 DB의 KST ``time`` 경계와 맞춘다.
+_KST = ZoneInfo("Asia/Seoul")
 #: 개장 구간 돌파(ORB)의 개장 구간 길이.
 _OPENING_RANGE = timedelta(minutes=15)
 #: 장중 지수 대비 상대강도 임계값.
@@ -663,6 +693,13 @@ class AIRecommendationVerticalSlice:
         trigger_statuses: Counter[str] = Counter()
         # 어느 관문이 몇 건을 죽였는지 운영 로그로 분리하기 위한 funnel 계측.
         trigger_failures: Counter[str] = Counter()
+        rvol_shadow_candidates: list[
+            tuple[
+                EvaluatedCandidate,
+                CompletedIntradayBars,
+                IntradayTriggerDecision,
+            ]
+        ] = []
 
         # 2단계: 선택된 setup만 장중 완료 bar를 읽는다. 세션·신선도 검증은
         # intraday_data가 fail-closed로 하고, 여기서는 그 결과만 정책에 넣는다.
@@ -708,6 +745,11 @@ class AIRecommendationVerticalSlice:
             )
             trigger_statuses[trigger_decision.status.value] += 1
             trigger_evidence.append(trigger_decision.as_evidence())
+            shadow_intraday = intraday_by_key.get(candidate.ranker_key)
+            if candidate.market == "KRX" and isinstance(
+                shadow_intraday, CompletedIntradayBars
+            ):
+                rvol_shadow_candidates.append((item, shadow_intraday, trigger_decision))
             if not trigger_decision.triggered:
                 for failure_code in (
                     trigger_decision.blocked_reason or "unspecified"
@@ -801,6 +843,28 @@ class AIRecommendationVerticalSlice:
             )
             for outcome in review_outcomes
         ]
+        try:
+            same_time_rvol_shadow = await self._record_same_time_rvol_shadow(
+                owner_user_id,
+                rvol_shadow_candidates,
+            )
+        except ValueError:
+            # 기준선 중복 날짜 같은 데이터 계약 위반은 계산 실패로 축소하지 않고
+            # traceback을 남기되, 이미 끝난 주문 판정과 owner cycle은 계속 보존한다.
+            logger.warning(
+                "kasset same-time RVOL shadow contract violation owner_user_id=%s",
+                owner_user_id,
+                exc_info=True,
+            )
+            eligible_count = sum(
+                1
+                for item, intraday, _decision in rvol_shadow_candidates
+                if item.candidate.market == "KRX" and intraday.market == "KRX"
+            )
+            same_time_rvol_shadow = {
+                "unavailable:shadow_pipeline_failed": eligible_count
+                * len(_SAME_TIME_RVOL_WINDOWS)
+            }
 
         ranked_evidence = [
             result.as_evidence()
@@ -851,6 +915,7 @@ class AIRecommendationVerticalSlice:
             "intradayTriggerPolicy": self._trigger_policy.as_evidence(),
             "intradayTriggerStatuses": dict(sorted(trigger_statuses.items())),
             "intradayTriggerFailures": dict(sorted(trigger_failures.items())),
+            "sameTimeRvolShadow": same_time_rvol_shadow,
             "intradayTriggers": trigger_evidence,
             "decisionCohortPolicy": {
                 "liveCohort": LIVE_COHORT,
@@ -1206,6 +1271,238 @@ class AIRecommendationVerticalSlice:
                 )
 
         return dict(await asyncio.gather(*(load(setup) for setup in setups)))
+
+    async def _record_same_time_rvol_shadow(
+        self,
+        owner_user_id: int,
+        candidates: Sequence[
+            tuple[
+                EvaluatedCandidate,
+                CompletedIntradayBars,
+                IntradayTriggerDecision,
+            ]
+        ],
+    ) -> dict[str, int]:
+        """동시간대 RVOL을 별도 세션에서 계산·기록하고 정책과 격리한다."""
+
+        eligible = tuple(
+            (item, intraday, decision)
+            for item, intraday, decision in candidates
+            if item.candidate.market == "KRX" and intraday.market == "KRX"
+        )
+        if not eligible:
+            return {}
+
+        before_session_date = min(
+            intraday.session.session_date for _item, intraday, _decision in eligible
+        )
+        baselines_by_code: dict[
+            str,
+            dict[str, list[SameTimeVolumeBaseline]],
+        ] = {}
+        baseline_failures: set[str] = set()
+        observations: list[RvolShadowObservation] = []
+        pending_summary: Counter[str] = Counter()
+        unavailable_count = len(eligible) * len(_SAME_TIME_RVOL_WINDOWS)
+
+        try:
+            async with asyncio.timeout(_SAME_TIME_RVOL_SHADOW_TIMEOUT_SECONDS):
+                # 주문 판정이 쓰는 ``self._db``와 transaction을 공유하지 않는다.
+                # 조회·기록 실패로 세션이 abort돼도 주문 경로는 이미 끝난 뒤이며
+                # 그 transaction에는 전파되지 않는다.
+                async with _session() as shadow_db:
+                    await shadow_db.execute(_SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL)
+                    for code, window_bars in _SAME_TIME_RVOL_WINDOWS:
+                        requests = {
+                            item.candidate.symbol: tuple(
+                                bar.timestamp.astimezone(_KST)
+                                .time()
+                                .replace(tzinfo=None)
+                                for bar in intraday.bars[-window_bars:]
+                            )
+                            for item, intraday, _decision in sorted(
+                                eligible,
+                                key=lambda candidate: candidate[0].candidate.symbol,
+                            )
+                            if len(intraday.bars) >= window_bars
+                        }
+                        if not requests:
+                            baselines_by_code[code] = {}
+                            continue
+                        try:
+                            baselines_by_code[
+                                code
+                            ] = await load_same_time_bucket_volumes(
+                                shadow_db,
+                                requests=requests,
+                                before_session_date=before_session_date,
+                                lookback_days=_SAME_TIME_BASELINE_LOOKBACK_DAYS,
+                            )
+                        except ValueError:
+                            raise
+                        except Exception:  # noqa: BLE001 - shadow-only DB read
+                            baseline_failures.add(code)
+                            logger.warning(
+                                "kasset same-time RVOL baseline unavailable "
+                                "code=%s symbols=%d",
+                                code,
+                                len(requests),
+                                exc_info=True,
+                            )
+                            await shadow_db.rollback()
+                            await shadow_db.execute(
+                                _SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL
+                            )
+
+                    for item, intraday, session_decision in eligible:
+                        symbol = item.candidate.symbol
+                        same_time_results: dict[str, TriggerResult | None] = {}
+                        same_time_statuses: dict[str, str] = {}
+                        baseline_medians: dict[str, Decimal | None] = {}
+                        sample_days: dict[str, int] = {}
+                        for code, window_bars in _SAME_TIME_RVOL_WINDOWS:
+                            baseline = baselines_by_code.get(code, {}).get(symbol, [])
+                            sample_days[code] = len(baseline)
+                            if code in baseline_failures:
+                                same_time_results[code] = None
+                                same_time_statuses[code] = (
+                                    "unavailable:baseline_load_failed"
+                                )
+                                baseline_medians[code] = None
+                                continue
+                            try:
+                                baseline_medians[code] = same_time_baseline_median(
+                                    baseline
+                                )
+                                result = same_time_relative_volume(
+                                    intraday.bars,
+                                    baseline,
+                                    code=code,
+                                    window_bars=window_bars,
+                                    minimum_days=_SAME_TIME_BASELINE_MIN_DAYS,
+                                    threshold=_RELATIVE_VOLUME_THRESHOLD,
+                                    bar_interval=intraday.bar_interval,
+                                    source=intraday.source,
+                                )
+                            except ValueError:
+                                raise
+                            except Exception:  # noqa: BLE001 - shadow calculation
+                                logger.warning(
+                                    "kasset same-time RVOL calculation unavailable "
+                                    "symbol=%s code=%s",
+                                    symbol,
+                                    code,
+                                    exc_info=True,
+                                )
+                                same_time_results[code] = None
+                                same_time_statuses[code] = (
+                                    "unavailable:calculation_failed"
+                                )
+                                baseline_medians[code] = None
+                                continue
+                            same_time_results[code] = result
+                            same_time_statuses[code] = _rvol_shadow_status(
+                                result,
+                                missing_reason="calculation_missing",
+                            )
+
+                        session_results = {
+                            result.code: result for result in session_decision.triggers
+                        }
+                        session_5m = session_results.get(RELATIVE_VOLUME_5M)
+                        session_20m = session_results.get(RELATIVE_VOLUME_20M)
+                        same_time_5m = same_time_results.get(
+                            SAME_TIME_RELATIVE_VOLUME_5M
+                        )
+                        same_time_20m = same_time_results.get(
+                            SAME_TIME_RELATIVE_VOLUME_20M
+                        )
+                        same_time_status_5m = same_time_statuses[
+                            SAME_TIME_RELATIVE_VOLUME_5M
+                        ]
+                        same_time_status_20m = same_time_statuses[
+                            SAME_TIME_RELATIVE_VOLUME_20M
+                        ]
+                        observations.append(
+                            RvolShadowObservation(
+                                observed_at=self._now,
+                                cycle_trace_id=self._cycle_trace_id,
+                                owner_user_id=owner_user_id,
+                                symbol=symbol,
+                                market=item.candidate.market,
+                                direction=item.setup.direction.value,
+                                bucket_start_kst=intraday.bars[-1]
+                                .timestamp.astimezone(_KST)
+                                .time()
+                                .replace(tzinfo=None),
+                                completed_bars=len(intraday.bars),
+                                session_decision_status=(
+                                    _session_decision_shadow_status(session_decision)
+                                ),
+                                session_decision_reason=session_decision.blocked_reason,
+                                same_time_baseline_median_5m=baseline_medians[
+                                    SAME_TIME_RELATIVE_VOLUME_5M
+                                ],
+                                same_time_baseline_median_20m=baseline_medians[
+                                    SAME_TIME_RELATIVE_VOLUME_20M
+                                ],
+                                session_rvol_5m=_rvol_shadow_value(session_5m),
+                                session_status_5m=_rvol_shadow_status(
+                                    session_5m,
+                                    missing_reason="session_trigger_missing",
+                                ),
+                                session_rvol_20m=_rvol_shadow_value(session_20m),
+                                session_status_20m=_rvol_shadow_status(
+                                    session_20m,
+                                    missing_reason="session_trigger_missing",
+                                ),
+                                same_time_rvol_5m=_rvol_shadow_value(same_time_5m),
+                                same_time_status_5m=same_time_status_5m,
+                                same_time_sample_days_5m=sample_days[
+                                    SAME_TIME_RELATIVE_VOLUME_5M
+                                ],
+                                same_time_rvol_20m=_rvol_shadow_value(same_time_20m),
+                                same_time_status_20m=same_time_status_20m,
+                                same_time_sample_days_20m=sample_days[
+                                    SAME_TIME_RELATIVE_VOLUME_20M
+                                ],
+                            )
+                        )
+                        pending_summary[same_time_status_5m] += 1
+                        pending_summary[same_time_status_20m] += 1
+
+                    try:
+                        await RvolShadowRepository(shadow_db).record_many(observations)
+                        await shadow_db.commit()
+                    except ValueError:
+                        raise
+                    except Exception:  # noqa: BLE001 - shadow-only DB write
+                        logger.warning(
+                            "kasset same-time RVOL shadow write failed "
+                            "owner_user_id=%s rows=%d",
+                            owner_user_id,
+                            len(observations),
+                            exc_info=True,
+                        )
+                        await shadow_db.rollback()
+                        return {"unavailable:shadow_write_failed": unavailable_count}
+        except TimeoutError:
+            logger.warning(
+                "kasset same-time RVOL shadow timed out owner_user_id=%s",
+                owner_user_id,
+                exc_info=True,
+            )
+            return {"unavailable:shadow_timeout": unavailable_count}
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - isolate the entire shadow path
+            logger.warning(
+                "kasset same-time RVOL shadow unavailable owner_user_id=%s",
+                owner_user_id,
+                exc_info=True,
+            )
+            return {"unavailable:shadow_pipeline_failed": unavailable_count}
+        return dict(sorted(pending_summary.items()))
 
     async def _load_index_intraday_bars(
         self,
@@ -2023,8 +2320,8 @@ async def run_ai_recommendation_cycle_once(
             "markets=%s sources=%s ranked=%s evaluated=%s "
             "actionable=%s setup_selected=%s setup_statuses=%s "
             "setup_rejections=%s trigger_statuses=%s trigger_failures=%s "
-            "pre_ai_exclusions=%s reviewed=%s review_cap_reached=%s "
-            "review_rejections=%s recommendations=%d",
+            "same_time_rvol_shadow=%s pre_ai_exclusions=%s reviewed=%s "
+            "review_cap_reached=%s review_rejections=%s recommendations=%d",
             owner_id,
             cycle_trace_id,
             result.get("skipped"),
@@ -2039,6 +2336,7 @@ async def run_ai_recommendation_cycle_once(
             result.get("dailySetupRejections"),
             result.get("intradayTriggerStatuses"),
             result.get("intradayTriggerFailures"),
+            result.get("sameTimeRvolShadow"),
             result.get("preAiExclusions"),
             result.get("aiReviewedCount"),
             result.get("strategyReviewCapReached"),
@@ -2207,6 +2505,34 @@ def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must include a timezone")
     return value.astimezone(UTC).replace(microsecond=0)
+
+
+def _rvol_shadow_status(
+    result: TriggerResult | None,
+    *,
+    missing_reason: str,
+) -> str:
+    if result is None:
+        return f"unavailable:{missing_reason}"
+    if result.available:
+        return result.status.value
+    return f"unavailable:{result.unavailable_reason or 'unspecified'}"
+
+
+def _session_decision_shadow_status(
+    decision: IntradayTriggerDecision,
+) -> str:
+    if decision.status is TriggerDecisionStatus.TRIGGERED:
+        return "active"
+    if decision.status is TriggerDecisionStatus.NOT_TRIGGERED:
+        return "inactive"
+    return f"unavailable:{decision.blocked_reason or 'unspecified'}"
+
+
+def _rvol_shadow_value(result: TriggerResult | None) -> Decimal | None:
+    if result is None or result.value is None:
+        return None
+    return Decimal(result.value)
 
 
 def _session() -> AbstractAsyncContextManager[AsyncSession]:

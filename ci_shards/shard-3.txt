@@ -229,6 +229,7 @@ tests/services/research/test_rob984_cp3_transaction_coordinator.py
 tests/services/research/test_rob984_cp4_replay_state_machine.py
 tests/services/research/test_rob984_cp8_actual_integration.py
 tests/services/research_candles/test_promotion.py
+tests/services/research_candles/test_same_time_volume_profile.py
 tests/services/research_candles/test_toss_minute_persistence.py
 tests/services/scalping_reviews/test_benchmark_column.py
 tests/services/social_sentiment_probe/test_models.py
