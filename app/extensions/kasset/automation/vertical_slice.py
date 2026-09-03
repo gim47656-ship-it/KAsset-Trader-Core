@@ -107,6 +107,7 @@ from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
     AITradingSnapshot,
     PortfolioPlan,
+    settlement_book,
 )
 from app.extensions.kasset.automation.position_manager_service import (
     PaperPositionManagerService,
@@ -1645,6 +1646,7 @@ class AIRecommendationVerticalSlice:
         """
 
         candidate = item.candidate
+        book, _ = settlement_book(market=candidate.market)
         reference_price_text = _level_text(item.ensemble.agreeing, "entry")
         if reference_price_text is None:
             return _PreAiExclusion(
@@ -1666,7 +1668,7 @@ class AIRecommendationVerticalSlice:
             symbol=candidate.symbol,
             reference_price=reference_price,
             limits=snapshot.limits,
-            usage=snapshot.usage,
+            usage=snapshot.usage_by_currency[book],
             strategy_stop=(
                 Decimal(strategy_stop_text) if strategy_stop_text is not None else None
             ),

@@ -408,7 +408,17 @@ class AITradingDerivedLimits(BaseModel):
 
 
 class AITradingSettings(_AITradingSettingsFields):
+    operating_budget_krw: Decimal = Field(gt=0, alias="operatingBudgetKrw")
+    operating_budget_usd: Decimal = Field(gt=0, alias="operatingBudgetUsd")
     derived_limits: AITradingDerivedLimits = Field(alias="derivedLimits")
+
+    @field_serializer(
+        "operating_budget_krw",
+        "operating_budget_usd",
+        when_used="json",
+    )
+    def serialize_book_budget(self, value: Decimal) -> str:
+        return format(value, "f")
 
 
 class AITradingStateUpdate(BaseModel):

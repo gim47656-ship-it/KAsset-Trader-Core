@@ -993,6 +993,8 @@ def _ai_trading_state_response(
         settings=AITradingSettings(
             riskLevel=limits.risk_level,
             operatingBudget=limits.operating_budget,
+            operatingBudgetKrw=limits.operating_budget_krw,
+            operatingBudgetUsd=limits.operating_budget_usd,
             dailyTargetRatePct=limits.daily_target_rate_pct,
             maxDailyLossRatePct=limits.max_daily_loss_rate_pct,
             killSwitch=limits.kill_switch,
@@ -1070,15 +1072,20 @@ async def update_ai_trading_state(
     _require_trader(session)
     values = request.settings
     try:
+        budget_field = (
+            {"operating_budget_krw": values.operating_budget}
+            if values.currency == "KRW"
+            else {"operating_budget_usd": values.operating_budget}
+        )
         limits = AITradingLimits(
             risk_level=values.risk_level,
-            operating_budget=values.operating_budget,
             daily_target_rate_pct=values.daily_target_rate_pct,
             max_daily_loss_rate_pct=values.max_daily_loss_rate_pct,
             custom_max_buys_per_day=values.custom_max_buys_per_day,
             custom_max_sells_per_day=values.custom_max_sells_per_day,
             kill_switch=values.kill_switch,
             currency=values.currency,
+            **budget_field,
         )
     except ValueError as exc:
         raise MobileApiError(

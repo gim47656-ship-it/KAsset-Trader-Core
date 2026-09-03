@@ -1,23 +1,25 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-03 (자동주문 표시·체결 푸시 WIP를 `main`에 보존하고 로컬 작업 브랜치 정리)
+갱신: 2026-09-03 (KRW/USD 정산 장부 분리로 같은 owner·계좌에서 KRX·US 자동주문 동시 허용, 자동주문 표시·체결 푸시 WIP 검증 완료·PR #43)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-03 중단 지점 — 집에서 이어서 할 작업
-- 사용자 실기기에서 확인한 결함: 정상 AUTO_PAPER 주문 `4dd8953f-2e82-4278-9f2e-220345836fc9`(추천 `rec-6835c14e`, KRX `138040`, BUY 3주 @135,100)이 최근 주문·주문/체결 내역·보유자산에서 종목명 대신 코드로 보였고, 자동주문 체결 FCM이 없었다. AI픽 `완료` 필터는 `GET /api/v1/ai/recommendations?status=RESOLVED&limit=50`에서 저장된 `strategyVotes[*].family`를 응답 스키마가 거절해 HTTP 500이었다.
-- 현재 `main` 작업 내용: `SymbolMaster` 기반 종목명 보강을 주문 목록·상세·주문 응답·포지션·execution 응답에 연결했다. AI 추천 응답은 `strategyVotes.family`를 선택 문자열로 수용한다. execution 응답에는 원장의 최초 유효 `SUBMITTED` 이벤트를 기준으로 `AUTO_PAPER`/`APPROVAL`/`DIRECT` 출처를 넣고, 원장이 없는 추천 연결 주문은 추측하지 않고 `null`로 둔다.
-- 자동주문 `SUBMITTED` 뒤 owner의 활성 기기에 `ORDER_EXECUTION` mixed FCM을 보낸다. payload는 `orderId`, `recommendationId`, `market`, `symbol`, `name`, `side`, `quantity`, `filledPrice`, `status`, `executionOrigin`을 포함하며 주문 ID별 dedupe, transient backoff 재시도, stale `PENDING` 회수, owner 격리를 구현했다. 푸시 실패는 주문·execution 원장 결과를 바꾸지 않는다.
-- 통합 checker 1회 결과는 CRITICAL 0, MAJOR 2였다. 둘 다 수용해 (1) 원장 없는 추천 주문을 `APPROVAL`로 오표시하지 않게 하고, (2) Android가 `executionOrigin=null`을 승인 주문으로 추측하지 않게 수정했다. 추가 수용 항목으로 재생된 SUBMITTED가 출처를 뒤집지 않도록 최초 이벤트를 사용하고, 주문 상세/주문 응답 이름 보강, 비주식 legacy `Instrument` fallback, transient FCM 재시도를 반영했다.
-- **아직 완료 아님 / 운영 미배포.** 최종 수정 후 DB 통합 테스트는 미통과 상태가 아니라 **실행 환경 실패로 미검증**이다. 225개 선택 테스트를 두 번 실행했으나 둘 다 시작 단계에서 `127.0.0.1` PostgreSQL `ConnectionRefusedError [WinError 1225]`로 전부 ERROR가 났다. `kasset-test-db`는 서버의 `127.0.0.1:55432`에 살아 있었지만 로컬 `pg-tunnel`이 실제 포트를 열지 못했다. 동일 실패를 반복하지 말고 터널부터 새로 만든 뒤 실행한다.
-- 최종 정적 상태: 변경 파일 `ruff check`는 오류 2건을 고친 뒤 통과했고, `ruff format`으로 9개 파일을 정리했다. **포맷 후 `ruff check`/`ruff format --check`와 pytest는 다시 실행해야 한다.**
-- 브랜치 정리 완료: 이 저장소는 `main` checkout이다. 로컬 `feat/order-name-and-push`는 `main`과 동일 커밋이라 삭제했고, 이미 merge된 `feat/same-time-rvol-shadow`도 삭제했다. 운영 서버는 여전히 기존 배포 `acf093d8`; 이번 WIP는 배포하지 않았다.
+## 2026-09-03 밤 — KRW/USD 정산 장부 분리 (PR #43 뒤 후속 PR, 배포 직전)
+- 증상: owner 4는 `AUTO_PAPER`·kill switch off·promotion bypass on인데 미국장 자동주문이 구조적으로 불가능했다. 원인은 `AITradingLimits.currency` 하나가 시장 관문 역할을 겸한 것이다 — `evaluate_hard_risk`의 `expected_market = "KRX" if limits.currency == "KRW" else "US"`가 US 주문을 `POSITION` 실패로 떨어뜨리고, `usage()`가 KRW·USD 원가·손익·주문수를 환산 없이 합산했다. 같은 PAPER 계좌에 `cash_krw`와 `cash_usd`가 나란히 있으므로 계좌·owner 분리는 해법이 아니다.
+- 수정(`app/extensions/kasset/automation/policy.py`, `vertical_slice.py::_pre_ai_sizing`, `api/router.py`, `schemas/ai_recommendations.py`): 주문 `market`이 정산 장부를 결정한다(`settlement_book`: `KRX→KRW→equity_kr`, `US→USD→equity_us`, 그 외 fail-closed). 장부마다 `operating_budget_krw`(기본 10,000,000원)·`operating_budget_usd`(기본 10,000 USD, 사용자 결정)를 갖고, BUDGET·DAILY_MAX_LOSS·POSITION·ORDER_COUNT·같은 종목 재진입·동시 보유가 장부별로 독립 평가된다. 거래일 경계도 장부별(KRW=KST, USD=America/New_York 자정)이다. `usage()`는 `AndroidPaperOrder.currency`, `PaperPosition.instrument_type`, `PaperTrade.currency`로 필터하고, snapshot은 `usage_by_currency`(두 장부)와 표시 장부 `usage`를 함께 든다. 포지션 조회에 `instrument_type`이 추가돼 교차시장 동일 심볼 충돌이 없다. FX 환산은 의도적으로 없다.
+- `currency` 설정은 이제 앱의 표시·편집 선택자일 뿐 시장을 막지 않는다. PUT `operatingBudget`은 요청 `currency` 장부에만 적용되고 반대 장부는 저장값을 보존한다(병합은 `put_snapshot` 안). 저장 canonical 키는 `operating_budget_krw`/`operating_budget_usd`이며 legacy `operating_budget`은 읽기만 한다(owner 4 행 `currency=KRW, operating_budget=5000000` → KRW 5,000,000·USD 10,000). 응답 `settings`에 `operatingBudgetKrw`/`operatingBudgetUsd`가 추가됐고 PUT 요청 스키마(`extra="forbid"`)는 불변이라 현재 Android와 호환된다. **앱에는 아직 USD 예산 입력칸이 없어 USD 장부는 기본 10,000 USD로 돈다** — 앱 후속 작업.
+- daily routine `recommendation_market_scope`(기본 `KR_US`)는 후보 시장 선택만 담당하며 이번 변경과 무관하게 유지된다. Position Manager 청산은 보유 포지션의 시장 장부로 평가되므로 KRW 표시 owner의 US 포지션 SELL도 통과한다.
+- 검증: focused pytest 9파일 `196 passed`, `ruff check`/`format --check` 통과, `tests/extensions/kasset` + `tests/schemas/test_ai_recommendations_schema.py` 전체 `1155 passed, 2 warnings in 93.96s`(로컬 PostgreSQL 16 run-owned DB). 독립 `checker` 1회(`integration-risk`): **PASS, CRITICAL/MAJOR/MINOR 0**. checker가 남긴 참고: `get_snapshot`이 두 장부 usage를 매번 계산해 Hard Risk 1회당 SQL 20회(기존 13회)로 owner 1명 규모에서는 문제없지만 다중 owner 확장 시 metadata-only 읽기 분리가 필요하다.
+- 자동주문 표시·체결 푸시 WIP(사무실 작업)는 이 PC에서 재검증했다: `ruff check` 21파일 통과, `format --check` 통과, focused pytest 10파일 `225 passed`, 신규 테스트 shard 등록 확인. PR #43 `feat/order-name-and-push`(6d053a64)로 발행했고 이 장부 분리 커밋은 그 위에 쌓인 `feat/multi-currency-hard-risk`다.
+- 운영 참고: owner 4는 2026-09-03 22:06 KST에 앱에서 `AUTO_PAPER`로 전환됐다(`user_settings.updated_at 13:06:41Z`). 배포 전 코드에서는 US 주문이 여전히 `expectedMarket=KRX`로 차단되므로, 이 PR 배포 뒤 첫 미국장 sweep부터 USD 장부(10,000 USD, 위험 4단계: 종목당 25%=2,500 USD, 매수 5건/매도 3건)로 자동주문이 가능해진다.
 
-집에서 재개 순서:
-1. `main` 최신 상태를 받은 뒤 서버 테스트 DB 터널을 새로 연다: `ssh -N -L 55432:127.0.0.1:55432 kasset-server`. 별도 셸에서 `DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/test_db`를 명시하고 이번 변경의 10개 테스트 파일을 다시 실행한다.
-2. `uv run ruff check <변경 파일>`과 `uv run ruff format --check <변경 파일>`을 다시 실행한다. pytest와 정적 검증이 모두 통과하기 전에는 배포하지 않는다.
-3. Android 최종 APK와 함께 실기기에서 4개 원래 증상을 재검증한다: AI픽 `완료`가 200/목록 표시, 최근 주문·주문/체결·보유자산에 `메리츠금융지주`, 최근 주문에 자동주문/3주/단가/총액과 AI픽 상세 링크, 자동주문 체결 FCM 탭 시 해당 주문 또는 추천 상세 이동.
-4. 검증 후에만 Core 이미지를 빌드해 `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개를 같은 SHA로 배포한다. migration 추가는 없다. 검증 목적으로 새 주문을 만들지 말고 기존 주문 `4dd8953f-...`의 알림 발송 경로만 owner 4 범위에서 확인한다.
+배포 절차(사용자 승인: 검증 통과 즉시, 미장 중이라도):
+1. PR #43 → 후속 PR 순서로 required checks 통과 후 merge. migration 없음.
+2. 서버 `/opt/kasset-trader-core`: `git fetch origin && git checkout main && git pull --ff-only`; `SHA=$(git rev-parse HEAD)`.
+3. DB full custom archive를 `backups/pre-multi-currency-<UTC>/database.dump`에 저장하고 `pg_restore --list`로 검증.
+4. `.env.kasset`을 `.env.kasset.bak-predeploy-<UTC>`로 백업한 뒤 `CORE_IMAGE_TAG`와 `VCS_REF`를 `$SHA`로 갱신. `VCS_REF="$SHA" docker compose --env-file .env.kasset -f docker-compose.kasset.yml build api`.
+5. `docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp` 뒤 **반드시** `--profile ai-mcp up -d ai-mcp`(profiles 서비스는 기본 `up -d`에 포함되지 않는다).
+6. 5개 container `/app/.build-vcs-ref`가 `$SHA`이고 `/health`가 `ok`인지, owner 4 `GET /api/v1/ai/trading/state` 대신 운영 컨테이너 안에서 `AITradingPolicyService().get_snapshot(db, 4)`가 KRW 5,000,000·USD 10,000·`usage_by_currency` 두 키를 돌려주는지 읽기 전용으로 확인한다.
 
 ## 전체 진행 상태
 - 운영 배포 이미지는 `kasset-trader-core:acf093d81e62c4bb2e41b5c4d3889dfd32972321`다(PR #41 merge, `main`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container의 `/app/.build-vcs-ref`가 모두 이 SHA이고 `/health`는 `ok`다. 서버 checkout도 `main` 같은 커밋이라 tree diff가 없다. migration head는 `20260903_kasset_rvol_shadow`다. 직전 이미지는 `d73a4e55`(PR #39 merge `1c74f3f2`)였다.
@@ -121,6 +123,8 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 - KR 저장 일봉 정규장 보정(PR #37): 신규 `kr_regular_daily.py`, `converters.aggregate_kr_regular_daily_row`, `repository.fetch_kr_toss_minutes/upsert_kr_regular_rows`, `sync_service.override_kr_regular_daily`, CLI `scripts/override_kr_regular_daily.py --date [--symbols]`(완료 거래일만 허용). 독립 checker major 3건(세션 tail gate 부재로 16:05 run이 오후 중간 종가로 덮어쓰기, CLI 완료 세션 guard 부재, adjusted 재적용 차단) 수용·수정 후 PASS. focused pytest 89 passed/5 skipped, ruff·CI 통과. 배포 후 운영 수동 실행: 관심종목 4종목 completed, 1d 유니버스 703종목 중 556 upsert·147 skip(`regular_trade_rows_short` 84, `regular_first_trade_late` 36, 1분봉 부재 23, `regular_tail_missing` 4 — 저유동성·ETN). 하이닉스 9/2 정규장 행: O 1,630,000 / H 1,661,000 / L 1,612,000 / C 1,613,000 / V 3,227,484(토스 1d V 3,493,365).
 
 ## 다음 세션이 바로 할 일
+00. **장부 분리 배포 직후 확인.** 배포 뒤 첫 미국장 sweep(5분 주기)에서 US 추천이 생기면 `review.kasset_paper_execution_events`와 `kasset_android_paper_orders`(`currency='USD'`)로 USD 장부 주문이 나가는지, Hard Risk detail이 `currency=USD`·`operatingBudget=10000`으로 찍히는지 본다. US BUY가 `POSITION`에서 막히면 `expectedMarket` 문구가 남아 있는 구 이미지가 도는 것이니 `/app/.build-vcs-ref`를 먼저 본다. `vertical_slice.py`가 바뀌어 승격 fingerprint가 다시 회전했다(레코드 0건이라 영향 없음).
+00-1. Android 후속: AI픽 운용 설정에 USD 운용 예산 입력칸을 추가하고 PUT 확장(`operatingBudgetUsd` 등)을 그때 서버와 함께 정의한다. 지금은 응답의 `operatingBudgetKrw`/`operatingBudgetUsd`만 존재한다.
 0. **P0 후속 (최우선).** PR #41은 merge·배포까지 끝났지만 `review.kasset_intraday_rvol_shadow`는 **아직 0행**이다. 배포 당일 KR장은 14:20 추천으로 쿨다운이 걸려 trigger 평가 사이클이 더 없었다. **2026-09-04 KR 개장 후 첫 사이클에서 행이 실제로 쌓이는지 반드시 확인한다.** 09:00~10:05는 `session_status_*`가 `unavailable:insufficient_completed_session_bars`, `same_time_status_*`는 표본 부족으로 `unavailable:insufficient_baseline_days`가 정상이다. 행 자체가 0이면 그때는 배선 문제이므로 `same_time_rvol_shadow=` 로그 요약과 `unavailable:shadow_timeout`/`shadow_write_failed` 여부를 본다.
 0-0. 2026-09-28경 20거래일이 차면 `insufficient_baseline_days`가 사라지고 `same_time_rvol_5m/20m`에 실제 값이 들어가기 시작한다. 그 전까지 표본 부족은 정상이며 장애로 오판하지 않는다.
 0-1. **P1은 데이터가 쌓인 뒤에 한다.** RS(`intraday_relative_strength`, 임계 `Decimal("0")`)를 hard AND에서 내리는 변경은 아직 하지 않았다. 10:10 실측에서 7종목 중 5건이 `intraday_relative_strength_disagrees`로 죽었지만, RVOL baseline 편향을 먼저 제거해야 원인이 분리된다. cohort 비교(A 현재 / B 동시간대+RS hard / C 동시간대+RS soft / D 동시간대+RS 없음)는 shadow 데이터로 한다.
@@ -143,6 +147,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-03: KRW/USD 정산 장부 분리(`settlement_book`, 장부별 usage·Hard Risk·sizing, PUT 반대 장부 보존, 응답 `operatingBudgetKrw/Usd`)를 구현·검수(PASS)했고 PR #43(자동주문 표시·FCM WIP 재검증 `225 passed`) 위에 후속 PR로 발행했다. 서버 배포는 PR merge 직후 진행.
 - 2026-09-03: 동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge하고 운영 배포(`acf093d8`). migration head `20260903_kasset_rvol_shadow`, 컨테이너 5개 정합. 같은 날 14:25 KST에 정규장 안 PAPER 자동주문(138040 3주 @135,100)이 정상 집행됐다.
 - 2026-09-03: 서버 로컬에만 있던 `fix/us-intraday-and-ai-veto`를 GitHub에 발행하고 PR #39를 CI 통과 후 merge(`1c74f3f2`). 운영 코드와 `main`의 괴리를 해소했다.
 - 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`). 운영 실측 1분봉 2,520행·5분봉 504행.
