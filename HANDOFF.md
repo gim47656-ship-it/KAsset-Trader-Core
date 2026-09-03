@@ -5,7 +5,7 @@
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
 ## 전체 진행 상태
-- 운영 배포 이미지는 `kasset-trader-core:d73a4e5547399b8b76c07b81c4e572bc5f67b387`다(브랜치 `fix/us-intraday-and-ai-veto`, 커밋 `5a5f737f` → `83f44174` → `ee170aba` → `728f21ad` → `2e939c27` → `9ea4b84d` → `d73a4e55`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container가 이 태그로 기동 중이고 `/health`는 `ok`다. GitHub push와 PR은 아직 하지 않았다(서버 로컬 브랜치에만 있다).
+- 운영 배포 이미지는 `kasset-trader-core:d73a4e5547399b8b76c07b81c4e572bc5f67b387`다(브랜치 `fix/us-intraday-and-ai-veto`, 커밋 `5a5f737f` → `83f44174` → `ee170aba` → `728f21ad` → `2e939c27` → `9ea4b84d` → `d73a4e55`). `api`, `worker`, `scheduler`, `mcp`, `ai-mcp` 5개 container가 이 태그로 기동 중이고 `/health`는 `ok`다. 이 브랜치는 PR #39 merge `1c74f3f2dfb5345bd920125ba0dc041062b23a84`로 GitHub `main`에 반영됐고 required checks(`ci-required`, `migration (PostgreSQL 15)`, `frontend`, shard test 4개)를 통과했다. 서버 checkout도 `main`으로 되돌려 `1c74f3f2`이며 배포 브랜치와 tree diff가 없다.
 - 미국장 자동주문 0건의 실제 원인은 provider 장애가 아니라 `intraday_data._NAIVE_TIMEZONE`에 `"US"` 매핑이 없던 것이었다. Toss US 분봉은 ET-naive를 돌려주는데(`market_data/service.py::_to_contract_timestamp`가 `equity_us`를 America/New_York로 변환한 뒤 tz를 제거) 매핑 부재로 모든 미국 후보가 첫 봉에서 `intraday_timestamp_unusable`로 탈락했다. `"US": ZoneInfo("America/New_York")` 추가로 해소했다.
 - PAPER Hard Risk의 `AI` 규칙은 `AI_SHADOW`(항상 통과, 근거만 기록)로 강등됐다. AI·뉴스·공시는 검증되지 않은 입력을 보므로 주문 veto를 갖지 않는다는 운영 결정이다. 차단은 kill switch, `DAILY_MAX_LOSS`, `BUDGET`, `POSITION`, `ORDER_COUNT`, stale quote, 거래시간, promotion, position sizing만 담당한다. `AI_SHADOW` detail에는 실제 관측 confidence가 남고(반대 0.72도 0으로 붕괴하지 않음) 부재·NaN·Infinity·파싱 실패만 0으로 기록된다.
 - owner cycle 로그에 관문별 funnel이 추가됐다: `setup_selected`, `setup_statuses`, `setup_rejections`, `trigger_statuses`, `trigger_failures`, `pre_ai_exclusions`, `review_rejections`. 어느 관문이 몇 건을 죽였는지 로그만으로 분리된다.
@@ -76,7 +76,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 2. 관문 탈락률을 3~5 거래일 측정한 뒤에만 임계값을 논의한다. 지금 funnel은 `setup_rejections`(최다 `no_breakout_family_direction`)와 `trigger_failures`(`no_directional_trigger`, `relative_volume_not_confirmed`)를 분리해 남긴다. RVOL 1.5나 Daily Setup 조건을 측정 없이 낮추지 않는다.
 3. RVOL은 개장 후 65~80분 동안 구조적으로 `unavailable`이다(5m: window 1 + baseline 12, 20m: 4 + 12). 개장 직후 무주문을 provider 실패로 오판하지 않는다.
 4. US 분봉 저장 범위는 watchlist 7종목이다. automation 후보 100종목까지 저장하려면 Toss 분봉 호출량이 크게 늘어난다 — 필요해지면 후보 유니버스 저장을 별도로 설계한다(`us_symbol_universe` 전수는 대상에 넣지 않는다).
-5. 서버 로컬 브랜치 `fix/us-intraday-and-ai-veto`(HEAD `ee170aba`)를 GitHub PR로 올리고 CI를 통과시킨다. `tests/extensions/kasset/automation/test_intraday_data.py`는 `ci_shards/shard-3.txt`에 등록했다(정렬 유지, 467행). `tests/test_us_candles_sync.py`는 기존 파일이라 추가 등록이 없다.
+5. (완료) 서버 로컬 브랜치 `fix/us-intraday-and-ai-veto`(HEAD `1c2e9a0c`)를 PR #39로 올려 CI 통과·merge했다. `tests/extensions/kasset/automation/test_intraday_data.py`는 `ci_shards/shard-3.txt`에 등록돼 있다. 남은 GitHub 미반영 로컬 브랜치는 없다.
 6. checker MINOR 5: `IntradayTriggerDecision`에 `failure_codes: tuple[str, ...]`를 노출해 funnel이 `blocked_reason` 문자열 재파싱에 의존하지 않게 한다.
 7. 다음 장중 `agrees` + 확신도 ≥0.50 진입 추천이 나오면 `review.ai_recommendations.paper_execution_status`가 `SUCCEEDED`로 가고 PAPER 주문이 생성되는지 확인한다. `FAILED`이면 `paper_execution_error`와 Hard Risk detail의 `aiStatus`를 본다. 검증 목적 주문은 만들지 않는다.
 2. 2026-09-03 09:05·20:05 KST `kasset_watchlist_candles.sync` 결과의 `regularOverride` 요약과 `kr_candles_1d` `source='toss_regular'` 행 수를 확인한다. `regular_tail_missing`이 20:05 run에서도 다수면 1분봉 로테이션 커버리지를 본다. 2026-09-01 이전 이력 재구축(토스 1분봉 API 대량 호출)은 사용자 결정 사항이다.
@@ -89,6 +89,7 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
+- 2026-09-03: 서버 로컬에만 있던 `fix/us-intraday-and-ai-veto`를 GitHub에 발행하고 PR #39를 CI 통과 후 merge(`1c74f3f2`). 운영 코드와 `main`의 괴리를 해소했다.
 - 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`). 운영 실측 1분봉 2,520행·5분봉 504행.
 - 2026-09-02: 정규장 밖 무인 PAPER 집행을 차단(`out_of_regular_session`)하고 장외 강제 체결을 원복(`2e939c27`).
 - 2026-09-02: AI veto 제거 후 첫 PAPER 자동주문 체결(055550 BUY 4주 @110,400). 자동 sweep 경로 end-to-end 증명.
