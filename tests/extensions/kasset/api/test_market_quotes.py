@@ -59,6 +59,7 @@ class _FakeDb:
         self.names = names or {}
         self.candle_reads = 0
         self.name_reads = 0
+        self.name_statement: Any | None = None
 
     async def execute(
         self, statement: Any, params: dict[str, Any] | None = None
@@ -71,6 +72,7 @@ class _FakeDb:
                 rows.extend(self.candles.get(symbol, []))
             return _FakeResult(rows)
         self.name_reads += 1
+        self.name_statement = statement
         return _FakeResult(list(self.names.items()))
 
 
@@ -244,6 +246,7 @@ def test_batch_quotes_serve_many_symbols_from_one_toss_call(
     }
     assert toss.calls == [["005930", "000660"]]
     assert db.candle_reads == 1
+    assert db.name_reads == 1
 
 
 def test_batch_quotes_deduplicate_symbols_before_calling_toss(
@@ -879,3 +882,61 @@ async def test_toss_channel_reuses_one_client_and_closes_it_once(
 
     await service.aclose()
     assert built[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_toss_quote_reads_market_aware_name_from_symbol_master(
+    monkeypatch: pytest.MonkeyPatch,
+    toss_enabled: None,
+) -> None:
+    toss = _StubTossClient({"138040": _toss_price("138040", price="135100")})
+    _install_toss(monkeypatch, toss)
+    db = _FakeDb(names={"138040": "메리츠금융지주"})
+
+    quote = await krx_quotes.resolve_quote(db, market="KRX", symbol="138040")
+
+    assert quote.name == "메리츠금융지주"
+    assert db.name_reads == 1
+    assert db.name_statement is not None
+    compiled = db.name_statement.compile()
+    assert "symbol_master" in str(compiled)
+    assert "instruments" not in str(compiled)
+    assert "KRX" in compiled.params.values()
+
+
+@pytest.mark.asyncio
+async def test_toss_quote_omits_name_when_symbol_master_has_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+    toss_enabled: None,
+) -> None:
+    toss = _StubTossClient({"999999": _toss_price("999999", price="1000")})
+    _install_toss(monkeypatch, toss)
+
+    quote = await krx_quotes.resolve_quote(_FakeDb(), market="KRX", symbol="999999")
+
+    assert quote.symbol == "999999"
+    assert quote.name is None
+
+
+@pytest.mark.asyncio
+async def test_symbol_master_read_failure_keeps_quote_available(
+    monkeypatch: pytest.MonkeyPatch,
+    toss_enabled: None,
+) -> None:
+    toss = _StubTossClient({"138040": _toss_price("138040", price="135100")})
+    _install_toss(monkeypatch, toss)
+    monkeypatch.setattr(krx_quotes, "_candle_rows", AsyncMock(return_value={}))
+
+    class FailingNameDb:
+        async def execute(self, _statement: object) -> None:
+            raise RuntimeError("symbol master unavailable")
+
+    quote = await krx_quotes.resolve_quote(
+        FailingNameDb(),  # type: ignore[arg-type]
+        market="KRX",
+        symbol="138040",
+    )
+
+    assert quote.symbol == "138040"
+    assert quote.price == "135100"
+    assert quote.name is None

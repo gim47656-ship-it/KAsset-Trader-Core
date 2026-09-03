@@ -1030,6 +1030,7 @@ def _ai_trading_state_response(
             PaperOrderResult(
                 id=item.id,
                 recommendationId=item.recommendation_id,
+                executionOrigin=item.execution_origin,
                 market=item.market,
                 symbol=item.symbol,
                 name=item.name,

@@ -28,8 +28,13 @@ from app.extensions.kasset.models import (
     AndroidPaperOrder,
 )
 from app.models.ai_recommendations import AIRecommendation
+from app.models.kasset_paper_execution_events import (
+    KASSET_PAPER_EXECUTION_ORIGINS,
+    KAssetPaperExecutionEvent,
+)
 from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.user_settings import UserSetting
+from app.services.ai_recommendations.service import AIRecommendationService
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +286,7 @@ class AITradingUsage:
 class PaperExecutionView:
     id: str
     recommendation_id: str | None
+    execution_origin: str | None
     market: str
     symbol: str
     name: str | None
@@ -838,11 +844,12 @@ class AITradingPolicyService:
         )
         if not orders:
             return []
+        order_ids = [order.id for order in orders]
         recommendation_rows = (
             await db.execute(
                 select(AIRecommendation.paper_order_id, AIRecommendation.id).where(
                     AIRecommendation.owner_user_id == owner_user_id,
-                    AIRecommendation.paper_order_id.in_([order.id for order in orders]),
+                    AIRecommendation.paper_order_id.in_(order_ids),
                 )
             )
         ).all()
@@ -851,13 +858,54 @@ class AITradingPolicyService:
             for order_id, recommendation_id in recommendation_rows
             if order_id is not None
         }
+        execution_event_rows = (
+            await db.execute(
+                select(
+                    KAssetPaperExecutionEvent.paper_order_id,
+                    KAssetPaperExecutionEvent.origin,
+                )
+                .where(
+                    KAssetPaperExecutionEvent.owner_user_id == owner_user_id,
+                    KAssetPaperExecutionEvent.paper_order_id.in_(order_ids),
+                    KAssetPaperExecutionEvent.status == "SUBMITTED",
+                    KAssetPaperExecutionEvent.replayed.is_(False),
+                )
+                .order_by(
+                    KAssetPaperExecutionEvent.observed_at.asc(),
+                    KAssetPaperExecutionEvent.id.asc(),
+                )
+            )
+        ).all()
+        ledger_order_ids: set[str] = set()
+        execution_origin_by_order: dict[str, str] = {}
+        for paper_order_id, origin in execution_event_rows:
+            if paper_order_id is None:
+                continue
+            order_id = str(paper_order_id)
+            if order_id in ledger_order_ids:
+                continue
+            # replay는 기존 주문 확인 사건이다. 최초 비-replay SUBMITTED가 주문 출처다.
+            ledger_order_ids.add(order_id)
+            if origin in KASSET_PAPER_EXECUTION_ORIGINS:
+                execution_origin_by_order[order_id] = str(origin)
+        symbol_names = await AIRecommendationService(db).load_symbol_names(orders)
         return [
             PaperExecutionView(
                 id=order.id,
                 recommendation_id=recommendation_by_order.get(order.id),
+                execution_origin=(
+                    execution_origin_by_order.get(order.id)
+                    if order.id in ledger_order_ids
+                    else (None if order.id in recommendation_by_order else "DIRECT")
+                ),
                 market=order.market,
                 symbol=order.symbol,
-                name=order.name,
+                name=(
+                    symbol_names.get((order.market, order.symbol))
+                    if not (order.name or "").strip()
+                    or (order.name or "").strip() == str(order.symbol).strip()
+                    else (order.name or "").strip()
+                ),
                 side=order.side,
                 quantity=_decimal_or_zero(order.quantity),
                 price=(

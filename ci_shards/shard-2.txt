@@ -85,6 +85,7 @@ tests/routers/test_investment_symbol_reports_http.py
 tests/routers/test_mock_auto_read_model.py
 tests/routers/test_strategy_events_router.py
 tests/routers/test_telegram_callback_durable_route.py
+tests/schemas/test_ai_recommendations_schema.py
 tests/schemas/test_investment_stages_schema.py
 tests/schemas/test_trade_journal_schemas.py
 tests/schemas/test_trading_policy_schema.py

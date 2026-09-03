@@ -247,13 +247,11 @@ class KAssetDeviceSession(Base):
 
 
 class KAssetPushDelivery(Base):
-    """One attempted price-alert push to one device session.
+    """기기 세션 하나로 보낸 KAsset 푸시 시도 한 건.
 
-    ``dedupe_key`` is deliberately not the routine alert id: that id folds the
-    quote timestamp and change rate in, so it churns on every intraday tick and
-    would push the same symbol repeatedly. The key is KST routine date + kind +
-    market + symbol, which makes at most one push per device, per symbol, per
-    direction, per day.
+    ``dedupe_key``는 알림 종류별 멱등 기준을 담는다. 가격 알림은 KST 날짜 +
+    방향 + 시장 + 종목으로 하루 한 번만 보내고, 주문 체결 알림은 PAPER 주문
+    ID로 같은 주문을 기기당 한 번만 보낸다.
     """
 
     __tablename__ = "kasset_push_deliveries"

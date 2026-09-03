@@ -425,9 +425,145 @@ def _prepare_positions(
     )
     monkeypatch.setattr(
         paper_account_adapter,
-        "_instrument_names",
-        AsyncMock(return_value={row["symbol"]: str(row["symbol"]) for row in rows}),
+        "_position_names",
+        AsyncMock(return_value={}),
     )
+
+
+@pytest.mark.asyncio
+async def test_positions_enrich_equities_in_one_market_aware_master_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="138040",
+            instrument_type="equity_kr",
+            currency="KRW",
+            market_value="135100",
+        ),
+        _position_row(
+            symbol="999999",
+            instrument_type="equity_kr",
+            currency="KRW",
+            market_value="1",
+        ),
+    ]
+
+    class Result:
+        @staticmethod
+        def all() -> list[tuple[str, str, str]]:
+            return [("KRX", "138040", "메리츠금융지주")]
+
+    class PositionNameSession:
+        def __init__(self) -> None:
+            self.name_reads = 0
+            self.name_statement: object | None = None
+
+        async def execute(self, statement: object) -> Result:
+            self.name_reads += 1
+            self.name_statement = statement
+            return Result()
+
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "default_account",
+        AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+    monkeypatch.setattr(
+        PaperTradingService,
+        "get_positions",
+        AsyncMock(return_value=rows),
+    )
+    db = PositionNameSession()
+
+    response = await paper_account_adapter.positions(
+        db,
+        owner_user_id=101,  # type: ignore[arg-type]
+    )
+
+    assert [position.name for position in response.positions] == [
+        "메리츠금융지주",
+        None,
+    ]
+    assert response.positions[-1].symbol == "999999"
+    assert db.name_reads == 1
+    assert db.name_statement is not None
+    statement_text = str(db.name_statement)
+    assert "symbol_master" in statement_text
+    assert "(symbol_master.market, symbol_master.symbol)" in statement_text
+
+
+@pytest.mark.asyncio
+async def test_positions_keep_legacy_names_for_non_equity_instruments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _position_row(
+            symbol="KRW-BTC",
+            instrument_type="crypto",
+            currency="KRW",
+            market_value="1",
+        ),
+        _position_row(
+            symbol="USD/KRW",
+            instrument_type="forex",
+            currency="KRW",
+            market_value="1",
+        ),
+        _position_row(
+            symbol="KOSPI",
+            instrument_type="index",
+            currency="KRW",
+            market_value="1",
+        ),
+    ]
+
+    class Result:
+        @staticmethod
+        def all() -> list[tuple[InstrumentType, str, str]]:
+            return [
+                (InstrumentType.crypto, "KRW-BTC", "비트코인"),
+                (InstrumentType.forex, "USD/KRW", "원/달러"),
+                (InstrumentType.index, "KOSPI", "코스피"),
+            ]
+
+    class PositionNameSession:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def execute(self, statement: object) -> Result:
+            self.statements.append(statement)
+            return Result()
+
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "default_account",
+        AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+    monkeypatch.setattr(
+        PaperTradingService,
+        "get_positions",
+        AsyncMock(return_value=rows),
+    )
+    db = PositionNameSession()
+
+    response = await paper_account_adapter.positions(
+        db,
+        owner_user_id=101,  # type: ignore[arg-type]
+    )
+
+    assert [
+        (position.market, position.symbol, position.name)
+        for position in response.positions
+    ] == [
+        ("CRYPTO", "KRW-BTC", "비트코인"),
+        ("FOREX", "USD/KRW", "원/달러"),
+        ("INDEX", "KOSPI", "코스피"),
+    ]
+    assert len(db.statements) == 1
+    statement_text = str(db.statements[0])
+    assert "instruments" in statement_text
+    assert "symbol_master" not in statement_text
 
 
 @pytest.mark.asyncio
@@ -1448,3 +1584,186 @@ async def test_market_order_fills_at_submit_reference_price(
     assert Decimal(envelope.risk.estimated_amount) == trade.total_amount
     assert Decimal(envelope.order.average_fill_price or "0") == trade.price
     assert db.execute_count == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_persists_name_resolved_by_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facade = PaperOrderFacade()
+    db = FakeSession()
+    request = OrderRequest(
+        clientOrderId="client-order-138040",
+        broker="PAPER",
+        accountId=None,
+        market="KRX",
+        symbol="138040",
+        side="BUY",
+        orderType="LIMIT",
+        quantity="3",
+        limitPrice="135000",
+    )
+    quote = Quote(
+        broker="PAPER",
+        market="KRX",
+        symbol="138040",
+        name="메리츠금융지주",
+        currency="KRW",
+        price="135100",
+        asOf="2026-09-03T00:00:00Z",
+        source="TEST",
+    )
+    monkeypatch.setattr(facade, "get_by_client_order_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runtime_state, "assert_order_allowed", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(facade, "preview", AsyncMock(return_value=_approved()))
+    monkeypatch.setattr(
+        paper_account_adapter, "resolve_account", AsyncMock(return_value=_account())
+    )
+    monkeypatch.setattr(krx_quotes, "quote_for_market", AsyncMock(return_value=quote))
+    monkeypatch.setattr(facade, "envelope", AsyncMock(return_value="open"))
+
+    envelope, replay = await facade.submit(db, 101, request)  # type: ignore[arg-type]
+
+    assert envelope == "open"
+    assert replay is False
+    assert len(db.added) == 1
+    assert db.added[0].symbol == "138040"
+    assert db.added[0].name == "메리츠금융지주"
+
+
+@pytest.mark.asyncio
+async def test_order_list_enriches_missing_names_in_one_master_query() -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+
+    def stored_order(order_id: str, symbol: str, name: str | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=order_id,
+            client_order_id=f"client-{order_id}",
+            broker_order_id=f"PAPER-{order_id}",
+            paper_account_id=1,
+            market="KRX",
+            symbol=symbol,
+            name=name,
+            currency="KRW",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            limit_price=None,
+            status="FILLED",
+            filled_quantity=Decimal("1"),
+            average_fill_price=Decimal("135100"),
+            reject_reason=None,
+            created_at=moment,
+            updated_at=moment,
+        )
+
+    orders = [
+        stored_order("null-name", "138040", None),
+        stored_order("blank-name", "138040", "  "),
+        stored_order("code-name", "138040", "138040"),
+        stored_order("unknown-name", "999999", None),
+    ]
+
+    class Result:
+        def __init__(self, rows: list[object]) -> None:
+            self.rows = rows
+
+        def scalars(self) -> "Result":
+            return self
+
+        def all(self) -> list[object]:
+            return self.rows
+
+    class ListSession:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def execute(self, statement: object) -> Result:
+            self.statements.append(statement)
+            if "kasset_android_paper_orders" in str(statement):
+                return Result(list(orders))
+            assert "symbol_master" in str(statement)
+            return Result([("KRX", "138040", "메리츠금융지주")])
+
+    db = ListSession()
+    response = await PaperOrderFacade().list_orders(
+        db,
+        101,
+        statuses=None,
+        limit=50,  # type: ignore[arg-type]
+    )
+
+    assert [order.name for order in response.orders] == [
+        "메리츠금융지주",
+        "메리츠금융지주",
+        "메리츠금융지주",
+        None,
+    ]
+    assert response.orders[-1].symbol == "999999"
+    assert len(db.statements) == 2
+    assert sum("symbol_master" in str(statement) for statement in db.statements) == 1
+
+
+@pytest.mark.asyncio
+async def test_order_detail_and_submission_envelope_enrich_missing_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moment = datetime(2026, 9, 3, tzinfo=UTC)
+    order = AndroidPaperOrder(
+        id="code-name",
+        owner_user_id=101,
+        client_order_id="client-code-name",
+        paper_account_id=1,
+        broker_order_id="PAPER-code-name",
+        market="KRX",
+        symbol="138040",
+        name="138040",
+        currency="KRW",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        limit_price=None,
+        status="FILLED",
+        filled_quantity=Decimal("1"),
+        average_fill_price=Decimal("135100"),
+        paper_trade_id=None,
+        reject_reason=None,
+        created_at=moment,
+        updated_at=moment,
+    )
+
+    class Result:
+        @staticmethod
+        def all() -> list[tuple[str, str, str]]:
+            return [("KRX", "138040", "메리츠금융지주")]
+
+    class NameSession:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def execute(self, statement: object) -> Result:
+            self.statements.append(statement)
+            return Result()
+
+    facade = PaperOrderFacade()
+    monkeypatch.setattr(facade, "get", AsyncMock(return_value=order))
+    monkeypatch.setattr(facade, "_fill_for_order", AsyncMock(return_value=None))
+    db = NameSession()
+
+    detail = await facade.detail(
+        db,
+        owner_user_id=101,
+        order_id=order.id,  # type: ignore[arg-type]
+    )
+    envelope = await facade.envelope(
+        db,
+        owner_user_id=101,
+        order=order,  # type: ignore[arg-type]
+    )
+
+    assert detail.order.name == "메리츠금융지주"
+    assert envelope.order.name == "메리츠금융지주"
+    assert len(db.statements) == 2
+    assert all("symbol_master" in str(statement) for statement in db.statements)

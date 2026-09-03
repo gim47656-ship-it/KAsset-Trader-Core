@@ -47,6 +47,7 @@ from app.extensions.kasset.automation.policy import (
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
 )
+from app.extensions.kasset.fcm_push_service import dispatch_order_execution_pushes
 from app.jobs.watch_market_data import is_market_open
 from app.models.ai_recommendations import (
     AIRecommendation,
@@ -99,6 +100,48 @@ async def _record_execution_event(
             owner_user_id,
             recommendation_id,
             origin,
+        )
+
+
+async def _dispatch_auto_paper_execution_push(
+    *,
+    owner_user_id: int,
+    outcome: PaperExecutionOutcome,
+    now: datetime,
+) -> None:
+    """성공 집행과 원장 기록이 끝난 뒤에만 소유자 기기로 알린다."""
+
+    if outcome.status != "SUBMITTED" or outcome.recommendation_id is None:
+        return
+    try:
+        async with _session() as db:
+            order_id = await db.scalar(
+                select(AIRecommendation.paper_order_id).where(
+                    AIRecommendation.id == outcome.recommendation_id,
+                    AIRecommendation.owner_user_id == owner_user_id,
+                )
+            )
+            if order_id is None:
+                logger.warning(
+                    "kasset auto PAPER execution push skipped without order id: "
+                    "owner_user_id=%s recommendation_id=%s",
+                    owner_user_id,
+                    outcome.recommendation_id,
+                )
+                return
+            await dispatch_order_execution_pushes(
+                db,
+                owner_user_id=owner_user_id,
+                order_id=order_id,
+                now=now,
+            )
+    except Exception:
+        logger.warning(
+            "kasset auto PAPER execution push failed: owner_user_id=%s "
+            "recommendation_id=%s",
+            owner_user_id,
+            outcome.recommendation_id,
+            exc_info=True,
         )
 
 
@@ -818,6 +861,11 @@ async def run_paper_automation_once(
         await _record_execution_event(
             owner_user_id=owner_id,
             origin=AUTO_PAPER_EXECUTION_ORIGIN,
+            outcome=outcome,
+            now=current,
+        )
+        await _dispatch_auto_paper_execution_push(
+            owner_user_id=owner_id,
             outcome=outcome,
             now=current,
         )

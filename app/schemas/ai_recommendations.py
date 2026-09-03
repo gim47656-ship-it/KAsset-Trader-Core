@@ -122,6 +122,8 @@ class StrategyVoteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: str
+    # 자동화가 내보낸 표시용 식별자를 열어 두어 새 전략군 배포가 응답을 깨지 않게 한다.
+    family: str | None = None
     vote: Literal["BUY", "SELL", "HOLD"]
     weight: DecimalText
     score: DecimalText
@@ -223,6 +225,10 @@ class PaperOrderResult(BaseModel):
 
     id: str
     recommendation_id: str | None = Field(default=None, alias="recommendationId")
+    execution_origin: Literal["AUTO_PAPER", "APPROVAL", "DIRECT"] | None = Field(
+        default=None,
+        alias="executionOrigin",
+    )
     market: str
     symbol: str
     name: str | None = None

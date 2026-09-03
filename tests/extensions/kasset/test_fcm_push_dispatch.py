@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
@@ -33,13 +35,20 @@ from app.extensions.kasset.fcm_push_service import (
     FcmClient,
     ServiceAccountCredentials,
     dedupe_key,
+    dispatch_order_execution_pushes,
     dispatch_price_alert_pushes,
+    dispatch_scheduled_pushes,
+    order_execution_dedupe_key,
 )
 from app.extensions.kasset.models import (
+    AndroidPaperAccount,
+    AndroidPaperOrder,
     KAssetDailyRoutineSetting,
     KAssetDeviceSession,
     KAssetPushDelivery,
 )
+from app.models.paper_trading import PaperAccount
+from app.models.symbol_master import SymbolMaster
 from app.models.trading import (
     Exchange,
     Instrument,
@@ -289,6 +298,85 @@ async def _token_of(db_session: AsyncSession, session_id: str) -> str | None:
     )
 
 
+@asynccontextmanager
+async def _filled_order(
+    db_session: AsyncSession,
+    *,
+    owner_user_id: int,
+) -> AsyncIterator[dict[str, object]]:
+    symbol = f"P{uuid4().hex[:10].upper()}"
+    order_id = str(uuid4())
+    account = PaperAccount(
+        name=f"KAsset retry push {uuid4().hex}",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.flush()
+    account_id = account.id
+    db_session.add_all(
+        [
+            AndroidPaperAccount(
+                owner_user_id=owner_user_id,
+                paper_account_id=account_id,
+            ),
+            AndroidPaperOrder(
+                id=order_id,
+                owner_user_id=owner_user_id,
+                client_order_id=f"ai-rec:{uuid4().hex}",
+                paper_account_id=account_id,
+                broker_order_id=f"PAPER-{uuid4().hex}",
+                market="KRX",
+                symbol=symbol,
+                name=None,
+                currency="KRW",
+                side="BUY",
+                order_type="MARKET",
+                quantity=Decimal("3"),
+                status="FILLED",
+                filled_quantity=Decimal("3"),
+                average_fill_price=Decimal("135100"),
+            ),
+            SymbolMaster(
+                market="KRX",
+                symbol=symbol,
+                name="메리츠금융지주",
+                security_type="COMMON_STOCK",
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+    try:
+        yield {
+            "id": order_id,
+            "symbol": symbol,
+        }
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            delete(AndroidPaperOrder).where(AndroidPaperOrder.id == order_id)
+        )
+        await db_session.execute(
+            delete(AndroidPaperAccount).where(
+                AndroidPaperAccount.owner_user_id == owner_user_id,
+                AndroidPaperAccount.paper_account_id == account_id,
+            )
+        )
+        await db_session.execute(
+            delete(PaperAccount).where(PaperAccount.id == account_id)
+        )
+        await db_session.execute(
+            delete(SymbolMaster).where(
+                SymbolMaster.market == "KRX",
+                SymbolMaster.symbol == symbol,
+            )
+        )
+        await db_session.commit()
+
+
 @pytest.mark.asyncio
 async def test_only_the_watching_owner_receives_the_rapid_change_alerts(
     db_session: AsyncSession,
@@ -322,6 +410,263 @@ async def test_only_the_watching_owner_receives_the_rapid_change_alerts(
 
     # Owner B watches nothing, so nothing was addressed to that device.
     assert await _deliveries(db_session, str(push_world["sessionIdB"])) == []
+
+
+@pytest.mark.asyncio
+async def test_order_execution_is_owner_scoped_contract_exact_and_deduplicated(
+    db_session: AsyncSession,
+    push_world: dict[str, object],
+    credentials: ServiceAccountCredentials,
+) -> None:
+    owner_a = int(push_world["ownerA"])
+    session_a = str(push_world["sessionIdA"])
+    symbol = f"P{uuid4().hex[:10].upper()}"
+    order_id = str(uuid4())
+    account = PaperAccount(
+        name=f"KAsset order push {uuid4().hex}",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.flush()
+    account_id = account.id
+    db_session.add_all(
+        [
+            AndroidPaperAccount(
+                owner_user_id=owner_a,
+                paper_account_id=account_id,
+            ),
+            AndroidPaperOrder(
+                id=order_id,
+                owner_user_id=owner_a,
+                client_order_id=f"ai-rec:{uuid4().hex}",
+                paper_account_id=account_id,
+                broker_order_id=f"PAPER-{uuid4().hex}",
+                market="KRX",
+                symbol=symbol,
+                name=None,
+                currency="KRW",
+                side="BUY",
+                order_type="MARKET",
+                quantity=Decimal("3"),
+                status="FILLED",
+                filled_quantity=Decimal("3"),
+                average_fill_price=Decimal("135100"),
+            ),
+            SymbolMaster(
+                market="KRX",
+                symbol=symbol,
+                name="메리츠금융지주",
+                security_type="COMMON_STOCK",
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    firebase = _Firebase()
+    client = firebase.client(credentials)
+    try:
+        first = await dispatch_order_execution_pushes(
+            db_session,
+            owner_user_id=owner_a,
+            order_id=order_id,
+            now=_MOMENT,
+            client=client,
+        )
+        second = await dispatch_order_execution_pushes(
+            db_session,
+            owner_user_id=owner_a,
+            order_id=order_id,
+            now=_MOMENT + timedelta(minutes=1),
+            client=client,
+        )
+        foreign_owner = await dispatch_order_execution_pushes(
+            db_session,
+            owner_user_id=int(push_world["ownerB"]),
+            order_id=order_id,
+            now=_MOMENT + timedelta(minutes=2),
+            client=client,
+        )
+
+        assert first["sent"] == 1
+        assert second["sent"] == 0
+        assert second["skipped"] == 1
+        assert foreign_owner["reason"] == "order_not_found"
+        assert foreign_owner["sent"] == 0
+        assert len(firebase.messages) == 1
+        message = firebase.messages[0]
+        assert message["token"] == TOKEN_A
+        assert message["notification"] == {
+            "title": "자동주문 체결",
+            "body": "메리츠금융지주 3주 매수 · 135,100원",
+        }
+        assert message["data"] == {
+            "version": "1",
+            "type": "ORDER_EXECUTION",
+            "orderId": order_id,
+            "market": "KRX",
+            "symbol": symbol,
+            "name": "메리츠금융지주",
+            "side": "BUY",
+            "quantity": "3",
+            "price": "135100",
+            "origin": "AUTO_PAPER",
+        }
+        assert all(isinstance(value, str) for value in message["data"].values())
+        assert message["android"]["notification"]["channel_id"] == (
+            push.ORDER_EXECUTION_CHANNEL_ID
+        )
+        assert message["android"]["collapse_key"] == f"ORDER_EXECUTION:{order_id}"
+
+        rows = await _deliveries(db_session, session_a)
+        assert len(rows) == 1
+        assert rows[0].alert_id == order_id
+        assert rows[0].kind == "ORDER_EXECUTION"
+        assert rows[0].dedupe_key == order_execution_dedupe_key(order_id=order_id)
+        assert rows[0].status == "sent"
+        assert await _deliveries(db_session, str(push_world["sessionIdB"])) == []
+    finally:
+        await client.aclose()
+        await db_session.rollback()
+        await db_session.execute(
+            delete(AndroidPaperOrder).where(AndroidPaperOrder.id == order_id)
+        )
+        await db_session.execute(
+            delete(AndroidPaperAccount).where(
+                AndroidPaperAccount.owner_user_id == owner_a,
+                AndroidPaperAccount.paper_account_id == account_id,
+            )
+        )
+        await db_session.execute(
+            delete(PaperAccount).where(PaperAccount.id == account_id)
+        )
+        await db_session.execute(
+            delete(SymbolMaster).where(
+                SymbolMaster.market == "KRX",
+                SymbolMaster.symbol == symbol,
+            )
+        )
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sweep_retries_order_execution_once_and_keeps_price_alerts(
+    db_session: AsyncSession,
+    push_world: dict[str, object],
+    credentials: ServiceAccountCredentials,
+) -> None:
+    owner_a = int(push_world["ownerA"])
+    session_a = str(push_world["sessionIdA"])
+    async with _filled_order(db_session, owner_user_id=owner_a) as order:
+        order_id = str(order["id"])
+        firebase = _Firebase()
+        firebase.responses = [_error(503, "UNAVAILABLE")]
+        client = firebase.client(credentials)
+        try:
+            initial = await dispatch_order_execution_pushes(
+                db_session,
+                owner_user_id=owner_a,
+                order_id=order_id,
+                now=_MOMENT,
+                client=client,
+            )
+            due = await dispatch_scheduled_pushes(
+                db_session,
+                now=_MOMENT + timedelta(minutes=10),
+                client=client,
+            )
+            after_success = await dispatch_scheduled_pushes(
+                db_session,
+                now=_MOMENT + timedelta(minutes=20),
+                client=client,
+            )
+        finally:
+            await client.aclose()
+
+        order_messages = [
+            message
+            for message in firebase.messages
+            if message["data"]["type"] == "ORDER_EXECUTION"
+        ]
+        assert initial["retry"] == 1
+        assert due["sent"] == 2
+        assert due["orderExecutions"]["sent"] == 1
+        assert after_success["orderExecutions"]["sent"] == 0
+        assert len(order_messages) == 2
+        assert order_messages[0]["notification"] == order_messages[1]["notification"]
+        assert order_messages[0]["data"] == order_messages[1]["data"]
+
+        key = order_execution_dedupe_key(order_id=order_id)
+        rows = [
+            row
+            for row in await _deliveries(db_session, session_a)
+            if row.dedupe_key == key
+        ]
+        assert len(rows) == 1
+        assert rows[0].status == "sent"
+        assert rows[0].attempt_count == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sweep_recovers_stale_pending_order_execution(
+    db_session: AsyncSession,
+    push_world: dict[str, object],
+    credentials: ServiceAccountCredentials,
+) -> None:
+    owner_a = int(push_world["ownerA"])
+    session_a = str(push_world["sessionIdA"])
+    async with _filled_order(db_session, owner_user_id=owner_a) as order:
+        order_id = str(order["id"])
+        symbol = str(order["symbol"])
+        key = order_execution_dedupe_key(order_id=order_id)
+        db_session.add(
+            KAssetPushDelivery(
+                device_session_id=session_a,
+                routine_date=_MOMENT.astimezone(KST).date(),
+                dedupe_key=key,
+                alert_id=order_id,
+                kind="ORDER_EXECUTION",
+                market="KRX",
+                symbol=symbol,
+                status="pending",
+                attempt_count=0,
+                next_attempt_at=_MOMENT - timedelta(minutes=2),
+                created_at=_MOMENT - timedelta(minutes=2),
+            )
+        )
+        await db_session.commit()
+
+        firebase = _Firebase()
+        client = firebase.client(credentials)
+        try:
+            result = await dispatch_scheduled_pushes(
+                db_session,
+                now=_MOMENT,
+                client=client,
+            )
+        finally:
+            await client.aclose()
+
+        order_messages = [
+            message
+            for message in firebase.messages
+            if message["data"]["type"] == "ORDER_EXECUTION"
+        ]
+        assert result["sent"] == 2
+        assert result["orderExecutions"]["sent"] == 1
+        assert len(order_messages) == 1
+        delivery = await db_session.scalar(
+            select(KAssetPushDelivery).where(
+                KAssetPushDelivery.device_session_id == session_a,
+                KAssetPushDelivery.dedupe_key == key,
+            )
+        )
+        assert delivery is not None
+        assert delivery.status == "sent"
+        assert delivery.attempt_count == 1
 
 
 @pytest.mark.asyncio
