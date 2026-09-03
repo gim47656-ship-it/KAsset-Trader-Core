@@ -280,6 +280,7 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
                 "kasset_shadow_loss_locks",
                 "review.kasset_paper_execution_events",
                 "review.kasset_automation_cycle_events",
+                "review.kasset_intraday_rvol_shadow",
             ):
                 await connection.execute(text(f"DROP TABLE {table}"))
             for column in (
