@@ -156,6 +156,7 @@ tests/services/buy_gate_ab_shadow/test_no_live_path_impact.py
 tests/services/buy_gate_ab_shadow/test_spec_freeze.py
 tests/services/daily_candles/test_crypto_venue_resolution.py
 tests/services/daily_candles/test_repository_crypto_path.py
+tests/services/daily_candles/test_resolve_universe_us_toss_master.py
 tests/services/daily_candles/test_sync_market_universe_isolation.py
 tests/services/execution_ledger/test_opening_lots.py
 tests/services/execution_ledger/test_repository.py

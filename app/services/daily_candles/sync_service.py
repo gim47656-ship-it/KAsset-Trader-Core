@@ -960,10 +960,15 @@ class DailyCandleSyncService:
             ]
         if market == "us":
             targets = {}
+            # US 일봉 fetcher는 Toss 단일 경로다. Toss 종목 마스터에 없는 심볼
+            # (SPAC unit/warrant/우선주 등)은 항상 ``stock-not-found``를 내므로
+            # 유니버스 대상에서 제외한다. 운영 실측: 2,263 실패 중 2,254가 이 경우였다.
+            # watchlist·cohort 심볼은 사용자 의도이므로 이 필터를 적용하지 않는다.
             result = await session.execute(
                 text(
                     "SELECT symbol, exchange FROM public.us_symbol_universe"
                     " WHERE is_active = TRUE"
+                    " AND toss_master_updated_at IS NOT NULL"
                 )
             )
             for row in result:
