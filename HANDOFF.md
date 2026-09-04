@@ -1,10 +1,19 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-05 (US 1분봉 동기화 종목별 실패 격리·해제 관심종목 제외, 배포 전)
+갱신: 2026-09-05 (US 벤치마크 SPY 파티션 중복 → Daily Setup 전면 UNAVAILABLE 수정, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-05 — US 1분봉 동기화 종목별 실패 격리와 해제된 관심종목 제외 (DB migration 없음, 배포 전)
+## 2026-09-05 — US 벤치마크(SPY) 파티션 중복으로 Daily Setup 전면 UNAVAILABLE (DB migration 없음, 배포 전)
+- 증상: 2026-09-04 미장 39개 US 사이클 중 추천 0건. 09:30–11:30 ET는 stale 일봉(PR #50 이전)으로 전부 HOLD, 11:40–12:00 ET는 DELL 1건 qualified 후 `intraday_trigger_not_satisfied`(ORB 미돌파, RVOL 5m 1.29/20m 0.95 < 1.5), **12:10 ET 이후 마감까지 directional 16건이 모두 `daily_relative_strength=unavailable`** 로 탈락했다.
+- 원인: `us_candles_1d`의 SPY가 두 파티션에 있었다. `sync_benchmark`는 `NASD`(405행, 2025-01~), 유니버스 경로는 `us_symbol_universe.exchange='AMEX'`(11행, 08-21~09-04, 09-04 수동 sync가 기록). `load_candidate_benchmark_returns`가 `partition=None`으로 읽어 같은 timestamp가 두 번 나오고, `compute_benchmark_return_60_from_bars`가 중복 timestamp에 fail-closed(`return None`) → 모든 US 후보의 RS source가 fallback → `_daily_relative_strength_feature` UNAVAILABLE. 09-05 07:00 KST 정기 sync도 AMEX 09-04 행을 다시 썼으므로 수정 없이는 월요일 미장도 동일하게 막힌다.
+- 변경: `constants.US_BENCHMARK_SYMBOL/US_BENCHMARK_PARTITION` 추가. `_resolve_universe(us)`가 유니버스·watchlist 경로에서 SPY를 제외해 `sync_benchmark`만 SPY를 쓴다(single writer). `benchmark_relative_strength`는 SPY를 `partition=US_BENCHMARK_PARTITION`으로만 읽는다(reader pin). 스키마 변경 없음.
+- 회귀 테스트: `tests/services/daily_candles/test_resolve_universe_us_benchmark_owner.py`(shard-2) — 유니버스·watchlist에 SPY가 있어도 대상에서 빠짐. 기존 `test_runtime_loader_fetches_kospi_kosdaq_and_spy`의 SPY partition 기대값을 `"NASD"`로 갱신.
+- 검증: focused pytest 16 passed(신규 1 + isolation·benchmark RS·daily_candles_tasks), 변경 경로 `ruff check`·`ruff format`, `ty check --error-on-warning`, `git diff --check` 통과.
+- 배포 후: 기존 AMEX SPY 11행은 reader pin으로 무해하지만 `partition=None` 조회의 중복 원천이므로 삭제를 권장한다(운영 DB 삭제라 사용자 승인 필요). 월요일 US 첫 사이클에서 `setup_rejections`에 `daily_relative_strength=unavailable`이 사라지는지 확인한다.
+- 부수 관찰: Toss US 당일 일봉의 volume은 장 마감 3시간 뒤에도 확정치의 약 1/8(AAPL 4.6M vs 전일 37M, 1분봉 합과는 일치)이다. 다음 07:00 KST sync(horizon 10)가 덮어쓰므로 최신 1봉만 하루 동안 저평가된다. 영향은 ranker volume contraction(weight 0.07)과 SHADOW에 한정. 별도 항목으로 관리.
+
+## 2026-09-05 — US 1분봉 동기화 종목별 실패 격리와 해제된 관심종목 제외 (PR #52, `c794c4aa` 운영 배포 완료)
 - 증상: PR #51 배포 직후 미장 중 `candles.us.sync`(10분 주기)가 매 실행 `US candles sync failed: Toss API error status=404 code='stock-not-found'`로 실패했고, 최근 30분 `us_candles_1m` 적재 심볼이 4개뿐이었다.
 - 원인 두 가지. (1) `us_candles_sync_service.sync_us_candles`의 watchlist 쿼리가 `UserWatchItem.is_active`를 보지 않아 온보딩 실기기 테스트로 추가 후 해제한 `APLD/APLE/APLM/APLU`(soft-delete) 가 계속 대상에 들어갔다. (2) 종목 루프에 예외 격리가 없어 `APLD`의 404가 알파벳 뒤 실제 관심·보유 종목 분봉 적재를 전부 끊었다(#50과 같은 구조적 결함의 분봉 버전).
 - 변경: watchlist 쿼리에 `UserWatchItem.is_active.is_(True)` 추가(일봉 쪽 `_resolve_universe`는 이미 `w.is_active = TRUE`). 종목별 fetch 실패는 `rollback()` 후 다음 종목으로 계속하고 결과에 `failed_pairs`를 넣고 부분 실패를 ERROR 로그로 남긴다. upsert 실패는 기존처럼 그대로 전파한다.

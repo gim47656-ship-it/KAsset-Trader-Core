@@ -16,6 +16,10 @@ from app.extensions.kasset.automation.candidate_ranker import (
 )
 from app.extensions.kasset.automation.contracts import PriceBar
 from app.models.kr_symbol_universe import KRSymbolUniverse
+from app.services.daily_candles.constants import (
+    US_BENCHMARK_PARTITION,
+    US_BENCHMARK_SYMBOL,
+)
 from app.services.daily_candles.repository import (
     DailyCandleRow,
     DailyCandlesRepository,
@@ -25,7 +29,7 @@ from app.services.market_data.constants import KR_BENCHMARK_SYMBOL_BY_EXCHANGE
 
 BENCHMARK_SESSIONS: Final = 60
 _BENCHMARK_BAR_COUNT: Final = BENCHMARK_SESSIONS + 1
-_US_BENCHMARK: Final = "SPY"
+_US_BENCHMARK: Final = US_BENCHMARK_SYMBOL
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -189,7 +193,9 @@ async def load_candidate_benchmark_returns(
             await repository.fetch_recent_batch(
                 market=MarketKey.US,
                 symbols=[_US_BENCHMARK],
-                partition=None,
+                # sync_benchmark가 쓰는 파티션만 읽는다. partition=None이면 유니버스
+                # 경로가 남긴 다른 거래소 행이 같은 날짜로 겹쳐 fail-closed된다.
+                partition=US_BENCHMARK_PARTITION,
                 count=_BENCHMARK_BAR_COUNT,
             )
         )
