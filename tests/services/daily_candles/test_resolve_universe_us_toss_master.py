@@ -23,8 +23,9 @@ async def test_us_universe_targets_skip_symbols_missing_from_toss_master(db_sess
     await db_session.execute(
         text(
             "INSERT INTO public.us_symbol_universe"
-            " (symbol, exchange, is_active, toss_master_updated_at)"
-            " VALUES (:known, 'NASD', TRUE, now()), (:unknown, 'NASD', TRUE, NULL)"
+            " (symbol, exchange, name_kr, name_en, is_active, toss_master_updated_at)"
+            " VALUES (:known, 'NASD', '', '', TRUE, now()),"
+            " (:unknown, 'NASD', '', '', TRUE, NULL)"
         ),
         {"known": _KNOWN, "unknown": _UNKNOWN},
     )
