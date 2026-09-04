@@ -1767,3 +1767,260 @@ async def test_order_detail_and_submission_envelope_enrich_missing_name(
     assert envelope.order.name == "메리츠금융지주"
     assert len(db.statements) == 2
     assert all("symbol_master" in str(statement) for statement in db.statements)
+
+
+@pytest.mark.asyncio
+async def test_paper_preview_rejects_quantity_below_execution_lot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """체결 lot 배수가 아닌 수량은 주문 저장 전에 명확히 거부한다."""
+    account = SimpleNamespace(
+        id=1,
+        cash_krw=Decimal("0"),
+        cash_usd=Decimal("10000"),
+    )
+    _configure_preview(
+        monkeypatch,
+        account=account,
+        quote=_risk_quote(
+            price="100",
+            market="US",
+            symbol="CRWD",
+            currency="USD",
+        ),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+
+    with pytest.raises(MobileApiError) as exc_info:
+        await paper_orders.preview(
+            FakeSession(),
+            101,
+            _risk_request(market="US", symbol="CRWD", quantity="4.00655"),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "INVALID_QUANTITY"
+    assert exc_info.value.message == "주문 수량은 0.0001 단위로 입력해야 합니다."
+
+
+@pytest.mark.asyncio
+async def test_paper_submit_fills_exact_execution_lot_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """체결 lot 배수 수량은 절사 없이 주문 수량 전체가 FILLED가 된다."""
+    db = FakeSession()
+    account = SimpleNamespace(
+        id=1,
+        cash_krw=Decimal("0"),
+        cash_usd=Decimal("10000"),
+    )
+    _configure_preview(
+        monkeypatch,
+        account=account,
+        quote=_risk_quote(
+            price="100",
+            market="US",
+            symbol="CRWD",
+            currency="USD",
+        ),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+    monkeypatch.setattr(
+        paper_orders,
+        "get_by_client_order_id",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(runtime_state, "assert_order_allowed", AsyncMock())
+    monkeypatch.setattr(paper_orders, "envelope", AsyncMock(return_value="filled"))
+
+    async def fill_exact(
+        session: FakeSession,
+        owner_user_id: int,
+        order: AndroidPaperOrder,
+        _market_price: Decimal,
+    ) -> AndroidPaperOrder:
+        assert owner_user_id == 101
+        trade = SimpleNamespace(
+            id=91,
+            quantity=Decimal("4.0065"),
+            price=Decimal("100"),
+        )
+        return await PaperOrderFacade._apply_trade_metadata(session, order, trade)
+
+    monkeypatch.setattr(paper_orders, "_fill", fill_exact)
+
+    envelope, replay = await paper_orders.submit(
+        db,
+        101,
+        _risk_request(market="US", symbol="CRWD", quantity="4.0065"),
+    )
+
+    order = db.added[0]
+    assert envelope == "filled"
+    assert replay is False
+    assert isinstance(order, AndroidPaperOrder)
+    assert order.quantity == Decimal("4.0065")
+    assert order.filled_quantity == Decimal("4.0065")
+    assert order.status == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_closed_trades_page_uses_all_round_trips_for_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """목록 limit과 무관하게 전체 확정손익을 통화별 합계에 반영한다."""
+    moment = datetime(2026, 9, 1, 15, 30, 0, 123456, tzinfo=UTC)
+
+    def trade(
+        *,
+        symbol: str,
+        side: str,
+        quantity: str,
+        price: str,
+        fee: str,
+        realized: str | None,
+        at: datetime,
+    ) -> PaperTrade:
+        return PaperTrade(
+            account_id=7,
+            symbol=symbol,
+            instrument_type=InstrumentType.equity_us,
+            side=side,
+            order_type="market",
+            quantity=Decimal(quantity),
+            price=Decimal(price),
+            total_amount=Decimal(quantity) * Decimal(price),
+            fee=Decimal(fee),
+            currency="USD",
+            realized_pnl=None if realized is None else Decimal(realized),
+            executed_at=at,
+        )
+
+    rows = [
+        trade(
+            symbol="OLD",
+            side="buy",
+            quantity="1.00000000",
+            price="50",
+            fee="0.5",
+            realized=None,
+            at=moment,
+        ),
+        trade(
+            symbol="OLD",
+            side="sell",
+            quantity="1.00000000",
+            price="45",
+            fee="0",
+            realized="-5",
+            at=moment + timedelta(days=1),
+        ),
+        trade(
+            symbol="CRWD",
+            side="buy",
+            quantity="2.00000000",
+            price="100",
+            fee="1",
+            realized=None,
+            at=moment + timedelta(days=2),
+        ),
+        trade(
+            symbol="CRWD",
+            side="sell",
+            quantity="2.00000000",
+            price="110",
+            fee="0",
+            realized="20",
+            at=moment + timedelta(days=3),
+        ),
+    ]
+
+    class TradeResult:
+        def scalars(self) -> "TradeResult":
+            return self
+
+        @staticmethod
+        def all() -> list[PaperTrade]:
+            return rows
+
+    class NameResult:
+        @staticmethod
+        def all() -> list[tuple[str, str, str]]:
+            return []
+
+    class ClosedTradeSession:
+        async def execute(self, statement: object) -> TradeResult | NameResult:
+            if "paper_trades" in str(statement):
+                return TradeResult()
+            assert "symbol_master" in str(statement)
+            return NameResult()
+
+    monkeypatch.setattr(
+        paper_account_adapter,
+        "default_account",
+        AsyncMock(return_value=SimpleNamespace(id=7)),
+    )
+
+    response = await paper_account_adapter.closed_trades(
+        ClosedTradeSession(),
+        101,
+        limit=1,
+    )
+
+    assert len(response.trades) == 1
+    closed = response.trades[0]
+    assert closed.symbol == "CRWD"
+    assert closed.quantity == "2.00000000"
+    assert closed.cost_basis == "201.0000"
+    assert closed.realized_pnl == "19.0000"
+    assert closed.return_rate == "9.45"
+    assert closed.entry_at == "2026-09-03T15:30:00Z"
+    assert closed.exit_at == "2026-09-04T15:30:00Z"
+    assert "." not in closed.entry_at
+    assert "." not in closed.exit_at
+
+    assert len(response.totals) == 1
+    total = response.totals[0]
+    assert total.currency == "USD"
+    assert total.trade_count == 2
+    assert total.win_count == 1
+    assert total.realized_pnl == "13.5000"
+    assert total.cost_basis == "251.5000"
+    assert total.return_rate == "5.37"
+
+
+@pytest.mark.asyncio
+async def test_closed_trades_exclude_open_positions() -> None:
+    """청산 전 보유는 확정 수익률이 없으므로 목록에 넣지 않는다."""
+
+    moment = datetime(2026, 9, 1, tzinfo=UTC)
+
+    def trade(side: str, quantity: str, price: str, realized: str | None, day: int):
+        return PaperTrade(
+            account_id=7,
+            symbol="CRWD",
+            instrument_type=InstrumentType.equity_us,
+            side=side,
+            order_type="market",
+            quantity=Decimal(quantity),
+            price=Decimal(price),
+            total_amount=Decimal(quantity) * Decimal(price),
+            fee=Decimal("0"),
+            currency="USD",
+            realized_pnl=None if realized is None else Decimal(realized),
+            executed_at=moment + timedelta(days=day),
+        )
+
+    closed = PaperTradingService._build_round_trips(
+        [
+            trade("buy", "4.0065", "214.13", None, 0),
+            trade("sell", "4.0065", "220", None, 1),
+            trade("buy", "2", "200", None, 2),
+        ]
+    )
+
+    assert len(closed) == 1
+    assert closed[0]["currency"] == "USD"
+    assert closed[0]["quantity"] == Decimal("4.0065")

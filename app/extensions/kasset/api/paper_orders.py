@@ -32,7 +32,12 @@ from app.extensions.kasset.models import AndroidPaperOrder
 from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.trading import InstrumentType
 from app.services.ai_recommendations.service import AIRecommendationService
-from app.services.paper_trading_service import PaperTradingService, calculate_fee
+from app.services.paper_trading_service import (
+    PaperTradingService,
+    calculate_fee,
+    execution_quantity_lot,
+    quantize_execution_quantity,
+)
 
 
 class PaperOrderFacade:
@@ -52,6 +57,8 @@ class PaperOrderFacade:
         quote = await krx_quotes.quote_for_market(
             db, market=request.market, symbol=request.symbol
         )
+        instrument_type = "equity_us" if quote.currency == "USD" else "equity_kr"
+        self._assert_execution_quantity(request.quantity, instrument_type)
         state = await runtime_state.get(db, owner_user_id)
         global_state = await runtime_state.get_global(db)
         price = Decimal(quote.price)
@@ -59,7 +66,7 @@ class PaperOrderFacade:
             request.limit_price if request.order_type == "LIMIT" else price
         )
         fee = calculate_fee(
-            "equity_us" if quote.currency == "USD" else "equity_kr",
+            instrument_type,
             request.side.lower(),
             estimated_amount,
         )
@@ -745,6 +752,21 @@ class PaperOrderFacade:
             if side == "BUY"
             else limit_price <= market_price
         )
+
+    @staticmethod
+    def _assert_execution_quantity(
+        quantity: Decimal,
+        instrument_type: str,
+    ) -> None:
+        if instrument_type == "crypto":
+            return
+        lot = execution_quantity_lot(instrument_type)
+        if quantize_execution_quantity(quantity, instrument_type) != quantity:
+            raise MobileApiError(
+                400,
+                "INVALID_QUANTITY",
+                f"주문 수량은 {decimal_text(lot)} 단위로 입력해야 합니다.",
+            )
 
     @staticmethod
     def _assert_paper(request: OrderRequest) -> None:

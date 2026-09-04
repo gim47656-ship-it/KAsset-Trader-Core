@@ -1,8 +1,19 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-04 (승격 검증·bias audit PR #46 CI 통과 및 운영 배포 완료; 관심종목 알림 PR #45와 KRW/USD 장부 운영 이력 보존)
+갱신: 2026-09-04 (US 소수 수량 부분체결 차단·일일 스냅샷 스케줄·확정 수익률 API 신설, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-04 — 소수 수량 부분체결·자산 곡선·확정 수익률 (DB migration 없음, 배포 전)
+세 증상을 함께 고쳤다. 모두 사용자 화면의 수치가 원장과 어긋나던 문제다.
+
+1. **US 소수 수량이 영구 `PARTIALLY_FILLED`로 잔류.** 자동화 사이저의 `us_lot_size=0.0001`과 체결 절사 규칙이 달라 주문 수량과 체결 수량이 갈라졌다. `paper_trading_service.execution_quantity_lot`/`quantize_execution_quantity`로 instrument class별 lot(`equity_us`=0.0001, `equity_kr`=1)을 ROUND_DOWN 절사하고, crypto는 기존 8자리 HALF_UP 규칙을 그대로 둔다. 절사 결과 0이면 주문을 거부한다. 추가로 **주문 수용 시점에 lot 배수를 검증**해 비배수 수량을 400 `INVALID_QUANTITY`로 거부한다(`paper_orders.py`) — 절사만으로는 수동 입력 경로에서 잔량이 그대로 남는다. `ai_recommendations/service.py`는 미완결 주문을 SUCCEEDED로 닫지 않고 `paper_order_not_final:{status}`로 FAILED 처리하며, `ck_ai_recommendations_paper_execution_coherent`와 정합한다.
+2. **자산 곡선이 비어 있었다.** `record_daily_snapshot`을 부르는 스케줄이 아예 없었다. `kasset.paper.daily_snapshot`을 `45 15 * * 1-5` / Asia/Seoul(KR 정규장 마감 직후)로 추가했다. 스냅샷은 주문을 내지 않으므로 분석 사이클(`_CYCLE_LOCK_KEY=1`)·푸시 sweep(`_PUSH_LOCK_KEY=2`) 뒤에 줄서지 않도록 `_SNAPSHOT_LOCK_KEY=3`을 쓴다. 이 시각의 USD 자산은 직전 미국 정규 세션 종가 기준이며 docstring에 명시했다.
+3. **확정 수익률이 어디에도 없었다.** 청산이 끝난 라운드트립만 모아 `GET /api/v1/positions/closed-trades?broker=PAPER&limit=N`으로 노출한다. `totals`는 **limit과 무관하게 계좌 전체 라운드트립**을 통화별로 합산하고 `trades`만 자른다(부분합을 총계로 내놓지 않는 이 모듈의 기존 규약). 통화가 다른 손익은 합산하지 않는다. 확정 손익은 **현금 원장 기준**이다 — 라운드트립 집계에서 매수 수수료를 차감해 `pnl_amount`·`return_rate_pct`·통화별 합계가 같은 규약을 쓴다(개별 `PaperTrade.realized_pnl`과 `execute_order` 정의는 기존 원장 규약이라 건드리지 않았다). `entry_at`/`exit_at`은 이 어댑터 유일 규약인 `iso_z`(`...Z`, 마이크로초 없음)로 나간다. `holding_days`는 KST 날짜 차다.
+- `list_closed_trades` 시그니처: `async def list_closed_trades(self, account_id: int, *, limit: int = 100) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]` (목록, 통화별 전체 합계).
+- 독립 `checker` 1회(`integration-risk`): 최초 **FAIL** — CRITICAL 1(totals가 limit 창 부분합), MAJOR 4(매수 수수료 비대칭, `entryAt`/`exitAt` 시각 계약 위반, lot 비배수 수량 잔류, 5초 폴링이 전체 이력 스캔 유발), MINOR 7. Main이 CRITICAL·MAJOR 전부와 MINOR 5건을 `ACCEPTED`로 판정해 수정했다. `REJECTED_WITH_EVIDENCE`: non-default `PositionSizingConfig` 생성이 app/ 안에 없어 활성 위험 아님, 부분 청산 실현손익 미집계는 패널 문구가 정의를 정확히 공시함.
+- 검증: focused pytest 5파일 **160 passed** (`test_paper_trading_service`, `test_paper_regression`, `test_android_contract`, `test_multi_user_contract`, `test_market_pipeline`), `ruff check app/ tests/` 통과, `ruff format` 적용. DB migration 없음.
+- 미해결: 기존 운영 `PARTIALLY_FILLED` 2건(US CRWD, UBS)은 원장 수정이라 사용자 승인 대기 중이다. 신규 주문은 위 수정으로 재발하지 않는다.
 
 ## 2026-09-04 — 승격 검증·bias audit 통합 (DB migration 없음)
 - 최신 `main`(`fd547c13`, PR #45 포함) 위에 18개 경로의 promotion WIP를 통합했다. `evidence_track`은 기본 `historical_pit`과 명시적 `forward_paper`만 허용하며, forward 시그널은 코호트 `effective_date` 이후로 제한한다. 기본 `promotion_ready`/`blockers`는 ops/dashboard·CLI의 공통 readiness 의미를 보존하고, historical PIT 전용 blocker는 `historical_evidence_ready`/`historical_evidence_blockers`로 분리한다. historical 증거 생성은 `promotion_evidence._require_readiness`에서 계속 fail-closed다. 알 수 없는 트랙과 불충분한 forward window도 fail-closed하며 성과 임계값 11개는 완화하지 않는다.

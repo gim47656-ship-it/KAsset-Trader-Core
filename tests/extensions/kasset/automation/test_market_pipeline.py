@@ -429,6 +429,13 @@ def test_market_event_task_is_registered() -> None:
     assert kasset_market_events_tasks.kasset_price_alert_push.labels["schedule"] == [
         {"cron": "*/10 * * * *", "cron_offset": "Asia/Seoul"}
     ]
+    assert (
+        kasset_market_events_tasks.kasset_paper_daily_snapshot.task_name
+        == "kasset.paper.daily_snapshot"
+    )
+    assert kasset_market_events_tasks.kasset_paper_daily_snapshot.labels[
+        "schedule"
+    ] == [{"cron": "45 15 * * 1-5", "cron_offset": "Asia/Seoul"}]
 
 
 @pytest.mark.asyncio
@@ -475,6 +482,131 @@ async def test_price_alert_task_runs_price_and_order_retry_sweep(
 
     assert await kasset_market_events_tasks.kasset_price_alert_push() is expected
     assert calls == [session]
+
+
+@pytest.mark.asyncio
+async def test_disabled_paper_daily_snapshot_is_database_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    @asynccontextmanager
+    async def forbidden_session():
+        raise AssertionError("disabled snapshot must not open a session")
+        yield  # pragma: no cover - unreachable, keeps the async generator shape
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", False)
+    monkeypatch.setattr(kasset_market_events_tasks, "_session", forbidden_session)
+
+    assert await kasset_market_events_tasks.kasset_paper_daily_snapshot() == {
+        "enabled": False,
+        "accounts": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_paper_daily_snapshot_isolates_one_account_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """한 계좌의 평가 실패가 나머지 계좌의 자산 기록을 막지 못한다."""
+
+    from decimal import Decimal
+
+    from app.core.config import settings
+    from app.services import paper_trading_service
+    from app.tasks import kasset_market_events_tasks
+
+    rollbacks = 0
+
+    class FakeResult:
+        def scalars(self) -> FakeResult:
+            return self
+
+        def all(self) -> list[int]:
+            return [7, 8, 9]
+
+    class FakeSession:
+        async def execute(self, _statement: object) -> FakeResult:
+            return FakeResult()
+
+        async def rollback(self) -> None:
+            nonlocal rollbacks
+            rollbacks += 1
+
+    class FakeService:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def record_daily_snapshot(self, account_id: int) -> SimpleNamespace:
+            if account_id == 8:
+                raise RuntimeError("quote provider down")
+            return SimpleNamespace(
+                snapshot_date=datetime(2026, 9, 4, tzinfo=UTC).date(),
+                equity_krw=Decimal("9999761.0500"),
+                equity_usd=Decimal("9997.2900"),
+                daily_return_krw_pct=Decimal("-0.1200"),
+                daily_return_usd_pct=None,
+                valuation_complete_krw=True,
+                valuation_complete_usd=False,
+            )
+
+    @asynccontextmanager
+    async def fake_session():
+        yield FakeSession()
+
+    @asynccontextmanager
+    async def acquired_lease(lock_key: int):
+        assert lock_key == kasset_market_events_tasks._SNAPSHOT_LOCK_KEY
+        yield True
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    monkeypatch.setattr(kasset_market_events_tasks, "_session", fake_session)
+    monkeypatch.setattr(
+        kasset_market_events_tasks, "_advisory_single_flight", acquired_lease
+    )
+    monkeypatch.setattr(paper_trading_service, "PaperTradingService", FakeService)
+
+    result = await kasset_market_events_tasks.kasset_paper_daily_snapshot()
+
+    assert result["enabled"] is True
+    accounts = result["accounts"]
+    assert [entry["accountId"] for entry in accounts] == [7, 8, 9]
+    assert [entry["status"] for entry in accounts] == ["recorded", "failed", "recorded"]
+    assert accounts[1]["error"] == "RuntimeError"
+    assert accounts[0]["equityKrw"] == "9999761.0500"
+    assert accounts[0]["dailyReturnUsdPct"] is None
+    assert accounts[0]["valuationCompleteUsd"] is False
+    assert rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_daily_snapshot_skips_when_another_run_holds_the_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.tasks import kasset_market_events_tasks
+
+    @asynccontextmanager
+    async def busy_lease(lock_key: int):
+        assert lock_key == kasset_market_events_tasks._SNAPSHOT_LOCK_KEY
+        yield False
+
+    @asynccontextmanager
+    async def forbidden_session():
+        raise AssertionError("a skipped snapshot must not open a session")
+        yield  # pragma: no cover - unreachable, keeps the async generator shape
+
+    monkeypatch.setattr(settings, "KASSET_MARKET_EVENTS_ENABLED", True)
+    monkeypatch.setattr(
+        kasset_market_events_tasks, "_advisory_single_flight", busy_lease
+    )
+    monkeypatch.setattr(kasset_market_events_tasks, "_session", forbidden_session)
+
+    assert await kasset_market_events_tasks.kasset_paper_daily_snapshot() == {
+        "enabled": True,
+        "skipped": "snapshot_already_running",
+    }
 
 
 @pytest.mark.asyncio
