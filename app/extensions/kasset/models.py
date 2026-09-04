@@ -249,9 +249,9 @@ class KAssetDeviceSession(Base):
 class KAssetPushDelivery(Base):
     """기기 세션 하나로 보낸 KAsset 푸시 시도 한 건.
 
-    ``dedupe_key``는 알림 종류별 멱등 기준을 담는다. 가격 알림은 KST 날짜 +
-    방향 + 시장 + 종목으로 하루 한 번만 보내고, 주문 체결 알림은 PAPER 주문
-    ID로 같은 주문을 기기당 한 번만 보낸다.
+    ``dedupe_key``는 알림 종류별 멱등 기준을 담는다. 가격 알림은 시장 현지 날짜
+    (US는 ET, KRX/CRYPTO는 KST) + 방향 + 시장 + 종목으로 하루 한 번만 보내고,
+    주문 체결 알림은 PAPER 주문 ID로 같은 주문을 기기당 한 번만 보낸다.
     """
 
     __tablename__ = "kasset_push_deliveries"
@@ -385,11 +385,12 @@ class KAssetDailyRoutineSetting(Base):
 
 
 class KAssetRoutinePriceAlertEvent(Base):
-    """관심종목 ±5% 알림이 KST 하루 안에 처음 포착된 기록.
+    """관심종목 ±5% 알림이 시장 현지 날짜에 처음 포착된 기록.
 
-    알림 목록은 현재가로 매번 다시 계산되므로 등락률이 임계값 안으로 돌아오면 사라진다.
-    이 표는 그날 처음 포착된 방향·등락률·시각을 붙잡아 두어 목록이 하루 동안 남게 한다.
-    ``detected_*``는 첫 포착 값으로 고정하고 ``last_*``만 이후 조회에서 갱신한다.
+    알림 목록은 저장된 첫 포착 기록과 현재가를 합쳐 계산한다. 이 표는 시장별
+    당일 첫 포착 방향·등락률·시각을 붙잡아, 등락률이 임계값 안으로 돌아와도
+    목록을 그 날짜 동안 보존한다. ``detected_*``는 첫 포착 값으로 고정하고
+    ``last_*``만 갱신한다.
     """
 
     __tablename__ = "kasset_routine_price_alert_events"

@@ -38,7 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.timezone import KST
 from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
-from app.extensions.kasset.daily_routine_service import daily_routine_service
+from app.extensions.kasset.daily_routine_service import (
+    daily_routine_service,
+    price_alert_market_date,
+)
 from app.extensions.kasset.models import (
     AndroidPaperOrder,
     KAssetDeviceSession,
@@ -449,7 +452,7 @@ def _extract_error_code(response: httpx.Response) -> str:
 
 
 def dedupe_key(*, routine_date: date, kind: str, market: str, symbol: str) -> str:
-    """One push per device, per symbol, per direction, per KST day."""
+    """기기·종목·방향·시장 현지 날짜별 하나인 가격 알림 전달 키를 만든다."""
 
     material = "|".join((routine_date.isoformat(), kind, market, symbol))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -766,7 +769,6 @@ async def _dispatch(
     if not targets:
         return {"enabled": True, "targets": 0, "sent": 0, "failed": 0, "retry": 0}
 
-    routine_date = instant.astimezone(KST).date()
     alerts_by_owner: dict[int, list[DailyRoutineAlert]] = {}
     counts = {"sent": 0, "failed": 0, "retry": 0, "skipped": 0, "tokensCleared": 0}
 
@@ -784,6 +786,7 @@ async def _dispatch(
 
         for alert in owner_alerts:
             assert alert.market is not None and alert.symbol is not None
+            routine_date = price_alert_market_date(alert.market, instant)
             delivery = await _claim_delivery(
                 db,
                 target=target,

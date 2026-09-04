@@ -27,10 +27,14 @@ from app.core.config import settings
 from app.core.timezone import KST
 from app.extensions.kasset import fcm_push_service as push
 from app.extensions.kasset.api.auth import MobileAuthService
+from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
 from app.extensions.kasset.api.paper_schemas import Quote
 from app.extensions.kasset.api.push_tokens import hash_fcm_token, register_push_token
 from app.extensions.kasset.api.schemas import RegisterRequest
-from app.extensions.kasset.daily_routine_service import DailyRoutineService
+from app.extensions.kasset.daily_routine_service import (
+    DailyRoutineService,
+    price_alert_market_date,
+)
 from app.extensions.kasset.fcm_push_service import (
     FcmClient,
     ServiceAccountCredentials,
@@ -144,8 +148,8 @@ async def push_world(
             exchange_id=exchange.id,
             symbol=f"P{index}{suffix}",
             name=f"푸시 종목 {index}",
-            type=InstrumentType.equity_kr,
-            base_currency="KRW",
+            type=(InstrumentType.equity_us if index == 0 else InstrumentType.equity_kr),
+            base_currency="USD" if index == 0 else "KRW",
             is_active=True,
         )
         for index in range(3)
@@ -223,7 +227,7 @@ async def push_world(
     async def quotes(
         _db: AsyncSession, market: str, requested: Sequence[str]
     ) -> list[Quote]:
-        assert market == "KRX"
+        assert market in {"KRX", "US"}
         by_symbol = dict(zip(symbols, zip(_RATES, _PRICES, strict=True), strict=True))
         result = []
         for symbol in requested:
@@ -231,10 +235,10 @@ async def push_world(
             result.append(
                 Quote(
                     broker="PAPER",
-                    market="KRX",
+                    market=market,
                     symbol=symbol,
                     name=None,
-                    currency="KRW",
+                    currency="USD" if market == "US" else "KRW",
                     price=price,
                     previous_close="100",
                     change_amount="0",
@@ -406,7 +410,7 @@ async def test_only_the_watching_owner_receives_the_rapid_change_alerts(
     assert [row.status for row in rows] == ["sent", "sent"]
     assert all(row.delivered_at is not None for row in rows)
     assert all(row.last_error_code is None for row in rows)
-    assert {row.market for row in rows} == {"KRX"}
+    assert {row.market for row in rows} == {"KRX", "US"}
 
     # Owner B watches nothing, so nothing was addressed to that device.
     assert await _deliveries(db_session, str(push_world["sessionIdB"])) == []
@@ -681,7 +685,6 @@ async def test_a_second_cycle_the_same_day_sends_nothing_again(
         first = await dispatch_price_alert_pushes(
             db_session, now=_MOMENT, client=client
         )
-        # Ten minutes later the quote has moved on, so the alert id differs.
         second = await dispatch_price_alert_pushes(
             db_session, now=_MOMENT + timedelta(minutes=10), client=client
         )
@@ -696,26 +699,93 @@ async def test_a_second_cycle_the_same_day_sends_nothing_again(
 
 
 @pytest.mark.asyncio
-async def test_the_next_kst_day_is_a_fresh_dedupe_slot(
+async def test_kst_midnight_keeps_us_dedupe_slot_and_rolls_krx_slot(
     db_session: AsyncSession,
     push_world: dict[str, object],
     credentials: ServiceAccountCredentials,
 ) -> None:
+    before_midnight = datetime(2026, 9, 1, 14, 59, tzinfo=UTC)
+    after_midnight = before_midnight + timedelta(minutes=2)
     firebase = _Firebase()
     client = firebase.client(credentials)
     try:
-        await dispatch_price_alert_pushes(db_session, now=_MOMENT, client=client)
-        tomorrow = await dispatch_price_alert_pushes(
-            db_session, now=_MOMENT + timedelta(days=1), client=client
+        first = await dispatch_price_alert_pushes(
+            db_session, now=before_midnight, client=client
+        )
+        second = await dispatch_price_alert_pushes(
+            db_session, now=after_midnight, client=client
         )
     finally:
         await client.aclose()
 
-    assert tomorrow["sent"] == 2
+    assert first["sent"] == 2
+    assert second["sent"] == 1
+    assert second["skipped"] == 1
+    assert len(firebase.messages) == 3
+
     rows = await _deliveries(db_session, str(push_world["sessionIdA"]))
-    assert len(rows) == 4
-    assert len({row.routine_date for row in rows}) == 2
-    assert len({row.dedupe_key for row in rows}) == 4
+    assert len(rows) == 3
+    us_rows = [row for row in rows if row.market == "US"]
+    krx_rows = [row for row in rows if row.market == "KRX"]
+    assert len(us_rows) == 1
+    assert len(krx_rows) == 2
+    assert us_rows[0].routine_date.isoformat() == "2026-09-01"
+    assert {row.routine_date.isoformat() for row in krx_rows} == {
+        "2026-09-01",
+        "2026-09-02",
+    }
+
+
+@pytest.mark.asyncio
+async def test_crypto_delivery_uses_current_kst_date_despite_stale_alert_time(
+    db_session: AsyncSession,
+    push_world: dict[str, object],
+    credentials: ServiceAccountCredentials,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_a = int(push_world["ownerA"])
+    current = datetime(2026, 9, 1, 15, 1, tzinfo=UTC)
+    stale_candle_time = datetime(2026, 8, 31, 15, 0, tzinfo=UTC)
+    alert = DailyRoutineAlert(
+        id="price:2026-09-02:RAPID_RISE:CRYPTO:KRW-BTC",
+        kind="RAPID_RISE",
+        headline="비트코인(KRW-BTC) +6.00% 급등",
+        symbol="KRW-BTC",
+        market="CRYPTO",
+        source="UPBIT",
+        occurred_at=stale_candle_time,
+        detected_rate_pct="6.00",
+        current_rate_pct="6.00",
+        recovered=False,
+        last_seen_at=stale_candle_time,
+    )
+
+    class _CryptoAlerts:
+        async def get_alerts(
+            self,
+            _db: AsyncSession,
+            owner_user_id: int,
+            *,
+            now: datetime,
+        ) -> list[DailyRoutineAlert]:
+            assert now == current
+            return [alert] if owner_user_id == owner_a else []
+
+    monkeypatch.setattr(push, "daily_routine_service", _CryptoAlerts())
+    firebase = _Firebase()
+    client = firebase.client(credentials)
+    try:
+        result = await dispatch_price_alert_pushes(
+            db_session, now=current, client=client
+        )
+    finally:
+        await client.aclose()
+
+    assert result["sent"] == 1
+    rows = await _deliveries(db_session, str(push_world["sessionIdA"]))
+    assert len(rows) == 1
+    assert rows[0].routine_date.isoformat() == "2026-09-02"
+    assert rows[0].alert_id.startswith("price:2026-09-02:")
 
 
 @pytest.mark.asyncio
@@ -945,7 +1015,7 @@ async def test_dedupe_row_matches_the_published_key_and_no_secret_is_logged(
     rows = await _deliveries(db_session, str(push_world["sessionIdA"]))
     attempted = next(row for row in rows if row.last_error_code)
     assert attempted.dedupe_key == dedupe_key(
-        routine_date=_MOMENT.astimezone(KST).date(),
+        routine_date=price_alert_market_date(attempted.market, _MOMENT),
         kind=attempted.kind,
         market=attempted.market,
         symbol=attempted.symbol,
