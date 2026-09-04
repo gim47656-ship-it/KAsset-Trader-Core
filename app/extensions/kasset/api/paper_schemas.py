@@ -238,6 +238,43 @@ class OrderDetail(AndroidWireModel):
     fills: list[Fill]
 
 
+class ClosedTrade(AndroidWireModel):
+    """청산이 끝난 매매 한 건의 확정 손익.
+
+    보유 중 평가손익과 달리 시세에 의존하지 않는다. `returnRate`는 매수 원가
+    대비 백분율이고, 통화가 다른 매매는 합산하지 않으므로 `currency`로 갈라
+    읽는다.
+    """
+
+    market: str
+    symbol: str
+    name: str | None = None
+    currency: str
+    quantity: str
+    cost_basis: str
+    realized_pnl: str
+    return_rate: str
+    holding_days: int
+    entry_at: str
+    exit_at: str
+
+
+class ClosedTradeTotal(AndroidWireModel):
+    currency: str
+    trade_count: int
+    win_count: int
+    realized_pnl: str
+    cost_basis: str
+    return_rate: str
+
+
+class ClosedTradesResponse(AndroidWireModel):
+    """확정 매매 목록과 통화별 합계. 통화가 섞이면 합산하지 않는다."""
+
+    trades: list[ClosedTrade]
+    totals: list[ClosedTradeTotal]
+
+
 class RiskPolicy(AndroidWireModel):
     max_order_ratio: str
     max_symbol_ratio: str

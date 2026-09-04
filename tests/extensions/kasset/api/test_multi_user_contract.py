@@ -714,6 +714,54 @@ async def test_paper_execution_claim_lease_fences_stale_and_foreign_workers(
     assert reconciled.paper_order_id == reconciled_order.id
     assert reconciled.paper_execution_error is None
 
+    # 부분체결은 주문 의도가 남아 있으므로 성공으로 닫히면 안 된다. 실제 운영에서
+    # 미국 소수 주문이 SUCCEEDED로 표기돼 미체결 잔량이 가려졌다.
+    partial_id = f"claim-partial-{owner_b_id}-{uuid4().hex}"
+    partial = _recommendation(
+        owner_b_id,
+        partial_id,
+        decision="APPROVED",
+        decided_at=_NOW - timedelta(minutes=1),
+    )
+    partial_order = AndroidPaperOrder(
+        id=f"paper-order-partial-{uuid4().hex}",
+        owner_user_id=owner_b_id,
+        client_order_id=f"ai-rec:{partial_id}",
+        paper_account_id=account_ids[1],
+        broker_order_id=f"paper-broker-{uuid4().hex}",
+        market="US",
+        symbol="CRWD",
+        currency="USD",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("4.0065"),
+        status="PARTIALLY_FILLED",
+        filled_quantity=Decimal("4"),
+        average_fill_price=Decimal("214.13"),
+    )
+    db_session.add_all([partial, partial_order])
+    await db_session.commit()
+    for attempt in range(1, service.PAPER_EXECUTION_MAX_ATTEMPTS + 1):
+        claimed = await service.claim_for_paper_execution(
+            owner_b_id,
+            _NOW + service.PAPER_EXECUTION_LEASE * (attempt - 1),
+            recommendation_id=partial_id,
+        )
+        assert claimed is not None
+    assert (
+        await service.claim_for_paper_execution(
+            owner_b_id,
+            _NOW + service.PAPER_EXECUTION_LEASE * service.PAPER_EXECUTION_MAX_ATTEMPTS,
+            recommendation_id=partial_id,
+        )
+        is None
+    )
+    await db_session.refresh(partial)
+    assert partial.paper_execution_status == "FAILED"
+    assert partial.paper_execution_error == "paper_order_not_final:PARTIALLY_FILLED"
+    # 미체결 상태에서는 coherence 제약이 주문 링크를 금지하므로 오류 문자열이 증거다.
+    assert partial.paper_order_id is None
+
 
 def _http_request(path: str) -> Request:
     return Request(

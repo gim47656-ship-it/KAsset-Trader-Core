@@ -6,6 +6,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
+from typing import Protocol
 
 from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,9 @@ from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper_schemas import (
     Balance,
     CashBalance,
+    ClosedTrade,
+    ClosedTradesResponse,
+    ClosedTradeTotal,
     Position,
     PositionsResponse,
     Quote,
@@ -42,6 +46,11 @@ _FX_QUOTE_INCOMPLETE = "FX_QUOTE_INCOMPLETE"
 _FX_QUOTE_STALE = "FX_QUOTE_STALE"
 
 logger = logging.getLogger(__name__)
+
+
+class _PositionIdentity(Protocol):
+    market: str
+    symbol: str
 
 
 def decimal_text(value: Decimal | int | str) -> str:
@@ -435,6 +444,45 @@ class PaperAccountAdapter:
             position.name = resolved_names.get((position.market, position.symbol))
         return PositionsResponse(positions=positions)
 
+    async def closed_trades(
+        self, db: AsyncSession, owner_user_id: int, *, limit: int = 100
+    ) -> ClosedTradesResponse:
+        """청산이 끝난 매매의 확정 수익률. 통화별로만 합계를 낸다."""
+        account = await self.default_account(db, owner_user_id)
+        service = PaperTradingService(db)
+        rows, total_rows = await service.list_closed_trades(account.id, limit=limit)
+        trades = [
+            ClosedTrade(
+                market=self.market_name(str(row["instrument_type"])),
+                symbol=str(row["symbol"]),
+                name=None,
+                currency=str(row["currency"]),
+                quantity=decimal_text(row["quantity"]),
+                cost_basis=decimal_text(row["cost_basis"]),
+                realized_pnl=decimal_text(row["pnl_amount"]),
+                return_rate=decimal_text(row["return_rate_pct"]),
+                holding_days=int(row["holding_days"]),
+                entry_at=iso_z(row["entry_date"]),
+                exit_at=iso_z(row["exit_date"]),
+            )
+            for row in rows
+        ]
+        resolved_names = await self._position_names(db, trades)
+        for trade in trades:
+            trade.name = resolved_names.get((trade.market, trade.symbol))
+        totals = [
+            ClosedTradeTotal(
+                currency=str(row["currency"]),
+                trade_count=int(row["trade_count"]),
+                win_count=int(row["win_count"]),
+                realized_pnl=decimal_text(row["realized_pnl"]),
+                cost_basis=decimal_text(row["cost_basis"]),
+                return_rate=decimal_text(row["return_rate"]),
+            )
+            for row in total_rows
+        ]
+        return ClosedTradesResponse(trades=trades, totals=totals)
+
     async def _quote_from_candles(
         self,
         db: AsyncSession,
@@ -618,7 +666,7 @@ class PaperAccountAdapter:
     async def _position_names(
         cls,
         db: AsyncSession,
-        positions: Sequence[Position],
+        positions: Sequence[_PositionIdentity],
     ) -> dict[tuple[str, str], str]:
         """주식은 SymbolMaster, 비주식은 기존 Instrument에서 이름을 찾는다."""
         equity_keys = tuple(

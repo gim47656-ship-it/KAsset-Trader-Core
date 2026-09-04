@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation, localcontext
 from typing import Any
 
 from sqlalchemy import select, update
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.money import quantize_crypto_qty as _q_crypto_qty
 from app.core.money import quantize_money as _q_money
 from app.core.money import quantize_pct as _q_pct
-from app.core.timezone import now_kst
+from app.core.timezone import KST, now_kst
 from app.extensions.kasset.models import KAssetPaperPositionState
 from app.models.paper_trading import (
     PaperAccount,
@@ -70,6 +70,33 @@ _SNAPSHOT_COMPLETE_COLUMNS: dict[str, str] = {
     "KRW": "valuation_complete_krw",
     "USD": "valuation_complete_usd",
 }
+
+# Tradable increment per instrument class, used to settle an order into a trade.
+#
+# US equities are fractionable, and the automation sizer already emits 0.0001
+# increments (``PositionSizingConfig.us_lot_size``). Settling those at whole
+# shares left the ordered remainder unfilled forever, so every fractional US
+# order ended `PARTIALLY_FILLED`. Truncating here — never rounding up — keeps a
+# fill inside the notional the risk check already approved.
+# Crypto keeps its own 8-decimal HALF_UP rule in ``preview_order`` and is not
+# listed here.
+_EXECUTION_QUANTITY_LOT: dict[str, Decimal] = {
+    "equity_us": Decimal("0.0001"),
+}
+_DEFAULT_EXECUTION_QUANTITY_LOT = Decimal("1")
+
+
+def execution_quantity_lot(instrument_type: str) -> Decimal:
+    """Smallest quantity this instrument can actually settle in."""
+    return _EXECUTION_QUANTITY_LOT.get(instrument_type, _DEFAULT_EXECUTION_QUANTITY_LOT)
+
+
+def quantize_execution_quantity(quantity: Decimal, instrument_type: str) -> Decimal:
+    """Truncate a requested quantity down to a settleable increment."""
+    lot = execution_quantity_lot(instrument_type)
+    with localcontext() as context:
+        context.prec = 28
+        return (quantity / lot).to_integral_value(rounding=ROUND_DOWN) * lot
 
 
 def position_currency(instrument_type: str) -> str:
@@ -445,8 +472,7 @@ class PaperTradingService:
         if instrument_type == "crypto":
             qty = _q_crypto_qty(qty)
         else:
-            # integer shares for equities
-            qty = Decimal(int(qty))
+            qty = quantize_execution_quantity(qty, instrument_type)
 
         if qty <= 0:
             raise ValueError(f"Computed quantity is not positive: {qty}")
@@ -1007,13 +1033,42 @@ class PaperTradingService:
             for s in snaps
         ]
 
+    async def list_closed_trades(
+        self, account_id: int, *, limit: int = 100
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return the newest closed trips page and all-trip currency totals.
+
+        Open positions are excluded: their outcome is an unrealized valuation
+        that moves with the next quote, not a settled return. Only the trade
+        page observes ``limit``; totals always cover every closed round trip.
+        """
+        trades = list(
+            (
+                await self.db.execute(
+                    select(PaperTrade)
+                    .where(PaperTrade.account_id == account_id)
+                    .order_by(PaperTrade.executed_at.asc(), PaperTrade.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        closed = self._build_round_trips(trades)
+        totals = self._closed_trade_totals(closed)
+        closed.reverse()
+        return closed[:limit], totals
+
     # ------------------------------------------------------------------ #
     # Performance analytics helpers
     # ------------------------------------------------------------------ #
     @staticmethod
     def _build_round_trips(trades: list[PaperTrade]) -> list[dict[str, Any]]:
         """Group raw trades into round trips per symbol until position is flat.
-        Excludes open (unclosed) trips."""
+
+        Excludes open (unclosed) trips. ``pnl`` and ``return_pct`` preserve the
+        historical float analytics contract; ``pnl_amount`` and
+        ``return_rate_pct`` expose the same values as exact Decimals.
+        """
         grouped: dict[str, list[tuple[int, PaperTrade]]] = defaultdict(list)
         for idx, t in enumerate(trades):
             grouped[t.symbol].append((idx, t))
@@ -1021,8 +1076,10 @@ class PaperTradingService:
         round_trips: list[dict[str, Any]] = []
         for symbol, indexed in grouped.items():
             indexed.sort(key=lambda item: (item[1].executed_at, item[0]))
+            instrument_type = indexed[0][1].instrument_type.value
             position_qty = Decimal("0")
             buy_cost = Decimal("0")
+            buy_quantity = Decimal("0")
             total_pnl = Decimal("0")
             entry_date: datetime | None = None
             entry_reason = ""
@@ -1036,9 +1093,12 @@ class PaperTradingService:
                         entry_date = t.executed_at
                         entry_reason = t.reason or ""
                         buy_cost = Decimal("0")
+                        buy_quantity = Decimal("0")
                         total_pnl = Decimal("0")
                     position_qty += qty
+                    buy_quantity += qty
                     buy_cost += qty * Decimal(t.price) + Decimal(t.fee)
+                    total_pnl -= Decimal(t.fee)
                 elif t.side == "sell" and position_qty > 0:
                     position_qty -= qty
                     total_pnl += Decimal(t.realized_pnl or 0)
@@ -1050,26 +1110,43 @@ class PaperTradingService:
                         and entry_date is not None
                         and last_exit_date is not None
                     ):
-                        holding_days = (last_exit_date.date() - entry_date.date()).days
-                        return_pct = (
-                            float(total_pnl / buy_cost * Decimal("100"))
+                        entry_kst = (
+                            entry_date
+                            if entry_date.tzinfo is not None
+                            else entry_date.replace(tzinfo=UTC)
+                        ).astimezone(KST)
+                        exit_kst = (
+                            last_exit_date
+                            if last_exit_date.tzinfo is not None
+                            else last_exit_date.replace(tzinfo=UTC)
+                        ).astimezone(KST)
+                        holding_days = (exit_kst.date() - entry_kst.date()).days
+                        return_rate = (
+                            _q_pct(total_pnl / buy_cost * Decimal("100"))
                             if buy_cost > 0
-                            else 0.0
+                            else Decimal("0")
                         )
                         round_trips.append(
                             {
                                 "symbol": symbol,
-                                "entry_date": entry_date.isoformat(),
-                                "exit_date": last_exit_date.isoformat(),
+                                "instrument_type": instrument_type,
+                                "currency": position_currency(instrument_type),
+                                "entry_date": entry_date,
+                                "exit_date": last_exit_date,
                                 "holding_days": max(holding_days, 0),
+                                "quantity": buy_quantity,
+                                "cost_basis": _q_money(buy_cost),
+                                "pnl_amount": _q_money(total_pnl),
+                                "return_rate_pct": return_rate,
                                 "pnl": float(total_pnl),
-                                "return_pct": return_pct,
+                                "return_pct": float(return_rate),
                                 "entry_reason": entry_reason,
                                 "exit_reason": last_sell_reason,
                             }
                         )
                         position_qty = Decimal("0")
                         buy_cost = Decimal("0")
+                        buy_quantity = Decimal("0")
                         total_pnl = Decimal("0")
                         entry_date = None
                         entry_reason = ""
@@ -1078,6 +1155,51 @@ class PaperTradingService:
 
         round_trips.sort(key=lambda trip: (trip["exit_date"], trip["symbol"]))
         return round_trips
+
+    @staticmethod
+    def _closed_trade_totals(
+        round_trips: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """모든 청산 매매를 통화별로 합산한다."""
+        buckets: dict[str, dict[str, Decimal | int]] = {}
+        for trip in round_trips:
+            currency = str(trip["currency"])
+            bucket = buckets.setdefault(
+                currency,
+                {"count": 0, "wins": 0, "pnl": _ZERO, "cost": _ZERO},
+            )
+            pnl = Decimal(trip["pnl_amount"])
+            bucket["count"] = int(bucket["count"]) + 1
+            bucket["wins"] = int(bucket["wins"]) + (1 if pnl > 0 else 0)
+            bucket["pnl"] = Decimal(bucket["pnl"]) + pnl
+            bucket["cost"] = Decimal(bucket["cost"]) + Decimal(trip["cost_basis"])
+
+        totals: list[dict[str, Any]] = []
+        for currency in sorted(buckets):
+            bucket = buckets[currency]
+            cost = _q_money(Decimal(bucket["cost"]))
+            pnl = _q_money(Decimal(bucket["pnl"]))
+            return_rate = _q_pct(pnl / cost * Decimal("100")) if cost > 0 else _ZERO
+            totals.append(
+                {
+                    "currency": currency,
+                    "trade_count": int(bucket["count"]),
+                    "win_count": int(bucket["wins"]),
+                    "realized_pnl": pnl,
+                    "cost_basis": cost,
+                    "return_rate": return_rate,
+                }
+            )
+        return totals
+
+    @staticmethod
+    def _analytics_round_trip(round_trip: dict[str, Any]) -> dict[str, Any]:
+        """Preserve the analytics JSON contract after internal datetime handling."""
+        return {
+            **round_trip,
+            "entry_date": round_trip["entry_date"].isoformat(),
+            "exit_date": round_trip["exit_date"].isoformat(),
+        }
 
     @staticmethod
     def _calc_max_drawdown_pct(equity_curve: list[Decimal]) -> float | None:
@@ -1141,14 +1263,13 @@ class PaperTradingService:
         complete = valuation.valuation_complete
         total_equity = _q_money(cash + valuation.positions_value) if complete else None
 
-        realized = sum(
-            (Decimal(t.realized_pnl) for t in trades if t.realized_pnl is not None),
-            _ZERO,
-        )
-
         # A symbol trades in exactly one currency, so grouping the currency's
         # own trades keeps every round trip single-currency by construction.
         round_trips = cls._build_round_trips(trades)
+        realized = sum(
+            (Decimal(trip["pnl_amount"]) for trip in round_trips),
+            _ZERO,
+        )
         total_trips = len(round_trips)
         wins = sum(1 for trip in round_trips if trip["pnl"] > 0)
         win_rate = (wins / total_trips * 100.0) if total_trips > 0 else 0.0
@@ -1198,10 +1319,18 @@ class PaperTradingService:
             "max_drawdown_pct": round(max_dd, 4) if max_dd is not None else None,
             "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
             "best_trade": (
-                max(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
+                cls._analytics_round_trip(
+                    max(round_trips, key=lambda trip: trip["return_pct"])
+                )
+                if round_trips
+                else None
             ),
             "worst_trade": (
-                min(round_trips, key=lambda t: t["return_pct"]) if round_trips else None
+                cls._analytics_round_trip(
+                    min(round_trips, key=lambda trip: trip["return_pct"])
+                )
+                if round_trips
+                else None
             ),
             "snapshots_used": len(equity_curve),
         }

@@ -49,6 +49,7 @@ from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
     AmendRequest,
     Balance,
+    ClosedTradesResponse,
     FillsResponse,
     KillSwitchRequest,
     OrderDetail,
@@ -644,6 +645,21 @@ async def positions(
         return await nh_adapter.positions(db, session.user.id)
     _require_paper(broker)
     return await paper_account_adapter.positions(db, session.user.id)
+
+
+@router.get("/positions/closed-trades", response_model=ClosedTradesResponse)
+async def closed_trades(
+    broker: str,
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> ClosedTradesResponse:
+    """청산이 끝난 PAPER 매매의 확정 수익률.
+
+    PAPER 원장만 라운드트립을 완결해 기록하므로 NH 조회 계좌에는 없다.
+    """
+    _require_paper(broker)
+    return await paper_account_adapter.closed_trades(db, session.user.id, limit=limit)
 
 
 @router.get("/market/overview", response_model=MarketOverviewResponse)

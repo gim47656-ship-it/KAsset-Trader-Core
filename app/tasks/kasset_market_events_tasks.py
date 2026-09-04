@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,7 @@ from app.extensions.kasset.automation.vertical_slice import (
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.jobs.google_news_rss_ingestion import run_google_news_rss_ingestion
 from app.models.ai_recommendations import AIRecommendation
-from app.models.paper_trading import PaperPosition
+from app.models.paper_trading import PaperAccount, PaperPosition
 from app.models.symbol_master import SymbolMaster
 from app.models.trading import (
     Instrument,
@@ -38,6 +39,9 @@ _CYCLE_LOCK_KEY = 1
 # Same namespace, distinct key: a push run and an analysis cycle are unrelated
 # and must not block each other.
 _PUSH_LOCK_KEY = 2
+# Equity snapshots never gate an order, so they must not queue behind the
+# analysis cycle or the push sweep.
+_SNAPSHOT_LOCK_KEY = 3
 _KST = ZoneInfo("Asia/Seoul")
 
 logger = logging.getLogger(__name__)
@@ -140,6 +144,83 @@ async def kasset_price_alert_push() -> dict[str, object]:
             return {"enabled": True, "skipped": "push_already_running"}
         async with _session() as session:
             return await dispatch_scheduled_pushes(session)
+
+
+@broker.task(
+    task_name="kasset.paper.daily_snapshot",
+    # KR 정규장 마감(15:30 KST) 직후 하루치 계좌 자산을 확정한다. 같은 KST 날짜에
+    # 다시 돌면 그날 행을 갱신할 뿐 새 행을 만들지 않으므로 재실행이 안전하다.
+    schedule=[{"cron": "45 15 * * 1-5", "cron_offset": "Asia/Seoul"}],
+)
+async def kasset_paper_daily_snapshot() -> dict[str, object]:
+    """활성 PAPER 계좌의 통화별 자산과 전일 대비 수익률을 하루 한 번 남긴다.
+
+    15:45 KST 시점의 USD 자산은 직전 미국 정규 세션 종가를 기준으로 평가한다.
+    """
+
+    if not settings.KASSET_MARKET_EVENTS_ENABLED:
+        return {"enabled": False, "accounts": []}
+
+    async with _advisory_single_flight(_SNAPSHOT_LOCK_KEY) as acquired:
+        if not acquired:
+            logger.info("kasset paper snapshot skipped: snapshot_already_running")
+            return {"enabled": True, "skipped": "snapshot_already_running"}
+        return await _record_paper_daily_snapshots()
+
+
+async def _record_paper_daily_snapshots() -> dict[str, object]:
+    from app.services.paper_trading_service import PaperTradingService
+
+    async with _session() as session:
+        account_ids = [
+            int(row)
+            for row in (
+                await session.execute(
+                    select(PaperAccount.id)
+                    .where(PaperAccount.is_active.is_(True))
+                    .order_by(PaperAccount.id)
+                )
+            )
+            .scalars()
+            .all()
+        ]
+        service = PaperTradingService(session)
+        accounts: list[dict[str, object]] = []
+        for account_id in account_ids:
+            try:
+                snapshot = await service.record_daily_snapshot(account_id)
+            except Exception as exc:  # noqa: BLE001 - 한 계좌 실패가 나머지를 막지 않는다
+                await session.rollback()
+                logger.exception(
+                    "kasset paper snapshot failed account_id=%s: %s", account_id, exc
+                )
+                accounts.append(
+                    {
+                        "accountId": account_id,
+                        "status": "failed",
+                        "error": type(exc).__name__,
+                    }
+                )
+                continue
+            accounts.append(
+                {
+                    "accountId": account_id,
+                    "status": "recorded",
+                    "snapshotDate": snapshot.snapshot_date.isoformat(),
+                    "equityKrw": _decimal_text(snapshot.equity_krw),
+                    "equityUsd": _decimal_text(snapshot.equity_usd),
+                    "dailyReturnKrwPct": _decimal_text(snapshot.daily_return_krw_pct),
+                    "dailyReturnUsdPct": _decimal_text(snapshot.daily_return_usd_pct),
+                    "valuationCompleteKrw": bool(snapshot.valuation_complete_krw),
+                    "valuationCompleteUsd": bool(snapshot.valuation_complete_usd),
+                }
+            )
+    logger.info("kasset paper daily snapshot done: accounts=%s", accounts)
+    return {"enabled": True, "accounts": accounts}
+
+
+def _decimal_text(value: object) -> str | None:
+    return None if value is None else format(Decimal(str(value)), "f")
 
 
 async def _sync_google_news_market(market: str) -> dict[str, object]:
@@ -406,6 +487,7 @@ __all__ = [
     "kasset_google_news_kr_sync",
     "kasset_google_news_us_sync",
     "kasset_market_events_run",
+    "kasset_paper_daily_snapshot",
     "kasset_price_alert_push",
     "kasset_watchlist_candles_sync",
 ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +23,8 @@ from app.services.paper_trading_service import (
     PaperTradingService,
     PositionQuote,
     calculate_fee,
+    execution_quantity_lot,
+    quantize_execution_quantity,
 )
 
 
@@ -313,6 +315,110 @@ class TestPreviewOrder:
                 order_type="limit",
                 quantity=Decimal("1"),
             )
+
+    @pytest.mark.asyncio
+    async def test_preview_us_equity_keeps_the_fractional_quantity(
+        self, mock_db, monkeypatch
+    ):
+        """미국 주식은 소수 주문 수량을 그대로 체결해야 한다.
+
+        정수로 깎으면 주문 원수량과 체결 수량이 어긋나 주문이 영원히
+        `PARTIALLY_FILLED`로 남는다(운영 CRWD 4.0065, UBS 44.8671 사례).
+        """
+        svc = PaperTradingService(mock_db)
+        account = PaperAccount(
+            id=1,
+            name="US",
+            initial_capital=Decimal("10000"),
+            cash_krw=Decimal("0"),
+            cash_usd=Decimal("10000"),
+            is_active=True,
+        )
+        monkeypatch.setattr(svc, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            svc, "_fetch_current_price", AsyncMock(return_value=Decimal("214.13"))
+        )
+
+        preview = await svc.preview_order(
+            account_id=1,
+            symbol="CRWD",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("4.0065"),
+        )
+
+        ex = preview["preview"]
+        assert ex["instrument_type"] == "equity_us"
+        assert ex["currency"] == "USD"
+        assert ex["quantity"] == Decimal("4.0065")
+
+    @pytest.mark.asyncio
+    async def test_preview_us_equity_truncates_below_the_tradable_lot(
+        self, mock_db, monkeypatch
+    ):
+        """사이저 lot보다 잘게 쪼갠 수량은 올림하지 않고 내림한다."""
+        svc = PaperTradingService(mock_db)
+        account = PaperAccount(
+            id=1,
+            name="US",
+            initial_capital=Decimal("10000"),
+            cash_krw=Decimal("0"),
+            cash_usd=Decimal("10000"),
+            is_active=True,
+        )
+        monkeypatch.setattr(svc, "get_account", AsyncMock(return_value=account))
+        monkeypatch.setattr(
+            svc, "_fetch_current_price", AsyncMock(return_value=Decimal("55.60"))
+        )
+
+        preview = await svc.preview_order(
+            account_id=1,
+            symbol="UBS",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("44.86719999"),
+        )
+
+        assert preview["preview"]["quantity"] == Decimal("44.8671")
+
+    @pytest.mark.asyncio
+    async def test_preview_kr_equity_still_settles_whole_shares(
+        self, service_with_account
+    ):
+        """KRX는 1주 단위 계약을 유지한다."""
+        preview = await service_with_account.preview_order(
+            account_id=1,
+            symbol="005930",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("3.9"),
+        )
+
+        assert preview["preview"]["quantity"] == Decimal("3")
+
+    def test_execution_lot_matches_the_automation_sizer(self):
+        """체결 lot과 사이저 lot이 어긋나면 부분체결 결함이 되살아난다."""
+        from app.extensions.kasset.automation.position_sizing import (
+            DEFAULT_POSITION_SIZING_CONFIG,
+        )
+
+        assert execution_quantity_lot("equity_us") == (
+            DEFAULT_POSITION_SIZING_CONFIG.us_lot_size
+        )
+        assert execution_quantity_lot("equity_kr") == (
+            DEFAULT_POSITION_SIZING_CONFIG.krx_lot_size
+        )
+
+    def test_execution_quantization_uses_stable_decimal_precision(self):
+        """호출자의 낮은 Decimal 정밀도가 체결 lot 절사 결과를 바꾸면 안 된다."""
+        with localcontext() as context:
+            context.prec = 4
+            quantity = quantize_execution_quantity(
+                Decimal("44.86719999"),
+                "equity_us",
+            )
+
+        assert quantity == Decimal("44.8671")
 
 
 class TestExecuteOrderBuy:
@@ -1232,10 +1338,32 @@ class TestRoundTrips:
         trip = trips[0]
         assert trip["symbol"] == "005930"
         assert trip["holding_days"] == 5
-        assert trip["pnl"] == pytest.approx(98635.0)
-        assert round(trip["return_pct"], 2) == pytest.approx(16.44)
+        assert trip["pnl_amount"] == Decimal("98545.0000")
+        assert trip["pnl"] == pytest.approx(98545.0)
+        assert trip["return_rate_pct"] == Decimal("16.42")
+        assert round(trip["return_pct"], 2) == pytest.approx(16.42)
         assert trip["entry_reason"] == "entry"
         assert trip["exit_reason"] == "exit"
+
+    def test_holding_days_use_kst_calendar_dates(self, service):
+        """UTC 자정을 넘더라도 KST 날짜가 같으면 보유일은 늘지 않는다."""
+        trades = [
+            self._trade(
+                id=1,
+                side="buy",
+                executed_at=datetime(2026, 4, 1, 15, 30, tzinfo=UTC),
+            ),
+            self._trade(
+                id=2,
+                side="sell",
+                realized_pnl=Decimal("100"),
+                executed_at=datetime(2026, 4, 2, 14, 59, tzinfo=UTC),
+            ),
+        ]
+
+        trip = service._build_round_trips(trades)[0]
+
+        assert trip["holding_days"] == 0
 
     def test_unclosed_position_excluded(self, service):
         from datetime import datetime
@@ -1487,7 +1615,7 @@ class TestCalculatePerformance:
         # 5,000,000 cash + 6,000,000 positions vs 10,000,000 opening capital.
         assert krw["total_equity"] == pytest.approx(11000000.0)
         assert krw["total_return_pct"] == pytest.approx(10.0)
-        assert krw["realized_pnl"] == pytest.approx(98635.0)
+        assert krw["realized_pnl"] == pytest.approx(98545.0)
         assert krw["unrealized_pnl"] == pytest.approx(500000.0)
         assert krw["total_trades"] == 1
         assert krw["win_rate"] == pytest.approx(100.0)
@@ -1496,6 +1624,8 @@ class TestCalculatePerformance:
         assert krw["sharpe_ratio"] is not None
         assert krw["best_trade"]["symbol"] == "A"
         assert krw["worst_trade"]["symbol"] == "A"
+        assert krw["best_trade"]["entry_date"] == "2026-04-01T00:00:00+00:00"
+        assert krw["best_trade"]["exit_date"] == "2026-04-06T00:00:00+00:00"
         assert krw["snapshots_used"] == 3
 
         usd = perf["currencies"]["USD"]

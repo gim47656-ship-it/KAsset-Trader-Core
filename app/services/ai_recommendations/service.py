@@ -297,18 +297,31 @@ class AIRecommendationService:
                     AndroidPaperOrder.client_order_id == f"ai-rec:{row.id}",
                 )
             )
+            # An order row proves the submit happened, not that the intent was
+            # met. A fractional order that only settled part of its quantity is
+            # still unfinished work, so calling it SUCCEEDED would hide an
+            # unfilled remainder behind a green status.
+            order_status = None if order is None else str(order.status or "")
+            filled = order_status == "FILLED"
             row.paper_execution_status = (
                 RecommendationExecutionStatus.SUCCEEDED
-                if order is not None
+                if filled
                 else RecommendationExecutionStatus.FAILED
             )
             row.paper_execution_token = None
             row.paper_execution_lease_expires_at = None
             row.paper_execution_completed_at = claimed_at
-            row.paper_order_id = order.id if order is not None else None
-            row.paper_execution_error = (
-                None if order is not None else "paper_execution_attempt_limit_exceeded"
-            )
+            # ``ck_ai_recommendations_paper_execution_coherent`` reserves
+            # ``paper_order_id`` for a settled execution, so an unfinished order
+            # is named in the error instead. ``client_order_id = ai-rec:<id>``
+            # still finds it.
+            row.paper_order_id = order.id if filled else None
+            if filled:
+                row.paper_execution_error = None
+            elif order is None:
+                row.paper_execution_error = "paper_execution_attempt_limit_exceeded"
+            else:
+                row.paper_execution_error = f"paper_order_not_final:{order_status}"
             row.updated_at = claimed_at
             await self._session.commit()
             return None

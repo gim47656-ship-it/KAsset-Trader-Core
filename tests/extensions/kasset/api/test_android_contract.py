@@ -95,6 +95,7 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/brokers/{provider}/verify": {"post"},
         "/api/v1/account/balance": {"get"},
         "/api/v1/positions": {"get"},
+        "/api/v1/positions/closed-trades": {"get"},
         "/api/v1/market/quote": {"get"},
         "/api/v1/market/quotes": {"get"},
         "/api/v1/market/overview": {"get"},
