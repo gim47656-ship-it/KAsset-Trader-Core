@@ -1,10 +1,17 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-05 (US 일봉 유니버스를 Toss 마스터 보유 심볼로 한정, 배포 전)
+갱신: 2026-09-05 (US 1분봉 동기화 종목별 실패 격리·해제 관심종목 제외, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-05 — US 일봉 유니버스 대상을 Toss 마스터 보유 심볼로 한정 (DB migration 없음, 배포 전)
+## 2026-09-05 — US 1분봉 동기화 종목별 실패 격리와 해제된 관심종목 제외 (DB migration 없음, 배포 전)
+- 증상: PR #51 배포 직후 미장 중 `candles.us.sync`(10분 주기)가 매 실행 `US candles sync failed: Toss API error status=404 code='stock-not-found'`로 실패했고, 최근 30분 `us_candles_1m` 적재 심볼이 4개뿐이었다.
+- 원인 두 가지. (1) `us_candles_sync_service.sync_us_candles`의 watchlist 쿼리가 `UserWatchItem.is_active`를 보지 않아 온보딩 실기기 테스트로 추가 후 해제한 `APLD/APLE/APLM/APLU`(soft-delete) 가 계속 대상에 들어갔다. (2) 종목 루프에 예외 격리가 없어 `APLD`의 404가 알파벳 뒤 실제 관심·보유 종목 분봉 적재를 전부 끊었다(#50과 같은 구조적 결함의 분봉 버전).
+- 변경: watchlist 쿼리에 `UserWatchItem.is_active.is_(True)` 추가(일봉 쪽 `_resolve_universe`는 이미 `w.is_active = TRUE`). 종목별 fetch 실패는 `rollback()` 후 다음 종목으로 계속하고 결과에 `failed_pairs`를 넣고 부분 실패를 ERROR 로그로 남긴다. upsert 실패는 기존처럼 그대로 전파한다.
+- 회귀 테스트: `tests/test_us_candles_sync.py::test_sync_isolates_symbol_fetch_failure` — 3종목 중 가운데가 예외를 던져도 나머지 2개가 처리되고 rollback 1회·commit 2회를 검증한다. 수정 전 코드에서 실패한다.
+- 검증: `tests/test_us_candles_sync.py` 9 passed, 변경 경로 `ruff check`·`ruff format`, `ty check --error-on-warning` 통과.
+
+## 2026-09-05 — US 일봉 유니버스 대상을 Toss 마스터 보유 심볼로 한정 (PR #51, `04e3450f` 운영 배포 완료)
 - 배경: PR #50 배포 후 운영에서 `run_daily_candles_sync('us')`를 1회 실행한 결과 `targets_total=12779, rows_upserted=104911, failed=2263`, 소요 약 1시간 40분이었다. 실패 2,263건 중 2,254건이 `us_symbol_universe.toss_master_updated_at IS NULL`인 행(SPAC unit/warrant/우선주 `.D`·`.UN` 등)이었고 전부 Toss `stock-not-found` 404였다. Toss 마스터가 없는데도 동기화에 성공한 행은 36개뿐이다.
 - 변경: `sync_service.py::_resolve_universe`의 US 유니버스 쿼리에 `AND toss_master_updated_at IS NOT NULL`을 추가했다. watchlist·cohort 심볼 union에는 적용하지 않는다(사용자 의도, 실패는 이미 심볼별로 격리됨). 스키마·fetcher·KR/crypto 경로 변경 없음.
 - 회귀 테스트: `tests/services/daily_candles/test_resolve_universe_us_toss_master.py`(DB fixture, shard-2) — 같은 세션에 Toss 마스터 유/무 active 심볼 2개를 넣고 유 심볼만 대상에 포함됨을 단언한 뒤 rollback한다. 로컬 Postgres가 없고 운영 이미지에는 test 의존성이 없어 CI로만 검증한다.

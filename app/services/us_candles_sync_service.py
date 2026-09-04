@@ -415,7 +415,10 @@ async def sync_us_candles(
         watchlist_result = await session.execute(
             select(Instrument.symbol)
             .join(UserWatchItem, UserWatchItem.instrument_id == Instrument.id)
-            .where(Instrument.type == InstrumentType.equity_us)
+            .where(
+                Instrument.type == InstrumentType.equity_us,
+                UserWatchItem.is_active.is_(True),
+            )
             .distinct()
         )
         watchlist_symbols = watchlist_result.scalars().all()
@@ -504,34 +507,48 @@ async def sync_us_candles(
         rows_upserted = 0
         pages_fetched = 0
         pairs_skipped = len(skipped_symbols)
+        failed_pairs: list[str] = []
 
         for symbol, exchange in symbol_pairs:
             pair_rows: list[MinuteCandleRow] = []
             pair_pages = 0
-            for window in windows:
-                lower_bound_utc = window.open_utc
-                if normalized_mode == "incremental":
-                    cursor_utc = await read_cursor_utc(
-                        session,
-                        _CURSOR_SQL,
-                        {"symbol": symbol, "exchange": exchange},
-                    )
-                    lower_bound_utc = _compute_incremental_lower_bound(
-                        cursor_utc,
-                        window.open_utc,
-                    )
+            try:
+                for window in windows:
+                    lower_bound_utc = window.open_utc
+                    if normalized_mode == "incremental":
+                        cursor_utc = await read_cursor_utc(
+                            session,
+                            _CURSOR_SQL,
+                            {"symbol": symbol, "exchange": exchange},
+                        )
+                        lower_bound_utc = _compute_incremental_lower_bound(
+                            cursor_utc,
+                            window.open_utc,
+                        )
 
-                if window.last_minute_utc < lower_bound_utc:
-                    continue
+                    if window.last_minute_utc < lower_bound_utc:
+                        continue
 
-                rows, page_calls = await _collect_window_rows(
-                    symbol=symbol,
-                    exchange=exchange,
-                    lower_bound_utc=lower_bound_utc,
-                    upper_bound_utc=window.last_minute_utc,
+                    rows, page_calls = await _collect_window_rows(
+                        symbol=symbol,
+                        exchange=exchange,
+                        lower_bound_utc=lower_bound_utc,
+                        upper_bound_utc=window.last_minute_utc,
+                    )
+                    pair_rows.extend(rows)
+                    pair_pages += page_calls
+            except Exception as exc:
+                # 한 종목의 Toss 조회 실패(예: ``stock-not-found``)가 나머지 관심·보유
+                # 종목의 분봉 적재를 막지 않도록 종목 단위로 격리한다.
+                await session.rollback()
+                failed_pairs.append(f"{symbol}:{exchange}")
+                logger.warning(
+                    "US minute candle fetch failed, continuing symbol=%s exchange=%s error=%s",
+                    symbol,
+                    exchange,
+                    exc,
                 )
-                pair_rows.extend(rows)
-                pair_pages += page_calls
+                continue
 
             if not pair_rows and pair_pages == 0:
                 pairs_skipped += 1
@@ -547,7 +564,16 @@ async def sync_us_candles(
             pairs_processed += 1
             pages_fetched += pair_pages
 
+        if failed_pairs:
+            logger.error(
+                "US minute candle sync partial failure failed=%d/%d pairs=%s",
+                len(failed_pairs),
+                len(symbol_pairs),
+                failed_pairs,
+            )
+
         return {
+            "failed_pairs": failed_pairs,
             "mode": normalized_mode,
             "sessions": session_count,
             "holdings_snapshot_ok": holdings_snapshot_ok,

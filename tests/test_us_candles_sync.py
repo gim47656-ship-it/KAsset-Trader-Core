@@ -177,6 +177,54 @@ async def test_sync_uses_us_watchlist_when_holdings_are_empty(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_sync_isolates_symbol_fetch_failure(monkeypatch) -> None:
+    """운영 재현: 해제된 관심종목 하나의 Toss 404가 나머지 종목 분봉 적재를 끊었다."""
+    session = _mock_session("AMD", "APLD", "NVDA")
+    monkeypatch.setattr(service, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(
+        service,
+        "fetch_toss_portfolio_snapshot",
+        AsyncMock(return_value=SimpleNamespace(positions=[])),
+    )
+    manual = SimpleNamespace(get_holdings_by_user=AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "ManualHoldingsService", lambda _session: manual)
+    monkeypatch.setattr(
+        service,
+        "_resolve_symbol_pairs",
+        AsyncMock(
+            return_value=service.ResolvedSymbolPairs(
+                symbol_pairs=[("AMD", "NASD"), ("APLD", "NASD"), ("NVDA", "NASD")],
+                skipped_symbols=[],
+                lookup_refresh_attempted=False,
+            )
+        ),
+    )
+    window = service.SessionWindow(
+        session=pd.Timestamp("2024-06-28"),
+        open_utc=datetime(2024, 6, 28, 13, 30, tzinfo=UTC),
+        close_utc=datetime(2024, 6, 28, 20, 0, tzinfo=UTC),
+        last_minute_utc=datetime(2024, 6, 28, 19, 59, tzinfo=UTC),
+    )
+    monkeypatch.setattr(service, "_select_closed_sessions", lambda *_: [window])
+
+    async def collect(*, symbol: str, **_: object) -> tuple[list[object], int]:
+        if symbol == "APLD":
+            raise RuntimeError("Toss API error status=404 code='stock-not-found'")
+        return [], 1
+
+    monkeypatch.setattr(service, "_collect_window_rows", collect)
+    monkeypatch.setattr(service, "_upsert_rows", AsyncMock(return_value=0))
+
+    result = await service.sync_us_candles(mode="backfill", sessions=1)
+
+    assert result["pairs_processed"] == 2
+    assert result["failed_pairs"] == ["APLD:NASD"]
+    session.rollback.assert_awaited_once()
+    assert session.commit.await_count == 2
+    session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sync_continues_with_watchlist_when_snapshot_fails(
     monkeypatch, caplog
 ) -> None:
