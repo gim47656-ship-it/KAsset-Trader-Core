@@ -1,8 +1,16 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-04 (US 소수 수량 부분체결 차단·일일 스냅샷 스케줄·확정 수익률 API 신설, 배포 전)
+갱신: 2026-09-04 (가격 알림 시장별 현지 날짜 보정, US 소수 수량 부분체결 차단·일일 스냅샷·확정 수익률 API 신설, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-04 — 가격 알림 시장 현지 날짜 적용
+- 변경 파일: `HANDOFF.md`, `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, `app/extensions/kasset/models.py`(docstring만), `tests/extensions/kasset/api/test_daily_routine.py`, `tests/extensions/kasset/test_fcm_push_dispatch.py`.
+- 가격 알림 날짜는 공통 `price_alert_market_date`로 계산한다. US는 `America/New_York`, KRX/CRYPTO는 `Asia/Seoul` 날짜를 사용한다. live 이벤트 저장과 저장 실패 fallback ID는 시세 timestamp가 아니라 현재 요청 시각의 시장 날짜를 사용하고, 목록은 KRX/US/CRYPTO의 현재 시장·날짜 쌍을 모두 조회한다. 저장 이벤트 ID는 행의 `routine_date`를 사용한다.
+- 가격 알림 FCM delivery의 `routine_date`와 dedupe key도 `alert.market`의 같은 날짜 의미를 사용한다. KST 자정을 지나도 같은 미국 거래일이면 US 이벤트·ID·전달 슬롯이 유지되고 KRX는 새 날짜로 전환된다. routine settings 날짜와 주문 체결 push 날짜는 기존 KST 의미를 유지한다.
+- 회귀 테스트는 EDT의 KST 자정 전후에서 stale 이전 세션 시세여도 요청 시각 기준 US 이벤트·ID·dedupe 슬롯 유지와 KRX/CRYPTO rollover를 검증한다. 빈 watchlist에서도 같은 시장 날짜의 저장 이벤트를 조회하며, FCM ledger의 published dedupe key 검증도 US/KRX 각각의 시장 날짜를 기대한다. 기존 회복 알림·history 실패 live fallback·당일 no-repeat 계약을 유지한다.
+- 로컬 Python test/build/lint는 실행하지 않았다. PR #49 첫 GitHub Actions run `33868460725`에서 전체 test matrix는 통과했고 lint의 Ruff formatter check만 두 테스트 파일 때문에 실패했다. 해당 두 파일에 Ruff format을 적용했으며 최종 검증은 후속 GitHub Actions run으로 확인한다.
+- migration과 API/Android schema 변경은 없다. 기존 unique key에 `market`이 포함되어 추가 제약 변경도 없다. 단, 배포 전 KST 날짜로 저장된 US 행은 재작성하지 않으므로 배포 당일 ET 날짜 행과 나란히 남을 수 있으며, 해당 미국 거래일이 끝나면 자연스럽게 조회 범위에서 벗어난다.
 
 ## 2026-09-04 — 소수 수량 부분체결·자산 곡선·확정 수익률 (DB migration 없음, 배포 전)
 세 증상을 함께 고쳤다. 모두 사용자 화면의 수치가 원장과 어긋나던 문제다.
@@ -174,15 +182,8 @@ KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자
 9. 제외 종목 `0126Z0`, `SPCX`, `SCCO`, 성과 미달 candidate와 historical point-in-time cohort 근거는 실제 데이터·성과 조건을 채울 때만 복귀·승격한다.
 
 ## 세션 이력
-- 2026-09-03: KRW/USD 정산 장부 분리(`settlement_book`, 장부별 usage·Hard Risk·sizing, PUT 반대 장부 보존, 응답 `operatingBudgetKrw/Usd`)를 구현·검수(PASS)했고 PR #43(자동주문 표시·FCM WIP 재검증 `225 passed`) 위에 후속 PR로 발행했다. 서버 배포는 PR merge 직후 진행.
-- 2026-09-03: 동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge하고 운영 배포(`acf093d8`). migration head `20260903_kasset_rvol_shadow`, 컨테이너 5개 정합. 같은 날 14:25 KST에 정규장 안 PAPER 자동주문(138040 3주 @135,100)이 정상 집행됐다.
-- 2026-09-03: 서버 로컬에만 있던 `fix/us-intraday-and-ai-veto`를 GitHub에 발행하고 PR #39를 CI 통과 후 merge(`1c74f3f2`). 운영 코드와 `main`의 괴리를 해소했다.
-- 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`). 운영 실측 1분봉 2,520행·5분봉 504행.
-- 2026-09-02: 정규장 밖 무인 PAPER 집행을 차단(`out_of_regular_session`)하고 장외 강제 체결을 원복(`2e939c27`).
-- 2026-09-02: AI veto 제거 후 첫 PAPER 자동주문 체결(055550 BUY 4주 @110,400). 자동 sweep 경로 end-to-end 증명.
-- 2026-09-02: US ET-naive 분봉 수용, AI Hard Risk veto 제거(SHADOW), 관문 funnel 계측 배포(`ee170aba`). 배포 후 미국장 전 관문이 데이터 결함 없이 판정, 주문 0건은 조건 미충족.
-- 2026-09-02: KR 저장 일봉 최근 완료 거래일을 KRX 정규장 OHLCV로 보정하는 경로 배포, 9/2 유니버스 556종목 적용(PR #37 `8f965aaf`).
-- 2026-09-02: KR 등락 기준가를 직전 거래일 KRX 정규장 종가(동시호가 봉 포함)로 교정해 토스 등락률과 일치(PR #33·#34·#35, `7f4924ef`).
-- 2026-09-02: 자동주문 0건 원인(Hard Risk AI 규칙이 합성 confidence 판정)을 수정해 배포(PR #31 `3851a0ed`).
-- 2026-09-02: 전 AI lane MCP-only 전환(revision 9→10), 유료 API 키 제거, 뉴스 요약 10건 배칭·일일 상한 100 배포(PR #29 `ac2de5a9`).
-- 2026-09-02: OpenAI와 OpenRouter 로그에서 뉴스 요약 토큰 급증을 확인하고 운영 `summary_luna` route를 비활성화했다.
+- 2026-09-04: 가격 알림 이벤트·ID·FCM dedupe를 시장 현지 날짜(US ET, KRX/CRYPTO KST)로 통일하고 KST 자정 회귀 테스트를 추가했다. migration/API 변경 없음.
+- 2026-09-03: KRW/USD 정산 장부 분리(`settlement_book`, 장부별 usage·Hard Risk·sizing, PUT 반대 장부 보존, 응답 `operatingBudgetKrw/Usd`)를 구현했고 PR #43 위 후속 PR로 발행했다.
+- 2026-09-03: 동시간대 RVOL SHADOW 관측 경로를 PR #41로 merge하고 운영 배포(`acf093d8`). migration head `20260903_kasset_rvol_shadow`, 컨테이너 5개 정합.
+- 2026-09-03: 서버 로컬 `fix/us-intraday-and-ai-veto`를 PR #39로 merge(`1c74f3f2`)해 운영 코드와 `main`의 괴리를 해소했다.
+- 2026-09-03: US 분봉 수집 대상을 watchlist까지 확장하고 Toss 스냅샷 실패를 격리(`d73a4e55`).

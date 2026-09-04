@@ -20,10 +20,14 @@ from app.extensions.kasset.api.ai_briefing import build_mobile_ai_briefing
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.paper_schemas import Quote
-from app.extensions.kasset.daily_routine_service import DailyRoutineService
+from app.extensions.kasset.daily_routine_service import (
+    DailyRoutineService,
+    price_alert_market_date,
+)
 from app.extensions.kasset.models import (
     AndroidPaperOrder,
     KAssetDailyRoutineSetting,
+    KAssetRoutinePriceAlertEvent,
 )
 from app.models.ai_recommendations import AIRecommendation
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
@@ -35,6 +39,7 @@ from app.models.trading import (
     UserRole,
     UserWatchItem,
 )
+from app.services.daily_candles.repository import DailyCandleRow, DailyCandlesRepository
 
 
 @pytest_asyncio.fixture
@@ -465,6 +470,127 @@ async def test_price_alert_stays_for_the_kst_day_after_recovery_and_resets_next_
 
 
 @pytest.mark.asyncio
+async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
+    db_session: AsyncSession,
+    routine_data: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = routine_data["users"][0]
+    instruments: Sequence[Instrument] = routine_data["instruments"]
+    us_instrument, krx_instrument, crypto_instrument = instruments
+    us_instrument.type = InstrumentType.equity_us
+    us_instrument.base_currency = "USD"
+    crypto_instrument.type = InstrumentType.crypto
+    crypto_instrument.base_currency = "KRW"
+    await db_session.commit()
+    before_midnight = datetime(2026, 7, 6, 14, 59, tzinfo=UTC)
+    after_midnight = before_midnight + timedelta(minutes=2)
+    assert price_alert_market_date("CRYPTO", after_midnight) == date(2026, 7, 7)
+    quote_at = datetime(2026, 7, 3, 19, 0, tzinfo=UTC)
+    rates = {
+        us_instrument.symbol: "6.20",
+        krx_instrument.symbol: "-6.20",
+        crypto_instrument.symbol: "6.00",
+    }
+
+    async def quotes(
+        _db: AsyncSession, market: str, symbols: Sequence[str]
+    ) -> list[Quote]:
+        return [
+            Quote(
+                broker="PAPER",
+                market=market,
+                symbol=symbol,
+                name=None,
+                currency="USD" if market == "US" else "KRW",
+                price=str(100 + float(rates[symbol])),
+                previous_close="100",
+                change_amount="0",
+                change_rate="0",
+                session="REGULAR",
+                regular_close="100",
+                session_change_amount=rates[symbol],
+                session_change_rate=rates[symbol],
+                as_of=quote_at.isoformat(),
+                source="TOSS_OPENAPI",
+            )
+            for symbol in symbols
+        ]
+
+    async def crypto_candles(
+        _repository: DailyCandlesRepository, **_kwargs: object
+    ) -> dict[str, list[DailyCandleRow]]:
+        return {
+            crypto_instrument.symbol: [
+                DailyCandleRow(
+                    time_utc=quote_at - timedelta(days=1),
+                    symbol=crypto_instrument.symbol,
+                    partition="upbit_krw",
+                    open=100,
+                    high=100,
+                    low=100,
+                    close=100,
+                    adj_close=None,
+                    volume=1,
+                    value=100,
+                    source="UPBIT",
+                ),
+                DailyCandleRow(
+                    time_utc=quote_at,
+                    symbol=crypto_instrument.symbol,
+                    partition="upbit_krw",
+                    open=106,
+                    high=106,
+                    low=106,
+                    close=106,
+                    adj_close=None,
+                    volume=1,
+                    value=106,
+                    source="UPBIT",
+                ),
+            ]
+        }
+
+    monkeypatch.setattr(DailyCandlesRepository, "fetch_recent_batch", crypto_candles)
+
+    service = DailyRoutineService(quote_loader=quotes)
+    before = await service.get(db_session, owner.id, now=before_midnight)
+    after = await service.get(db_session, owner.id, now=after_midnight)
+
+    before_ids = {alert.market: alert.id for alert in before.alerts}
+    after_ids = {alert.market: alert.id for alert in after.alerts}
+    assert before_ids["US"] == after_ids["US"]
+    assert before_ids["US"].startswith("price:2026-07-06:")
+    assert before_ids["KRX"].startswith("price:2026-07-06:")
+    assert before_ids["CRYPTO"].startswith("price:2026-07-06:")
+    assert after_ids["CRYPTO"].startswith("price:2026-07-07:")
+    assert after_ids["KRX"].startswith("price:2026-07-07:")
+    await db_session.execute(
+        delete(UserWatchItem).where(UserWatchItem.user_id == owner.id)
+    )
+    await db_session.commit()
+    after_removal = await service.get(db_session, owner.id, now=after_midnight)
+    assert {alert.market: alert.id for alert in after_removal.alerts} == after_ids
+
+    events = list(
+        (
+            await db_session.scalars(
+                select(KAssetRoutinePriceAlertEvent).where(
+                    KAssetRoutinePriceAlertEvent.owner_user_id == owner.id
+                )
+            )
+        ).all()
+    )
+    assert {(event.market, event.routine_date.isoformat()) for event in events} == {
+        ("US", "2026-07-06"),
+        ("KRX", "2026-07-06"),
+        ("CRYPTO", "2026-07-06"),
+        ("CRYPTO", "2026-07-07"),
+        ("KRX", "2026-07-07"),
+    }
+
+
+@pytest.mark.asyncio
 async def test_price_alert_history_failure_still_returns_live_alerts(
     db_session: AsyncSession,
     routine_data: dict[str, object],
@@ -494,7 +620,7 @@ async def test_price_alert_history_failure_still_returns_live_alerts(
     service = DailyRoutineService(
         quote_loader=_quote_loader_for(
             {rising: "7.00", flat: "0.00"},
-            quote_time=moment,
+            quote_time=moment - timedelta(days=1),
         )
     )
     response = await service.get(db_session, owner.id, now=moment)
@@ -503,6 +629,7 @@ async def test_price_alert_history_failure_still_returns_live_alerts(
     ]
     assert response.alerts[0].recovered is False
     assert response.alerts[0].current_rate_pct == "7.00"
+    assert response.alerts[0].id == f"price:2026-08-29:RAPID_RISE:KRX:{rising}"
 
 
 def _news_article(

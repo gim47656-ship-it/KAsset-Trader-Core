@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +45,8 @@ from app.services.news_summary_service import (
 
 logger = logging.getLogger(__name__)
 _RAPID_CHANGE_THRESHOLD = Decimal("5")
+_PRICE_ALERT_MARKETS: tuple[WatchlistMarket, ...] = ("KRX", "US", "CRYPTO")
+_US_PRICE_ALERT_TIMEZONE = ZoneInfo("America/New_York")
 _NEWS_WINDOW = timedelta(hours=24)
 _NEWS_ALERT_LIMIT_PER_KIND = 10
 _NEWS_SCAN_LIMIT = 200
@@ -196,6 +199,13 @@ def _current_instant(now: datetime | None) -> datetime:
     if now is None:
         return datetime.now(UTC)
     return _aware(now).astimezone(UTC)
+
+
+def price_alert_market_date(market: WatchlistMarket, instant: datetime) -> date:
+    """US는 ET, KRX/CRYPTO는 KST인 가격 알림 현지 날짜를 돌려준다."""
+
+    zone = _US_PRICE_ALERT_TIMEZONE if market == "US" else KST
+    return instant.astimezone(zone).date()
 
 
 def _canonical_routines(values: Sequence[str]) -> tuple[RoutineKey, ...]:
@@ -570,11 +580,16 @@ class DailyRoutineService:
         ]
 
     async def _load_price_observations(
-        self, db: AsyncSession, owner_user_id: int
+        self,
+        db: AsyncSession,
+        owner_user_id: int,
+        *,
+        watch_symbols: Sequence[_WatchSymbol] | None = None,
     ) -> list[_PriceObservation]:
         """관심종목 전체의 현재 일간 등락률을 읽는다. 임계값 판정은 하지 않는다."""
 
-        watch_symbols = await self._load_watch_symbols(db, owner_user_id)
+        if watch_symbols is None:
+            watch_symbols = await self._load_watch_symbols(db, owner_user_id)
         by_market: dict[WatchlistMarket, list[_WatchSymbol]] = {
             "KRX": [],
             "US": [],
@@ -655,15 +670,18 @@ class DailyRoutineService:
         *,
         now: datetime,
     ) -> list[DailyRoutineAlert]:
-        """오늘(KST) 포착된 ±5% 알림을 돌려준다.
+        """각 시장의 오늘 포착된 ±5% 알림을 돌려준다.
 
-        지금 임계값을 넘는 종목은 즉시 기록되고, 이미 기록된 종목은 등락률이
-        임계값 안으로 돌아와도 ``recovered``로 표시된 채 하루 동안 남는다. 기록
-        실패는 로그만 남기고 지금 넘는 종목을 그대로 돌려준다 — 알림 조회가
-        이력 저장 때문에 실패하면 안 된다.
+        지금 임계값을 넘는 종목은 해당 시장 현지 날짜로 즉시 기록되고, 이미 기록된
+        종목은 등락률이 임계값 안으로 돌아와도 ``recovered``로 표시된 채 그 날짜
+        동안 남는다. 기록 실패는 로그만 남기고 지금 넘는 종목을 그대로 돌려준다 —
+        알림 조회가 이력 저장 때문에 실패하면 안 된다.
         """
 
-        observations = await self._load_price_observations(db, owner_user_id)
+        watch_symbols = await self._load_watch_symbols(db, owner_user_id)
+        observations = await self._load_price_observations(
+            db, owner_user_id, watch_symbols=watch_symbols
+        )
         by_symbol = {(item.market, item.symbol): item for item in observations}
         live: dict[tuple[str, str, str], _PriceObservation] = {}
         for item in observations:
@@ -671,12 +689,15 @@ class DailyRoutineService:
             if kind is not None and kind in enabled:
                 live[(kind, item.market, item.symbol)] = item
 
-        routine_date = now.astimezone(KST).date()
+        current_routine_dates = {
+            market: price_alert_market_date(market, now)
+            for market in _PRICE_ALERT_MARKETS
+        }
         try:
             events = await self._record_price_alert_events(
                 db,
                 owner_user_id,
-                routine_date=routine_date,
+                current_routine_dates=current_routine_dates,
                 live=live,
                 by_symbol=by_symbol,
                 now=now,
@@ -726,7 +747,7 @@ class DailyRoutineService:
                     provenance=(
                         _provenance(observation) if observation is not None else None
                     ),
-                    routine_date=routine_date,
+                    routine_date=event.routine_date,
                 )
             )
         for key, item in live.items():
@@ -745,7 +766,7 @@ class DailyRoutineService:
                     current_rate=item.rate,
                     last_seen_at=item.occurred_at,
                     provenance=_provenance(item),
-                    routine_date=routine_date,
+                    routine_date=current_routine_dates[item.market],
                 )
             )
         return alerts
@@ -755,19 +776,19 @@ class DailyRoutineService:
         db: AsyncSession,
         owner_user_id: int,
         *,
-        routine_date: date,
+        current_routine_dates: Mapping[WatchlistMarket, date],
         live: dict[tuple[str, str, str], _PriceObservation],
         by_symbol: dict[tuple[str, str], _PriceObservation],
         now: datetime,
     ) -> list[KAssetRoutinePriceAlertEvent]:
-        """지금 넘는 종목을 오늘 기록에 넣고, 오늘 기록 전체를 최신 등락률로 돌려준다."""
+        """시장별 오늘 기록을 넣고, 현재 시장·날짜의 기록을 최신 등락률로 돌려준다."""
 
         if live:
             statement = pg_insert(KAssetRoutinePriceAlertEvent).values(
                 [
                     {
                         "owner_user_id": owner_user_id,
-                        "routine_date": routine_date,
+                        "routine_date": current_routine_dates[item.market],
                         "kind": kind,
                         "market": item.market,
                         "symbol": item.symbol,
@@ -793,15 +814,26 @@ class DailyRoutineService:
             )
             await db.execute(statement)
 
-        events = list(
-            (
-                await db.scalars(
-                    select(KAssetRoutinePriceAlertEvent).where(
-                        KAssetRoutinePriceAlertEvent.owner_user_id == owner_user_id,
-                        KAssetRoutinePriceAlertEvent.routine_date == routine_date,
+        market_date_conditions = [
+            and_(
+                KAssetRoutinePriceAlertEvent.market == market,
+                KAssetRoutinePriceAlertEvent.routine_date == routine_date,
+            )
+            for market, routine_date in current_routine_dates.items()
+        ]
+        events = (
+            list(
+                (
+                    await db.scalars(
+                        select(KAssetRoutinePriceAlertEvent).where(
+                            KAssetRoutinePriceAlertEvent.owner_user_id == owner_user_id,
+                            or_(*market_date_conditions),
+                        )
                     )
-                )
-            ).all()
+                ).all()
+            )
+            if market_date_conditions
+            else []
         )
         # 임계값 안으로 돌아온 종목도 관심종목에 남아 있으면 최근 등락률을 따라간다.
         for event in events:
@@ -972,4 +1004,8 @@ class DailyRoutineService:
 
 daily_routine_service = DailyRoutineService()
 
-__all__ = ["DailyRoutineService", "daily_routine_service"]
+__all__ = [
+    "DailyRoutineService",
+    "daily_routine_service",
+    "price_alert_market_date",
+]
