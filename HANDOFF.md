@@ -1,16 +1,22 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-04 (US 일봉 유니버스 동기화 심볼별 실패 격리, 배포 전)
+갱신: 2026-09-05 (US 일봉 유니버스를 Toss 마스터 보유 심볼로 한정, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-04 — US 일봉 유니버스 동기화 심볼별 실패 격리 (DB migration 없음, 배포 전)
+## 2026-09-05 — US 일봉 유니버스 대상을 Toss 마스터 보유 심볼로 한정 (DB migration 없음, 배포 전)
+- 배경: PR #50 배포 후 운영에서 `run_daily_candles_sync('us')`를 1회 실행한 결과 `targets_total=12779, rows_upserted=104911, failed=2263`, 소요 약 1시간 40분이었다. 실패 2,263건 중 2,254건이 `us_symbol_universe.toss_master_updated_at IS NULL`인 행(SPAC unit/warrant/우선주 `.D`·`.UN` 등)이었고 전부 Toss `stock-not-found` 404였다. Toss 마스터가 없는데도 동기화에 성공한 행은 36개뿐이다.
+- 변경: `sync_service.py::_resolve_universe`의 US 유니버스 쿼리에 `AND toss_master_updated_at IS NOT NULL`을 추가했다. watchlist·cohort 심볼 union에는 적용하지 않는다(사용자 의도, 실패는 이미 심볼별로 격리됨). 스키마·fetcher·KR/crypto 경로 변경 없음.
+- 회귀 테스트: `tests/services/daily_candles/test_resolve_universe_us_toss_master.py`(DB fixture, shard-2) — 같은 세션에 Toss 마스터 유/무 active 심볼 2개를 넣고 유 심볼만 대상에 포함됨을 단언한 뒤 rollback한다. 로컬 Postgres가 없고 운영 이미지에는 test 의존성이 없어 CI로만 검증한다.
+- 검증: 변경 경로 `ruff check`·`ruff format`, `ty check --error-on-warning` 통과. 배포 후 다음 07:00 KST `candles.daily.us.sync` 로그에서 `failed`가 수십 건 이하로 떨어지는지 확인한다.
+
+## 2026-09-04 — US 일봉 유니버스 동기화 심볼별 실패 격리 (PR #50, `954861d5` 운영 배포 완료)
 - 증상: 미장 중 AI픽에 US 추천이 전혀 쌓이지 않았다. 운영 `review.kasset_automation_cycle_events`에서 09-04 22:30 KST 이후 모든 US 사이클이 `daily_setup_not_qualified`, `setup_rejections={'no_breakout_family_direction': 85}`였다.
 - 원인: `us_candles_1d`가 08-31 이후 3개 심볼(`A`,`AA`,`AAA`)만 갱신됐다. `candles.daily.us.sync`(07:00 KST 화–토)를 운영 worker에서 수동 실행하면 4번째 심볼에서 `TossApiResponseError status=404 code='stock-not-found'`가 나며 `sync_market_universe` 전체가 중단됐다. 한 심볼 예외가 유니버스 루프를 끊는 구조였다.
 - 변경: `app/services/daily_candles/sync_service.py::sync_market_universe`가 심볼별 예외를 잡아 `rollback()` 후 다음 심볼로 계속하고, 결과에 `failed`·`failed_symbols`를 추가하며 부분 실패를 ERROR 로그로 남긴다. `sync_one` 자체와 KR/crypto 경로, fetcher, 스키마는 바꾸지 않았다.
 - 회귀 테스트: `tests/services/daily_candles/test_sync_market_universe_isolation.py` — 5개 타깃 중 4번째가 예외를 던져도 나머지 4개가 upsert되고 rollback이 1회 호출됨을 검증한다. 수정 전 코드에서는 예외가 전파돼 실패한다.
 - 검증: focused pytest 5 passed(신규 1 + `tests/unit/tasks/test_daily_candles_tasks.py`), 변경 경로 `ruff check`·`ruff format`, `ty check --error-on-warning`, `git diff --check` 통과. DB fixture가 필요한 `test_kr_regular_daily.py`는 로컬 Postgres가 없어 실행하지 못했다.
-- 배포 후 할 일: 운영 worker에서 `run_daily_candles_sync('us')`를 1회 수동 실행해 `failed_symbols`를 확인하고, 다음 미장 사이클에서 `daily_setup_not_qualified`가 해소되는지 본다. 404를 내는 심볼은 US 유니버스에서 비활성 처리 여부를 별도로 판단한다.
+- 배포 결과(2026-09-05 00:00 KST 무렵): api·worker·scheduler·mcp·ai-mcp를 `954861d5`로 재기동, `/health` 200. 운영 worker에서 수동 sync 1회로 `us_candles_1d`가 3개 심볼 → 10,514개 심볼, 최신 세션 2026-09-03까지 채워졌다. 이어진 US 사이클에서 `strategy_evaluated=1, actionable=1`(`intraday_trigger_not_satisfied`)이 관측돼 `daily_setup_not_qualified` 전면 차단은 해소됐다. 남은 404 심볼 처리는 위 09-05 항목으로 이어진다.
 
 ## 2026-09-04 — 가격 알림 시장 현지 날짜 적용
 - 변경 파일: `HANDOFF.md`, `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, `app/extensions/kasset/models.py`(docstring만), `tests/extensions/kasset/api/test_daily_routine.py`, `tests/extensions/kasset/test_fcm_push_dispatch.py`.
