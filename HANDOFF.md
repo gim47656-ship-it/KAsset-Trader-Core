@@ -1,8 +1,16 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-04 (가격 알림 시장별 현지 날짜 보정, US 소수 수량 부분체결 차단·일일 스냅샷·확정 수익률 API 신설, 배포 전)
+갱신: 2026-09-04 (US 일봉 유니버스 동기화 심볼별 실패 격리, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-04 — US 일봉 유니버스 동기화 심볼별 실패 격리 (DB migration 없음, 배포 전)
+- 증상: 미장 중 AI픽에 US 추천이 전혀 쌓이지 않았다. 운영 `review.kasset_automation_cycle_events`에서 09-04 22:30 KST 이후 모든 US 사이클이 `daily_setup_not_qualified`, `setup_rejections={'no_breakout_family_direction': 85}`였다.
+- 원인: `us_candles_1d`가 08-31 이후 3개 심볼(`A`,`AA`,`AAA`)만 갱신됐다. `candles.daily.us.sync`(07:00 KST 화–토)를 운영 worker에서 수동 실행하면 4번째 심볼에서 `TossApiResponseError status=404 code='stock-not-found'`가 나며 `sync_market_universe` 전체가 중단됐다. 한 심볼 예외가 유니버스 루프를 끊는 구조였다.
+- 변경: `app/services/daily_candles/sync_service.py::sync_market_universe`가 심볼별 예외를 잡아 `rollback()` 후 다음 심볼로 계속하고, 결과에 `failed`·`failed_symbols`를 추가하며 부분 실패를 ERROR 로그로 남긴다. `sync_one` 자체와 KR/crypto 경로, fetcher, 스키마는 바꾸지 않았다.
+- 회귀 테스트: `tests/services/daily_candles/test_sync_market_universe_isolation.py` — 5개 타깃 중 4번째가 예외를 던져도 나머지 4개가 upsert되고 rollback이 1회 호출됨을 검증한다. 수정 전 코드에서는 예외가 전파돼 실패한다.
+- 검증: focused pytest 5 passed(신규 1 + `tests/unit/tasks/test_daily_candles_tasks.py`), 변경 경로 `ruff check`·`ruff format`, `ty check --error-on-warning`, `git diff --check` 통과. DB fixture가 필요한 `test_kr_regular_daily.py`는 로컬 Postgres가 없어 실행하지 못했다.
+- 배포 후 할 일: 운영 worker에서 `run_daily_candles_sync('us')`를 1회 수동 실행해 `failed_symbols`를 확인하고, 다음 미장 사이클에서 `daily_setup_not_qualified`가 해소되는지 본다. 404를 내는 심볼은 US 유니버스에서 비활성 처리 여부를 별도로 판단한다.
 
 ## 2026-09-04 — 가격 알림 시장 현지 날짜 적용
 - 변경 파일: `HANDOFF.md`, `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, `app/extensions/kasset/models.py`(docstring만), `tests/extensions/kasset/api/test_daily_routine.py`, `tests/extensions/kasset/test_fcm_push_dispatch.py`.

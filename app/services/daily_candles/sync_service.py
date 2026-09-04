@@ -842,24 +842,50 @@ class DailyCandleSyncService:
         Target universe rules:
         - kr/us: active universe plus active watch items and research cohorts.
         - crypto: active KRW rows from upbit_symbol_universe.
+
+        한 심볼의 조회 실패(예: Toss ``stock-not-found``)는 그 심볼만 실패로 기록하고
+        나머지 유니버스는 계속 동기화한다. 실패한 심볼의 트랜잭션은 다음 심볼 전에 폐기한다.
         """
         targets = await self._resolve_universe(market=market)
         rows_total = 0
         fallback_count = 0
         skipped = 0
+        failed_symbols: list[str] = []
         for target in targets:
-            result = await self.sync_one(target=target, horizon_bars=horizon_bars)
+            try:
+                result = await self.sync_one(target=target, horizon_bars=horizon_bars)
+            except Exception as exc:
+                await self.rollback()
+                failed_symbols.append(target.symbol)
+                logger.warning(
+                    "일봉 동기화 실패, 다음 심볼로 계속: market=%s symbol=%s partition=%s error=%s",
+                    market,
+                    target.symbol,
+                    target.partition,
+                    exc,
+                )
+                continue
             rows_total += result.rows_upserted
             if result.fallback_used:
                 fallback_count += 1
             if result.skipped_reason:
                 skipped += 1
+        if failed_symbols:
+            logger.error(
+                "일봉 동기화 부분 실패: market=%s failed=%d/%d symbols=%s",
+                market,
+                len(failed_symbols),
+                len(targets),
+                failed_symbols[:20],
+            )
         return {
             "market": market,
             "targets_total": len(targets),
             "rows_upserted": rows_total,
             "fallback_count": fallback_count,
             "skipped": skipped,
+            "failed": len(failed_symbols),
+            "failed_symbols": failed_symbols,
         }
 
     _COHORT_MEMBER_SQL = """
