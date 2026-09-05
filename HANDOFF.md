@@ -1,16 +1,7 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-05 (진입·리스크 1차 묶음: LOSS_STREAK·ACCOUNT_STATE 관문, No-Chase 트리거, 배포 전)
+갱신: 2026-09-05 (자동배포 도입 · 토스 구성용 시세 API · KR 투자지표 공급; 최신 운영 SHA `b710fd5d`)
 
-## 2026-09-05 — Android KR 종목정보 투자지표·52주 고저·외국인 보유율 공급
-- 운영 DB 읽기 조사: `market_valuation_snapshots`는 KR 3,929행/US 10,493행, 최신 `snapshot_date=2026-08-29`, source는 양 시장 모두 `toss_openapi`뿐이다. KR 샘플 `005930/138040/180640`은 행과 `market_cap`만 있고 `per/pbr/roe/dividend_yield/high_52w/low_52w`는 모두 NULL이었다. `invest_kr_fundamentals_snapshots`는 0행, `investor_flow_snapshots`의 KR 행도 0행이라 `foreign_holding_rate` 최신 NULL 비율은 계산할 모수가 없었다. `kr_candles_1d.value`는 최신 5거래일 3,345행에서 NULL 0행이며, 세 샘플의 최근 400일 264~266행도 NULL 0행이었다.
-- 원인: `market_summary.py`는 지표를 `market_valuation_snapshots`, 외국인 보유율을 `investor_flow_snapshots`, 거래대금을 `kr_candles_1d.value`에서 읽는다. Toss symbol-master 경로는 의도적으로 `market_cap`만 쓴다. Naver 지표/수급 builder와 TaskIQ task는 이미 있지만 일반 스케줄 등록과 commit이 각각 기본 OFF 설정에 묶여 있어 운영에는 Naver 행이 한 건도 없었다. 별도 TV Screener KR snapshot flow도 deployment registration이 유예됐고 운영 테이블이 비어 있어 fallback 원천이 아니다.
-- 변경: `kasset.market_snapshots.kr.sync`를 KAsset worker가 이미 로드하는 `kasset_market_events_tasks`에 매 거래일 16:40 KST로 등록했다. 기존 KAsset bounded universe(보유 → 관심종목 → 최근 추천, 최대 50)를 한 번 해석해 기존 Naver valuation/investor-flow builder를 `commit=True`로 호출한다. 전체 KRX 크롤은 하지 않는다. `market_summary.py`는 KR 일봉을 최근 260개 읽고 snapshot의 52주 고저가 NULL일 때만 저장 일봉 `high/low`의 max/min을 사용한다. 거래대금 근사(`close*volume`)는 추가하지 않았다.
-- 수동 1회 실행(배포 컨테이너): `/app/.venv/bin/python -c "import asyncio; from app.tasks.kasset_market_events_tasks import kasset_kr_market_snapshots_sync as run; print(asyncio.run(run()))"`.
-- 검증: focused pytest `17 passed`; 변경 Python 경로 `ruff check`, `ruff format --check`, `ty check --error-on-warning` 모두 통과했다. 로컬 PostgreSQL 미기동 때문에 DB fixture가 섞인 최초 baseline 선택은 `ConnectionRefusedError: [WinError 1225]`였고, DB-free focused node로 분리해 검증했다.
-- 배포 후 SQL: `SELECT DISTINCT ON (v.symbol) v.symbol,v.snapshot_date,v.source,v.per,v.pbr,v.roe,v.dividend_yield,v.market_cap,v.high_52w,v.low_52w,f.snapshot_date AS flow_date,f.foreign_holding_rate FROM market_valuation_snapshots v LEFT JOIN investor_flow_snapshots f ON f.market='kr' AND f.symbol=v.symbol WHERE v.market='kr' AND v.symbol IN ('005930','138040','180640') ORDER BY v.symbol,(v.source='naver_finance') DESC,v.snapshot_date DESC,f.snapshot_date DESC;`
-- 배포 후 curl: `curl -fsS -H "Authorization: Bearer $KASSET_TOKEN" "$KASSET_API/api/v1/market/summary?market=KRX&symbol=005930"`.
-
-## 운영 배포 방식 (2026-09-05부터)
+## 운영 배포 방식 (2026-09-05부터 자동, PR #56 `fde4d4e2`)
 - **main merge → Test 워크플로 성공 → `.github/workflows/deploy-kasset.yml`이 운영서버 self-hosted runner(`kasset-prod`, systemd `actions.runner.gim47656-ship-it-KAsset-Trader-Core.kasset-prod`, 사용자 `ghrunner`, docker 그룹)에서 `deploy/kasset/deploy.sh <sha>`를 실행한다.** 승인 단계 없음 — merge가 승인이다. SSH 포트는 열지 않는다.
 - `deploy.sh`는 기존 수동 절차와 동일: `git checkout <sha>` → `.env.kasset`의 `CORE_IMAGE_TAG/VCS_REF` 갱신(`.env.kasset.pre-<sha8>` 백업) → `compose build api` → `up -d api worker scheduler mcp ai-mcp` → `https://$KASSET_DOMAIN/health` 200 + 5개 컨테이너 새 이미지 확인(최대 180초) → 실패 시 이전 SHA로 롤백.
 - **alembic/versions 변경이 포함되면 자동배포는 exit 2로 멈춘다.** `workflow_dispatch`에서 `allow_migration=true`로 수동 실행하면 `backups/kasset-pre-migration-*.dump.gz` 백업 후 `compose --profile migration run migration`을 돌리고 배포한다. DB는 자동 롤백하지 않는다.
@@ -21,7 +12,25 @@
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-05 — 진입·리스크 1차 묶음 (DB migration 없음, 배포 전)
+## 2026-09-05 — Android KR 종목정보 투자지표·52주 고저·외국인 보유율 공급 (PR #57, `b710fd5d` 자동배포 완료)
+- 운영 DB 읽기 조사: `market_valuation_snapshots`는 KR 3,929행/US 10,493행, 최신 `snapshot_date=2026-08-29`, source는 양 시장 모두 `toss_openapi`뿐이다. KR 샘플 `005930/138040/180640`은 행과 `market_cap`만 있고 `per/pbr/roe/dividend_yield/high_52w/low_52w`는 모두 NULL이었다. `invest_kr_fundamentals_snapshots`는 0행, `investor_flow_snapshots`의 KR 행도 0행이라 `foreign_holding_rate` 최신 NULL 비율은 계산할 모수가 없었다. `kr_candles_1d.value`는 최신 5거래일 3,345행에서 NULL 0행이며, 세 샘플의 최근 400일 264~266행도 NULL 0행이었다.
+- 원인: `market_summary.py`는 지표를 `market_valuation_snapshots`, 외국인 보유율을 `investor_flow_snapshots`, 거래대금을 `kr_candles_1d.value`에서 읽는다. Toss symbol-master 경로는 의도적으로 `market_cap`만 쓴다. Naver 지표/수급 builder와 TaskIQ task는 이미 있지만 일반 스케줄 등록과 commit이 각각 기본 OFF 설정에 묶여 있어 운영에는 Naver 행이 한 건도 없었다. 별도 TV Screener KR snapshot flow도 deployment registration이 유예됐고 운영 테이블이 비어 있어 fallback 원천이 아니다.
+- 변경: `kasset.market_snapshots.kr.sync`를 KAsset worker가 이미 로드하는 `kasset_market_events_tasks`에 매 거래일 16:40 KST로 등록했다. 기존 KAsset bounded universe(보유 → 관심종목 → 최근 추천, 최대 50)를 한 번 해석해 기존 Naver valuation/investor-flow builder를 `commit=True`로 호출한다. 전체 KRX 크롤은 하지 않는다. `market_summary.py`는 KR 일봉을 최근 260개 읽고 snapshot의 52주 고저가 NULL일 때만 저장 일봉 `high/low`의 max/min을 사용한다. 거래대금 근사(`close*volume`)는 추가하지 않았다.
+- 수동 1회 실행(배포 컨테이너): `/app/.venv/bin/python -c "import asyncio; from app.tasks.kasset_market_events_tasks import kasset_kr_market_snapshots_sync as run; print(asyncio.run(run()))"`.
+- 검증: focused pytest `17 passed`; 변경 Python 경로 `ruff check`, `ruff format --check`, `ty check --error-on-warning` 모두 통과했다. 로컬 PostgreSQL 미기동 때문에 DB fixture가 섞인 최초 baseline 선택은 `ConnectionRefusedError: [WinError 1225]`였고, DB-free focused node로 분리해 검증했다.
+- 배포 후 SQL: `SELECT DISTINCT ON (v.symbol) v.symbol,v.snapshot_date,v.source,v.per,v.pbr,v.roe,v.dividend_yield,v.market_cap,v.high_52w,v.low_52w,f.snapshot_date AS flow_date,f.foreign_holding_rate FROM market_valuation_snapshots v LEFT JOIN investor_flow_snapshots f ON f.market='kr' AND f.symbol=v.symbol WHERE v.market='kr' AND v.symbol IN ('005930','138040','180640') ORDER BY v.symbol,(v.source='naver_finance') DESC,v.snapshot_date DESC,f.snapshot_date DESC;`
+- 배포 후 curl: `curl -fsS -H "Authorization: Bearer $KASSET_TOKEN" "$KASSET_API/api/v1/market/summary?market=KRX&symbol=005930"`.
+
+- 배포 후: 운영 worker에서 builder를 1회 수동 실행해 9종목(보유·관심·최근 추천) 채움. 메리츠 PER 9.76·PBR 1.93·ROE 22.38·52주 149,800/98,000 — 토스와 일치. 같은 날 `kr_candles_1d`에 9/3·9/4 행이 ~620종목만 있던 것(PR #50 이전 KR sync 중단 잔재)을 `run_daily_candles_sync('kr')` 1회로 3,933종목 백필(실패 7: 특수 티커 + 유니버스에 잘못 섞인 `KOSPI`). 정기 cron은 월요일 16:40 KST 첫 실행.
+
+## 2026-09-05 — Android 토스 구성용 시세 API (PR #55, `8c192b44` 자동배포 완료)
+- `GET /market/candles`: `range` 1Y/5Y/ALL(DB 일봉 260/1300/2600), `1D`는 정규장 1분봉(count 400).
+- 신규 `GET /market/summary`(당일 OHLCV·거래대금·전일대비거래량%·52주·시총·PER/PBR/ROE·배당수익률(비율)·외국인소진율, 없으면 null), `GET /market/investor-flow`(KR 최신 1건), `GET /market/fx?pair=USD-KRW`(`exchange_rate_service` projection). `market_summary.py` 신규.
+- `GET /market/orderbook`: US 422 → 200 `availability=UNAVAILABLE, reason=US_DEPTH_NOT_PROVIDED`; KR에 `availability` 추가, WS payload 불변.
+- `POST /orders/preview`: `maxQuantity`, `tickSize`(KR), `normalizedLimitPrice`, `priceAdjusted`(기존 `tick_size.py` 재사용). 제출 경로·검증 불변. 신규 route는 `paths.py` allowlist 등록.
+- 검증: focused pytest 45 passed, ruff/ty. Android 소비 측은 KAsset-Trader `c24d2417`.
+
+## 2026-09-05 — 진입·리스크 1차 묶음 (PR #54, `7ccb115c` 운영 배포 완료)
 BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_COUNT의 SELL 의미론은 변경하지 않았다. 기존 SHADOW 모듈·테이블(`shadow_loss_streak.py`, `shadow_high_watermark.py`, `kasset_shadow_*`)은 계산·저장에 재사용하고 활성 정책은 별도 production 모듈로 분리했다. `shadow_manifest` activation 의미는 그대로다.
 
 - **LOSS_STREAK** (`automation/loss_streak_gate.py`): 전역 — 최근 90분 손절 3회 → 신규 BUY 60분 차단. 종목별 — 같은 정규장 세션 손절 2회 → 그 종목 세션 종료까지 차단. 손절 사유는 `position_manager.ExitKind`의 `STOP/STOP_GAP/TRAILING_STOP/TRAILING_STOP_GAP`에서 파생(문자열 중복 정의 없음). 일반 exit가 끼면 streak 리셋. lock 저장은 관측 전용이며 streak과 활성 lock은 매 평가마다 `PaperTrade` 사실에서 재계산한다. evidence `lossStreak`(`kasset.loss-streak-gate.v1`).
@@ -70,7 +79,7 @@ BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_
 - 로컬 Python test/build/lint는 실행하지 않았다. PR #49 첫 GitHub Actions run `33868460725`에서 전체 test matrix는 통과했고 lint의 Ruff formatter check만 두 테스트 파일 때문에 실패했다. 해당 두 파일에 Ruff format을 적용했으며 최종 검증은 후속 GitHub Actions run으로 확인한다.
 - migration과 API/Android schema 변경은 없다. 기존 unique key에 `market`이 포함되어 추가 제약 변경도 없다. 단, 배포 전 KST 날짜로 저장된 US 행은 재작성하지 않으므로 배포 당일 ET 날짜 행과 나란히 남을 수 있으며, 해당 미국 거래일이 끝나면 자연스럽게 조회 범위에서 벗어난다.
 
-## 2026-09-04 — 소수 수량 부분체결·자산 곡선·확정 수익률 (DB migration 없음, 배포 전)
+## 2026-09-04 — 소수 수량 부분체결·자산 곡선·확정 수익률 (PR #48, `e4b60437` 운영 배포 완료, DB migration 없음)
 세 증상을 함께 고쳤다. 모두 사용자 화면의 수치가 원장과 어긋나던 문제다.
 
 1. **US 소수 수량이 영구 `PARTIALLY_FILLED`로 잔류.** 자동화 사이저의 `us_lot_size=0.0001`과 체결 절사 규칙이 달라 주문 수량과 체결 수량이 갈라졌다. `paper_trading_service.execution_quantity_lot`/`quantize_execution_quantity`로 instrument class별 lot(`equity_us`=0.0001, `equity_kr`=1)을 ROUND_DOWN 절사하고, crypto는 기존 8자리 HALF_UP 규칙을 그대로 둔다. 절사 결과 0이면 주문을 거부한다. 추가로 **주문 수용 시점에 lot 배수를 검증**해 비배수 수량을 400 `INVALID_QUANTITY`로 거부한다(`paper_orders.py`) — 절사만으로는 수동 입력 경로에서 잔량이 그대로 남는다. `ai_recommendations/service.py`는 미완결 주문을 SUCCEEDED로 닫지 않고 `paper_order_not_final:{status}`로 FAILED 처리하며, `ck_ai_recommendations_paper_execution_coherent`와 정합한다.
