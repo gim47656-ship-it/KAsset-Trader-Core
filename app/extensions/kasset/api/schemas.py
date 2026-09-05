@@ -33,8 +33,8 @@ MarketSessionState = Literal[
 ]
 MarketOverviewErrorCode = Literal["UNAVAILABLE", "TIMEOUT"]
 MarketIndexRange = Literal["1D", "1W", "1M", "3M", "6M"]
-CandleRange = Literal["1D", "1W", "1M", "3M", "6M"]
-CandleInterval = Literal["10m", "1h", "1d"]
+CandleRange = Literal["1D", "1W", "1M", "3M", "6M", "1Y", "5Y", "ALL"]
+CandleInterval = Literal["1m", "1h", "1d"]
 MarketNewsFilterKind = Literal["all", "news", "disclosure"]
 MarketNewsKind = Literal["news", "disclosure"]
 MarketIndicatorKey = Literal[
@@ -100,6 +100,46 @@ class DailyCandle(AndroidWireModel):
 class DailyCandlesResponse(AndroidWireModel):
     interval: CandleInterval
     candles: list[DailyCandle]
+
+
+class MarketSummaryResponse(AndroidWireModel):
+    market: Literal["KRX", "US"]
+    symbol: str
+    as_of: str | None
+    source: str | None
+    open: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    high: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    low: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    prev_close: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    volume: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    trade_value: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    volume_change_rate: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    high_52w: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    low_52w: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    market_cap: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    per: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    pbr: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    roe: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    dividend_yield: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+    foreign_holding_rate: str | None = Field(default=None, pattern=r"^-?\d+(?:\.\d+)?$")
+
+
+class InvestorFlowResponse(AndroidWireModel):
+    symbol: str
+    as_of: str | None
+    individual_net: str | None = Field(default=None, pattern=r"^-?\d+$")
+    foreign_net: str | None = Field(default=None, pattern=r"^-?\d+$")
+    institution_net: str | None = Field(default=None, pattern=r"^-?\d+$")
+    unit: Literal["SHARES"]
+
+
+class FxRateResponse(AndroidWireModel):
+    pair: Literal["USD-KRW"]
+    rate: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+    source: str
+    as_of: str | None
+    valid_until: str | None
+    stale: bool
 
 
 class MarketNewsItem(AndroidWireModel):
@@ -225,15 +265,18 @@ class OrderbookLevel(AndroidWireModel):
 
 
 class OrderbookResponse(AndroidWireModel):
-    symbol: str = Field(pattern=r"^\d{6}$")
-    market: Literal["KRX"]
+    symbol: str = Field(pattern=r"^(?:\d{6}|[A-Z][A-Z0-9.\-]{0,14})$")
+    market: Literal["KRX", "US"]
     ready: bool
+    availability: Literal["READY", "LOADING", "UNAVAILABLE"]
+    reason: str | None = None
+    message: str | None = None
     as_of: str | None
-    source: Literal["NH_PLUG_WS"]
+    source: Literal["NH_PLUG_WS"] | None
     asks: list[OrderbookLevel] = Field(max_length=10)
     bids: list[OrderbookLevel] = Field(max_length=10)
-    total_ask_volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
-    total_bid_volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
+    total_ask_volume: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    total_bid_volume: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
 
 
 class RegisterRequest(AndroidWireModel):

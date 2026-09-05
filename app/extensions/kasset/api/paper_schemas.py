@@ -141,6 +141,10 @@ class RiskAssessment(AndroidWireModel):
     estimated_fee: str | None = None
     reference_price: str | None = None
     currency: str | None = None
+    max_quantity: str | None = None
+    tick_size: str | None = None
+    normalized_limit_price: str | None = None
+    price_adjusted: bool = False
 
 
 class OrderRequest(AndroidWireModel):

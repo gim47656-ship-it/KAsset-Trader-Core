@@ -133,6 +133,9 @@ class PreviewRows:
     def all(self) -> list[tuple[str, Decimal, Decimal]]:
         return self._rows
 
+    def scalar_one_or_none(self) -> Decimal | None:
+        return self._rows[0][1] if self._rows else None
+
 
 class PreviewSession:
     def __init__(self, positions: list[PaperPosition] | None = None) -> None:
@@ -191,6 +194,8 @@ def _risk_request(
     market: str = "KRX",
     symbol: str = "005930",
     quantity: str = "1",
+    order_type: str = "MARKET",
+    limit_price: str | None = None,
 ) -> OrderRequest:
     return OrderRequest(
         clientOrderId="risk-preview",
@@ -199,9 +204,9 @@ def _risk_request(
         market=market,
         symbol=symbol,
         side=side,
-        orderType="MARKET",
+        orderType=order_type,
         quantity=quantity,
-        limitPrice=None,
+        limitPrice=limit_price,
     )
 
 
@@ -947,10 +952,19 @@ async def test_ratios_at_one_keep_insufficient_cash_guard(
 
 
 @pytest.mark.asyncio
-async def test_sell_ignores_buy_concentration_ratios(
+async def test_sell_preview_uses_holding_quantity_as_maximum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = PreviewSession()
+    db = PreviewSession(
+        [
+            _position(
+                symbol="005930",
+                instrument_type=InstrumentType.equity_kr,
+                quantity="4",
+                avg_price="100",
+            )
+        ]
+    )
     _configure_preview(
         monkeypatch,
         account=SimpleNamespace(id=1, cash_krw=Decimal("1"), cash_usd=Decimal("1")),
@@ -961,11 +975,91 @@ async def test_sell_ignores_buy_concentration_ratios(
     risk = await PaperOrderFacade().preview(
         db,
         101,
-        _risk_request(side="SELL", quantity="100"),  # type: ignore[arg-type]
+        _risk_request(
+            side="SELL",
+            quantity="100",
+            order_type="LIMIT",
+            limit_price="60123",
+        ),  # type: ignore[arg-type]
     )
     assert risk.decision == "APPROVED"
     assert risk.reasons == []
-    assert db.last_statement is None
+    assert risk.max_quantity == "4"
+    assert risk.tick_size == "100"
+    assert risk.normalized_limit_price == "60200"
+    assert risk.price_adjusted is True
+    assert db.last_statement is not None
+
+
+@pytest.mark.asyncio
+async def test_kr_limit_preview_returns_tick_snap_and_buy_maximum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession()
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1,
+            cash_krw=Decimal("1000000"),
+            cash_usd=Decimal("10000"),
+        ),
+        quote=_risk_quote(price="60000"),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+
+    risk = await PaperOrderFacade().preview(
+        db,
+        101,
+        _risk_request(
+            order_type="LIMIT",
+            limit_price="60123",
+        ),  # type: ignore[arg-type]
+    )
+
+    assert risk.max_quantity == "16"
+    assert risk.tick_size == "100"
+    assert risk.normalized_limit_price == "60100"
+    assert risk.price_adjusted is True
+
+
+@pytest.mark.asyncio
+async def test_us_preview_returns_fractional_maximum_without_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = PreviewSession()
+    _configure_preview(
+        monkeypatch,
+        account=SimpleNamespace(
+            id=1,
+            cash_krw=Decimal("0"),
+            cash_usd=Decimal("1000"),
+        ),
+        quote=_risk_quote(
+            price="100",
+            market="US",
+            symbol="AAPL",
+            currency="USD",
+        ),
+        max_order_ratio="1",
+        max_symbol_ratio="1",
+    )
+
+    risk = await PaperOrderFacade().preview(
+        db,
+        101,
+        _risk_request(
+            market="US",
+            symbol="AAPL",
+            order_type="LIMIT",
+            limit_price="100",
+        ),  # type: ignore[arg-type]
+    )
+
+    assert risk.max_quantity == "9.9900"
+    assert risk.tick_size is None
+    assert risk.normalized_limit_price == "100"
+    assert risk.price_adjusted is False
 
 
 @pytest.mark.asyncio

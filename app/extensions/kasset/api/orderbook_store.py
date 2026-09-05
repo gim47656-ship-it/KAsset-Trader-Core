@@ -32,6 +32,7 @@ _SUBSCRIPTION_TTL_SECONDS: Final[float] = 60.0
 _RECEIVE_POLL_SECONDS: Final[float] = 1.0
 _MAX_RECONNECT_DELAY_SECONDS: Final[float] = 30.0
 _KRX_SYMBOL_RE = re.compile(r"^\d{6}$")
+_US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
 
 _ASK_PRICE_FIELDS: Final[tuple[str, ...]] = (
     "offer",
@@ -92,18 +93,22 @@ class _WebSocketAuthenticationError(RuntimeError):
 
 
 def normalize_orderbook_key(*, market: str, symbol: str) -> tuple[str, str]:
-    """Normalize and validate the only orderbook key supported by this channel."""
+    """시장별 호가 조회 키를 정규화한다. US는 미제공 응답의 identity만 검증한다."""
 
     normalized_market = market.strip().upper()
-    normalized_symbol = symbol.strip()
-    if (
-        normalized_market != "KRX"
-        or _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is None
-    ):
+    normalized_symbol = symbol.strip().upper()
+    valid = (
+        normalized_market == "KRX"
+        and _KRX_SYMBOL_RE.fullmatch(normalized_symbol) is not None
+    ) or (
+        normalized_market == "US"
+        and _US_SYMBOL_RE.fullmatch(normalized_symbol) is not None
+    )
+    if not valid:
         raise MobileApiError(
             422,
             "VALIDATION_ERROR",
-            "NH PLUG 실시간 호가는 KRX 6자리 종목코드만 지원합니다.",
+            "시장에 맞는 종목 코드를 입력해 주세요.",
         )
     return normalized_market, normalized_symbol
 
@@ -538,6 +543,9 @@ def _snapshot_from_push(
         "symbol": symbol,
         "market": "KRX",
         "ready": True,
+        "availability": "READY",
+        "reason": None,
+        "message": None,
         "asOf": received_at.astimezone(UTC).isoformat(),
         "source": "NH_PLUG_WS",
         "asks": asks,
@@ -592,6 +600,9 @@ def _empty_snapshot(*, market: str, symbol: str) -> dict[str, Any]:
         "symbol": symbol,
         "market": market,
         "ready": False,
+        "availability": "LOADING",
+        "reason": None,
+        "message": None,
         "asOf": None,
         "source": "NH_PLUG_WS",
         "asks": [],

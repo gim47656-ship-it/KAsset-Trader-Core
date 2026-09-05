@@ -56,6 +56,9 @@ def test_orderbook_returns_ready_snapshot_from_injected_store() -> None:
             "symbol": "005930",
             "market": "KRX",
             "ready": True,
+            "availability": "READY",
+            "reason": None,
+            "message": None,
             "asOf": "2026-08-28T05:30:00+00:00",
             "source": "NH_PLUG_WS",
             "asks": [
@@ -85,6 +88,9 @@ def test_orderbook_returns_not_ready_without_snapshot() -> None:
             "symbol": "005930",
             "market": "KRX",
             "ready": False,
+            "availability": "LOADING",
+            "reason": None,
+            "message": None,
             "asOf": None,
             "source": "NH_PLUG_WS",
             "asks": [],
@@ -107,9 +113,10 @@ def test_orderbook_returns_not_ready_without_snapshot() -> None:
         ("NYSE", "005930"),
         ("KRX", "5930"),
         ("KRX", "A05930"),
+        ("US", "005930"),
     ],
 )
-def test_orderbook_rejects_non_krx_six_digit_keys(
+def test_orderbook_rejects_keys_that_do_not_match_the_market(
     market: str,
     symbol: str,
 ) -> None:
@@ -125,8 +132,32 @@ def test_orderbook_rejects_non_krx_six_digit_keys(
     assert response.json() == {
         "error": {
             "code": "VALIDATION_ERROR",
-            "message": "NH PLUG 실시간 호가는 KRX 6자리 종목코드만 지원합니다.",
+            "message": "시장에 맞는 종목 코드를 입력해 주세요.",
         }
+    }
+    assert store.calls == []
+
+
+def test_us_orderbook_returns_explicit_unavailable_contract() -> None:
+    store = _FakeOrderbookStore()
+
+    with _client(store) as client:
+        response = client.get("/api/v1/market/orderbook?market=us&symbol=aapl")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "symbol": "AAPL",
+        "market": "US",
+        "ready": False,
+        "availability": "UNAVAILABLE",
+        "reason": "US_DEPTH_NOT_PROVIDED",
+        "message": "미국 종목은 실시간 호가를 제공하지 않아요",
+        "asOf": None,
+        "source": None,
+        "asks": [],
+        "bids": [],
+        "totalAskVolume": None,
+        "totalBidVolume": None,
     }
     assert store.calls == []
 
@@ -191,6 +222,9 @@ def test_nh_ob_push_maps_official_49_field_ladder_to_rest_contract() -> None:
     )
 
     assert snapshot is not None
+    assert snapshot["availability"] == "READY"
+    assert snapshot["reason"] is None
+    assert snapshot["message"] is None
     assert snapshot["asks"] == [
         {"price": str(price), "volume": str(volume)}
         for price, volume in zip(range(101, 111), range(11, 21), strict=True)

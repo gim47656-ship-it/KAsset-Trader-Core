@@ -408,7 +408,7 @@ async def test_candles_map_six_month_range_to_120_rows(
 
 
 @pytest.mark.asyncio
-async def test_one_day_range_emits_39_session_aligned_ten_minute_bars(
+async def test_one_day_range_emits_regular_session_one_minute_bars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = TossSessionWindow(
@@ -439,17 +439,58 @@ async def test_one_day_range_emits_39_session_aligned_ten_minute_bars(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["interval"] == "10m"
-    assert len(payload["candles"]) == 39
+    assert payload["interval"] == "1m"
+    assert len(payload["candles"]) == 390
     assert payload["candles"][0] == {
         "time": "2026-08-28T00:00:00Z",
         "open": "1",
-        "high": "10",
+        "high": "1",
         "low": "1",
-        "close": "10",
-        "volume": "100",
+        "close": "1",
+        "volume": "10",
     }
-    assert payload["candles"][-1]["time"] == "2026-08-28T06:20:00Z"
+    assert payload["candles"][-1]["time"] == "2026-08-28T06:29:00Z"
+    assert provider.intraday_bars.await_args.kwargs["count"] == 400
+
+
+@pytest.mark.parametrize(
+    ("range_", "count"),
+    [("1Y", 260), ("5Y", 1300), ("ALL", 2600)],
+)
+@pytest.mark.asyncio
+async def test_long_ranges_read_bounded_daily_history_without_provider_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+    range_: str,
+    count: int,
+) -> None:
+    calls: list[int] = []
+
+    class EmptyRepository:
+        def __init__(self, *, session: object) -> None:
+            del session
+
+        async def fetch_recent(self, **kwargs: object) -> list[object]:
+            calls.append(int(kwargs["count"]))
+            return []
+
+    provider = SimpleNamespace(
+        intraday_bars=AsyncMock(side_effect=AssertionError("unexpected intraday")),
+        daily_bars=AsyncMock(side_effect=AssertionError("unexpected daily bars")),
+        aclose=AsyncMock(),
+    )
+    monkeypatch.setattr(router_module, "DailyCandlesRepository", EmptyRepository)
+    monkeypatch.setattr(router_module, "toss_market_data", provider)
+
+    async with _isolated_candle_client() as client:
+        response = await client.get(
+            "/api/v1/market/candles",
+            params={"market": "KRX", "symbol": "005930", "range": range_},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"interval": "1d", "candles": []}
+    assert calls == [count]
+    provider.daily_bars.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1249,7 +1290,7 @@ async def test_daily_ranges_keep_existing_counts_and_emit_daily_interval(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("range_", "expected_interval"),
-    [("1D", "10m"), ("1W", "1h")],
+    [("1D", "1m"), ("1W", "1h")],
 )
 async def test_empty_intraday_range_keeps_its_contract_interval(
     monkeypatch: pytest.MonkeyPatch,
@@ -1306,12 +1347,12 @@ async def test_empty_intraday_does_not_fall_back_to_daily(
         )
 
     assert response.status_code == 200
-    assert response.json() == {"interval": "10m", "candles": []}
+    assert response.json() == {"interval": "1m", "candles": []}
     awaited = provider.intraday_bars.await_args
     assert awaited is not None
     args, kwargs = awaited
     assert args == ("005930",)
-    assert kwargs["count"] == 390
+    assert kwargs["count"] == 400
     assert kwargs["market"] == "kr"
     assert kwargs["window"] == window
     assert isinstance(kwargs["moment"], datetime)
@@ -1353,7 +1394,7 @@ async def test_intraday_response_keeps_only_current_regular_session(
 
     assert response.status_code == 200
     assert response.json() == {
-        "interval": "10m",
+        "interval": "1m",
         "candles": [
             {
                 "time": "2026-08-29T01:00:00Z",
