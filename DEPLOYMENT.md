@@ -5,7 +5,7 @@
 ## 배포 파이프라인 개요
 
 ```
-feature branch → (PR) → main → (merge) → production → (CI: deploy.yml) → GHCR → (서버) → deploy.sh
+feature branch → (PR) → main → (merge) → production → (CI: ghcr-images.yml, legacy) → GHCR → (서버) → deploy.sh
 ```
 
 - **main**: 개발 브랜치 (모든 PR의 base)
@@ -15,7 +15,7 @@ feature branch → (PR) → main → (merge) → production → (CI: deploy.yml)
 |------|--------|--------|
 | feature → main | PR 머지 | 수동 (리뷰 필수) |
 | main → production | 브랜치 머지 | 수동 (`git merge main`) |
-| production → GHCR | push to `production` | **자동** (GitHub Actions `deploy.yml`) |
+| production → GHCR | push to `production` | **자동** (GitHub Actions `ghcr-images.yml`(legacy; KAsset 운영 배포는 `deploy-kasset.yml`)) |
 | GHCR → 서버 배포 | 이미지 pull + restart | 수동 (`scripts/deploy.sh`) |
 
 ### 전체 배포 절차 (main 머지 후)
@@ -28,7 +28,7 @@ git merge main
 git push origin production
 
 # 2. GitHub Actions 빌드 완료 대기 (약 5-10분)
-#    확인: https://github.com/<repo>/actions/workflows/deploy.yml
+#    확인: https://github.com/<repo>/actions/workflows/ghcr-images.yml
 
 # 3. 서버에서 배포 실행
 cd /home/mgh3326/auto_trader
