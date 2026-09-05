@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from math import ceil
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from sqlalchemy import text
@@ -18,6 +18,7 @@ from app.core.db import get_db
 from app.extensions.kasset.api import krx_quotes, push_tokens
 from app.extensions.kasset.api import market_news as market_news_service
 from app.extensions.kasset.api import market_overview as market_overview_service
+from app.extensions.kasset.api import market_summary as market_summary_service
 from app.extensions.kasset.api.ai_briefing import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -77,16 +78,19 @@ from app.extensions.kasset.api.schemas import (
     DailyCandle,
     DailyCandlesResponse,
     DatabaseStatus,
+    FxRateResponse,
     GoogleLoginRequest,
     HealthResponse,
     InstrumentSearchMarket,
     InstrumentSearchResponse,
+    InvestorFlowResponse,
     LoginRequest,
     MarketIndexDetailResponse,
     MarketIndexRange,
     MarketNewsFilterKind,
     MarketNewsResponse,
     MarketOverviewResponse,
+    MarketSummaryResponse,
     NicknameUpdateRequest,
     OrderbookResponse,
     PushTokenRequest,
@@ -168,7 +172,11 @@ _CANDLE_RANGE_COUNTS: dict[CandleRange, int] = {
     "1M": 20,
     "3M": 60,
     "6M": 120,
+    "1Y": 260,
+    "5Y": 1300,
+    "ALL": 2600,
 }
+_TOSS_ONE_DAY_CANDLE_COUNT = 400
 # 분봉 예산의 상한. 정규장 390분에 시간외 전체를 더해도 남는 여유다.
 _TOSS_INTRADAY_MAX_CANDLE_COUNT = 1200
 # 정규장 종료 후 예산에 더할 상한. 최신 슬롯을 차지하는 것은 그 거래일의 시간외·NXT 봉뿐이고
@@ -749,6 +757,21 @@ async def market_orderbook(
         market=market,
         symbol=symbol,
     )
+    if normalized_market == "US":
+        return OrderbookResponse(
+            symbol=normalized_symbol,
+            market="US",
+            ready=False,
+            availability="UNAVAILABLE",
+            reason="US_DEPTH_NOT_PROVIDED",
+            message="미국 종목은 실시간 호가를 제공하지 않아요",
+            as_of=None,
+            source=None,
+            asks=[],
+            bids=[],
+            total_ask_volume=None,
+            total_bid_volume=None,
+        )
     snapshot = await store.get_snapshot(
         market=normalized_market,
         symbol=normalized_symbol,
@@ -775,8 +798,7 @@ async def market_candles(
         ) from err
 
     if range_ in {"1D", "1W"}:
-        interval = "10m" if range_ == "1D" else "1h"
-        interval_minutes = 10 if range_ == "1D" else 60
+        interval = "1m" if range_ == "1D" else "1h"
         session_count = 1 if range_ == "1D" else _CANDLE_RANGE_COUNTS["1W"]
         sessions = await _recent_sessions(
             candle_market.value,
@@ -789,9 +811,14 @@ async def market_candles(
         moment = datetime.now(UTC)
         candles: list[DailyCandle] = []
         for boundary, regular_market in sessions:
+            request_count = (
+                _TOSS_ONE_DAY_CANDLE_COUNT
+                if range_ == "1D"
+                else _intraday_request_candle_count(regular_market, moment)
+            )
             bars = await toss_market_data.intraday_bars(
                 normalized_symbol,
-                count=_intraday_request_candle_count(regular_market, moment),
+                count=request_count,
                 market=candle_market.value,
                 window=regular_market,
                 moment=moment,
@@ -802,6 +829,15 @@ async def market_candles(
                 if krx_quotes._market_trading_date(market, bar.time_utc) == boundary
                 and regular_market.contains(bar.time_utc)
             ]
+            visible_bars = (
+                session_bars[-_TOSS_ONE_DAY_CANDLE_COUNT:]
+                if range_ == "1D"
+                else aggregate_intraday_bars(
+                    session_bars,
+                    window=regular_market,
+                    interval_minutes=60,
+                )
+            )
             candles.extend(
                 DailyCandle(
                     time=iso_z(bar.time_utc),
@@ -811,11 +847,7 @@ async def market_candles(
                     close=decimal_text(bar.close),
                     volume=decimal_text(bar.volume),
                 )
-                for bar in aggregate_intraday_bars(
-                    session_bars,
-                    window=regular_market,
-                    interval_minutes=interval_minutes,
-                )
+                for bar in visible_bars
             )
         return DailyCandlesResponse(interval=interval, candles=candles)
 
@@ -837,9 +869,9 @@ async def market_candles(
         )
         for row in rows
     }
-    if len(rows) < limit:
-        # Toss 자체도 `limit`보다 적게 돌려주면 실제 상장 이력이 짧은 종목이다.
-        # `daily_bars`의 기존 TTL 캐시가 같은 상세 요청의 반복 호출을 흡수한다.
+    if range_ in {"1M", "3M", "6M"} and len(rows) < limit:
+        # 짧은 기존 범위만 Toss 일봉으로 보완한다. 장기 범위는 저장 DB가 authoritative이며
+        # ALL도 저장된 이력만 최대 2600건까지 반환한다.
         bars = await toss_market_data.daily_bars(normalized_symbol, count=limit)
         for bar in bars:
             candles_by_trading_date.setdefault(
@@ -860,6 +892,50 @@ async def market_candles(
             candles_by_trading_date[trading_date] for trading_date in ordered_dates
         ],
     )
+
+
+@router.get("/market/summary", response_model=MarketSummaryResponse)
+async def market_summary(
+    market: Annotated[str, Query(min_length=1, max_length=20)],
+    symbol: Annotated[str, Query(min_length=1, max_length=64)],
+    session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MarketSummaryResponse:
+    intraday = await market_candles(
+        market=market,
+        symbol=symbol,
+        range_="1D",
+        _session=session,
+        db=db,
+    )
+    return await market_summary_service.get_market_summary(
+        db,
+        market=market,
+        symbol=symbol,
+        intraday=intraday,
+    )
+
+
+@router.get("/market/investor-flow", response_model=InvestorFlowResponse)
+async def market_investor_flow(
+    market: Annotated[str, Query(min_length=1, max_length=20)],
+    symbol: Annotated[str, Query(min_length=1, max_length=64)],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InvestorFlowResponse:
+    return await market_summary_service.get_investor_flow(
+        db,
+        market=market,
+        symbol=symbol,
+    )
+
+
+@router.get("/market/fx", response_model=FxRateResponse)
+async def market_fx(
+    pair: Annotated[Literal["USD-KRW"], Query()],
+    _session: Annotated[MobileSession, Depends(get_mobile_session)],
+) -> FxRateResponse:
+    return await market_summary_service.get_fx_rate(pair=pair)
 
 
 @router.get("/market/symbols", response_model=SymbolsResponse)

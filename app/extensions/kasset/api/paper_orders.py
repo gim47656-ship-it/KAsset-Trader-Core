@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -29,6 +30,7 @@ from app.extensions.kasset.api.paper_schemas import (
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.models import AndroidPaperOrder
+from app.mcp_server.tick_size import adjust_tick_size_kr, get_tick_size_kr
 from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.trading import InstrumentType
 from app.services.ai_recommendations.service import AIRecommendationService
@@ -86,6 +88,33 @@ class PaperOrderFacade:
             if quote.currency == "USD"
             else Decimal(account.cash_krw)
         )
+        order_price = request.limit_price if request.order_type == "LIMIT" else price
+        tick_size: Decimal | None = None
+        normalized_limit_price = request.limit_price
+        if instrument_type == "equity_kr":
+            tick_reference = request.limit_price or price
+            tick_size = Decimal(get_tick_size_kr(cast(float, tick_reference)))
+            if request.limit_price is not None:
+                normalized_limit_price = Decimal(
+                    adjust_tick_size_kr(
+                        cast(float, request.limit_price),
+                        request.side.lower(),
+                    )
+                )
+        if request.side == "BUY":
+            max_quantity = self._max_buy_quantity(
+                available=available,
+                price=order_price,
+                fee=fee,
+                instrument_type=instrument_type,
+            )
+        else:
+            max_quantity = await self._holding_quantity(
+                db,
+                account_id=account.id,
+                instrument_type=instrument_type,
+                symbol=request.symbol,
+            )
         if request.side == "BUY":
             if estimated_amount + fee > available:
                 reasons.append(
@@ -154,6 +183,14 @@ class PaperOrderFacade:
             estimated_fee=decimal_text(fee),
             reference_price=quote.price,
             currency=quote.currency,
+            max_quantity=decimal_text(max_quantity),
+            tick_size=decimal_text(tick_size) if tick_size is not None else None,
+            normalized_limit_price=(
+                decimal_text(normalized_limit_price)
+                if normalized_limit_price is not None
+                else None
+            ),
+            price_adjusted=normalized_limit_price != request.limit_price,
         )
 
     async def submit(
@@ -742,6 +779,42 @@ class PaperOrderFacade:
     def _assert_owned(order: AndroidPaperOrder, owner_user_id: int) -> None:
         if order.owner_user_id != owner_user_id:
             raise MobileApiError(404, "NOT_FOUND", "주문을 찾을 수 없습니다.")
+
+    @staticmethod
+    def _max_buy_quantity(
+        *,
+        available: Decimal,
+        price: Decimal,
+        fee: Decimal,
+        instrument_type: str,
+    ) -> Decimal:
+        if available <= 0 or price <= 0:
+            return Decimal("0")
+        spendable = max(Decimal("0"), available - fee)
+        return quantize_execution_quantity(spendable / price, instrument_type)
+
+    @staticmethod
+    async def _holding_quantity(
+        db: AsyncSession,
+        *,
+        account_id: int,
+        instrument_type: str,
+        symbol: str,
+    ) -> Decimal:
+        position_type = (
+            InstrumentType.equity_us
+            if instrument_type == "equity_us"
+            else InstrumentType.equity_kr
+        )
+        result = await db.execute(
+            select(PaperPosition.quantity).where(
+                PaperPosition.account_id == account_id,
+                PaperPosition.instrument_type == position_type,
+                PaperPosition.symbol == symbol,
+            )
+        )
+        quantity = result.scalar_one_or_none()
+        return Decimal(quantity) if quantity is not None else Decimal("0")
 
     @staticmethod
     def _crosses(side: str, limit_price: Decimal | None, market_price: Decimal) -> bool:

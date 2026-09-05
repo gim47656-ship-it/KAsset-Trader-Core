@@ -137,6 +137,11 @@ BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_
 - 토스 1분봉 timestamp는 분의 끝 라벨이다. 15:30:00 마감 동시호가 체결은 15:31 봉에 실리므로 `_regular_close`는 `(window.start, window.end+1분]` 구간을 채택한다(US 16:00 ET도 동일 규칙).
 
 ## 이번 세션에서 한 일
+### 2026-09-05 — Android 토스 구성용 Core read API
+- Android `/market/candles`의 `1D`를 정규장 1분봉(요청 400개)으로 전환하고 `1Y=260`, `5Y=1300`, `ALL=2600` 저장 일봉 범위를 추가했다. 장기 범위는 외부 보완 없이 DB 저장 이력만 반환한다.
+- `/market/summary`, `/market/investor-flow`, `/market/fx`를 추가하고 Android token exact allowlist에 등록했다. 당일 OHLCV·직전 거래일·최신 valuation/investor-flow·기존 exchange-rate service만 projection하며 없는 값은 `null`이다. US 호가는 HTTP 200 `UNAVAILABLE/US_DEPTH_NOT_PROVIDED`, KR 호가는 `READY|LOADING` availability를 추가했고 기존 WS payload는 유지했다.
+- 주문 preview에 `maxQuantity`, `tickSize`, `normalizedLimitPrice`, `priceAdjusted`를 추가했다. KR tick은 기존 `get_tick_size_kr`/`adjust_tick_size_kr`를 Decimal 값으로 재사용하고 제출 필드·검증은 바꾸지 않았다. 로컬 DB fixture는 PostgreSQL 미가동으로 baseline 실행이 불가했으며, DB 없는 focused 45건은 통과했다. 변경 Python의 `ruff check`, `ruff format`, `ty check --error-on-warning`도 통과했다.
+
 ### 2026-09-03 — 동시간대 RVOL SHADOW 관측 (PR #41 merge `acf093d81e62c4bb2e41b5c4d3889dfd32972321`, 운영 배포 완료)
 - KR 개장 후 자동주문 0건을 다시 규명했다. 장애가 아니라 관문 결과다. 09:00~09:50 사이클 6건 전부 `intraday_trigger_not_satisfied`이고, 09:53 실측 완료 5분봉은 10개였다. `relative_volume`은 5m가 13봉(개장 후 65분), 20m가 16봉(80분)을 요구하므로 **매일 09:00~10:05는 구조적으로 주문이 불가능**하다. 10:10 사이클에서 예측대로 `unavailable` → `not_confirmed`로 전환됐다.
 - 현행 RVOL은 baseline이 같은 세션 직전 12봉이라 오전에는 개장 러시가 분모에 들어간다. 10:12 실측 5m RVOL: 005930 0.615, 000660 0.912, 055550 0.542, 096770 2.567, 035420 0.454. 임계 1.5 자체는 달성 가능하고, 11시 이후 baseline이 개장 구간을 벗어나면 편향이 완화된다(9/2에 11:40 사이클만 통과한 것과 정합).

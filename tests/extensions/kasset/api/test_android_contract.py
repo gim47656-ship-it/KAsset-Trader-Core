@@ -101,6 +101,11 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/market/overview": {"get"},
         "/api/v1/market/news": {"get"},
         "/api/v1/market/indices/{symbol}": {"get"},
+        "/api/v1/market/orderbook": {"get"},
+        "/api/v1/market/candles": {"get"},
+        "/api/v1/market/summary": {"get"},
+        "/api/v1/market/investor-flow": {"get"},
+        "/api/v1/market/fx": {"get"},
         "/api/v1/market/symbols": {"get"},
         "/api/v1/instruments/search": {"get"},
         "/api/v1/orders": {"get", "post"},
@@ -191,6 +196,52 @@ def test_ai_briefing_mobile_auth_survives_upstream_middleware(
     }
     authenticate.assert_awaited_once()
     assert authenticate.await_args.args[1] == "valid-mobile-token"
+
+
+def test_paper_order_preview_exposes_price_and_quantity_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.extensions.kasset.api.paper_orders import paper_orders
+    from app.extensions.kasset.api.paper_schemas import RiskAssessment
+
+    preview = AsyncMock(
+        return_value=RiskAssessment(
+            decision="APPROVED",
+            reasons=[],
+            estimatedAmount="60123",
+            estimatedFee="9.02",
+            referencePrice="60000",
+            currency="KRW",
+            maxQuantity="16",
+            tickSize="100",
+            normalizedLimitPrice="60100",
+            priceAdjusted=True,
+        )
+    )
+    monkeypatch.setattr(paper_orders, "preview", preview)
+    request = {
+        **ORDER,
+        "broker": "PAPER",
+        "orderType": "LIMIT",
+        "limitPrice": "60123",
+    }
+
+    with _client() as client:
+        response = client.post("/api/v1/orders/preview", json=request)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "decision": "APPROVED",
+        "reasons": [],
+        "estimatedAmount": "60123",
+        "estimatedFee": "9.02",
+        "referencePrice": "60000",
+        "currency": "KRW",
+        "maxQuantity": "16",
+        "tickSize": "100",
+        "normalizedLimitPrice": "60100",
+        "priceAdjusted": True,
+    }
 
 
 def test_nh_order_preview_submit_cancel_and_amend_are_read_only() -> None:
