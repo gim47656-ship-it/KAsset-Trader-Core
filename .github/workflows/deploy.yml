@@ -1,131 +1,80 @@
-name: Build GHCR images (legacy Docker deploy disabled)
+name: Deploy
 
+# main에 push된 commit의 Test 워크플로(ci-required 포함)가 성공하면 곧바로 운영 배포가 실행된다.
+# 승인 단계는 없다 — PR을 main에 merge하는 행위가 배포 승인이다(단일 운영자 저장소).
+# 예외: alembic/versions 변경이 포함되면 deploy.sh가 exit 2로 멈추고, workflow_dispatch에서
+# allow_migration=true 로만 배포할 수 있다(DB 백업 후 migration). 롤백/재배포도 workflow_dispatch(sha).
+# 러너는 운영서버 자체(self-hosted, label kasset-prod)라 SSH 포트를 열지 않는다.
+# `production` environment는 배포 이력·URL 표시용이며 protection rule은 두지 않는다.
 on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
-  release:
-    types: [published]
+    inputs:
+      sha:
+        description: "배포할 commit SHA (비우면 main HEAD)"
+        required: false
+        default: ""
+      allow_migration:
+        description: "alembic/versions 변경이 있어도 배포(DB 백업 후 migration 실행)"
+        type: boolean
+        required: false
+        default: false
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: api
-            dockerfile: ./Dockerfile.api
-            suffix: ""
-
+  deploy:
+    name: deploy to production
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, kasset-prod]
+    environment:
+      name: production
+      url: https://${{ vars.KASSET_PUBLIC_HOST }}/health
+    timeout-minutes: 30
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Verify Dockerfile exists
+      - name: Resolve target SHA
+        id: target
+        shell: bash
         run: |
-          echo "Checking for Dockerfile: ${{ matrix.dockerfile }}"
-          ls -la ${{ matrix.dockerfile }}
-          echo "Context files:"
-          ls -la .
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.suffix }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=production,enable=${{ startsWith(github.ref, 'refs/heads/production') }}
-
-      - name: Build and push ${{ matrix.image }} Docker image
-        id: build
-        timeout-minutes: 30
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          build-args: |
-            VCS_REF=${{ github.sha }}
-            GITHUB_SHA=${{ github.sha }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-          platforms: linux/amd64,linux/arm64
-          provenance: false
-
-      - name: Legacy deploy disabled notice
-        run: |
-          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          ## Legacy Docker deploy disabled
-
-          This workflow only builds/pushes GHCR images. ROB-263 retired the
-          Raspberry Pi Docker production deploy path that used the old Pi SSH
-          deployment secret and `scripts/deploy.sh`.
-
-          Production deployment is handled by:
-          - `.github/workflows/deploy-macos-native.yml`
-          - `scripts/deploy-native.sh`
-          EOF
-
-      - name: Build Summary
-        if: always()
-        run: |
-          echo "## Build Summary for ${{ matrix.image }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image**: ${{ matrix.image }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Dockerfile**: ${{ matrix.dockerfile }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Status**: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.build.outcome }}" = "success" ]; then
-            echo "- **Image pushed**: ✅" >> "$GITHUB_STEP_SUMMARY"
-            echo "- **Tags**: ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            sha="${{ github.event.workflow_run.head_sha }}"
+          elif [ -n "${{ inputs.sha }}" ]; then
+            sha="${{ inputs.sha }}"
           else
-            echo "- **Image pushed**: ❌" >> "$GITHUB_STEP_SUMMARY"
+            sha="${{ github.sha }}"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "배포 대상: $sha"
+
+      - name: Market-hours notice
+        shell: bash
+        run: |
+          # KRX 정규장 09:00–15:30 KST, US 정규장 22:30–05:00 KST(서머타임 기준). 배포 중 worker/scheduler 사이클 1회가 빠질 수 있다.
+          h=$(TZ=Asia/Seoul date +%H%M); dow=$(TZ=Asia/Seoul date +%u)
+          if [ "$dow" -le 5 ] && { { [ "$h" -ge 0900 ] && [ "$h" -le 1530 ]; } || [ "$h" -ge 2230 ] || [ "$h" -le 0500 ]; }; then
+            echo "::warning::장중 배포다(KST $h). 재기동 중 자동운용 사이클 1회가 빠질 수 있다."
           fi
 
-  notify:
-    if: failure()
-    needs: [build-and-push]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Discord failure notification
+      - name: Checkout target (deploy script source)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Deploy
+        shell: bash
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ALLOW_MIGRATION: ${{ inputs.allow_migration == true && '1' || '0' }}
         run: |
-          curl -s -H "Content-Type: application/json" \
-            -d "{
-              \"embeds\": [{
-                \"title\": \"❌ GHCR 이미지 빌드 실패\",
-                \"description\": \"**Branch:** \`${{ github.ref_name }}\`\n**Commit:** \`${GITHUB_SHA::7}\`\n**Author:** ${{ github.actor }}\n**Image:** GHCR push failed\",
-                \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-                \"color\": 16711680,
-                \"footer\": {\"text\": \"${{ github.repository }}\"},
-                \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-              }]
-            }" \
-            "$DISCORD_WEBHOOK"
+          set -euo pipefail
+          chmod +x deploy/kasset/deploy.sh
+          deploy/kasset/deploy.sh "${{ steps.target.outputs.sha }}"
