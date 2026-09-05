@@ -724,10 +724,12 @@ class AITradingPolicyService:
         ai_review_status: str | None = None,
         base_risk_reasons: Sequence[Any] = (),
         account_state: AccountStateEvaluation | None = None,
+        snapshot: AITradingSnapshot | None = None,
     ) -> HardRiskResult:
-        snapshot = await self.get_snapshot(
-            db, owner_user_id, now=now, execution_limit=0
-        )
+        if snapshot is None:
+            snapshot = await self.get_snapshot(
+                db, owner_user_id, now=now, execution_limit=0
+            )
         limits = snapshot.limits
         try:
             currency, instrument_type = settlement_book(market=market)

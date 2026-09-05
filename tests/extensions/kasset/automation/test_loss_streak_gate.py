@@ -195,6 +195,30 @@ async def test_two_symbol_losses_block_only_that_symbol(
 
 
 @pytest.mark.asyncio
+async def test_lock_persistence_failure_keeps_confirmed_buy_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _loader, persister = _patch_dependencies(
+        monkeypatch,
+        (
+            _fact(1, minutes_ago=30),
+            _fact(2, minutes_ago=20),
+            _fact(3, minutes_ago=10),
+        ),
+    )
+    persister.side_effect = RuntimeError("lock store offline")
+
+    result = await _evaluate()
+
+    assert result.passed is False
+    assert result.reason == "global_lock"
+    assert result.evidence["streakGlobal"] == 3
+    assert result.evidence["persistFailed"] == "RuntimeError:lock store offline"
+    assert "LOSS_STREAK persistence failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_database_exception_passes_with_unavailable_evidence(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -214,5 +238,6 @@ async def test_database_exception_passes_with_unavailable_evidence(
         "streakGlobal": 0,
         "streakSymbol": 0,
         "unavailable": "RuntimeError:database offline",
+        "persistFailed": None,
     }
     assert "LOSS_STREAK gate unavailable" in caplog.text

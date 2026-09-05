@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -20,7 +20,10 @@ from app.extensions.kasset.automation.shadow_high_watermark import (
     ShadowHighWatermarkEvaluation,
     ShadowHighWatermarkThresholds,
     ShadowReductionStage,
-    evaluate_and_persist_shadow_high_watermark,
+    evaluate_shadow_high_watermark,
+    load_shadow_high_watermark,
+    market_trading_date,
+    persist_shadow_high_watermark,
 )
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.models.paper_trading import PaperAccount
@@ -147,6 +150,7 @@ class AccountStateEvaluation:
     multiplier: Decimal
     thresholds: AccountStateThresholds
     unavailable: str | None = None
+    persist_failed: str | None = None
 
     def as_evidence(self) -> dict[str, object]:
         return {
@@ -163,6 +167,7 @@ class AccountStateEvaluation:
             "multiplier": str(self.multiplier),
             "thresholds": self.thresholds.as_evidence(),
             "unavailable": self.unavailable,
+            "persistFailed": self.persist_failed,
         }
 
 
@@ -193,11 +198,13 @@ class AccountStateSnapshot:
 
     def as_evidence(self) -> dict[str, object]:
         if not self.evaluations:
-            return unavailable_account_state(
+            evidence = unavailable_account_state(
                 market="KRX",
                 thresholds=self.thresholds,
                 reason="market_scope_unavailable",
             ).as_evidence()
+            evidence["representativeMarket"] = None
+            return evidence
         priority = {
             AccountState.NORMAL: 0,
             AccountState.STAGED_REDUCTION: 1,
@@ -208,6 +215,7 @@ class AccountStateSnapshot:
             key=lambda item: (priority[item.state], item.market),
         )
         evidence = representative.as_evidence()
+        evidence["representativeMarket"] = representative.market
         if len(self.evaluations) > 1:
             evidence["books"] = {
                 item.market: item.as_evidence() for item in self.evaluations
@@ -288,36 +296,20 @@ class AccountStateGate:
                     market=market,
                     now=now,
                 )
-                shadow = await evaluate_and_persist_shadow_high_watermark(
+                previous = await load_shadow_high_watermark(
                     db,
+                    owner_user_id=owner_user_id,
+                    account_key=valuation.account_key,
+                    market=market,
+                    trading_date=market_trading_date(market, valuation.valuation_at),
+                )
+                shadow = evaluate_shadow_high_watermark(
                     valuation,
                     thresholds=thresholds.as_shadow_thresholds(),
+                    previous=previous,
                 )
-                if shadow.status is ShadowEvidenceStatus.VALID:
-                    # SHADOW 저장 함수는 호출자에게 commit 경계를 맡긴다. 후보가
-                    # 하나도 없는 cycle에서도 HWM 상태가 남도록 여기서 확정한다.
-                    await db.commit()
                 evaluation = account_state_from_shadow(shadow, thresholds=thresholds)
-                if evaluation.unavailable is not None:
-                    logger.warning(
-                        "kasset account state calculation unavailable: "
-                        "owner_user_id=%s market=%s reason=%s",
-                        owner_user_id,
-                        market,
-                        evaluation.unavailable,
-                    )
-                evaluations.append(evaluation)
             except Exception as exc:  # noqa: BLE001 - 신규 관문은 계산 불가 시 PASS
-                try:
-                    await db.rollback()
-                except Exception:  # noqa: BLE001 - 원래 unavailable 사유를 보존
-                    logger.warning(
-                        "kasset account state rollback failed: "
-                        "owner_user_id=%s market=%s",
-                        owner_user_id,
-                        market,
-                        exc_info=True,
-                    )
                 reason = _unavailable_reason(exc)
                 logger.warning(
                     "kasset account state calculation unavailable: "
@@ -334,6 +326,32 @@ class AccountStateGate:
                         reason=reason,
                     )
                 )
+                continue
+
+            if evaluation.unavailable is not None:
+                logger.warning(
+                    "kasset account state calculation unavailable: "
+                    "owner_user_id=%s market=%s reason=%s",
+                    owner_user_id,
+                    market,
+                    evaluation.unavailable,
+                )
+            persist_failed: str | None = None
+            if shadow.persistence_required:
+                try:
+                    async with db.begin_nested():
+                        await persist_shadow_high_watermark(db, shadow)
+                except Exception as exc:  # noqa: BLE001 - 관측 저장 실패는 판정을 바꾸지 않음
+                    persist_failed = _unavailable_reason(exc)
+                    logger.warning(
+                        "kasset account state persistence failed: "
+                        "owner_user_id=%s market=%s reason=%s",
+                        owner_user_id,
+                        market,
+                        persist_failed,
+                        exc_info=True,
+                    )
+            evaluations.append(replace(evaluation, persist_failed=persist_failed))
         return AccountStateSnapshot(
             thresholds=thresholds,
             evaluations=tuple(evaluations),
@@ -407,6 +425,7 @@ def evaluate_account_state_gate(
                 "multiplier": str(_ONE),
                 "thresholds": {},
                 "unavailable": "account_state_not_supplied",
+                "persistFailed": None,
             },
         )
     if normalized_action == "SELL":
@@ -425,7 +444,8 @@ def evaluate_account_state_gate(
         f"state={evaluation.state.value}; profitRatio={evaluation.profit_ratio}; "
         f"peakDrawdownRatio={evaluation.peak_drawdown_ratio}; "
         f"multiplier={evaluation.multiplier}; "
-        f"reason={reason or 'clear'}; unavailable={evaluation.unavailable}"
+        f"reason={reason or 'clear'}; unavailable={evaluation.unavailable}; "
+        f"persistFailed={evaluation.persist_failed}"
     )
     return AccountStateGateResult(
         code=ACCOUNT_STATE_GATE_CODE,

@@ -30,6 +30,7 @@ from app.extensions.kasset.api.watchlist import watchlist_service
 from app.extensions.kasset.automation.account_state_gate import (
     AccountStateEvaluation,
     AccountStateGate,
+    evaluate_account_state_gate,
 )
 from app.extensions.kasset.automation.ai_shadow import (
     AiShadowObservation,
@@ -217,6 +218,7 @@ _SAME_TIME_RVOL_SHADOW_TIMEOUT_SECONDS = 25.0
 _SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL = text("SET LOCAL statement_timeout = '20s'")
 #: KRX 분봉 bucket 시작 시각을 DB의 KST ``time`` 경계와 맞춘다.
 _KST = ZoneInfo("Asia/Seoul")
+_ET = ZoneInfo("America/New_York")
 #: 개장 구간 돌파(ORB)의 개장 구간 길이.
 _OPENING_RANGE = timedelta(minutes=15)
 #: 장중 지수 대비 상대강도 임계값.
@@ -589,6 +591,7 @@ class AIRecommendationVerticalSlice:
             max_daily_loss_rate_pct=snapshot.limits.max_daily_loss_rate_pct,
             now=self._now,
         )
+        await self._db.commit()
         candidates = await self._load_candidates(
             owner_user_id,
             currency=snapshot.limits.currency,
@@ -757,11 +760,27 @@ class AIRecommendationVerticalSlice:
                 continue
             actionable.append(item)
             daily_bars = bars_by_candidate.get(candidate.ranker_key, ())
+            intraday = intraday_by_key.get(candidate.ranker_key)
+            previous_close = None
+            if isinstance(intraday, CompletedIntradayBars):
+                market_timezone = _KST if candidate.market == "KRX" else _ET
+                previous_bar = next(
+                    (
+                        bar
+                        for bar in reversed(daily_bars)
+                        if bar.timestamp.astimezone(market_timezone).date()
+                        < intraday.session.session_date
+                    ),
+                    None,
+                )
+                previous_close = (
+                    previous_bar.close if previous_bar is not None else None
+                )
             trigger_decision = self._decide_triggers(
                 item,
-                intraday=intraday_by_key.get(candidate.ranker_key),
+                intraday=intraday,
                 index_bars=index_bars_by_symbol.get(_benchmark_symbol(ranked_result)),
-                previous_close=daily_bars[-1].close if daily_bars else None,
+                previous_close=previous_close,
             )
             trigger_decision = trigger_decision.expire(self._now)
             trigger_statuses[trigger_decision.status.value] += 1
@@ -818,12 +837,32 @@ class AIRecommendationVerticalSlice:
                     }
                 )
                 continue
+            account_state = account_state_snapshot.for_market(candidate.market)
+            account_state_gate = evaluate_account_state_gate(
+                item.ensemble.action.value,
+                account_state,
+            )
+            if not account_state_gate.passed:
+                reason = account_state_gate.reason or "account_state"
+                pre_ai_exclusions[reason] += 1
+                pre_ai_exclusion_evidence.append(
+                    {
+                        "source": "account_state_gate",
+                        "symbol": candidate.symbol,
+                        "market": candidate.ranker_market,
+                        "code": account_state_gate.code,
+                        "reason": reason,
+                        "detail": account_state_gate.detail,
+                        "accountState": account_state_gate.evidence,
+                    }
+                )
+                continue
             sizing = await self._pre_ai_sizing(
                 owner_user_id,
                 item,
                 candidate_regime,
                 snapshot=snapshot,
-                account_state=account_state_snapshot.for_market(candidate.market),
+                account_state=account_state,
             )
             if isinstance(sizing, _PreAiExclusion):
                 pre_ai_exclusions[sizing.reason] += 1
@@ -1688,7 +1727,11 @@ class AIRecommendationVerticalSlice:
             direction=direction,
             evaluated_at=self._now,
             policy=self._trigger_policy,
-            session_open_price=intraday.bars[0].open,
+            session_open_price=(
+                intraday.bars[0].open
+                if intraday.bars[0].timestamp == intraday.session.opens_at
+                else None
+            ),
             previous_close=previous_close,
             atr_14=(
                 item.factor_ranking.atr_14 if item.factor_ranking is not None else None

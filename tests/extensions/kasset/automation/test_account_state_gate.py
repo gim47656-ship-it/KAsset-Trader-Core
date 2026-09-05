@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -9,17 +10,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.extensions.kasset.api.paper_schemas import OrderRequest
 from app.extensions.kasset.automation import account_state_gate as gate_module
+from app.extensions.kasset.automation import job as job_module
 from app.extensions.kasset.automation.account_state_gate import (
     ACCOUNT_STATE_SCHEMA_VERSION,
     STAGED_REDUCTION_MULTIPLIER,
     AccountState,
     AccountStateEvaluation,
     AccountStateGate,
+    AccountStateSnapshot,
     AccountStateThresholds,
     account_state_from_shadow,
     evaluate_account_state_gate,
 )
+from app.extensions.kasset.automation.job import OwnerScopedPaperOrders
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
@@ -127,21 +132,24 @@ def test_peak_drawdown_above_half_max_loss_activates_staged_reduction() -> None:
 
 
 class _PaperAccountDb:
-    def __init__(self) -> None:
-        self.commits = 0
+    def __init__(self, *, cash_krw: Decimal = Decimal("1000")) -> None:
+        self.cash_krw = cash_krw
+        self.savepoint_rollbacks = 0
 
     async def scalar(self, _statement: object) -> object:
         return SimpleNamespace(
             id=11,
-            cash_krw=Decimal("1000"),
+            cash_krw=self.cash_krw,
             cash_usd=Decimal("100"),
         )
 
-    async def commit(self) -> None:
-        self.commits += 1
-
-    async def rollback(self) -> None:
-        pass
+    @asynccontextmanager
+    async def begin_nested(self):
+        try:
+            yield
+        except Exception:
+            self.savepoint_rollbacks += 1
+            raise
 
 
 @pytest.mark.asyncio
@@ -164,15 +172,20 @@ async def test_owner_evaluation_keeps_krw_and_usd_books_separate(
     ]
     valuations: list[ShadowEquityValuation] = []
 
-    async def evaluate(
-        _db: object,
+    def evaluate(
         valuation: ShadowEquityValuation,
         *,
         thresholds: object,
+        previous: ShadowHighWatermarkState | None,
     ):
         valuations.append(valuation)
-        return evaluate_shadow_high_watermark(valuation, thresholds=thresholds)
+        return evaluate_shadow_high_watermark(
+            valuation,
+            thresholds=thresholds,  # type: ignore[arg-type]
+            previous=previous,
+        )
 
+    persister = AsyncMock()
     monkeypatch.setattr(
         gate_module,
         "PaperTradingService",
@@ -180,9 +193,11 @@ async def test_owner_evaluation_keeps_krw_and_usd_books_separate(
     )
     monkeypatch.setattr(
         gate_module,
-        "evaluate_and_persist_shadow_high_watermark",
-        evaluate,
+        "load_shadow_high_watermark",
+        AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(gate_module, "evaluate_shadow_high_watermark", evaluate)
+    monkeypatch.setattr(gate_module, "persist_shadow_high_watermark", persister)
 
     db = _PaperAccountDb()
     snapshot = await AccountStateGate().evaluate_owner(
@@ -198,9 +213,54 @@ async def test_owner_evaluation_keeps_krw_and_usd_books_separate(
         ("KRX", Decimal("1200")),
         ("US", Decimal("150")),
     ]
-    assert db.commits == 2
+    assert persister.await_count == 2
+    assert snapshot.as_evidence()["representativeMarket"] in {"KRX", "US"}
     assert snapshot.for_market("KRX").state is AccountState.NORMAL
     assert snapshot.for_market("US").state is AccountState.NORMAL
+
+
+@pytest.mark.asyncio
+async def test_hwm_persistence_failure_keeps_exit_only_buy_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    opened = _shadow("100")
+    assert opened.state is not None
+    monkeypatch.setattr(
+        gate_module,
+        "PaperTradingService",
+        lambda _db: SimpleNamespace(get_positions=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "load_shadow_high_watermark",
+        AsyncMock(return_value=opened.state),
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "persist_shadow_high_watermark",
+        AsyncMock(side_effect=RuntimeError("hwm store offline")),
+    )
+    db = _PaperAccountDb(cash_krw=Decimal("100.6"))
+
+    snapshot = await AccountStateGate().evaluate_owner(
+        db,  # type: ignore[arg-type]
+        7,
+        markets=("KRX",),
+        daily_target_rate_pct=Decimal("0.5"),
+        max_daily_loss_rate_pct=Decimal("1.0"),
+        now=_NOW + timedelta(minutes=1),
+    )
+
+    evaluation = snapshot.for_market("KRX")
+    buy = evaluate_account_state_gate("BUY", evaluation)
+    assert evaluation.state is AccountState.EXIT_ONLY
+    assert evaluation.persist_failed == "hwm store offline"
+    assert buy.passed is False
+    assert buy.reason == "exit_only"
+    assert buy.evidence["persistFailed"] == "hwm store offline"
+    assert db.savepoint_rollbacks == 1
+    assert "account state persistence failed" in caplog.text
 
 
 class _FailedValuationDb:
@@ -319,3 +379,116 @@ async def test_policy_exit_only_does_not_change_sell_path(
     )
     assert account_check.passed is True
     assert result.passed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("side", "db", "expected_passed"),
+    [
+        ("BUY", _EmptyRiskDb(), False),
+        ("SELL", _HeldSellRiskDb(), True),
+    ],
+)
+async def test_job_execution_rechecks_exit_only_without_changing_sell(
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+    db: object,
+    expected_passed: bool,
+) -> None:
+    recommendation_service = SimpleNamespace(
+        get_recommendation=AsyncMock(
+            return_value=SimpleNamespace(reference_price="100", evidence=[])
+        )
+    )
+    monkeypatch.setattr(
+        job_module,
+        "AIRecommendationService",
+        lambda _db: recommendation_service,
+    )
+    policy = AITradingPolicyService()
+    monkeypatch.setattr(policy, "get_snapshot", AsyncMock(return_value=_snapshot()))
+    monkeypatch.setattr(job_module, "AITradingPolicyService", lambda: policy)
+    account_snapshot = AccountStateSnapshot(
+        thresholds=_THRESHOLDS,
+        evaluations=(_evaluation(AccountState.EXIT_ONLY),),
+    )
+    evaluate_owner = AsyncMock(return_value=account_snapshot)
+    monkeypatch.setattr(
+        job_module,
+        "AccountStateGate",
+        lambda: SimpleNamespace(evaluate_owner=evaluate_owner),
+    )
+    request = OrderRequest(
+        client_order_id="ai-rec:rec-account-state",
+        broker="PAPER",
+        market="KRX",
+        symbol="005930",
+        side=side,  # type: ignore[arg-type]
+        order_type="MARKET",
+        quantity=Decimal("1"),
+    )
+
+    result = await OwnerScopedPaperOrders(now=_NOW)._hard_risk(
+        db,  # type: ignore[arg-type]
+        "7",
+        request,
+        reference_price="100",
+        base_reasons=(),
+    )
+
+    account_check = next(
+        check for check in result.checks if check.rule == "ACCOUNT_STATE"
+    )
+    assert account_check.passed is expected_passed
+    assert result.passed is expected_passed
+    assert evaluate_owner.await_args.kwargs["markets"] == ("KRX",)
+
+
+@pytest.mark.asyncio
+async def test_job_execution_account_state_failure_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        job_module,
+        "AIRecommendationService",
+        lambda _db: SimpleNamespace(
+            get_recommendation=AsyncMock(
+                return_value=SimpleNamespace(reference_price="100", evidence=[])
+            )
+        ),
+    )
+    policy = AITradingPolicyService()
+    monkeypatch.setattr(policy, "get_snapshot", AsyncMock(return_value=_snapshot()))
+    monkeypatch.setattr(job_module, "AITradingPolicyService", lambda: policy)
+    monkeypatch.setattr(
+        job_module,
+        "AccountStateGate",
+        lambda: SimpleNamespace(
+            evaluate_owner=AsyncMock(side_effect=RuntimeError("valuation offline"))
+        ),
+    )
+    request = OrderRequest(
+        client_order_id="ai-rec:rec-account-state-unavailable",
+        broker="PAPER",
+        market="KRX",
+        symbol="005930",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+    )
+
+    result = await OwnerScopedPaperOrders(now=_NOW)._hard_risk(
+        _EmptyRiskDb(),  # type: ignore[arg-type]
+        "7",
+        request,
+        reference_price="100",
+        base_reasons=(),
+    )
+
+    account_check = next(
+        check for check in result.checks if check.rule == "ACCOUNT_STATE"
+    )
+    assert account_check.passed is True
+    assert result.passed is True
+    assert "execution ACCOUNT_STATE unavailable; gate passes" in caplog.text

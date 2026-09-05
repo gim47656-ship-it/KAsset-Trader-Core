@@ -13,6 +13,12 @@ import pytest
 
 from app.extensions.kasset.ai.model_router import _TierAnalysis
 from app.extensions.kasset.automation import vertical_slice
+from app.extensions.kasset.automation.account_state_gate import (
+    AccountState,
+    AccountStateEvaluation,
+    AccountStateSnapshot,
+    AccountStateThresholds,
+)
 from app.extensions.kasset.automation.ai_shadow import build_ai_shadow_observation
 from app.extensions.kasset.automation.candidate_ranker import (
     CandidateRankerConfig,
@@ -86,6 +92,33 @@ _BULL = RegimeAssessment(
     median_atr_ratio=Decimal("0.02"),
     weights=weights_for_regime(MarketRegime.BULL),
 )
+_ACCOUNT_THRESHOLDS = AccountStateThresholds.from_risk_rates(
+    daily_target_rate_pct=Decimal("0.5"),
+    max_daily_loss_rate_pct=Decimal("1.0"),
+)
+
+
+def _account_state(state: AccountState = AccountState.NORMAL) -> AccountStateEvaluation:
+    multiplier = Decimal("0") if state is AccountState.EXIT_ONLY else Decimal("1")
+    return AccountStateEvaluation(
+        market="KRX",
+        state=state,
+        profit_ratio=Decimal("0.006")
+        if state is AccountState.EXIT_ONLY
+        else Decimal("0"),
+        peak_drawdown_ratio=Decimal("0"),
+        multiplier=multiplier,
+        thresholds=_ACCOUNT_THRESHOLDS,
+    )
+
+
+def _account_snapshot(
+    state: AccountState = AccountState.NORMAL,
+) -> AccountStateSnapshot:
+    return AccountStateSnapshot(
+        thresholds=_ACCOUNT_THRESHOLDS,
+        evaluations=(_account_state(state),),
+    )
 
 
 def _rank_result(
@@ -488,6 +521,9 @@ def _stub_review_cycle(
             )
         ),
         portfolio_plan=portfolio_plan,
+    )
+    instance._account_state_gate = SimpleNamespace(  # type: ignore[assignment]
+        evaluate_owner=AsyncMock(return_value=_account_snapshot())
     )
     instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
@@ -1163,8 +1199,10 @@ async def test_owner_market_scope_is_intersected_before_candidate_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     router = MagicMock()
+    db = MagicMock()
+    db.commit = AsyncMock()
     instance = AIRecommendationVerticalSlice(
-        MagicMock(),
+        db,
         router,
         now=_NOW,
         allowed_markets=frozenset({"KR"}),
@@ -1184,6 +1222,9 @@ async def test_owner_market_scope_is_intersected_before_candidate_loading(
             )
         )
     )
+    instance._account_state_gate = SimpleNamespace(  # type: ignore[assignment]
+        evaluate_owner=AsyncMock(return_value=_account_snapshot())
+    )
     load_candidates = AsyncMock(return_value=[])
     instance._load_candidates = load_candidates  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -1200,6 +1241,7 @@ async def test_owner_market_scope_is_intersected_before_candidate_loading(
         currency="KRW",
         allowed_markets=frozenset({"KR"}),
     )
+    db.commit.assert_awaited_once()
     assert router.mock_calls == []
 
 
@@ -1389,6 +1431,150 @@ async def test_non_gating_ai_review_is_not_capped_after_technical_exclusions(
         "rec:000444",
     ]
     assert persist_recommendation.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_exit_only_is_counted_before_sizing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, analyze_for_owner, portfolio_plan, persist_recommendation = (
+        _stub_review_cycle(
+            monkeypatch,
+            ranked_symbols=("000111",),
+            unaffordable=frozenset(),
+            ranker_config=CandidateRankerConfig(),
+        )
+    )
+    instance._account_state_gate = SimpleNamespace(  # type: ignore[assignment]
+        evaluate_owner=AsyncMock(return_value=_account_snapshot(AccountState.EXIT_ONLY))
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["preAiExclusions"] == {"exit_only": 1}
+    exclusion = result["candidateExclusions"][0]
+    assert exclusion["source"] == "account_state_gate"
+    assert exclusion["symbol"] == "000111"
+    assert exclusion["reason"] == "exit_only"
+    portfolio_plan.assert_not_awaited()
+    analyze_for_owner.assert_not_awaited()
+    persist_recommendation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_cycle_uses_last_daily_close_before_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _analyze, _plan, _persist = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("000111",),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    previous = PriceBar(
+        timestamp=_NOW - timedelta(days=1),
+        open=Decimal("94"),
+        high=Decimal("96"),
+        low=Decimal("93"),
+        close=Decimal("95"),
+        volume=Decimal("1000"),
+    )
+    same_session = replace(
+        previous,
+        timestamp=_NOW,
+        close=Decimal("105"),
+    )
+    instance._load_candidate_bars = AsyncMock(  # type: ignore[method-assign]
+        return_value={("KR", "000111"): (previous, same_session)}
+    )
+    decide = MagicMock(return_value=_fresh_trigger_decision("000111"))
+    instance._decide_triggers = decide  # type: ignore[method-assign]
+
+    await instance.run_owner(7)
+
+    assert decide.call_args.kwargs["previous_close"] == Decimal("95")
+
+
+@pytest.mark.parametrize(
+    ("aligned_open", "previous_close", "expected_unavailable"),
+    [
+        (False, Decimal("100"), "session_open_unavailable"),
+        (True, None, "previous_close_unavailable"),
+    ],
+)
+def test_trigger_inputs_mark_missing_session_prices_unavailable(
+    aligned_open: bool,
+    previous_close: Decimal | None,
+    expected_unavailable: str,
+) -> None:
+    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
+    intraday = _completed_intraday_bars("005930")
+    if aligned_open:
+        intraday = replace(
+            intraday,
+            bars=(
+                replace(
+                    intraday.bars[0],
+                    timestamp=intraday.session.opens_at,
+                ),
+            ),
+        )
+
+    decision = instance._decide_triggers(  # noqa: SLF001 - no-chase 입력 계약
+        _evaluated_candidate("005930"),
+        intraday=intraday,
+        index_bars=None,
+        previous_close=previous_close,
+    )
+
+    no_chase = decision.as_evidence()["noChase"]
+    assert no_chase["gapUp"]["unavailable"] == expected_unavailable  # type: ignore[index]
+
+
+def test_admitted_candidate_valid_until_is_bounded_by_trigger() -> None:
+    item = _evaluated_candidate("005930")
+    trigger_decision = replace(
+        _fresh_trigger_decision("005930"),
+        valid_until=_NOW + timedelta(minutes=10),
+    )
+    ai_shadow = build_ai_shadow_observation(
+        SimpleNamespace(
+            input_hash="b" * 64,
+            provider="direct-api",
+            tier="terra",
+            model_id="configured-terra-model",
+            action="HOLD",
+            risk="MEDIUM",
+            bullish_score=45,
+            bearish_score=55,
+            rationale_tags=["breakout_not_confirmed"],
+            confidence=0.72,
+        ),
+        observed_at=_NOW,
+    )
+    review = vertical_slice._AiReviewOutcomeBundle(  # noqa: SLF001 - admission 계약
+        ai_review=ai_review_from_observation(
+            status=AiReviewStatus.DISAGREES,
+            observation=ai_shadow,
+            detail="technical direction=BUY aiAction=HOLD",
+        ),
+        ai_shadow=ai_shadow,
+        bullish_score=45,
+        bearish_score=55,
+    )
+
+    admitted = vertical_slice._admitted_candidate(  # noqa: SLF001 - admission 계약
+        item,
+        trigger_decision=trigger_decision,
+        review=review,
+        news_shadow=unknown_news_shadow(
+            observed_at=_NOW,
+            detail="fixture source health is intentionally unproven",
+        ),
+        now=_NOW,
+    )
+
+    assert admitted.decision.valid_until == trigger_decision.valid_until
 
 
 @pytest.mark.asyncio

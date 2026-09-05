@@ -101,7 +101,7 @@ def _short_session() -> list[PriceBar]:
     ]
     bars.extend(_flat(index) for index in range(3, 15))
     bars.append(
-        _bar(15, open_price="101", high="101", low="99", close="99", volume="5000")
+        _bar(15, open_price="101", high="101", low="96", close="96", volume="5000")
     )
     return bars
 
@@ -205,6 +205,39 @@ def test_opening_range_breakout_requires_the_pivot_buffer(
     assert result.threshold == "100.200000"
 
 
+def test_sell_triggers_do_not_require_a_pivot_buffer() -> None:
+    opening_range = [
+        _bar(0, open_price="101", high="101", low="100", close="101", volume="1000"),
+        _bar(1, open_price="101", high="101", low="100", close="101", volume="1000"),
+        _bar(2, open_price="101", high="101", low="100", close="101", volume="1000"),
+        _bar(3, open_price="101", high="101", low="100", close="100", volume="1000"),
+    ]
+    vwap = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="0"),
+        _bar(1, open_price="100", high="100", low="100", close="100", volume="0"),
+    ]
+
+    breakout = opening_range_breakout(
+        opening_range,
+        direction=Action.SELL,
+        session_open=_OPEN,
+        opening_range=_OPENING_RANGE,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+    reclaim = session_vwap_reclaim(
+        vwap,
+        direction=Action.SELL,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert breakout.status is TriggerStatus.ACTIVE
+    assert breakout.threshold == "100.000000"
+    assert reclaim.status is TriggerStatus.ACTIVE
+    assert reclaim.threshold == "100.000000"
+
+
 def test_opening_range_breakout_blocks_an_overextended_price() -> None:
     bars = [
         _bar(0, open_price="99", high="100", low="99", close="99", volume="1000"),
@@ -240,6 +273,33 @@ def test_opening_range_breakout_blocks_an_overextended_price() -> None:
     assert result.blocked_reason == "too_extended"
     assert decision.status is TriggerDecisionStatus.BLOCKED
     assert decision.blocked_reason == "too_extended"
+
+
+def test_sell_triggers_ignore_extension_cap_during_five_percent_drop() -> None:
+    bars = _short_session()
+    bars[-1] = _bar(
+        15,
+        open_price="101",
+        high="101",
+        low="95",
+        close="95",
+        volume="5000",
+    )
+    triggers = _triggers(bars, Action.SELL)
+
+    decision = decide_intraday_triggers(
+        triggers,
+        symbol="005930",
+        market="KRX",
+        direction=Action.SELL,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+    )
+
+    assert triggers[0].status is TriggerStatus.ACTIVE
+    assert triggers[1].status is TriggerStatus.ACTIVE
+    assert triggers[0].blocked_reason is None
+    assert triggers[1].blocked_reason is None
+    assert decision.status is TriggerDecisionStatus.TRIGGERED
 
 
 def test_opening_range_breakout_needs_a_completed_bar_after_the_range() -> None:
@@ -790,6 +850,26 @@ def test_missing_atr_marks_gap_check_unavailable_without_blocking() -> None:
     no_chase = decision.as_evidence()["noChase"]  # type: ignore[index]
     assert no_chase["schemaVersion"] == "kasset.no-chase.v1"  # type: ignore[index]
     assert no_chase["gapUp"]["unavailable"] == "atr14_unavailable"  # type: ignore[index]
+
+
+def test_missing_previous_close_marks_gap_check_unavailable_without_blocking() -> None:
+    decision = decide_intraday_triggers(
+        _triggers(_long_session(), Action.BUY),
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+        session_open_price=Decimal("104"),
+        previous_close=None,
+        atr_14=Decimal("1"),
+    )
+
+    assert decision.status is TriggerDecisionStatus.TRIGGERED
+    no_chase = decision.as_evidence()["noChase"]  # type: ignore[index]
+    assert (
+        no_chase["gapUp"]["unavailable"]  # type: ignore[index]
+        == "previous_close_unavailable"
+    )
 
 
 def test_expired_trigger_decision_becomes_not_triggered() -> None:

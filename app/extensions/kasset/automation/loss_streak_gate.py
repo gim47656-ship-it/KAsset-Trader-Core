@@ -74,7 +74,7 @@ class LossStreakGateResult:
 
 
 class LossStreakGate:
-    """PAPER 체결 사실을 계산하고 기존 SHADOW lock 테이블에 복구 상태를 남긴다."""
+    """PAPER 체결 사실을 계산하고 기존 SHADOW lock 테이블에 관측값을 남긴다."""
 
     def __init__(self, config: LossStreakConfig = DEFAULT_LOSS_STREAK_CONFIG) -> None:
         self._config = config
@@ -109,26 +109,23 @@ class LossStreakGate:
             if session is None:
                 raise ValueError("regular_session_unavailable")
             earliest = min(current - self._config.global_lookback, session.opens_at)
-
-            async with db.begin_nested():
-                account_key, facts = await _load_paper_trade_facts(
-                    db,
-                    owner_user_id=owner_user_id,
-                    market=normalized_market,
-                    earliest=earliest,
-                )
-                combined = _evaluate_active_streaks(
-                    facts,
-                    owner_user_id=owner_user_id,
-                    account_key=account_key,
-                    market=normalized_market,
-                    symbol=normalized_symbol,
-                    now=current,
-                    session_opens_at=session.opens_at,
-                    session_closes_at=session.closes_at,
-                    config=self._config,
-                )
-                await persist_shadow_loss_locks(db, combined)
+            account_key, facts = await _load_paper_trade_facts(
+                db,
+                owner_user_id=owner_user_id,
+                market=normalized_market,
+                earliest=earliest,
+            )
+            combined = _evaluate_active_streaks(
+                facts,
+                owner_user_id=owner_user_id,
+                account_key=account_key,
+                market=normalized_market,
+                symbol=normalized_symbol,
+                now=current,
+                session_opens_at=session.opens_at,
+                session_closes_at=session.closes_at,
+                config=self._config,
+            )
         except Exception as exc:  # noqa: BLE001 - 관문 계산 불가는 명시적으로 fail-open
             unavailable = f"{type(exc).__name__}:{exc}"
             logger.warning(
@@ -151,6 +148,22 @@ class LossStreakGate:
                 unavailable=unavailable,
             )
 
+        persist_failed: str | None = None
+        try:
+            async with db.begin_nested():
+                await persist_shadow_loss_locks(db, combined)
+        except Exception as exc:  # noqa: BLE001 - 관측 저장 실패는 확정 판정을 바꾸지 않음
+            persist_failed = f"{type(exc).__name__}:{exc}"
+            logger.warning(
+                "kasset LOSS_STREAK persistence failed: owner_user_id=%s market=%s "
+                "symbol=%s reason=%s",
+                owner_user_id,
+                market,
+                symbol,
+                persist_failed,
+                exc_info=True,
+            )
+
         global_lock = combined.global_lock
         symbol_lock = combined.symbol_lock
         if global_lock.buy_locked:
@@ -168,12 +181,14 @@ class LossStreakGate:
             detail=(
                 f"reason={reason or 'clear'}; "
                 f"streakGlobal={global_lock.streak_count}/{global_lock.loss_limit}; "
-                f"streakSymbol={symbol_lock.streak_count}/{symbol_lock.loss_limit}"
+                f"streakSymbol={symbol_lock.streak_count}/{symbol_lock.loss_limit}; "
+                f"persistFailed={persist_failed}"
             ),
             global_lock=global_lock if global_lock.buy_locked else None,
             symbol_lock=symbol_lock if symbol_lock.buy_locked else None,
             streak_global=global_lock.streak_count,
             streak_symbol=symbol_lock.streak_count,
+            persist_failed=persist_failed,
         )
 
 
@@ -426,6 +441,7 @@ def _result(
     streak_global: int,
     streak_symbol: int,
     unavailable: str | None = None,
+    persist_failed: str | None = None,
 ) -> LossStreakGateResult:
     evidence: dict[str, object] = {
         "schemaVersion": LOSS_STREAK_GATE_SCHEMA_VERSION,
@@ -434,6 +450,7 @@ def _result(
         "streakGlobal": streak_global,
         "streakSymbol": streak_symbol,
         "unavailable": unavailable,
+        "persistFailed": persist_failed,
     }
     return LossStreakGateResult(
         code=LOSS_STREAK_CODE,

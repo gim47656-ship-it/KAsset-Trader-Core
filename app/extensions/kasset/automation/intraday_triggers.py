@@ -338,21 +338,14 @@ def opening_range_breakout(
     range_low = min(bar.low for bar in opening)
     latest = after[-1]
     basis = range_high if direction is Action.BUY else range_low
-    pivot_threshold = (
-        basis * (Decimal("1") + config.pivot_buffer_ratio)
-        if direction is Action.BUY
-        else basis * (Decimal("1") - config.pivot_buffer_ratio)
-    )
-    extension_threshold = (
-        basis * (Decimal("1") + config.max_extension_ratio)
-        if direction is Action.BUY
-        else basis * (Decimal("1") - config.max_extension_ratio)
-    )
-    too_extended = (
-        latest.close > extension_threshold
-        if direction is Action.BUY
-        else latest.close < extension_threshold
-    )
+    if direction is Action.BUY:
+        pivot_threshold = basis * (Decimal("1") + config.pivot_buffer_ratio)
+        extension_threshold = basis * (Decimal("1") + config.max_extension_ratio)
+        too_extended = latest.close > extension_threshold
+    else:
+        pivot_threshold = basis
+        extension_threshold = None
+        too_extended = False
     broke = (
         latest.close >= pivot_threshold
         if direction is Action.BUY
@@ -371,9 +364,13 @@ def opening_range_breakout(
         as_of=_aware_utc(latest.timestamp, "bar.timestamp") + bar_interval,
         detail=(
             f"opening range high={_decimal_text(range_high)} "
-            f"low={_decimal_text(range_low)} extension="
-            f"{_decimal_text(extension_threshold)} over "
-            f"{len(opening)} completed bars"
+            f"low={_decimal_text(range_low)}"
+            + (
+                f" extension={_decimal_text(extension_threshold)}"
+                if extension_threshold is not None
+                else ""
+            )
+            + f" over {len(opening)} completed bars"
         ),
         blocked_reason="too_extended" if too_extended else None,
     )
@@ -438,10 +435,10 @@ def session_vwap_reclaim(
     else:
         reclaimed = previous.close >= previous_vwap
         extreme = latest.close <= min(bar.close for bar in ordered)
-        pivot_threshold = latest_vwap * (Decimal("1") - config.pivot_buffer_ratio)
-        extension_threshold = latest_vwap * (Decimal("1") - config.max_extension_ratio)
+        pivot_threshold = latest_vwap
+        extension_threshold = None
         beyond = latest.close <= pivot_threshold
-        too_extended = latest.close < extension_threshold
+        too_extended = False
     pattern = "reclaim" if reclaimed else ("breakout" if extreme else "none")
     active = beyond and pattern != "none"
     return TriggerResult(
@@ -457,9 +454,13 @@ def session_vwap_reclaim(
         as_of=_aware_utc(latest.timestamp, "bar.timestamp") + bar_interval,
         detail=(
             f"pattern={pattern} previousClose={_decimal_text(previous.close)} "
-            f"previousVwap={_decimal_text(previous_vwap)} extension="
-            f"{_decimal_text(extension_threshold)} over "
-            f"{len(ordered)} completed bars"
+            f"previousVwap={_decimal_text(previous_vwap)}"
+            + (
+                f" extension={_decimal_text(extension_threshold)}"
+                if extension_threshold is not None
+                else ""
+            )
+            + f" over {len(ordered)} completed bars"
         ),
         blocked_reason="too_extended" if too_extended else None,
     )
@@ -690,7 +691,11 @@ def decide_intraday_triggers(
     atr_14: Decimal | None = None,
     blocked_reason: str | None = None,
 ) -> IntradayTriggerDecision:
-    """명시적 정책과 추격매수 금지 조건으로 진입 방아쇠를 판정한다."""
+    """명시적 정책과 추격매수 금지 조건으로 진입 방아쇠를 판정한다.
+
+    ``previous_close``는 현재 세션 거래일보다 이전인 마지막 완료 일봉의
+    종가여야 한다. 호출자가 그 일봉을 확인할 수 없으면 ``None``을 넘긴다.
+    """
 
     moment = _aware_utc(evaluated_at, "evaluated_at")
     valid_until = moment + config.decision_ttl
