@@ -1,6 +1,15 @@
 # HANDOFF — KAsset-Trader-Core
 갱신: 2026-09-05 (진입·리스크 1차 묶음: LOSS_STREAK·ACCOUNT_STATE 관문, No-Chase 트리거, 배포 전)
 
+## 2026-09-05 — Android KR 종목정보 투자지표·52주 고저·외국인 보유율 공급
+- 운영 DB 읽기 조사: `market_valuation_snapshots`는 KR 3,929행/US 10,493행, 최신 `snapshot_date=2026-08-29`, source는 양 시장 모두 `toss_openapi`뿐이다. KR 샘플 `005930/138040/180640`은 행과 `market_cap`만 있고 `per/pbr/roe/dividend_yield/high_52w/low_52w`는 모두 NULL이었다. `invest_kr_fundamentals_snapshots`는 0행, `investor_flow_snapshots`의 KR 행도 0행이라 `foreign_holding_rate` 최신 NULL 비율은 계산할 모수가 없었다. `kr_candles_1d.value`는 최신 5거래일 3,345행에서 NULL 0행이며, 세 샘플의 최근 400일 264~266행도 NULL 0행이었다.
+- 원인: `market_summary.py`는 지표를 `market_valuation_snapshots`, 외국인 보유율을 `investor_flow_snapshots`, 거래대금을 `kr_candles_1d.value`에서 읽는다. Toss symbol-master 경로는 의도적으로 `market_cap`만 쓴다. Naver 지표/수급 builder와 TaskIQ task는 이미 있지만 일반 스케줄 등록과 commit이 각각 기본 OFF 설정에 묶여 있어 운영에는 Naver 행이 한 건도 없었다. 별도 TV Screener KR snapshot flow도 deployment registration이 유예됐고 운영 테이블이 비어 있어 fallback 원천이 아니다.
+- 변경: `kasset.market_snapshots.kr.sync`를 KAsset worker가 이미 로드하는 `kasset_market_events_tasks`에 매 거래일 16:40 KST로 등록했다. 기존 KAsset bounded universe(보유 → 관심종목 → 최근 추천, 최대 50)를 한 번 해석해 기존 Naver valuation/investor-flow builder를 `commit=True`로 호출한다. 전체 KRX 크롤은 하지 않는다. `market_summary.py`는 KR 일봉을 최근 260개 읽고 snapshot의 52주 고저가 NULL일 때만 저장 일봉 `high/low`의 max/min을 사용한다. 거래대금 근사(`close*volume`)는 추가하지 않았다.
+- 수동 1회 실행(배포 컨테이너): `/app/.venv/bin/python -c "import asyncio; from app.tasks.kasset_market_events_tasks import kasset_kr_market_snapshots_sync as run; print(asyncio.run(run()))"`.
+- 검증: focused pytest `17 passed`; 변경 Python 경로 `ruff check`, `ruff format --check`, `ty check --error-on-warning` 모두 통과했다. 로컬 PostgreSQL 미기동 때문에 DB fixture가 섞인 최초 baseline 선택은 `ConnectionRefusedError: [WinError 1225]`였고, DB-free focused node로 분리해 검증했다.
+- 배포 후 SQL: `SELECT DISTINCT ON (v.symbol) v.symbol,v.snapshot_date,v.source,v.per,v.pbr,v.roe,v.dividend_yield,v.market_cap,v.high_52w,v.low_52w,f.snapshot_date AS flow_date,f.foreign_holding_rate FROM market_valuation_snapshots v LEFT JOIN investor_flow_snapshots f ON f.market='kr' AND f.symbol=v.symbol WHERE v.market='kr' AND v.symbol IN ('005930','138040','180640') ORDER BY v.symbol,(v.source='naver_finance') DESC,v.snapshot_date DESC,f.snapshot_date DESC;`
+- 배포 후 curl: `curl -fsS -H "Authorization: Bearer $KASSET_TOKEN" "$KASSET_API/api/v1/market/summary?market=KRX&symbol=005930"`.
+
 ## 운영 배포 방식 (2026-09-05부터)
 - **main merge → Test 워크플로 성공 → `.github/workflows/deploy-kasset.yml`이 운영서버 self-hosted runner(`kasset-prod`, systemd `actions.runner.gim47656-ship-it-KAsset-Trader-Core.kasset-prod`, 사용자 `ghrunner`, docker 그룹)에서 `deploy/kasset/deploy.sh <sha>`를 실행한다.** 승인 단계 없음 — merge가 승인이다. SSH 포트는 열지 않는다.
 - `deploy.sh`는 기존 수동 절차와 동일: `git checkout <sha>` → `.env.kasset`의 `CORE_IMAGE_TAG/VCS_REF` 갱신(`.env.kasset.pre-<sha8>` 백업) → `compose build api` → `up -d api worker scheduler mcp ai-mcp` → `https://$KASSET_DOMAIN/health` 200 + 5개 컨테이너 새 이미지 확인(최대 180초) → 실패 시 이전 SHA로 롤백.

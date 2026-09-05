@@ -17,6 +17,7 @@ from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.schemas import DailyCandle, DailyCandlesResponse
+from app.services.daily_candles.repository import MarketKey
 from app.services.exchange_rate_service import UsdKrwExchangeRateQuote
 
 
@@ -72,7 +73,8 @@ def _install_summary_repositories(
             del session
 
         async def fetch_recent(self, **kwargs: object) -> list[object]:
-            assert kwargs["count"] == 3
+            expected_count = 260 if kwargs["market"] == MarketKey.KR else 3
+            assert kwargs["count"] == expected_count
             return daily_rows
 
     class ValuationRepository:
@@ -167,6 +169,65 @@ def test_market_summary_projects_intraday_and_latest_snapshots(
         "dividendYield": "2.1",
         "foreignHoldingRate": "47.73",
     }
+
+
+def test_market_summary_derives_missing_kr_52w_range_from_stored_daily_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_summary_repositories(
+        monkeypatch,
+        daily_rows=[
+            SimpleNamespace(
+                time_utc=datetime(2026, 9, 2, 6, 30, tzinfo=UTC),
+                high=Decimal("150"),
+                low=Decimal("70"),
+                close=Decimal("100"),
+                volume=Decimal("10"),
+                value=Decimal("1000"),
+                source="toss_regular",
+            ),
+            SimpleNamespace(
+                time_utc=datetime(2026, 9, 3, 6, 30, tzinfo=UTC),
+                high=Decimal("160"),
+                low=Decimal("65"),
+                close=Decimal("98"),
+                volume=Decimal("20"),
+                value=Decimal("1960"),
+                source="toss_regular",
+            ),
+            SimpleNamespace(
+                time_utc=datetime(2026, 9, 4, 6, 30, tzinfo=UTC),
+                high=Decimal("140"),
+                low=Decimal("80"),
+                close=Decimal("111"),
+                volume=Decimal("30"),
+                value=Decimal("3300"),
+                source="toss_regular",
+            ),
+        ],
+        valuation_rows=[
+            SimpleNamespace(
+                high_52w=None,
+                low_52w=None,
+                market_cap=Decimal("123000000"),
+                per=None,
+                pbr=None,
+                roe=None,
+                dividend_yield=None,
+            )
+        ],
+        flow_rows=[],
+    )
+    monkeypatch.setattr(
+        router_module, "market_candles", AsyncMock(return_value=_intraday())
+    )
+
+    with _client() as client:
+        response = client.get("/api/v1/market/summary?market=KRX&symbol=005930")
+
+    assert response.status_code == 200
+    assert response.json()["high52w"] == "160"
+    assert response.json()["low52w"] == "65"
 
 
 def test_market_summary_keeps_unavailable_us_values_null(
