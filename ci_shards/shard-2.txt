@@ -28,6 +28,7 @@ tests/extensions/kasset/ai/test_summary_provider_routing.py
 tests/extensions/kasset/api/test_ai_trading_settings.py
 tests/extensions/kasset/api/test_multi_user_contract.py
 tests/extensions/kasset/api/test_system_status.py
+tests/extensions/kasset/automation/test_account_state_gate.py
 tests/extensions/kasset/automation/test_intraday_triggers.py
 tests/extensions/kasset/automation/test_market_session.py
 tests/extensions/kasset/automation/test_p0_cycle_trace.py

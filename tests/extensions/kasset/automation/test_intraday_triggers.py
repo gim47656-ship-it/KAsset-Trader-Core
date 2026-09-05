@@ -86,7 +86,7 @@ def _long_session() -> list[PriceBar]:
     ]
     bars.extend(_flat(index) for index in range(3, 15))
     bars.append(
-        _bar(15, open_price="101", high="106", low="101", close="105", volume="5000")
+        _bar(15, open_price="101", high="103", low="101", close="103", volume="5000")
     )
     return bars
 
@@ -101,7 +101,7 @@ def _short_session() -> list[PriceBar]:
     ]
     bars.extend(_flat(index) for index in range(3, 15))
     bars.append(
-        _bar(15, open_price="101", high="101", low="95", close="96", volume="5000")
+        _bar(15, open_price="101", high="101", low="99", close="99", volume="5000")
     )
     return bars
 
@@ -168,6 +168,80 @@ def test_opening_range_breakout_is_symmetric(
     assert result.as_of == bars[-1].timestamp + _INTERVAL
 
 
+@pytest.mark.parametrize(
+    ("latest_close", "expected"),
+    [
+        ("100.199", TriggerStatus.INACTIVE),
+        ("100.200", TriggerStatus.ACTIVE),
+    ],
+)
+def test_opening_range_breakout_requires_the_pivot_buffer(
+    latest_close: str, expected: TriggerStatus
+) -> None:
+    bars = [
+        _bar(0, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(1, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(2, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(
+            3,
+            open_price="100",
+            high=latest_close,
+            low="100",
+            close=latest_close,
+            volume="1000",
+        ),
+    ]
+
+    result = opening_range_breakout(
+        bars,
+        direction=Action.BUY,
+        session_open=_OPEN,
+        opening_range=_OPENING_RANGE,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is expected
+    assert result.threshold == "100.200000"
+
+
+def test_opening_range_breakout_blocks_an_overextended_price() -> None:
+    bars = [
+        _bar(0, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(1, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(2, open_price="99", high="100", low="99", close="99", volume="1000"),
+        _bar(
+            3,
+            open_price="100",
+            high="102.01",
+            low="100",
+            close="102.01",
+            volume="1000",
+        ),
+    ]
+
+    result = opening_range_breakout(
+        bars,
+        direction=Action.BUY,
+        session_open=_OPEN,
+        opening_range=_OPENING_RANGE,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+    decision = decide_intraday_triggers(
+        [result],
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=20),
+    )
+
+    assert result.status is TriggerStatus.BLOCKED
+    assert result.blocked_reason == "too_extended"
+    assert decision.status is TriggerDecisionStatus.BLOCKED
+    assert decision.blocked_reason == "too_extended"
+
+
 def test_opening_range_breakout_needs_a_completed_bar_after_the_range() -> None:
     bars = [
         _bar(0, open_price="100", high="102", low="99", close="100", volume="1000"),
@@ -217,6 +291,43 @@ def test_session_vwap_trigger_is_symmetric(
     assert result.code == SESSION_VWAP_RECLAIM
     assert result.status is TriggerStatus.ACTIVE
     assert result.threshold is not None
+
+
+@pytest.mark.parametrize(
+    ("latest_close", "expected"),
+    [
+        ("100.199", TriggerStatus.INACTIVE),
+        ("100.200", TriggerStatus.ACTIVE),
+        ("102.010", TriggerStatus.BLOCKED),
+    ],
+)
+def test_session_vwap_reclaim_applies_buffer_and_extension_cap(
+    latest_close: str, expected: TriggerStatus
+) -> None:
+    bars = [
+        _bar(0, open_price="100", high="100", low="100", close="100", volume="0"),
+        _bar(
+            1,
+            open_price="100",
+            high=latest_close,
+            low="100",
+            close=latest_close,
+            volume="0",
+        ),
+    ]
+
+    result = session_vwap_reclaim(
+        bars,
+        direction=Action.BUY,
+        bar_interval=_INTERVAL,
+        source="toss",
+    )
+
+    assert result.status is expected
+    assert result.threshold == "100.200000"
+    assert result.blocked_reason == (
+        "too_extended" if expected is TriggerStatus.BLOCKED else None
+    )
 
 
 def test_relative_volume_needs_completed_window_and_baseline() -> None:
@@ -631,6 +742,72 @@ def test_relative_volume_alone_cannot_trigger_an_entry() -> None:
 
     assert decision.status is TriggerDecisionStatus.NOT_TRIGGERED
     assert decision.blocked_reason == "no_directional_trigger"
+
+
+@pytest.mark.parametrize(
+    ("session_open_price", "expected_status"),
+    [
+        (Decimal("104"), TriggerDecisionStatus.BLOCKED),
+        (Decimal("101"), TriggerDecisionStatus.TRIGGERED),
+    ],
+)
+def test_gap_up_no_chase_blocks_only_a_large_gap(
+    session_open_price: Decimal, expected_status: TriggerDecisionStatus
+) -> None:
+    decision = decide_intraday_triggers(
+        _triggers(_long_session(), Action.BUY),
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+        session_open_price=session_open_price,
+        previous_close=Decimal("100"),
+        atr_14=Decimal("1"),
+    )
+
+    assert decision.status is expected_status
+    gap_evidence = decision.as_evidence()["noChase"]["gapUp"]  # type: ignore[index]
+    assert gap_evidence["blocked"] is (  # type: ignore[index]
+        expected_status is TriggerDecisionStatus.BLOCKED
+    )
+    if expected_status is TriggerDecisionStatus.BLOCKED:
+        assert decision.blocked_reason == "gap_up_no_chase"
+
+
+def test_missing_atr_marks_gap_check_unavailable_without_blocking() -> None:
+    decision = decide_intraday_triggers(
+        _triggers(_long_session(), Action.BUY),
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=_OPEN + timedelta(minutes=90),
+        session_open_price=Decimal("104"),
+        previous_close=Decimal("100"),
+        atr_14=None,
+    )
+
+    assert decision.status is TriggerDecisionStatus.TRIGGERED
+    no_chase = decision.as_evidence()["noChase"]  # type: ignore[index]
+    assert no_chase["schemaVersion"] == "kasset.no-chase.v1"  # type: ignore[index]
+    assert no_chase["gapUp"]["unavailable"] == "atr14_unavailable"  # type: ignore[index]
+
+
+def test_expired_trigger_decision_becomes_not_triggered() -> None:
+    evaluated_at = _OPEN + timedelta(minutes=90)
+    decision = decide_intraday_triggers(
+        _triggers(_long_session(), Action.BUY),
+        symbol="005930",
+        market="KRX",
+        direction=Action.BUY,
+        evaluated_at=evaluated_at,
+    )
+
+    expired = decision.expire(evaluated_at + timedelta(minutes=30))
+
+    assert decision.valid_until == evaluated_at + timedelta(minutes=30)
+    assert expired.status is TriggerDecisionStatus.NOT_TRIGGERED
+    assert expired.blocked_reason == "expired"
+    assert expired.as_evidence()["validUntil"] == "2026-09-01T02:00:00Z"
 
 
 def test_stale_or_partial_bars_block_every_trigger() -> None:

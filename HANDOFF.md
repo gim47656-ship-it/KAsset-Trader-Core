@@ -1,10 +1,21 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-05 (US 벤치마크 SPY 파티션 중복 → Daily Setup 전면 UNAVAILABLE 수정, 배포 전)
+갱신: 2026-09-05 (진입·리스크 1차 묶음: LOSS_STREAK·ACCOUNT_STATE 관문, No-Chase 트리거, 배포 전)
 
 ## 프로젝트 개요와 사용자가 원하는 방향
 KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
 
-## 2026-09-05 — US 벤치마크(SPY) 파티션 중복으로 Daily Setup 전면 UNAVAILABLE (DB migration 없음, 배포 전)
+## 2026-09-05 — 진입·리스크 1차 묶음 (DB migration 없음, 배포 전)
+BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_COUNT의 SELL 의미론은 변경하지 않았다. 기존 SHADOW 모듈·테이블(`shadow_loss_streak.py`, `shadow_high_watermark.py`, `kasset_shadow_*`)은 계산·저장에 재사용하고 활성 정책은 별도 production 모듈로 분리했다. `shadow_manifest` activation 의미는 그대로다.
+
+- **LOSS_STREAK** (`automation/loss_streak_gate.py`): 전역 — 최근 90분 손절 3회 → 신규 BUY 60분 차단. 종목별 — 같은 정규장 세션 손절 2회 → 그 종목 세션 종료까지 차단. 손절 사유는 `position_manager.ExitKind`의 `STOP/STOP_GAP/TRAILING_STOP/TRAILING_STOP_GAP`에서 파생(문자열 중복 정의 없음). 일반 exit가 끼면 streak 리셋. lock은 `KAssetShadowLossLock`에 upsert해 재시작 복구. evidence `lossStreak`(`kasset.loss-streak-gate.v1`).
+- **ACCOUNT_STATE** (`automation/account_state_gate.py`): 통화 장부(KRX/KRW, US/USD)별로 세션 시작·peak·현재 평가금액을 계산. `profit_ratio ≥ 0.5×daily_goal` 또는 `peak_drawdown ≥ 0.5×max_daily_loss` → `STAGED_REDUCTION`(BUY 수량 ×0.75 후 lot 내림); `profit_ratio ≥ daily_goal` → `EXIT_ONLY`(BUY 차단, SELL 기존 경로). 임계는 owner risk preset에서 파생. 상태는 기존 HWM 테이블에 upsert. evidence `accountState`(`kasset.account-state.v1`). `position_sizing`에 `account_state_multiplier`(≤1, 초과 ValueError) 입력 추가.
+- **No-Chase** (`automation/intraday_triggers.py`): ORB/VWAP 돌파는 기준가×(1+0.002) 이상에서만 `triggered`; 기준가×(1+0.02) 초과는 `BLOCKED/too_extended`; BUY 세션 시가 갭이 `max(1.0×ATR14, 3%×전일종가)` 이상이면 `BLOCKED/gap_up_no_chase`(ATR 없으면 이 검사만 unavailable). `IntradayTriggerDecision.valid_until = as_of+30분`, 소비 시 만료면 `not_triggered/expired`. 새 status `BLOCKED`. evidence `noChase`(`kasset.no-chase.v1`) + `validUntil`. recommendation `valid_until`에 trigger 만료 반영.
+- **Hard Risk 순서**: `DAILY_MAX_LOSS → ACCOUNT_STATE → LOSS_STREAK → BUDGET → POSITION → ORDER_COUNT → AI_SHADOW → DAILY_GOAL`. 새 관문 두 개는 **계산 불가 시 PASS + evidence unavailable + WARNING**(기존 관문이 뒤에서 안전망), 확정 차단만 fail-closed.
+- 회귀 테스트: `test_loss_streak_gate.py`(shard-4), `test_account_state_gate.py`(shard-2), `test_intraday_triggers.py`(+10, 기존 long/short fixture는 2% cap 안쪽 가격으로 조정), `test_position_sizing.py`, `test_vertical_slice.py`, `test_ai_trading_policy.py`(우선순위) 갱신.
+- 검증: 변경 경로 `ruff check/format`, `ty check app/extensions/kasset/automation --error-on-warning` 통과. 로컬 Postgres가 없어 DB fixture 테스트는 CI에서 검증. 독립 checker 1회 실행(결과는 PR 본문·아래 세션 이력 참조).
+- 운영 관찰(배포 후): 첫 미장·국장 사이클 evidence에 `accountState`·`lossStreak`·`noChase` 섹션이 채워지는지, `setup_selected>0`인 사이클에서 `trigger_failures`에 `too_extended`/`gap_up_no_chase`/`expired`가 집계되는지, HWM 테이블에 KRW/USD 장부 행이 세션마다 갱신되는지 확인한다.
+
+## 2026-09-05 — US 벤치마크(SPY) 파티션 중복으로 Daily Setup 전면 UNAVAILABLE (PR #53, `7140c3ad` 운영 배포 완료)
 - 증상: 2026-09-04 미장 39개 US 사이클 중 추천 0건. 09:30–11:30 ET는 stale 일봉(PR #50 이전)으로 전부 HOLD, 11:40–12:00 ET는 DELL 1건 qualified 후 `intraday_trigger_not_satisfied`(ORB 미돌파, RVOL 5m 1.29/20m 0.95 < 1.5), **12:10 ET 이후 마감까지 directional 16건이 모두 `daily_relative_strength=unavailable`** 로 탈락했다.
 - 원인: `us_candles_1d`의 SPY가 두 파티션에 있었다. `sync_benchmark`는 `NASD`(405행, 2025-01~), 유니버스 경로는 `us_symbol_universe.exchange='AMEX'`(11행, 08-21~09-04, 09-04 수동 sync가 기록). `load_candidate_benchmark_returns`가 `partition=None`으로 읽어 같은 timestamp가 두 번 나오고, `compute_benchmark_return_60_from_bars`가 중복 timestamp에 fail-closed(`return None`) → 모든 US 후보의 RS source가 fallback → `_daily_relative_strength_feature` UNAVAILABLE. 09-05 07:00 KST 정기 sync도 AMEX 09-04 행을 다시 썼으므로 수정 없이는 월요일 미장도 동일하게 막힌다.
 - 변경: `constants.US_BENCHMARK_SYMBOL/US_BENCHMARK_PARTITION` 추가. `_resolve_universe(us)`가 유니버스·watchlist 경로에서 SPY를 제외해 `sync_benchmark`만 SPY를 쓴다(single writer). `benchmark_relative_strength`는 SPY를 `partition=US_BENCHMARK_PARTITION`으로만 읽는다(reader pin). 스키마 변경 없음.

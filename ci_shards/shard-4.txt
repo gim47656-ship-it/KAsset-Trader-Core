@@ -23,6 +23,7 @@ tests/extensions/kasset/automation/test_ai_shadow.py
 tests/extensions/kasset/automation/test_benchmark_relative_strength.py
 tests/extensions/kasset/automation/test_candidate_ranker.py
 tests/extensions/kasset/automation/test_event_detector.py
+tests/extensions/kasset/automation/test_loss_streak_gate.py
 tests/extensions/kasset/automation/test_shadow_loss_streak.py
 tests/extensions/kasset/test_fcm_push_dispatch.py
 tests/infra/test_database_guard_completeness.py

@@ -31,6 +31,8 @@ from app.services.kasset_automation_audit import build_paper_execution_event
 _NOW = datetime(2026, 9, 1, 1, 0, tzinfo=UTC)
 _EXPECTED_PRIORITY = [
     "DAILY_MAX_LOSS",
+    "ACCOUNT_STATE",
+    "LOSS_STREAK",
     "BUDGET",
     "POSITION",
     "ORDER_COUNT",

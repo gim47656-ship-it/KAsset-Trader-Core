@@ -44,9 +44,7 @@ from app.extensions.kasset.automation.intraday_data import (
     load_index_session_bars,
 )
 from app.extensions.kasset.automation.intraday_triggers import (
-    DEFAULT_INTRADAY_TRIGGER_POLICY,
     INDEX_INTRADAY_UNAVAILABLE,
-    INTRADAY_TRIGGER_SCHEMA_VERSION,
     OPENING_RANGE_BREAKOUT,
     RELATIVE_VOLUME_5M,
     RELATIVE_VOLUME_20M,
@@ -55,6 +53,7 @@ from app.extensions.kasset.automation.intraday_triggers import (
     TriggerDecisionStatus,
     TriggerResult,
     TriggerStatus,
+    decide_intraday_triggers,
     intraday_relative_strength,
 )
 from app.extensions.kasset.automation.market_session import RegularSession
@@ -301,20 +300,20 @@ def _session_rvol_decision(
         )
         for code in (RELATIVE_VOLUME_5M, RELATIVE_VOLUME_20M)
     )
-    return IntradayTriggerDecision(
-        schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
+    decision = decide_intraday_triggers(
+        triggers,
         symbol=symbol,
         market="KRX",
         direction=Action.BUY,
+        evaluated_at=_NOW,
+    )
+    return replace(
+        decision,
         status=(
             TriggerDecisionStatus.TRIGGERED
             if triggered
             else TriggerDecisionStatus.NOT_TRIGGERED
         ),
-        triggers=triggers,
-        policy=DEFAULT_INTRADAY_TRIGGER_POLICY,
-        evaluated_at=_NOW,
-        data_as_of=_NOW - timedelta(minutes=1),
         blocked_reason=None if triggered else "relative_volume_not_satisfied",
     )
 
@@ -377,17 +376,12 @@ def _fresh_trigger_decision(symbol: str) -> IntradayTriggerDecision:
             detail="completed-bar relative volume expanded",
         ),
     )
-    return IntradayTriggerDecision(
-        schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
+    return decide_intraday_triggers(
+        triggers,
         symbol=symbol,
         market="KRX",
         direction=Action.BUY,
-        status=TriggerDecisionStatus.TRIGGERED,
-        triggers=triggers,
-        policy=DEFAULT_INTRADAY_TRIGGER_POLICY,
         evaluated_at=_NOW,
-        data_as_of=data_as_of,
-        blocked_reason=None,
     )
 
 
@@ -484,7 +478,11 @@ def _stub_review_cycle(
     instance._policy = SimpleNamespace(  # type: ignore[assignment]
         get_snapshot=AsyncMock(
             return_value=SimpleNamespace(
-                limits=SimpleNamespace(currency="KRW"),
+                limits=SimpleNamespace(
+                    currency="KRW",
+                    daily_target_rate_pct=Decimal("0.5"),
+                    max_daily_loss_rate_pct=Decimal("1.0"),
+                ),
                 usage=object(),
                 usage_by_currency={"KRW": object(), "USD": object()},
             )
@@ -552,8 +550,10 @@ def _stub_review_cycle(
         *,
         intraday: object,
         index_bars: object,
+        previous_close: Decimal | None,
     ) -> IntradayTriggerDecision:
         del index_bars
+        assert previous_close is None
         assert isinstance(intraday, CompletedIntradayBars)
         assert _NOW - intraday.data_as_of <= timedelta(minutes=12)
         return _fresh_trigger_decision(item.candidate.symbol)
@@ -1175,7 +1175,13 @@ async def test_owner_market_scope_is_intersected_before_candidate_loading(
     )
     instance._policy = SimpleNamespace(  # type: ignore[assignment]
         get_snapshot=AsyncMock(
-            return_value=SimpleNamespace(limits=SimpleNamespace(currency="KRW"))
+            return_value=SimpleNamespace(
+                limits=SimpleNamespace(
+                    currency="KRW",
+                    daily_target_rate_pct=Decimal("0.5"),
+                    max_daily_loss_rate_pct=Decimal("1.0"),
+                )
+            )
         )
     )
     load_candidates = AsyncMock(return_value=[])
