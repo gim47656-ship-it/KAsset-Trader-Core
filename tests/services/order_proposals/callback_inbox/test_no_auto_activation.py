@@ -224,7 +224,7 @@ COVERED_SURFACES = (
     "Makefile",
     "docker-compose.prod.yml",
     "scripts/run_taskiq_worker.sh",
-    ".github/workflows/deploy.yml",
+    ".github/workflows/ghcr-images.yml",
 )
 
 #: Places a fake gate literal legitimately lives. Scanning them would make
