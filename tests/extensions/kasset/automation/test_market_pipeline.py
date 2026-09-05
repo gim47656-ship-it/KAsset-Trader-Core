@@ -409,6 +409,13 @@ def test_market_event_task_is_registered() -> None:
         {"cron": "5 20 * * 1-5", "cron_offset": "Asia/Seoul"},
     ]
     assert (
+        kasset_market_events_tasks.kasset_kr_market_snapshots_sync.task_name
+        == "kasset.market_snapshots.kr.sync"
+    )
+    assert kasset_market_events_tasks.kasset_kr_market_snapshots_sync.labels[
+        "schedule"
+    ] == [{"cron": "40 16 * * 1-5", "cron_offset": "Asia/Seoul"}]
+    assert (
         kasset_market_events_tasks.kasset_google_news_kr_sync.task_name
         == "kasset.news.google.kr.sync"
     )
@@ -436,6 +443,74 @@ def test_market_event_task_is_registered() -> None:
     assert kasset_market_events_tasks.kasset_paper_daily_snapshot.labels[
         "schedule"
     ] == [{"cron": "45 15 * * 1-5", "cron_offset": "Asia/Seoul"}]
+
+
+@pytest.mark.asyncio
+async def test_kr_market_snapshot_task_builds_bounded_app_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import (
+        invest_screener_snapshot_tasks,
+        investor_flow_snapshot_tasks,
+        kasset_market_events_tasks,
+        market_valuation_snapshot_tasks,
+    )
+
+    async def fake_targets(market: str) -> list[str]:
+        assert market == "kr"
+        return ["005930", "138040", "180640"]
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_valuation(**kwargs: object) -> dict[str, object]:
+        calls.append(("valuation", kwargs))
+        return {"snapshotsBuilt": 3}
+
+    async def fake_flow(**kwargs: object) -> dict[str, object]:
+        calls.append(("investor_flow", kwargs))
+        return {"snapshotsBuilt": 60}
+
+    monkeypatch.setattr(
+        invest_screener_snapshot_tasks,
+        "is_market_session_today",
+        lambda market: market == "kr",
+    )
+    monkeypatch.setattr(
+        kasset_market_events_tasks, "_news_target_symbols", fake_targets
+    )
+    monkeypatch.setattr(
+        market_valuation_snapshot_tasks,
+        "build_market_valuation_snapshots",
+        fake_valuation,
+    )
+    monkeypatch.setattr(
+        investor_flow_snapshot_tasks,
+        "build_investor_flow_snapshots",
+        fake_flow,
+    )
+
+    result = await kasset_market_events_tasks.kasset_kr_market_snapshots_sync()
+
+    assert result["symbolCount"] == 3
+    assert calls == [
+        (
+            "valuation",
+            {
+                "market": "kr",
+                "symbols": ["005930", "138040", "180640"],
+                "commit": True,
+            },
+        ),
+        (
+            "investor_flow",
+            {
+                "market": "kr",
+                "symbols": ["005930", "138040", "180640"],
+                "days": 20,
+                "commit": True,
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio

@@ -105,6 +105,53 @@ async def kasset_watchlist_candles_sync() -> dict[str, object]:
 
 
 @broker.task(
+    task_name="kasset.market_snapshots.kr.sync",
+    schedule=[{"cron": "40 16 * * 1-5", "cron_offset": "Asia/Seoul"}],
+)
+async def kasset_kr_market_snapshots_sync() -> dict[str, object]:
+    """Refresh KR valuation and investor-flow rows for the bounded KAsset universe."""
+
+    from app.tasks.invest_screener_snapshot_tasks import is_market_session_today
+    from app.tasks.investor_flow_snapshot_tasks import build_investor_flow_snapshots
+    from app.tasks.market_valuation_snapshot_tasks import (
+        build_market_valuation_snapshots,
+    )
+
+    if not is_market_session_today("kr"):
+        return {"status": "skipped_holiday", "market": "kr"}
+
+    # Reuse the held → watched → recently recommended priority already used by
+    # KAsset news collection. It is bounded to NEWS_TARGET_LIMIT, avoiding the
+    # legacy all-KRX Naver crawl while covering the symbols shown to app users.
+    symbols = await _news_target_symbols("kr")
+    if not symbols:
+        return {
+            "status": "skipped",
+            "market": "kr",
+            "symbolCount": 0,
+            "reason": "no_active_targets",
+        }
+
+    valuation = await build_market_valuation_snapshots(
+        market="kr",
+        symbols=symbols,
+        commit=True,
+    )
+    investor_flow = await build_investor_flow_snapshots(
+        market="kr",
+        symbols=symbols,
+        days=20,
+        commit=True,
+    )
+    return {
+        "market": "kr",
+        "symbolCount": len(symbols),
+        "valuation": valuation,
+        "investorFlow": investor_flow,
+    }
+
+
+@broker.task(
     task_name="kasset.news.google.kr.sync",
     schedule=[{"cron": "20 */3 * * *", "cron_offset": "Asia/Seoul"}],
 )

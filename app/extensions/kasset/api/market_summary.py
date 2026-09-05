@@ -39,16 +39,19 @@ def _one_symbol(market: str, symbol: str) -> tuple[str, str]:
     return normalized_market, normalized_symbol[0]
 
 
-def _wire_decimal(value: object | None) -> str | None:
+def _decimal_value(value: object | None) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if not number.is_finite():
-        return None
-    return decimal_text(number)
+    return number if number.is_finite() else None
+
+
+def _wire_decimal(value: object | None) -> str | None:
+    number = _decimal_value(value)
+    return decimal_text(number) if number is not None else None
 
 
 def _candle_time(value: str) -> datetime:
@@ -74,7 +77,7 @@ async def get_market_summary(
         market=market_key,
         symbol=normalized_symbol,
         partition=partition,
-        count=3,
+        count=260 if market_key == MarketKey.KR else 3,
     )
     valuation_rows = await MarketValuationSnapshotsRepository(db).latest_for_symbols(
         market=market_key.value,
@@ -153,11 +156,31 @@ async def get_market_summary(
 
     valuation = valuation_rows[0] if valuation_rows else None
     flow = flow_rows[0] if flow_rows else None
+    current_value = _decimal_value(
+        current_daily_row.value if current_daily_row is not None else None
+    )
     trade_value = (
-        _wire_decimal(current_daily_row.value)
-        if current_daily_row is not None and Decimal(str(current_daily_row.value)) > 0
+        decimal_text(current_value)
+        if current_value is not None and current_value > 0
         else None
     )
+    high_52w = _decimal_value(getattr(valuation, "high_52w", None))
+    low_52w = _decimal_value(getattr(valuation, "low_52w", None))
+    if market_key == MarketKey.KR:
+        if high_52w is None:
+            stored_highs = [
+                value
+                for row in daily_rows
+                if (value := _decimal_value(getattr(row, "high", None))) is not None
+            ]
+            high_52w = max(stored_highs, default=None)
+        if low_52w is None:
+            stored_lows = [
+                value
+                for row in daily_rows
+                if (value := _decimal_value(getattr(row, "low", None))) is not None
+            ]
+            low_52w = min(stored_lows, default=None)
     return MarketSummaryResponse(
         market=normalized_market,
         symbol=normalized_symbol,
@@ -172,8 +195,8 @@ async def get_market_summary(
         volume=candle_volume,
         trade_value=trade_value,
         volume_change_rate=volume_change_rate,
-        high_52w=_wire_decimal(valuation.high_52w) if valuation else None,
-        low_52w=_wire_decimal(valuation.low_52w) if valuation else None,
+        high_52w=_wire_decimal(high_52w),
+        low_52w=_wire_decimal(low_52w),
         market_cap=_wire_decimal(valuation.market_cap) if valuation else None,
         per=_wire_decimal(valuation.per) if valuation else None,
         pbr=_wire_decimal(valuation.pbr) if valuation else None,
