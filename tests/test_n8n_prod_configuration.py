@@ -1,7 +1,7 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEPLOY_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "deploy.yml"
+DEPLOY_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ghcr-images.yml"
 DEPLOY_SCRIPT_PATH = REPO_ROOT / "scripts" / "deploy.sh"
 
 

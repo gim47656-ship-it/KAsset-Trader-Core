@@ -1,0 +1,80 @@
+name: Deploy
+
+# main에 push된 commit의 Test 워크플로(ci-required 포함)가 성공하면 곧바로 운영 배포가 실행된다.
+# 승인 단계는 없다 — PR을 main에 merge하는 행위가 배포 승인이다(단일 운영자 저장소).
+# 예외: alembic/versions 변경이 포함되면 deploy.sh가 exit 2로 멈추고, workflow_dispatch에서
+# allow_migration=true 로만 배포할 수 있다(DB 백업 후 migration). 롤백/재배포도 workflow_dispatch(sha).
+# 러너는 운영서버 자체(self-hosted, label kasset-prod)라 SSH 포트를 열지 않는다.
+# `production` environment는 배포 이력·URL 표시용이며 protection rule은 두지 않는다.
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "배포할 commit SHA (비우면 main HEAD)"
+        required: false
+        default: ""
+      allow_migration:
+        description: "alembic/versions 변경이 있어도 배포(DB 백업 후 migration 실행)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy to production
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, kasset-prod]
+    environment:
+      name: production
+      url: https://${{ vars.KASSET_PUBLIC_HOST }}/health
+    timeout-minutes: 30
+    steps:
+      - name: Resolve target SHA
+        id: target
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            sha="${{ github.event.workflow_run.head_sha }}"
+          elif [ -n "${{ inputs.sha }}" ]; then
+            sha="${{ inputs.sha }}"
+          else
+            sha="${{ github.sha }}"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "배포 대상: $sha"
+
+      - name: Market-hours notice
+        shell: bash
+        run: |
+          # KRX 정규장 09:00–15:30 KST, US 정규장 22:30–05:00 KST(서머타임 기준). 배포 중 worker/scheduler 사이클 1회가 빠질 수 있다.
+          h=$(TZ=Asia/Seoul date +%H%M); dow=$(TZ=Asia/Seoul date +%u)
+          if [ "$dow" -le 5 ] && { { [ "$h" -ge 0900 ] && [ "$h" -le 1530 ]; } || [ "$h" -ge 2230 ] || [ "$h" -le 0500 ]; }; then
+            echo "::warning::장중 배포다(KST $h). 재기동 중 자동운용 사이클 1회가 빠질 수 있다."
+          fi
+
+      - name: Checkout target (deploy script source)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Deploy
+        shell: bash
+        env:
+          ALLOW_MIGRATION: ${{ inputs.allow_migration == true && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          chmod +x deploy/kasset/deploy.sh
+          deploy/kasset/deploy.sh "${{ steps.target.outputs.sha }}"
