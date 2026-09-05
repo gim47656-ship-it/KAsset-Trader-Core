@@ -21,3 +21,9 @@ DAILY_CANDLE_BACKFILL_BARS_CRYPTO: int = 400
 DAILY_CANDLE_SYNC_BARS_KR: int = 10
 DAILY_CANDLE_SYNC_BARS_US: int = 10
 DAILY_CANDLE_SYNC_BARS_CRYPTO: int = 10
+
+# US 벤치마크는 유니버스 동기화와 분리된 sync_benchmark 경로가 단독으로 쓴다.
+# 유니버스 경로가 같은 심볼을 다른 거래소 파티션(AMEX)으로 쓰면 partition=None
+# 조회에서 같은 날짜가 두 번 나와 60세션 벤치마크 계산이 fail-closed된다.
+US_BENCHMARK_SYMBOL: str = "SPY"
+US_BENCHMARK_PARTITION: str = "NASD"

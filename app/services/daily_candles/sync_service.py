@@ -16,6 +16,10 @@ from typing import Any
 
 import pandas as pd
 
+from app.services.daily_candles.constants import (
+    US_BENCHMARK_PARTITION,
+    US_BENCHMARK_SYMBOL,
+)
 from app.services.daily_candles.converters import (
     aggregate_kr_regular_daily_row,
     frame_to_rows,
@@ -35,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # 관심종목 호환 경로는 거래소가 비어 있으면 NASD를 사용한다. 반면 대량 백필은
 # DB에 명시된 유효 거래소만 받아 잘못된 파티션으로 쓰지 않는다.
-_DEFAULT_US_PARTITION = "NASD"
+_DEFAULT_US_PARTITION = US_BENCHMARK_PARTITION
 _US_PARTITION_ALIASES = {
     "US": "NASD",
     "NASDAQ": "NASD",
@@ -346,13 +350,13 @@ class DailyCandleSyncService:
         """후보 유니버스와 분리된 시장별 벤치마크를 동기화한다."""
         normalized_symbol = str(symbol or "").strip().upper()
         if market == MarketKey.US:
-            if normalized_symbol and normalized_symbol != "SPY":
+            if normalized_symbol and normalized_symbol != US_BENCHMARK_SYMBOL:
                 raise ValueError(f"지원하지 않는 US 벤치마크입니다: {symbol!r}")
             return await self.sync_one(
                 target=SyncTarget(
                     market=MarketKey.US,
-                    symbol="SPY",
-                    partition=_DEFAULT_US_PARTITION,
+                    symbol=US_BENCHMARK_SYMBOL,
+                    partition=US_BENCHMARK_PARTITION,
                 ),
                 horizon_bars=horizon_bars,
             )
@@ -972,6 +976,10 @@ class DailyCandleSyncService:
                 )
             )
             for row in result:
+                # SPY는 sync_benchmark가 US_BENCHMARK_PARTITION으로 단독 기록한다.
+                # 유니버스 경로(AMEX)와 중복되면 벤치마크 조회가 fail-closed된다.
+                if row.symbol == US_BENCHMARK_SYMBOL:
+                    continue
                 targets[row.symbol] = row.exchange
             result = await session.execute(
                 text(
@@ -983,6 +991,8 @@ class DailyCandleSyncService:
                 )
             )
             for row in result:
+                if row.symbol == US_BENCHMARK_SYMBOL:
+                    continue
                 targets.setdefault(row.symbol, _us_partition(row.exchange))
             result = await session.execute(
                 text(

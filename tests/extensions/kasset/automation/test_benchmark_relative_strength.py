@@ -134,7 +134,7 @@ async def test_runtime_loader_fetches_kospi_kosdaq_and_spy(
     assert fetch_recent_batch.await_args_list[1].kwargs == {
         "market": MarketKey.US,
         "symbols": ["SPY"],
-        "partition": None,
+        "partition": "NASD",
         "count": 61,
     }
 
