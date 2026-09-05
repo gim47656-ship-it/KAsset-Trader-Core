@@ -15,7 +15,7 @@ bar이면 개별 trigger가 아니라 판정 전체가 막힌다.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
@@ -24,6 +24,7 @@ from typing import Final, Literal
 from app.extensions.kasset.automation.contracts import Action, PriceBar
 
 INTRADAY_TRIGGER_SCHEMA_VERSION: Final = "kasset.intraday-triggers.v1"
+NO_CHASE_SCHEMA_VERSION: Final = "kasset.no-chase.v1"
 
 #: Trigger 이름. 감사 원장과 정책이 같은 문자열을 쓴다.
 OPENING_RANGE_BREAKOUT: Final = "opening_range_breakout"
@@ -47,12 +48,14 @@ class TriggerStatus(StrEnum):
 
     ACTIVE = "active"
     INACTIVE = "inactive"
+    BLOCKED = "blocked"
     UNAVAILABLE = "unavailable"
 
 
 class TriggerDecisionStatus(StrEnum):
     TRIGGERED = "triggered"
     NOT_TRIGGERED = "not_triggered"
+    BLOCKED = "blocked"
     UNAVAILABLE = "unavailable"
 
 
@@ -68,6 +71,7 @@ class TriggerResult:
     as_of: datetime | None
     detail: str
     unavailable_reason: str | None = None
+    blocked_reason: str | None = None
 
     @property
     def active(self) -> bool:
@@ -87,6 +91,7 @@ class TriggerResult:
             "asOf": _timestamp_text(self.as_of),
             "detail": self.detail,
             "unavailableReason": self.unavailable_reason,
+            "blockedReason": self.blocked_reason,
         }
 
 
@@ -126,6 +131,59 @@ def same_time_baseline_median(
     if len(ordered) % 2:
         return ordered[midpoint]
     return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal("2")
+
+
+@dataclass(frozen=True, slots=True)
+class IntradayTriggerConfig:
+    """장중 추격매수 방지 임계값."""
+
+    pivot_buffer_ratio: Decimal = Decimal("0.002")
+    max_extension_ratio: Decimal = Decimal("0.02")
+    gap_up_atr_multiple: Decimal = Decimal("1.0")
+    gap_up_min_ratio: Decimal = Decimal("0.03")
+    decision_ttl: timedelta = timedelta(minutes=30)
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "pivot_buffer_ratio",
+            "max_extension_ratio",
+            "gap_up_atr_multiple",
+            "gap_up_min_ratio",
+        ):
+            if getattr(self, field_name) < _ZERO:
+                raise ValueError(f"{field_name} must not be negative")
+        if self.max_extension_ratio < self.pivot_buffer_ratio:
+            raise ValueError("max_extension_ratio must be at least pivot_buffer_ratio")
+        if self.decision_ttl <= timedelta(0):
+            raise ValueError("decision_ttl must be positive")
+
+
+DEFAULT_INTRADAY_TRIGGER_CONFIG = IntradayTriggerConfig()
+
+
+@dataclass(frozen=True, slots=True)
+class _NoChaseEvidence:
+    pivot_buffer_ratio: Decimal
+    max_extension_ratio: Decimal
+    session_open_price: Decimal | None
+    previous_close: Decimal | None
+    atr_14: Decimal | None
+    gap_up_blocked: bool
+    gap_up_unavailable: str | None
+
+    def as_evidence(self) -> dict[str, object]:
+        return {
+            "schemaVersion": NO_CHASE_SCHEMA_VERSION,
+            "pivotBuffer": _decimal_text(self.pivot_buffer_ratio),
+            "maxExtension": _decimal_text(self.max_extension_ratio),
+            "gapUp": {
+                "open": _optional_decimal_text(self.session_open_price),
+                "prevClose": _optional_decimal_text(self.previous_close),
+                "atr14": _optional_decimal_text(self.atr_14),
+                "blocked": self.gap_up_blocked,
+                "unavailable": self.gap_up_unavailable,
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,12 +237,28 @@ class IntradayTriggerDecision:
     triggers: tuple[TriggerResult, ...]
     policy: IntradayTriggerPolicy
     evaluated_at: datetime
+    valid_until: datetime
     data_as_of: datetime | None
     blocked_reason: str | None
+    no_chase: _NoChaseEvidence
 
     @property
     def triggered(self) -> bool:
         return self.status is TriggerDecisionStatus.TRIGGERED
+
+    def is_expired(self, now: datetime) -> bool:
+        return _aware_utc(now, "now") >= self.valid_until
+
+    def expire(self, now: datetime) -> IntradayTriggerDecision:
+        """소비 시점에 TTL이 지난 활성 판정을 비활성 판정으로 바꾼다."""
+
+        if not self.triggered or not self.is_expired(now):
+            return self
+        return replace(
+            self,
+            status=TriggerDecisionStatus.NOT_TRIGGERED,
+            blocked_reason="expired",
+        )
 
     def as_evidence(self) -> dict[str, object]:
         return {
@@ -197,10 +271,12 @@ class IntradayTriggerDecision:
             "direction": self.direction.value,
             "status": self.status.value,
             "evaluatedAt": _timestamp_text(self.evaluated_at),
+            "validUntil": _timestamp_text(self.valid_until),
             "dataAsOf": _timestamp_text(self.data_as_of),
             "blockedReason": self.blocked_reason,
             "policy": self.policy.as_evidence(),
             "triggers": [item.as_evidence() for item in self.triggers],
+            "noChase": self.no_chase.as_evidence(),
         }
 
     def compact_reason(self) -> str:
@@ -218,6 +294,7 @@ def opening_range_breakout(
     opening_range: timedelta,
     bar_interval: timedelta,
     source: str,
+    config: IntradayTriggerConfig = DEFAULT_INTRADAY_TRIGGER_CONFIG,
 ) -> TriggerResult:
     """개장 구간 고/저를 완료 bar 종가가 방향대로 깼는가."""
 
@@ -260,23 +337,42 @@ def opening_range_breakout(
     range_high = max(bar.high for bar in opening)
     range_low = min(bar.low for bar in opening)
     latest = after[-1]
-    threshold = range_high if direction is Action.BUY else range_low
+    basis = range_high if direction is Action.BUY else range_low
+    if direction is Action.BUY:
+        pivot_threshold = basis * (Decimal("1") + config.pivot_buffer_ratio)
+        extension_threshold = basis * (Decimal("1") + config.max_extension_ratio)
+        too_extended = latest.close > extension_threshold
+    else:
+        pivot_threshold = basis
+        extension_threshold = None
+        too_extended = False
     broke = (
-        latest.close > range_high
+        latest.close >= pivot_threshold
         if direction is Action.BUY
-        else latest.close < range_low
+        else latest.close <= pivot_threshold
     )
     return TriggerResult(
         code=OPENING_RANGE_BREAKOUT,
-        status=TriggerStatus.ACTIVE if broke else TriggerStatus.INACTIVE,
+        status=(
+            TriggerStatus.BLOCKED
+            if too_extended
+            else (TriggerStatus.ACTIVE if broke else TriggerStatus.INACTIVE)
+        ),
         value=_decimal_text(latest.close),
-        threshold=_decimal_text(threshold),
+        threshold=_decimal_text(pivot_threshold),
         source=source,
         as_of=_aware_utc(latest.timestamp, "bar.timestamp") + bar_interval,
         detail=(
             f"opening range high={_decimal_text(range_high)} "
-            f"low={_decimal_text(range_low)} over {len(opening)} completed bars"
+            f"low={_decimal_text(range_low)}"
+            + (
+                f" extension={_decimal_text(extension_threshold)}"
+                if extension_threshold is not None
+                else ""
+            )
+            + f" over {len(opening)} completed bars"
         ),
+        blocked_reason="too_extended" if too_extended else None,
     )
 
 
@@ -309,6 +405,7 @@ def session_vwap_reclaim(
     direction: Action,
     bar_interval: timedelta,
     source: str,
+    config: IntradayTriggerConfig = DEFAULT_INTRADAY_TRIGGER_CONFIG,
 ) -> TriggerResult:
     """세션 VWAP을 방향대로 되찾았거나 그 위/아래로 뻗었는가.
 
@@ -329,27 +426,43 @@ def session_vwap_reclaim(
     latest, previous = ordered[-1], ordered[-2]
     latest_vwap, previous_vwap = curve[-1], curve[-2]
     if direction is Action.BUY:
-        beyond = latest.close > latest_vwap
         reclaimed = previous.close <= previous_vwap
         extreme = latest.close >= max(bar.close for bar in ordered)
+        pivot_threshold = latest_vwap * (Decimal("1") + config.pivot_buffer_ratio)
+        extension_threshold = latest_vwap * (Decimal("1") + config.max_extension_ratio)
+        beyond = latest.close >= pivot_threshold
+        too_extended = latest.close > extension_threshold
     else:
-        beyond = latest.close < latest_vwap
         reclaimed = previous.close >= previous_vwap
         extreme = latest.close <= min(bar.close for bar in ordered)
+        pivot_threshold = latest_vwap
+        extension_threshold = None
+        beyond = latest.close <= pivot_threshold
+        too_extended = False
     pattern = "reclaim" if reclaimed else ("breakout" if extreme else "none")
     active = beyond and pattern != "none"
     return TriggerResult(
         code=SESSION_VWAP_RECLAIM,
-        status=TriggerStatus.ACTIVE if active else TriggerStatus.INACTIVE,
+        status=(
+            TriggerStatus.BLOCKED
+            if too_extended
+            else (TriggerStatus.ACTIVE if active else TriggerStatus.INACTIVE)
+        ),
         value=_decimal_text(latest.close),
-        threshold=_decimal_text(latest_vwap),
+        threshold=_decimal_text(pivot_threshold),
         source=source,
         as_of=_aware_utc(latest.timestamp, "bar.timestamp") + bar_interval,
         detail=(
             f"pattern={pattern} previousClose={_decimal_text(previous.close)} "
-            f"previousVwap={_decimal_text(previous_vwap)} over "
-            f"{len(ordered)} completed bars"
+            f"previousVwap={_decimal_text(previous_vwap)}"
+            + (
+                f" extension={_decimal_text(extension_threshold)}"
+                if extension_threshold is not None
+                else ""
+            )
+            + f" over {len(ordered)} completed bars"
         ),
+        blocked_reason="too_extended" if too_extended else None,
     )
 
 
@@ -572,42 +685,68 @@ def decide_intraday_triggers(
     direction: Action,
     evaluated_at: datetime,
     policy: IntradayTriggerPolicy = DEFAULT_INTRADAY_TRIGGER_POLICY,
+    config: IntradayTriggerConfig = DEFAULT_INTRADAY_TRIGGER_CONFIG,
+    session_open_price: Decimal | None = None,
+    previous_close: Decimal | None = None,
+    atr_14: Decimal | None = None,
     blocked_reason: str | None = None,
 ) -> IntradayTriggerDecision:
-    """명시적 정책으로 진입 방아쇠를 판정한다."""
+    """명시적 정책과 추격매수 금지 조건으로 진입 방아쇠를 판정한다.
+
+    ``previous_close``는 현재 세션 거래일보다 이전인 마지막 완료 일봉의
+    종가여야 한다. 호출자가 그 일봉을 확인할 수 없으면 ``None``을 넘긴다.
+    """
 
     moment = _aware_utc(evaluated_at, "evaluated_at")
+    valid_until = moment + config.decision_ttl
     ordered = tuple(triggers)
     by_code = {item.code: item for item in ordered}
     data_as_of = max(
         (item.as_of for item in ordered if item.as_of is not None),
         default=None,
     )
-    if blocked_reason is not None:
+    no_chase = _no_chase_evidence(
+        direction=direction,
+        config=config,
+        session_open_price=session_open_price,
+        previous_close=previous_close,
+        atr_14=atr_14,
+    )
+
+    def decision(
+        status: TriggerDecisionStatus, reason: str | None
+    ) -> IntradayTriggerDecision:
         return IntradayTriggerDecision(
             schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
             symbol=symbol,
             market=market,
             direction=direction,
-            status=TriggerDecisionStatus.UNAVAILABLE,
+            status=status,
             triggers=ordered,
             policy=policy,
             evaluated_at=moment,
+            valid_until=valid_until,
             data_as_of=data_as_of,
-            blocked_reason=blocked_reason,
+            blocked_reason=reason,
+            no_chase=no_chase,
         )
+
+    if blocked_reason is not None:
+        return decision(TriggerDecisionStatus.UNAVAILABLE, blocked_reason)
     if direction not in {Action.BUY, Action.SELL}:
-        return IntradayTriggerDecision(
-            schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
-            symbol=symbol,
-            market=market,
-            direction=direction,
-            status=TriggerDecisionStatus.UNAVAILABLE,
-            triggers=ordered,
-            policy=policy,
-            evaluated_at=moment,
-            data_as_of=data_as_of,
-            blocked_reason="no_directional_setup",
+        return decision(TriggerDecisionStatus.UNAVAILABLE, "no_directional_setup")
+
+    no_chase_blocks = [
+        item.blocked_reason
+        for item in ordered
+        if item.status is TriggerStatus.BLOCKED and item.blocked_reason is not None
+    ]
+    if no_chase.gap_up_blocked:
+        no_chase_blocks.append("gap_up_no_chase")
+    if no_chase_blocks:
+        return decision(
+            TriggerDecisionStatus.BLOCKED,
+            ",".join(dict.fromkeys(no_chase_blocks)),
         )
 
     failures: list[str] = []
@@ -633,27 +772,15 @@ def decide_intraday_triggers(
             failures.append(f"{code}_disagrees")
 
     if not failures:
-        status = TriggerDecisionStatus.TRIGGERED
-        reason = None
-    else:
-        unavailable_failure = any(item.endswith("_unavailable") for item in failures)
-        status = (
+        return decision(TriggerDecisionStatus.TRIGGERED, None)
+    unavailable_failure = any(item.endswith("_unavailable") for item in failures)
+    return decision(
+        (
             TriggerDecisionStatus.UNAVAILABLE
             if unavailable_failure
             else TriggerDecisionStatus.NOT_TRIGGERED
-        )
-        reason = ",".join(failures)
-    return IntradayTriggerDecision(
-        schema_version=INTRADAY_TRIGGER_SCHEMA_VERSION,
-        symbol=symbol,
-        market=market,
-        direction=direction,
-        status=status,
-        triggers=ordered,
-        policy=policy,
-        evaluated_at=moment,
-        data_as_of=data_as_of,
-        blocked_reason=reason,
+        ),
+        ",".join(failures),
     )
 
 
@@ -690,6 +817,47 @@ def _ordered(bars: Sequence[PriceBar]) -> tuple[PriceBar, ...]:
     )
 
 
+def _no_chase_evidence(
+    *,
+    direction: Action,
+    config: IntradayTriggerConfig,
+    session_open_price: Decimal | None,
+    previous_close: Decimal | None,
+    atr_14: Decimal | None,
+) -> _NoChaseEvidence:
+    unavailable: str | None = None
+    blocked = False
+    if direction is Action.BUY:
+        missing: list[str] = []
+        if session_open_price is None:
+            missing.append("session_open_unavailable")
+        if previous_close is None or previous_close <= _ZERO:
+            missing.append("previous_close_unavailable")
+        if atr_14 is None:
+            missing.append("atr14_unavailable")
+        if missing:
+            unavailable = ",".join(missing)
+        else:
+            assert session_open_price is not None
+            assert previous_close is not None
+            assert atr_14 is not None
+            gap = session_open_price - previous_close
+            threshold = max(
+                config.gap_up_atr_multiple * atr_14,
+                config.gap_up_min_ratio * previous_close,
+            )
+            blocked = gap >= threshold
+    return _NoChaseEvidence(
+        pivot_buffer_ratio=config.pivot_buffer_ratio,
+        max_extension_ratio=config.max_extension_ratio,
+        session_open_price=session_open_price,
+        previous_close=previous_close,
+        atr_14=atr_14,
+        gap_up_blocked=blocked,
+        gap_up_unavailable=unavailable,
+    )
+
+
 def _unavailable(
     code: str,
     *,
@@ -719,6 +887,10 @@ def _decimal_text(value: Decimal) -> str:
     return format(value.quantize(_QUANTUM, rounding=ROUND_HALF_EVEN), "f")
 
 
+def _optional_decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else _decimal_text(value)
+
+
 def _timestamp_text(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -727,9 +899,12 @@ def _timestamp_text(value: datetime | None) -> str | None:
 
 __all__ = [
     "DEFAULT_INTRADAY_TRIGGER_POLICY",
+    "DEFAULT_INTRADAY_TRIGGER_CONFIG",
     "INDEX_INTRADAY_UNAVAILABLE",
     "INTRADAY_RELATIVE_STRENGTH",
     "INTRADAY_TRIGGER_SCHEMA_VERSION",
+    "IntradayTriggerConfig",
+    "NO_CHASE_SCHEMA_VERSION",
     "IntradayTriggerDecision",
     "IntradayTriggerPolicy",
     "OPENING_RANGE_BREAKOUT",

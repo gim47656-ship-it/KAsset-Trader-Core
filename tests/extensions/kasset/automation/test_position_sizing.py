@@ -167,6 +167,25 @@ def test_market_lot_rounding_always_rounds_down(
     assert result.quantity <= result.unrounded_quantity
 
 
+def test_account_state_multiplier_scales_final_buy_before_lot_rounding() -> None:
+    result = calculate_position_size(
+        _buy_input(
+            operating_budget=Decimal("3999"),
+            account_state_multiplier=Decimal("0.75"),
+        )
+    )
+
+    assert result.unrounded_quantity == Decimal("2.99925")
+    assert result.quantity == Decimal("2")
+    assert result.account_state_multiplier == Decimal("0.75")
+    assert result.as_evidence()["accountStateMultiplier"] == "0.75"
+
+
+def test_account_state_multiplier_above_one_is_rejected() -> None:
+    with pytest.raises(ValueError, match="account_state_multiplier"):
+        _buy_input(account_state_multiplier=Decimal("1.01"))
+
+
 def test_sell_needs_no_atr_and_is_capped_to_actual_paper_holding() -> None:
     result = calculate_position_size(
         PositionSizingInput(
@@ -177,6 +196,7 @@ def test_sell_needs_no_atr_and_is_capped_to_actual_paper_holding() -> None:
             evaluated_at=_NOW,
             current_holding_quantity=Decimal("2.34567"),
             strategy_quantity=Decimal("10"),
+            account_state_multiplier=Decimal("0.75"),
         )
     )
 

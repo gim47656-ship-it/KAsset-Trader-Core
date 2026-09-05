@@ -137,6 +137,19 @@ class PositionSizingInput:
     strategy_quantity: Decimal | None = None
     average_volume: Decimal | None = None
     average_turnover: Decimal | None = None
+    account_state_multiplier: Decimal = _ONE
+
+    def __post_init__(self) -> None:
+        multiplier = self.account_state_multiplier
+        if (
+            not isinstance(multiplier, Decimal)
+            or not multiplier.is_finite()
+            or multiplier < _ZERO
+            or multiplier > _ONE
+        ):
+            raise ValueError(
+                "account_state_multiplier must be a Decimal between 0 and 1"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +189,7 @@ class PositionSizingResult:
     entry_price: Decimal | None = None
     strategy_stop: Decimal | None = None
     strategy_atr: Decimal | None = None
+    account_state_multiplier: Decimal = _ONE
 
     @property
     def actionable(self) -> bool:
@@ -202,6 +216,7 @@ class PositionSizingResult:
             "riskPerTradeRate": str(self.risk_per_trade_rate),
             "regime": self.regime,
             "regimeMultiplier": str(self.regime_multiplier),
+            "accountStateMultiplier": str(self.account_state_multiplier),
             "caps": [cap.as_evidence() for cap in self.caps],
             "limitingCaps": [cap.value for cap in self.limiting_caps],
             "zeroReasons": [reason.as_evidence() for reason in self.zero_reasons],
@@ -243,6 +258,7 @@ def calculate_position_size(
                 if normalized_regime is not None
                 else _ZERO
             ),
+            account_state_multiplier=request.account_state_multiplier,
             entry_price=(
                 request.entry_price
                 if isinstance(request.entry_price, Decimal)
@@ -531,11 +547,11 @@ def _calculate_buy(
     assert stop is not None
     regime = _normalize_regime(request.regime)
     assert regime is not None
-    multiplier = config.regime_multiplier(regime)
+    regime_multiplier = config.regime_multiplier(regime)
     risk_per_unit = entry - stop
     try:
         risk_budget = (
-            request.operating_budget * request.risk_per_trade_rate * multiplier
+            request.operating_budget * request.risk_per_trade_rate * regime_multiplier
         )
         remaining_symbol_notional = max(
             _ZERO,
@@ -574,7 +590,8 @@ def _calculate_buy(
                 ),
             )
         )
-        unrounded = min(cap.quantity for cap in caps)
+        base_unrounded = min(cap.quantity for cap in caps)
+        unrounded = base_unrounded * request.account_state_multiplier
     except DecimalException:
         return _zero_result(
             action="BUY",
@@ -597,7 +614,8 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             unrounded=unrounded,
             code=PositionSizingZeroCode.ZERO_RISK_BUDGET,
@@ -613,7 +631,8 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             unrounded=unrounded,
             code=PositionSizingZeroCode.ZERO_BUDGET,
@@ -629,7 +648,8 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             unrounded=unrounded,
             code=PositionSizingZeroCode.ZERO_SYMBOL_ALLOCATION,
@@ -645,7 +665,8 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             unrounded=_ZERO,
             code=PositionSizingZeroCode.NONFINITE_QUANTITY,
@@ -662,14 +683,15 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             unrounded=unrounded,
             code=PositionSizingZeroCode.NONFINITE_QUANTITY,
             field="quantity",
             detail="market lot rounding did not produce a finite quantity",
         )
-    limiting = tuple(cap.code for cap in caps if cap.quantity == unrounded)
+    limiting = tuple(cap.code for cap in caps if cap.quantity == base_unrounded)
     if quantity <= 0:
         return PositionSizingResult(
             action="BUY",
@@ -681,7 +703,8 @@ def _calculate_buy(
             risk_per_unit=risk_per_unit,
             risk_per_trade_rate=request.risk_per_trade_rate,
             regime=regime.name,
-            regime_multiplier=multiplier,
+            regime_multiplier=regime_multiplier,
+            account_state_multiplier=request.account_state_multiplier,
             caps=tuple(caps),
             limiting_caps=limiting,
             zero_reasons=(
@@ -705,7 +728,8 @@ def _calculate_buy(
         risk_per_unit=risk_per_unit,
         risk_per_trade_rate=request.risk_per_trade_rate,
         regime=regime.name,
-        regime_multiplier=multiplier,
+        regime_multiplier=regime_multiplier,
+        account_state_multiplier=request.account_state_multiplier,
         caps=tuple(caps),
         limiting_caps=limiting,
         zero_reasons=(),
@@ -800,6 +824,7 @@ def _zero_with_calculation(
     code: PositionSizingZeroCode,
     field: str,
     detail: str,
+    account_state_multiplier: Decimal = _ONE,
 ) -> PositionSizingResult:
     return PositionSizingResult(
         action=action,
@@ -812,6 +837,7 @@ def _zero_with_calculation(
         risk_per_trade_rate=risk_per_trade_rate,
         regime=regime,
         regime_multiplier=regime_multiplier,
+        account_state_multiplier=account_state_multiplier,
         caps=caps,
         limiting_caps=tuple(cap.code for cap in caps if cap.quantity == unrounded),
         zero_reasons=(_reason(code, field, detail),),
@@ -830,6 +856,7 @@ def _zero_result(
     entry_price: Decimal | None = None,
     strategy_stop: Decimal | None = None,
     strategy_atr: Decimal | None = None,
+    account_state_multiplier: Decimal = _ONE,
 ) -> PositionSizingResult:
     return PositionSizingResult(
         action=action,
@@ -842,6 +869,7 @@ def _zero_result(
         risk_per_trade_rate=risk_per_trade_rate,
         regime=regime,
         regime_multiplier=regime_multiplier,
+        account_state_multiplier=account_state_multiplier,
         caps=(),
         limiting_caps=(),
         zero_reasons=reasons,

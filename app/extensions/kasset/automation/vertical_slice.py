@@ -27,6 +27,11 @@ from app.extensions.kasset.ai.runtime_config import (
     build_ai_route_catalog,
 )
 from app.extensions.kasset.api.watchlist import watchlist_service
+from app.extensions.kasset.automation.account_state_gate import (
+    AccountStateEvaluation,
+    AccountStateGate,
+    evaluate_account_state_gate,
+)
 from app.extensions.kasset.automation.ai_shadow import (
     AiShadowObservation,
     build_ai_shadow_observation,
@@ -98,6 +103,7 @@ from app.extensions.kasset.automation.intraday_triggers import (
     same_time_relative_volume,
     session_vwap_reclaim,
 )
+from app.extensions.kasset.automation.loss_streak_gate import loss_streak_gate
 from app.extensions.kasset.automation.market_session import (
     RegularSession,
     completed_bar_cutoff,
@@ -212,6 +218,7 @@ _SAME_TIME_RVOL_SHADOW_TIMEOUT_SECONDS = 25.0
 _SAME_TIME_RVOL_STATEMENT_TIMEOUT_SQL = text("SET LOCAL statement_timeout = '20s'")
 #: KRX 분봉 bucket 시작 시각을 DB의 KST ``time`` 경계와 맞춘다.
 _KST = ZoneInfo("Asia/Seoul")
+_ET = ZoneInfo("America/New_York")
 #: 개장 구간 돌파(ORB)의 개장 구간 길이.
 _OPENING_RANGE = timedelta(minutes=15)
 #: 장중 지수 대비 상대강도 임계값.
@@ -313,6 +320,7 @@ class _PreAiSizing:
 
     reference_price: Decimal
     plan: PortfolioPlan
+    account_state: AccountStateEvaluation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +492,7 @@ class AIRecommendationVerticalSlice:
         # 추천이 같은 추적 id를 공유한다.
         self._cycle_trace_id = cycle_trace_id or new_cycle_trace_id()
         self._policy = AITradingPolicyService()
+        self._account_state_gate = AccountStateGate()
         self._live_candidates_cache = (
             live_candidates_cache if live_candidates_cache is not None else {}
         )
@@ -574,6 +583,15 @@ class AIRecommendationVerticalSlice:
             allowed_markets = normalize_allowed_markets(
                 frozenset(market.upper() for market in configured_markets)
             )
+        account_state_snapshot = await self._account_state_gate.evaluate_owner(
+            self._db,
+            owner_user_id,
+            markets=tuple(sorted(allowed_markets)),
+            daily_target_rate_pct=snapshot.limits.daily_target_rate_pct,
+            max_daily_loss_rate_pct=snapshot.limits.max_daily_loss_rate_pct,
+            now=self._now,
+        )
+        await self._db.commit()
         candidates = await self._load_candidates(
             owner_user_id,
             currency=snapshot.limits.currency,
@@ -686,11 +704,13 @@ class AIRecommendationVerticalSlice:
         sizing_by_key: dict[CandidateKey, _PreAiSizing] = {}
         pre_ai_exclusions: Counter[str] = Counter()
         pre_ai_exclusion_evidence: list[dict[str, object]] = []
+        loss_streak_evidence: list[dict[str, object]] = []
         admitted: list[AdmittedCandidate] = []
         review_outcomes: list[AIReviewOutcome] = []
         ai_failures = 0
         review_rejections: Counter[str] = Counter()
         trigger_evidence: list[dict[str, object]] = []
+        no_chase_evidence: list[dict[str, object]] = []
         trigger_statuses: Counter[str] = Counter()
         # 어느 관문이 몇 건을 죽였는지 운영 로그로 분리하기 위한 funnel 계측.
         trigger_failures: Counter[str] = Counter()
@@ -739,13 +759,40 @@ class AIRecommendationVerticalSlice:
             if setup.direction not in {Action.BUY, Action.SELL}:
                 continue
             actionable.append(item)
+            daily_bars = bars_by_candidate.get(candidate.ranker_key, ())
+            intraday = intraday_by_key.get(candidate.ranker_key)
+            previous_close = None
+            if isinstance(intraday, CompletedIntradayBars):
+                market_timezone = _KST if candidate.market == "KRX" else _ET
+                previous_bar = next(
+                    (
+                        bar
+                        for bar in reversed(daily_bars)
+                        if bar.timestamp.astimezone(market_timezone).date()
+                        < intraday.session.session_date
+                    ),
+                    None,
+                )
+                previous_close = (
+                    previous_bar.close if previous_bar is not None else None
+                )
             trigger_decision = self._decide_triggers(
                 item,
-                intraday=intraday_by_key.get(candidate.ranker_key),
+                intraday=intraday,
                 index_bars=index_bars_by_symbol.get(_benchmark_symbol(ranked_result)),
+                previous_close=previous_close,
             )
+            trigger_decision = trigger_decision.expire(self._now)
             trigger_statuses[trigger_decision.status.value] += 1
-            trigger_evidence.append(trigger_decision.as_evidence())
+            trigger_payload = trigger_decision.as_evidence()
+            trigger_evidence.append(trigger_payload)
+            no_chase_evidence.append(
+                {
+                    "market": candidate.market,
+                    "symbol": candidate.symbol,
+                    **cast(dict[str, object], trigger_payload["noChase"]),
+                }
+            )
             shadow_intraday = intraday_by_key.get(candidate.ranker_key)
             if candidate.market == "KRX" and isinstance(
                 shadow_intraday, CompletedIntradayBars
@@ -763,11 +810,59 @@ class AIRecommendationVerticalSlice:
                     _trigger_exclusion_evidence(item, trigger_decision)
                 )
                 continue
+            loss_streak = await loss_streak_gate.evaluate(
+                self._db,
+                owner_user_id,
+                market=candidate.market,
+                symbol=candidate.symbol,
+                side=item.ensemble.action.value,
+                now=self._now,
+            )
+            loss_streak_evidence.append(
+                {
+                    "market": candidate.market,
+                    "symbol": candidate.symbol,
+                    **loss_streak.evidence,
+                }
+            )
+            if not loss_streak.passed:
+                pre_ai_exclusions[loss_streak.reason or "loss_streak"] += 1
+                pre_ai_exclusion_evidence.append(
+                    {
+                        "source": "loss_streak_gate",
+                        "code": loss_streak.code,
+                        "reason": loss_streak.reason,
+                        "detail": loss_streak.detail,
+                        "lossStreak": loss_streak.evidence,
+                    }
+                )
+                continue
+            account_state = account_state_snapshot.for_market(candidate.market)
+            account_state_gate = evaluate_account_state_gate(
+                item.ensemble.action.value,
+                account_state,
+            )
+            if not account_state_gate.passed:
+                reason = account_state_gate.reason or "account_state"
+                pre_ai_exclusions[reason] += 1
+                pre_ai_exclusion_evidence.append(
+                    {
+                        "source": "account_state_gate",
+                        "symbol": candidate.symbol,
+                        "market": candidate.ranker_market,
+                        "code": account_state_gate.code,
+                        "reason": reason,
+                        "detail": account_state_gate.detail,
+                        "accountState": account_state_gate.evidence,
+                    }
+                )
+                continue
             sizing = await self._pre_ai_sizing(
                 owner_user_id,
                 item,
                 candidate_regime,
                 snapshot=snapshot,
+                account_state=account_state,
             )
             if isinstance(sizing, _PreAiExclusion):
                 pre_ai_exclusions[sizing.reason] += 1
@@ -917,7 +1012,10 @@ class AIRecommendationVerticalSlice:
             "intradayTriggerStatuses": dict(sorted(trigger_statuses.items())),
             "intradayTriggerFailures": dict(sorted(trigger_failures.items())),
             "sameTimeRvolShadow": same_time_rvol_shadow,
+            "accountState": account_state_snapshot.as_evidence(),
             "intradayTriggers": trigger_evidence,
+            "noChase": no_chase_evidence,
+            "lossStreak": loss_streak_evidence,
             "decisionCohortPolicy": {
                 "liveCohort": LIVE_COHORT,
                 "cohorts": [
@@ -1548,6 +1646,7 @@ class AIRecommendationVerticalSlice:
         *,
         intraday: CompletedIntradayBars | IntradayBarsUnavailable | None,
         index_bars: CompletedIntradayBars | IntradayBarsUnavailable | None,
+        previous_close: Decimal | None = None,
     ) -> IntradayTriggerDecision:
         """완료 장중 bar로 명시적 trigger 정책을 판정한다."""
 
@@ -1628,6 +1727,15 @@ class AIRecommendationVerticalSlice:
             direction=direction,
             evaluated_at=self._now,
             policy=self._trigger_policy,
+            session_open_price=(
+                intraday.bars[0].open
+                if intraday.bars[0].timestamp == intraday.session.opens_at
+                else None
+            ),
+            previous_close=previous_close,
+            atr_14=(
+                item.factor_ranking.atr_14 if item.factor_ranking is not None else None
+            ),
         )
 
     async def _pre_ai_sizing(
@@ -1637,6 +1745,7 @@ class AIRecommendationVerticalSlice:
         regime: RegimeAssessment,
         *,
         snapshot: AITradingSnapshot,
+        account_state: AccountStateEvaluation | None = None,
     ) -> _PreAiSizing | _PreAiExclusion:
         """Size the candidate before AI so unaffordable rows cost no AI slot.
 
@@ -1684,6 +1793,9 @@ class AIRecommendationVerticalSlice:
                 candidate.turnover,
                 ranking.average_turnover_20 if ranking is not None else None,
             ),
+            account_state_multiplier=(
+                account_state.multiplier if account_state is not None else Decimal("1")
+            ),
         )
         quantity = plan.target_quantity
         sizing = plan.position_sizing
@@ -1697,7 +1809,11 @@ class AIRecommendationVerticalSlice:
                 reason=reason,
                 evidence=_presizing_exclusion_evidence(item, reason=reason, plan=plan),
             )
-        return _PreAiSizing(reference_price=reference_price, plan=plan)
+        return _PreAiSizing(
+            reference_price=reference_price,
+            plan=plan,
+            account_state=account_state,
+        )
 
     async def _review_candidate(
         self,
@@ -1853,6 +1969,7 @@ class AIRecommendationVerticalSlice:
             reference_price=sizing.reference_price,
             ai_confidence=item.decision.confidence,
             now=self._now,
+            account_state=sizing.account_state,
         )
         persistence = AIRecommendationService(
             self._db,
@@ -2127,6 +2244,7 @@ def _admitted_candidate(
     if ranking is not None and ranking.valid_until is not None:
         valid_until = min(valid_until, ranking.valid_until.astimezone(UTC))
     valid_until = min(valid_until, now + timedelta(hours=1))
+    valid_until = min(valid_until, trigger_decision.valid_until)
     confidence = min(
         Decimal("1"),
         (item.ensemble.confidence + trigger_strength) / Decimal("2"),
@@ -2527,6 +2645,8 @@ def _session_decision_shadow_status(
     if decision.status is TriggerDecisionStatus.TRIGGERED:
         return "active"
     if decision.status is TriggerDecisionStatus.NOT_TRIGGERED:
+        return "inactive"
+    if decision.status is TriggerDecisionStatus.BLOCKED:
         return "inactive"
     return f"unavailable:{decision.blocked_reason or 'unspecified'}"
 

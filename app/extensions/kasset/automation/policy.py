@@ -15,6 +15,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.runtime_state import runtime_state
+from app.extensions.kasset.automation.account_state_gate import (
+    AccountStateEvaluation,
+    evaluate_account_state_gate,
+)
+from app.extensions.kasset.automation.loss_streak_gate import loss_streak_gate
 from app.extensions.kasset.automation.position_sizing import (
     DEFAULT_POSITION_SIZING_CONFIG,
     PositionSizingConfig,
@@ -395,13 +400,20 @@ class HardRiskResult:
     passed: bool
     checks: tuple[HardRiskCheck, ...]
     blocked_reason: str | None
+    account_state: Mapping[str, object] | None = None
+    loss_streak: Mapping[str, object] | None = None
 
     def as_evidence(self) -> dict[str, object]:
-        return {
+        evidence: dict[str, object] = {
             "passed": self.passed,
             "checks": [check.as_evidence() for check in self.checks],
             "blockedReason": self.blocked_reason,
         }
+        if self.account_state is not None:
+            evidence["accountState"] = dict(self.account_state)
+        if self.loss_streak is not None:
+            evidence["lossStreak"] = dict(self.loss_streak)
+        return evidence
 
 
 class AITradingPolicyService:
@@ -621,6 +633,7 @@ class AITradingPolicyService:
         average_volume: Decimal | None = None,
         average_turnover: Decimal | None = None,
         strategy_quantity: Decimal | None = None,
+        account_state_multiplier: Decimal = Decimal("1"),
         sizing_config: PositionSizingConfig = DEFAULT_POSITION_SIZING_CONFIG,
     ) -> PortfolioPlan:
         book, instrument_type = settlement_book(market=market)
@@ -666,6 +679,7 @@ class AITradingPolicyService:
                 strategy_quantity=strategy_quantity,
                 average_volume=average_volume,
                 average_turnover=average_turnover,
+                account_state_multiplier=account_state_multiplier,
             ),
             config=sizing_config,
         )
@@ -709,10 +723,13 @@ class AITradingPolicyService:
         now: datetime,
         ai_review_status: str | None = None,
         base_risk_reasons: Sequence[Any] = (),
+        account_state: AccountStateEvaluation | None = None,
+        snapshot: AITradingSnapshot | None = None,
     ) -> HardRiskResult:
-        snapshot = await self.get_snapshot(
-            db, owner_user_id, now=now, execution_limit=0
-        )
+        if snapshot is None:
+            snapshot = await self.get_snapshot(
+                db, owner_user_id, now=now, execution_limit=0
+            )
         limits = snapshot.limits
         try:
             currency, instrument_type = settlement_book(market=market)
@@ -823,6 +840,23 @@ class AITradingPolicyService:
             and usage.orders_today < limits.max_orders_per_day
             and side_count_passed
         )
+        loss_streak = await loss_streak_gate.evaluate(
+            db,
+            owner_user_id,
+            market=market,
+            symbol=symbol,
+            side=action,
+            now=now,
+        )
+        account_state_gate = evaluate_account_state_gate(action, account_state)
+        if is_buy and account_state_gate.reason == "unavailable":
+            logger.warning(
+                "kasset ACCOUNT_STATE unavailable; gate passes: "
+                "owner_user_id=%s market=%s detail=%s",
+                owner_user_id,
+                market,
+                account_state_gate.detail,
+            )
         checks = [
             HardRiskCheck(
                 "DAILY_MAX_LOSS",
@@ -832,6 +866,16 @@ class AITradingPolicyService:
                     f"realizedLossToday={usage.realized_loss_today}; "
                     f"limit={daily_loss_limit}"
                 ),
+            ),
+            HardRiskCheck(
+                account_state_gate.code,
+                account_state_gate.passed,
+                account_state_gate.detail,
+            ),
+            HardRiskCheck(
+                rule=loss_streak.code,
+                passed=loss_streak.passed,
+                detail=loss_streak.detail,
             ),
             HardRiskCheck(
                 "BUDGET",
@@ -903,6 +947,8 @@ class AITradingPolicyService:
                 if first_failed is not None
                 else None
             ),
+            account_state=account_state_gate.evidence,
+            loss_streak=loss_streak.evidence,
         )
 
     async def _setting_row(

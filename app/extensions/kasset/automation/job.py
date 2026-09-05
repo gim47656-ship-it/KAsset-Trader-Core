@@ -29,6 +29,10 @@ from app.extensions.kasset.api.paper_schemas import (
     RiskAssessment,
     RiskReason,
 )
+from app.extensions.kasset.automation.account_state_gate import (
+    AccountStateEvaluation,
+    AccountStateGate,
+)
 from app.extensions.kasset.automation.consumer import PaperAutomationConsumer
 from app.extensions.kasset.automation.contracts import (
     PROMOTION_BYPASSED_BY_OWNER,
@@ -650,7 +654,35 @@ class OwnerScopedPaperOrders:
                 if ai_review_confidence is not None and ai_review_confidence.is_finite()
                 else Decimal("0")
             )
-        return await AITradingPolicyService().evaluate_hard_risk(
+        policy = AITradingPolicyService()
+        account_state: AccountStateEvaluation | None = None
+        risk_snapshot = None
+        try:
+            risk_snapshot = await policy.get_snapshot(
+                db,
+                int(owner_user_id),
+                now=self._now,
+                execution_limit=0,
+            )
+            account_state_snapshot = await AccountStateGate().evaluate_owner(
+                db,
+                int(owner_user_id),
+                markets=(request.market,),
+                daily_target_rate_pct=risk_snapshot.limits.daily_target_rate_pct,
+                max_daily_loss_rate_pct=risk_snapshot.limits.max_daily_loss_rate_pct,
+                now=self._now,
+            )
+            account_state = account_state_snapshot.for_market(request.market)
+        except Exception:  # noqa: BLE001 - 신규 집행 관문 계산 불가는 fail-open
+            logger.warning(
+                "kasset execution ACCOUNT_STATE unavailable; gate passes: "
+                "owner_user_id=%s market=%s symbol=%s",
+                owner_user_id,
+                request.market,
+                request.symbol,
+                exc_info=True,
+            )
+        return await policy.evaluate_hard_risk(
             db,
             int(owner_user_id),
             action=request.side,
@@ -662,6 +694,8 @@ class OwnerScopedPaperOrders:
             ai_review_status=ai_review_status,
             now=self._now,
             base_risk_reasons=base_reasons,
+            account_state=account_state,
+            snapshot=risk_snapshot,
         )
 
 
