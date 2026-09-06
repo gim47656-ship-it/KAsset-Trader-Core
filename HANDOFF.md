@@ -1,5 +1,15 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-05 (자동배포 도입 · 토스 구성용 시세 API · KR 투자지표 공급; 최신 운영 SHA `b710fd5d`)
+갱신: 2026-09-06 (주말 과거 시세 재알림 수정; 운영 확인 SHA `4a06870f`, 이번 수정은 미배포)
+
+## 2026-09-06 — 주말 과거 시세 급등락 재알림
+- 운영 원인: SOXL `+9.2468%`의 원 시세는 KST `2026-09-05 08:59:59`인데, 미국 날짜가 바뀌는 9/5·9/6 13:00 KST에 각각 새 이벤트와 `sent` 푸시가 생성됐다. 가격 감시는 주말에도 10분마다 실행되며, 기존 코드는 시세 날짜와 무관하게 요청 시각의 시장 날짜로 이벤트·중복 키를 만들었다.
+- 수정 계약: KRX/US는 관측 시세의 시장 현지 날짜가 현재 시장 날짜와 같은 경우만 신규 가격 이벤트·푸시 대상으로 삼는다. 보존된 알림 목록은 지우지 않으며, 저장 기록을 통한 새 푸시에도 같은 날짜 계약을 적용한다. 현재 `CLOSED` 여부나 임의 초 단위 유효기간을 추가하지 않아 같은 시장 날짜의 정상 시간외 알림은 유지한다. CRYPTO의 기존 일봉·날짜 동작은 변경하지 않는다.
+- 작업 기준: `origin/main`의 `4a06870f`에서 분리한 `fix/weekend-stale-price-alerts`. 기존 기본 checkout의 미커밋 작업은 보존했다. 운영 DB는 원인 조사에서 읽기만 했고, 기존 잘못 생성된 알림은 삭제하지 않았다.
+- 변경 파일: `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, 기존 테스트 `tests/extensions/kasset/api/test_daily_routine.py`·`tests/extensions/kasset/test_fcm_push_dispatch.py`, 이 문서. 신규 테스트 파일·스키마·Android 변경은 없다.
+- 회귀 증거: 수정 전 `HEAD`의 두 서비스 소스를 메모리에 로드하고 신규 회귀 두 건을 실행했다. 금요일 시세로 토요일 알림이 생성되는 실패와 저장 이벤트의 푸시 `sent=2` 실패를 각각 확인했다(`2 failed`, exit 1). 운영 DB가 아니라 기존 전용 `kasset-test-db`의 pytest 실행별 분리 DB를 사용했다.
+- 최종 검증: `python -m pytest tests/extensions/kasset/api/test_daily_routine.py tests/extensions/kasset/test_fcm_push_dispatch.py -q --tb=short` → **25 passed**, exit 0. 기존 Pydantic deprecated-config 경고 2개만 남았다. 변경 Python 4파일의 `ruff check`·`ruff format --check`, 서비스 2파일의 `ty check --error-on-warning` 통과. 첫 실행은 원격 테스트 DB 스키마 준비 때문에 600초 제한에 도달했고, fail-fast 재실행에서 전날 시세를 쓰던 history-failure fixture 충돌을 확인한 뒤 당일 시세로 보완하여 최종 통과했다.
+- 독립 `checker` 1회 **PASS**, CRITICAL/MAJOR/MINOR 0. INFO의 저장 이벤트 목록 직접 단언 추가 제안은 기존 stored-history 회귀와 실제 목록 조립 코드가 계약을 방어하므로 `REJECTED_WITH_EVIDENCE`로 종결했다. **Main 최종 판정: PASS.** 전체 저장소 테스트·GitHub CI·실제 단말 FCM·운영 배포는 실행하지 않았다.
+- 배포 승인: 사용자가 운영 반영과 임시 원격 브랜치 생성·병합 후 삭제를 승인했다. `4a06870f`를 가리키는 원격 `fix/weekend-stale-price-alerts`를 생성하여 `git_finalize`가 요구하는 fetch 대상을 준비했다. 검증된 수정은 PR CI 통과 후 main에 병합하여 기존 자동배포 경로로 반영한다.
 
 ## 운영 배포 방식 (2026-09-05부터 자동, PR #56 `fde4d4e2`)
 - **main merge → Test 워크플로 성공 → `.github/workflows/deploy-kasset.yml`이 운영서버 self-hosted runner(`kasset-prod`, systemd `actions.runner.gim47656-ship-it-KAsset-Trader-Core.kasset-prod`, 사용자 `ghrunner`, docker 그룹)에서 `deploy/kasset/deploy.sh <sha>`를 실행한다.** 승인 단계 없음 — merge가 승인이다. SSH 포트는 열지 않는다.
@@ -73,9 +83,9 @@ BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_
 
 ## 2026-09-04 — 가격 알림 시장 현지 날짜 적용
 - 변경 파일: `HANDOFF.md`, `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, `app/extensions/kasset/models.py`(docstring만), `tests/extensions/kasset/api/test_daily_routine.py`, `tests/extensions/kasset/test_fcm_push_dispatch.py`.
-- 가격 알림 날짜는 공통 `price_alert_market_date`로 계산한다. US는 `America/New_York`, KRX/CRYPTO는 `Asia/Seoul` 날짜를 사용한다. live 이벤트 저장과 저장 실패 fallback ID는 시세 timestamp가 아니라 현재 요청 시각의 시장 날짜를 사용하고, 목록은 KRX/US/CRYPTO의 현재 시장·날짜 쌍을 모두 조회한다. 저장 이벤트 ID는 행의 `routine_date`를 사용한다.
+- 가격 알림 날짜는 공통 `price_alert_market_date`로 계산한다. US는 `America/New_York`, KRX/CRYPTO는 `Asia/Seoul` 날짜를 사용한다. live 이벤트 저장과 저장 실패 fallback ID는 현재 요청 시각의 시장 날짜를 사용하고, 목록은 KRX/US/CRYPTO의 현재 시장·날짜 쌍을 모두 조회한다. 저장 이벤트 ID는 행의 `routine_date`를 사용한다. **2026-09-06 보완:** KRX/US의 신규 가격 이벤트는 시세 날짜가 현재 시장 날짜와 같을 때만 생성한다.
 - 가격 알림 FCM delivery의 `routine_date`와 dedupe key도 `alert.market`의 같은 날짜 의미를 사용한다. KST 자정을 지나도 같은 미국 거래일이면 US 이벤트·ID·전달 슬롯이 유지되고 KRX는 새 날짜로 전환된다. routine settings 날짜와 주문 체결 push 날짜는 기존 KST 의미를 유지한다.
-- 회귀 테스트는 EDT의 KST 자정 전후에서 stale 이전 세션 시세여도 요청 시각 기준 US 이벤트·ID·dedupe 슬롯 유지와 KRX/CRYPTO rollover를 검증한다. 빈 watchlist에서도 같은 시장 날짜의 저장 이벤트를 조회하며, FCM ledger의 published dedupe key 검증도 US/KRX 각각의 시장 날짜를 기대한다. 기존 회복 알림·history 실패 live fallback·당일 no-repeat 계약을 유지한다.
+- 회귀 테스트는 EDT의 KST 자정 전후에서 같은 미국 시장 날짜의 시세라면 US 이벤트·ID·dedupe 슬롯을 유지하고, KRX는 새 날짜의 관측부터 새 이벤트를 생성하며 CRYPTO rollover는 기존대로 유지하는 계약을 검증한다. 빈 watchlist에서도 같은 시장 날짜의 저장 이벤트를 조회한다. 기존 회복 알림·history 실패 live fallback·당일 no-repeat 계약을 유지하되, 과거 시세로 새 날짜 주식 알림을 만드는 이전 기대값은 2026-09-06 수정으로 폐기했다.
 - 로컬 Python test/build/lint는 실행하지 않았다. PR #49 첫 GitHub Actions run `33868460725`에서 전체 test matrix는 통과했고 lint의 Ruff formatter check만 두 테스트 파일 때문에 실패했다. 해당 두 파일에 Ruff format을 적용했으며 최종 검증은 후속 GitHub Actions run으로 확인한다.
 - migration과 API/Android schema 변경은 없다. 기존 unique key에 `market`이 포함되어 추가 제약 변경도 없다. 단, 배포 전 KST 날짜로 저장된 US 행은 재작성하지 않으므로 배포 당일 ET 날짜 행과 나란히 남을 수 있으며, 해당 미국 거래일이 끝나면 자연스럽게 조회 범위에서 벗어난다.
 

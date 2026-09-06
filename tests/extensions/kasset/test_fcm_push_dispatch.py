@@ -11,7 +11,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -50,6 +50,7 @@ from app.extensions.kasset.models import (
     KAssetDailyRoutineSetting,
     KAssetDeviceSession,
     KAssetPushDelivery,
+    KAssetRoutinePriceAlertEvent,
 )
 from app.models.paper_trading import PaperAccount
 from app.models.symbol_master import SymbolMaster
@@ -128,6 +129,41 @@ def _error(status: int, code: str) -> httpx.Response:
             }
         },
     )
+
+
+def _quote_loader_at(symbols: Sequence[str], quote_time: datetime):
+    """관측 시각만 바꿔 끼우는 시세 loader. 나머지 필드는 모든 테스트가 공유한다."""
+
+    async def quotes(
+        _db: AsyncSession, market: str, requested: Sequence[str]
+    ) -> list[Quote]:
+        assert market in {"KRX", "US"}
+        by_symbol = dict(zip(symbols, zip(_RATES, _PRICES, strict=True), strict=True))
+        result = []
+        for symbol in requested:
+            rate, price = by_symbol[symbol]
+            result.append(
+                Quote(
+                    broker="PAPER",
+                    market=market,
+                    symbol=symbol,
+                    name=None,
+                    currency="USD" if market == "US" else "KRW",
+                    price=price,
+                    previous_close="100",
+                    change_amount="0",
+                    change_rate=rate,
+                    session="AFTER_MARKET",
+                    regular_close="100",
+                    session_change_amount=rate,
+                    session_change_rate=rate,
+                    as_of=quote_time.isoformat(),
+                    source="TOSS_OPENAPI",
+                )
+            )
+        return result
+
+    return quotes
 
 
 @pytest_asyncio.fixture
@@ -224,37 +260,10 @@ async def push_world(
         token=TOKEN_B,
     )
 
-    async def quotes(
-        _db: AsyncSession, market: str, requested: Sequence[str]
-    ) -> list[Quote]:
-        assert market in {"KRX", "US"}
-        by_symbol = dict(zip(symbols, zip(_RATES, _PRICES, strict=True), strict=True))
-        result = []
-        for symbol in requested:
-            rate, price = by_symbol[symbol]
-            result.append(
-                Quote(
-                    broker="PAPER",
-                    market=market,
-                    symbol=symbol,
-                    name=None,
-                    currency="USD" if market == "US" else "KRW",
-                    price=price,
-                    previous_close="100",
-                    change_amount="0",
-                    change_rate=rate,
-                    session="AFTER_MARKET",
-                    regular_close="100",
-                    session_change_amount=rate,
-                    session_change_rate=rate,
-                    as_of=_QUOTE_TIME.isoformat(),
-                    source="TOSS_OPENAPI",
-                )
-            )
-        return result
-
     monkeypatch.setattr(
-        push, "daily_routine_service", DailyRoutineService(quote_loader=quotes)
+        push,
+        "daily_routine_service",
+        DailyRoutineService(quote_loader=_quote_loader_at(symbols, _QUOTE_TIME)),
     )
     monkeypatch.setattr(settings, "KASSET_FCM_ENABLED", True)
 
@@ -703,14 +712,30 @@ async def test_kst_midnight_keeps_us_dedupe_slot_and_rolls_krx_slot(
     db_session: AsyncSession,
     push_world: dict[str, object],
     credentials: ServiceAccountCredentials,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    symbols: Sequence[str] = push_world["symbols"]  # type: ignore[assignment]
     before_midnight = datetime(2026, 9, 1, 14, 59, tzinfo=UTC)
-    after_midnight = before_midnight + timedelta(minutes=2)
+    after_midnight = datetime(2026, 9, 1, 15, 10, tzinfo=UTC)
+    # 두 시세 모두 각 시각의 시장 현지 날짜에 속한다: ET는 둘 다 09-01,
+    # KST는 09-01 → 09-02로 넘어간다.
+    quote_before = datetime(2026, 9, 1, 14, 50, tzinfo=UTC)
+    quote_after = datetime(2026, 9, 1, 15, 5, tzinfo=UTC)
     firebase = _Firebase()
     client = firebase.client(credentials)
     try:
+        monkeypatch.setattr(
+            push,
+            "daily_routine_service",
+            DailyRoutineService(quote_loader=_quote_loader_at(symbols, quote_before)),
+        )
         first = await dispatch_price_alert_pushes(
             db_session, now=before_midnight, client=client
+        )
+        monkeypatch.setattr(
+            push,
+            "daily_routine_service",
+            DailyRoutineService(quote_loader=_quote_loader_at(symbols, quote_after)),
         )
         second = await dispatch_price_alert_pushes(
             db_session, now=after_midnight, client=client
@@ -734,6 +759,60 @@ async def test_kst_midnight_keeps_us_dedupe_slot_and_rolls_krx_slot(
         "2026-09-01",
         "2026-09-02",
     }
+
+
+@pytest.mark.asyncio
+async def test_stored_event_with_previous_session_quote_is_not_pushed_again(
+    db_session: AsyncSession,
+    push_world: dict[str, object],
+    credentials: ServiceAccountCredentials,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """이미 저장된 이벤트라도 근거 시세가 지난 시장 날짜면 새로 발송하지 않는다.
+
+    수정 전 코드가 주말마다 만들어 둔 ``routine_date`` 행이 그대로 남아 있어도
+    같은 금요일 시세로 다시 푸시되면 안 된다.
+    """
+
+    owner_a = int(push_world["ownerA"])
+    symbols: Sequence[str] = push_world["symbols"]  # type: ignore[assignment]
+    stale_quote_at = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)  # ET 09-04 / KST 09-04
+    saturday_at = datetime(2026, 9, 5, 4, 0, tzinfo=UTC)  # ET 09-05 / KST 09-05
+    db_session.add(
+        KAssetRoutinePriceAlertEvent(
+            owner_user_id=owner_a,
+            routine_date=date(2026, 9, 5),
+            kind="RAPID_RISE",
+            market="US",
+            symbol=symbols[0],
+            name="푸시 종목 0",
+            detected_rate_pct=Decimal("5.20"),
+            detected_at=stale_quote_at,
+            source="TOSS_OPENAPI",
+            last_rate_pct=Decimal("5.20"),
+            last_seen_at=stale_quote_at,
+            updated_at=stale_quote_at,
+        )
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        push,
+        "daily_routine_service",
+        DailyRoutineService(quote_loader=_quote_loader_at(symbols, stale_quote_at)),
+    )
+
+    firebase = _Firebase()
+    client = firebase.client(credentials)
+    try:
+        result = await dispatch_price_alert_pushes(
+            db_session, now=saturday_at, client=client
+        )
+    finally:
+        await client.aclose()
+
+    assert result["sent"] == 0
+    assert firebase.messages == []
+    assert await _deliveries(db_session, str(push_world["sessionIdA"])) == []
 
 
 @pytest.mark.asyncio

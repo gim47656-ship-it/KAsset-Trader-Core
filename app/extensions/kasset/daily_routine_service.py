@@ -208,6 +208,24 @@ def price_alert_market_date(market: WatchlistMarket, instant: datetime) -> date:
     return instant.astimezone(zone).date()
 
 
+def price_alert_observation_is_current(
+    market: WatchlistMarket, observed_at: datetime, instant: datetime
+) -> bool:
+    """관측 시세가 ``instant`` 시점의 시장 현지 날짜에 속하는지.
+
+    지난 세션 시세가 다음 날짜의 알림을 새로 만들거나 새로 발송되지 않게 막는
+    유일한 조건이다. 세션 상태(CLOSED 등)나 경과 시간 임계값은 보지 않으므로 같은
+    시장 날짜의 시간외 시세는 그대로 알림이 된다. CRYPTO는 거래일 경계가 없고
+    관측이 마감된 KST 일봉이라 이 판정 대상이 아니다 — 기존 동작을 유지한다.
+    """
+
+    if market == "CRYPTO":
+        return True
+    return price_alert_market_date(market, observed_at) == price_alert_market_date(
+        market, instant
+    )
+
+
 def _canonical_routines(values: Sequence[str]) -> tuple[RoutineKey, ...]:
     raw = list(values)
     if len(raw) != len(set(raw)) or any(value not in ROUTINE_KEYS for value in raw):
@@ -674,8 +692,11 @@ class DailyRoutineService:
 
         지금 임계값을 넘는 종목은 해당 시장 현지 날짜로 즉시 기록되고, 이미 기록된
         종목은 등락률이 임계값 안으로 돌아와도 ``recovered``로 표시된 채 그 날짜
-        동안 남는다. 기록 실패는 로그만 남기고 지금 넘는 종목을 그대로 돌려준다 —
-        알림 조회가 이력 저장 때문에 실패하면 안 된다.
+        동안 남는다. 단 시세가 그 시장의 현재 날짜에 속하지 않으면(주말·휴장으로
+        직전 거래일 시세가 그대로 남은 경우) 새 날짜의 알림을 만들지 않는다 —
+        같은 움직임이 날짜마다 다시 포착되면 안 된다. 기록 실패는 로그만 남기고
+        지금 넘는 종목을 그대로 돌려준다 — 알림 조회가 이력 저장 때문에 실패하면
+        안 된다.
         """
 
         watch_symbols = await self._load_watch_symbols(db, owner_user_id)
@@ -686,8 +707,13 @@ class DailyRoutineService:
         live: dict[tuple[str, str, str], _PriceObservation] = {}
         for item in observations:
             kind = _rapid_kind(item.rate)
-            if kind is not None and kind in enabled:
-                live[(kind, item.market, item.symbol)] = item
+            if kind is None or kind not in enabled:
+                continue
+            if not price_alert_observation_is_current(
+                item.market, item.occurred_at, now
+            ):
+                continue
+            live[(kind, item.market, item.symbol)] = item
 
         current_routine_dates = {
             market: price_alert_market_date(market, now)
@@ -1008,4 +1034,5 @@ __all__ = [
     "DailyRoutineService",
     "daily_routine_service",
     "price_alert_market_date",
+    "price_alert_observation_is_current",
 ]
