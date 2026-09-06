@@ -457,8 +457,8 @@ async def test_price_alert_stays_for_the_kst_day_after_recovery_and_resets_next_
     # 3) 회복된 알림은 푸시 대상이 아니다.
     from app.extensions.kasset.fcm_push_service import _price_alerts
 
-    assert _price_alerts(detected.alerts) == detected.alerts
-    assert _price_alerts(recovered.alerts) == []
+    assert _price_alerts(detected.alerts, instant=first_at) == detected.alerts
+    assert _price_alerts(recovered.alerts, instant=later_at) == []
 
     # 4) KST 날짜가 바뀌면 전날 기록은 돌아오지 않는다.
     rolled = await DailyRoutineService(
@@ -484,38 +484,44 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
     crypto_instrument.base_currency = "KRW"
     await db_session.commit()
     before_midnight = datetime(2026, 7, 6, 14, 59, tzinfo=UTC)
-    after_midnight = before_midnight + timedelta(minutes=2)
+    after_midnight = datetime(2026, 7, 6, 15, 10, tzinfo=UTC)
     assert price_alert_market_date("CRYPTO", after_midnight) == date(2026, 7, 7)
-    quote_at = datetime(2026, 7, 3, 19, 0, tzinfo=UTC)
+    # 두 시세 모두 각 시각의 시장 현지 날짜에 속한다: ET는 둘 다 07-06,
+    # KST는 07-06 → 07-07로 넘어간다.
+    quote_before = datetime(2026, 7, 6, 14, 50, tzinfo=UTC)
+    quote_after = datetime(2026, 7, 6, 15, 5, tzinfo=UTC)
     rates = {
         us_instrument.symbol: "6.20",
         krx_instrument.symbol: "-6.20",
         crypto_instrument.symbol: "6.00",
     }
 
-    async def quotes(
-        _db: AsyncSession, market: str, symbols: Sequence[str]
-    ) -> list[Quote]:
-        return [
-            Quote(
-                broker="PAPER",
-                market=market,
-                symbol=symbol,
-                name=None,
-                currency="USD" if market == "US" else "KRW",
-                price=str(100 + float(rates[symbol])),
-                previous_close="100",
-                change_amount="0",
-                change_rate="0",
-                session="REGULAR",
-                regular_close="100",
-                session_change_amount=rates[symbol],
-                session_change_rate=rates[symbol],
-                as_of=quote_at.isoformat(),
-                source="TOSS_OPENAPI",
-            )
-            for symbol in symbols
-        ]
+    def quotes_at(quote_at: datetime):
+        async def quotes(
+            _db: AsyncSession, market: str, symbols: Sequence[str]
+        ) -> list[Quote]:
+            return [
+                Quote(
+                    broker="PAPER",
+                    market=market,
+                    symbol=symbol,
+                    name=None,
+                    currency="USD" if market == "US" else "KRW",
+                    price=str(100 + float(rates[symbol])),
+                    previous_close="100",
+                    change_amount="0",
+                    change_rate="0",
+                    session="REGULAR",
+                    regular_close="100",
+                    session_change_amount=rates[symbol],
+                    session_change_rate=rates[symbol],
+                    as_of=quote_at.isoformat(),
+                    source="TOSS_OPENAPI",
+                )
+                for symbol in symbols
+            ]
+
+        return quotes
 
     async def crypto_candles(
         _repository: DailyCandlesRepository, **_kwargs: object
@@ -523,7 +529,7 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
         return {
             crypto_instrument.symbol: [
                 DailyCandleRow(
-                    time_utc=quote_at - timedelta(days=1),
+                    time_utc=quote_before - timedelta(days=1),
                     symbol=crypto_instrument.symbol,
                     partition="upbit_krw",
                     open=100,
@@ -536,7 +542,7 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
                     source="UPBIT",
                 ),
                 DailyCandleRow(
-                    time_utc=quote_at,
+                    time_utc=quote_before,
                     symbol=crypto_instrument.symbol,
                     partition="upbit_krw",
                     open=106,
@@ -553,9 +559,11 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
 
     monkeypatch.setattr(DailyCandlesRepository, "fetch_recent_batch", crypto_candles)
 
-    service = DailyRoutineService(quote_loader=quotes)
-    before = await service.get(db_session, owner.id, now=before_midnight)
-    after = await service.get(db_session, owner.id, now=after_midnight)
+    before = await DailyRoutineService(quote_loader=quotes_at(quote_before)).get(
+        db_session, owner.id, now=before_midnight
+    )
+    service_after = DailyRoutineService(quote_loader=quotes_at(quote_after))
+    after = await service_after.get(db_session, owner.id, now=after_midnight)
 
     before_ids = {alert.market: alert.id for alert in before.alerts}
     after_ids = {alert.market: alert.id for alert in after.alerts}
@@ -569,7 +577,7 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
         delete(UserWatchItem).where(UserWatchItem.user_id == owner.id)
     )
     await db_session.commit()
-    after_removal = await service.get(db_session, owner.id, now=after_midnight)
+    after_removal = await service_after.get(db_session, owner.id, now=after_midnight)
     assert {alert.market: alert.id for alert in after_removal.alerts} == after_ids
 
     events = list(
@@ -587,6 +595,89 @@ async def test_kst_midnight_keeps_us_event_id_and_rolls_krx_crypto_ids(
         ("CRYPTO", "2026-07-06"),
         ("CRYPTO", "2026-07-07"),
         ("KRX", "2026-07-07"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_previous_session_us_quote_does_not_create_weekend_price_alerts(
+    db_session: AsyncSession,
+    routine_data: dict[str, object],
+) -> None:
+    """금요일 시간외 시세 하나가 토·일 알림을 새로 만들면 안 된다.
+
+    운영 사고 재현: SOXL +9.25%(ET 09-04 시간외)가 09-05·09-06 ET 자정마다
+    새 ``routine_date`` 이벤트로 다시 포착됐다.
+    """
+
+    owner = routine_data["users"][0]
+    instruments: Sequence[Instrument] = routine_data["instruments"]
+    us_instrument = instruments[0]
+    us_instrument.type = InstrumentType.equity_us
+    us_instrument.base_currency = "USD"
+    await db_session.commit()
+
+    friday_at = datetime(2026, 9, 4, 23, 59, 59, tzinfo=UTC)  # ET 09-04 19:59:59
+    saturday_at = datetime(2026, 9, 5, 4, 0, tzinfo=UTC)  # ET 09-05 00:00
+    sunday_at = datetime(2026, 9, 6, 4, 0, tzinfo=UTC)  # ET 09-06 00:00
+
+    async def quotes(
+        _db: AsyncSession, market: str, symbols: Sequence[str]
+    ) -> list[Quote]:
+        return [
+            Quote(
+                broker="PAPER",
+                market=market,
+                symbol=symbol,
+                name=None,
+                currency="USD" if market == "US" else "KRW",
+                price="109.25" if symbol == us_instrument.symbol else "101.00",
+                previous_close="100",
+                change_amount="0",
+                change_rate="0",
+                session="AFTER_MARKET",
+                regular_close="100",
+                session_change_amount="0",
+                session_change_rate="0",
+                as_of=friday_at.isoformat(),
+                source="TOSS_OPENAPI",
+            )
+            for symbol in symbols
+        ]
+
+    db_session.add(
+        KAssetDailyRoutineSetting(
+            owner_user_id=owner.id,
+            routine_date=friday_at.astimezone(KST).date(),
+            enabled_routines=["RAPID_RISE", "RAPID_FALL"],
+            updated_at=friday_at,
+        )
+    )
+    await db_session.commit()
+    service = DailyRoutineService(quote_loader=quotes)
+
+    friday = await service.get(db_session, owner.id, now=friday_at)
+    assert [alert.id for alert in friday.alerts] == [
+        f"price:2026-09-04:RAPID_RISE:US:{us_instrument.symbol}"
+    ]
+
+    # 같은 시세가 그대로 남아 있어도 다음 시장 날짜의 알림이 되지는 않는다.
+    saturday = await service.get(db_session, owner.id, now=saturday_at)
+    sunday = await service.get(db_session, owner.id, now=sunday_at)
+    assert saturday.alerts == []
+    assert sunday.alerts == []
+
+    # 금요일 이력은 그대로 남는다 — 지우지 않고 그 날짜에서만 보인다.
+    events = list(
+        (
+            await db_session.scalars(
+                select(KAssetRoutinePriceAlertEvent).where(
+                    KAssetRoutinePriceAlertEvent.owner_user_id == owner.id
+                )
+            )
+        ).all()
+    )
+    assert {(event.market, event.routine_date.isoformat()) for event in events} == {
+        ("US", "2026-09-04")
     }
 
 
@@ -620,7 +711,7 @@ async def test_price_alert_history_failure_still_returns_live_alerts(
     service = DailyRoutineService(
         quote_loader=_quote_loader_for(
             {rising: "7.00", flat: "0.00"},
-            quote_time=moment - timedelta(days=1),
+            quote_time=moment - timedelta(minutes=30),
         )
     )
     response = await service.get(db_session, owner.id, now=moment)

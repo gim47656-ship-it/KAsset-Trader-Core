@@ -41,6 +41,7 @@ from app.extensions.kasset.api.daily_routine_schemas import DailyRoutineAlert
 from app.extensions.kasset.daily_routine_service import (
     daily_routine_service,
     price_alert_market_date,
+    price_alert_observation_is_current,
 )
 from app.extensions.kasset.models import (
     AndroidPaperOrder,
@@ -519,11 +520,17 @@ async def _push_targets(
     ]
 
 
-def _price_alerts(alerts: Sequence[DailyRoutineAlert]) -> list[DailyRoutineAlert]:
+def _price_alerts(
+    alerts: Sequence[DailyRoutineAlert], *, instant: datetime
+) -> list[DailyRoutineAlert]:
     """Only the ±5% price routines that are still beyond the threshold.
 
     News alerts are out of scope for push. Recovered alerts stay in the app's
     day list but must not trigger a push for a move that is already over.
+
+    저장된 이벤트는 그 날짜 동안 목록에 남지만, 근거 시세가 그 시장의 현재 날짜에
+    속하지 않으면 새로 발송하지 않는다 — 지난 거래일 움직임이 저장 이벤트를 통해
+    다시 푸시되는 경로를 막는다. 근거 시각이 없는 알림도 같은 이유로 제외한다.
     """
 
     return [
@@ -533,6 +540,10 @@ def _price_alerts(alerts: Sequence[DailyRoutineAlert]) -> list[DailyRoutineAlert
         and alert.market is not None
         and alert.symbol is not None
         and not alert.recovered
+        and alert.last_seen_at is not None
+        and price_alert_observation_is_current(
+            alert.market, alert.last_seen_at, instant
+        )
     ]
 
 
@@ -778,7 +789,8 @@ async def _dispatch(
             owner_alerts = _price_alerts(
                 await daily_routine_service.get_alerts(
                     db, target.owner_user_id, now=instant
-                )
+                ),
+                instant=instant,
             )
             alerts_by_owner[target.owner_user_id] = owner_alerts
         if not owner_alerts:
