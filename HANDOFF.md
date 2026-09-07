@@ -1,10 +1,10 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-07 (PAPER 자동 손절 -3% 바닥 구현·로컬 검증 완료, CI·운영 미반영 / 장중 보호 청산·손절 후 매수 후보 유지, 배포 완료)
+갱신: 2026-09-07 (PAPER 자동 손절 -3% 바닥 — 운영 반영 완료·Main FINAL PASS, 다음 정규장 실손절 관측은 미완 / 장중 보호 청산·손절 후 매수 후보 유지, 배포 완료)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
-- 운영은 `5c436eb02156d45aa458e244b969cf386475fc36`(PR #59). API·worker·scheduler·MCP·AI MCP 동일 이미지, `/health` 정상. 이번 수정은 `fix/intraday-exit`, `.worktrees/intraday-exit`에 있으며 운영 배포·강제 주문·운영 DB 수정은 하지 않았다. main merge는 자동배포이므로 별도 승인 필요.
+- 운영은 `9fefab61e80a6ade8466669e75e06cdc975a95fb`(자동 손절 -3% 바닥). 2026-09-07 10:40:51 UTC(19:40:51 KST) API·worker·scheduler·MCP·AI MCP 5개 image·build SHA 일치, restart 0. 직전 운영은 `e3680671bb19c323f62d5fcac18efdcb0c91c7b7`(PR #60)였다. alembic 변경 때문에 자동배포는 `exit 2`로 막혔고, 사용자 승인 아래 수동 단계 배포로 반영했다. 이후 구버전 이미지 롤백은 금지된다(아래 롤백 주의).
 - 기존 기본 checkout은 `main`/`e4b6043`와 사용자 `HANDOFF.md` 미커밋 변경을 그대로 보존했다. 중단된 새 worktree checkout만 복구했다.
 
 ## 2026-09-07 — PAPER 자동 손절 -3% 바닥 (구현·로컬 검증 완료, CI·운영 미반영)
@@ -13,7 +13,7 @@
 - 정확히 -3%에서의 체결을 보장하지 않는다. 손절선 아래에서 시가가 형성되면 기존 `STOP_GAP` 계약대로 그 시가를 참조가로 쓴다. 참조가는 추천값이며 체결가 보장이 아니다.
 
 ### 작업 기준
-- `origin/main`의 `e3680671bb19c323f62d5fcac18efdcb0c91c7b7`(PR #60)에서 분리한 `task/paper-auto-stoploss`, worktree `.worktrees/paper-auto-stoploss`.
+- `origin/main`의 `e3680671bb19c323f62d5fcac18efdcb0c91c7b7`(PR #60)에서 분리한 `task/paper-auto-stoploss`, worktree `.worktrees/paper-auto-stoploss`. 최종 커밋은 `9fefab61e80a6ade8466669e75e06cdc975a95fb`이며 `git_finalize`가 이 branch의 `origin/main` tracking에 따라 **`main`에 직접 push**했다(별도 PR 없음).
 - 기본 checkout(`main`/`e4b6043` + 사용자 `HANDOFF.md` 미커밋 변경)은 읽기만 하고 그대로 보존했다. 기본 checkout이 `origin/main`보다 14커밋 뒤이므로 이 문서 갱신은 worktree 쪽에만 했다. 두 HANDOFF의 병합은 Main이 판단한다.
 
 ### 수정
@@ -36,25 +36,48 @@
 - `tests/_schema_bootstrap.py`의 `SCHEMA_BOOTSTRAP_VERSION`을 52 → 53으로 올렸다. mirrored ALTER가 없으므로 이 bump가 상시 로컬 테스트 DB를 한 번 재생성해 nullable 컬럼을 만든다(기존 규약과 동일).
 - **배포 경로**: 이 과제는 `alembic/versions` 변경을 포함한다. `deploy/kasset/deploy.sh:44-55`가 `alembic/versions` diff를 감지해 `ALLOW_MIGRATION=1`(workflow_dispatch `allow_migration=true`)이 아니면 `exit 2`로 멈춘다. 자동배포 코드·gate는 이 과제에서 **변경하지 않았다**.
 - **문제**: `deploy.sh`의 승인 경로도 그대로는 쓸 수 없다. `deploy.sh:89`가 migration을 돌린 직후 `deploy.sh:96-97`이 `api worker scheduler mcp ai-mcp`를 **한 번에** `up -d` 하므로, worker·scheduler를 사전에 멈춰둬도 같은 실행에서 함께 올라온다. 즉 "migration → api만 health 확인 → 그 다음 worker" 순서를 만들 수 없고, health 실패 시 `deploy.sh:64-72 rollback()`이 **이전 SHA 이미지로 되돌린다**. nullable 상태 row가 이미 생겼다면 구버전은 `initial_atr` non-null을 가정하므로 이 자동 롤백은 위험하다.
-- **사용자 승인 대기 제안(확정 배포 절차 아님)**: 아래는 Main이 CI·준비를 마친 뒤 사용자에게 "workflow 이탈 + rollback 호환성 변경"을 구체적으로 승인받기 위한 제안이다. 승인 전에는 어떤 단계도 실행하지 않는다. 실행은 Main만 한다. cwd `/opt/kasset-trader-core`(`KASSET_REPO_DIR`), compose 규약은 `deploy.sh:25`와 동일하게 `docker compose -f docker-compose.kasset.yml --env-file .env.kasset`.
-  1. `.env.kasset` 백업(`.env.kasset.pre-<sha8>`) → 대상 SHA checkout → `CORE_IMAGE_TAG`/`VCS_REF`를 대상 SHA로 갱신(`deploy.sh:58-61`과 동일).
-  2. worker·scheduler 정지 유지: `compose stop worker scheduler`. 자동 sweep이 nullable row를 만들기 전 상태를 고정한다.
-  3. 이미지 빌드: `compose build api`(`deploy.sh:76`과 동일 규약. 5개 서비스가 같은 `kasset-trader-core:${CORE_IMAGE_TAG}` 이미지를 공유한다).
-  4. DB 백업: `docker exec kasset-trader-db-1 pg_dump -U kasset -d kasset --format=custom | gzip > backups/kasset-pre-migration-<sha8>-<stamp>.dump.gz`(`deploy.sh:80-87`과 동일, 빈 파일이면 중단).
+- **사용자 승인 후 실행한 수동 단계 배포 절차**: 사용자가 "단계별 배포 진행"으로 승인했고 Main만 실행했다. cwd `/opt/kasset-trader-core`(`KASSET_REPO_DIR`), compose 규약은 `deploy.sh:25`와 동일하게 `docker compose -f docker-compose.kasset.yml --env-file .env.kasset`.
+  1. DB 백업: `docker exec kasset-trader-db-1 pg_dump -U kasset -d kasset --format=custom`(`deploy.sh:80-87`과 동일 규약, 빈 파일이면 중단). 산출물 `backups/pre-stoploss-9fefab61/database.dump` 93,355,726 bytes, `pg_restore --list` 2,498행. `pg_dump`의 트랜잭션 일관 full dump이므로 서비스 정지 전에 떴다.
+  2. worker·scheduler 정지: `compose stop worker scheduler`. 자동 sweep이 새 코드로 도는 시점을 이후 단계까지 막는다.
+  3. `.env.kasset` 백업(`backups/pre-stoploss-9fefab61/`에 함께 보관) → 대상 SHA checkout → `CORE_IMAGE_TAG`/`VCS_REF` 갱신(`deploy.sh:58-61`과 동일).
+  4. 이미지 빌드: `compose build api`(`deploy.sh:76`과 동일 규약. 5개 서비스가 같은 `kasset-trader-core:${CORE_IMAGE_TAG}` 이미지를 공유한다).
   5. migration: `compose --profile migration run --rm -T migration`(= `alembic upgrade head`, `docker-compose.kasset.yml:154-164`).
   6. `compose up -d --no-build api mcp ai-mcp`만 올린다(`ai-mcp`는 `profiles: ["ai-mcp"]`이므로 서비스명을 명시해 활성화한다). `https://$KASSET_DOMAIN/health` 200과 `docker ps`의 `kasset-trader-core:<sha>` 태그로 SHA 일치를 확인한다.
   7. 그 다음에야 `compose up -d --no-build worker scheduler`로 신규 SHA를 올리고, 다음 자연 사이클의 실행 로그를 확인한다.
   8. 자동 롤백 스크립트(`deploy.sh` rollback 경로)는 쓰지 않는다. 실패 시 worker·scheduler 정지를 유지한 채 `SELECT count(*) FROM kasset_paper_position_states WHERE initial_atr IS NULL`을 read-only로 확인한다. 0건이면 `compose --profile migration run --rm -T migration alembic downgrade <이전 revision>` 후 이전 이미지로 되돌릴 수 있다. 1건 이상이면 구버전 반영을 금지하고 nullable을 이해하는 버전으로 roll-forward한다(migration의 downgrade 자체도 NULL 행이 있으면 `RuntimeError`로 거부한다).
-- 현재 상태: 운영은 **미변경**이다. 소스·commit은 진행하지만 CI 미실행, 배포·운영 DB 반영·실주문 없음. 위 절차의 실행 승인은 아직 받지 않았다.
+- 결과: 아래 "운영 배포 결과"대로 2026-09-07 10:40:51 UTC(19:40:51 KST) 반영을 완료했다. 자동 롤백 스크립트는 쓰지 않았다.
 
-### 검증 결과 (로컬, 2026-09-07)
+### Git 마감·CI·자동배포 차단·운영 배포 (2026-09-07)
+- `git_finalize`가 `task/paper-auto-stoploss`의 `origin/main` tracking에 따라 **`main`으로 직접 push**했다. 마감 커밋 `9fefab61e80a6ade8466669e75e06cdc975a95fb` (`fix(kasset): protect paper holdings with three-percent stop floor`), 부모 `e3680671`. PR은 만들지 않았다.
+- main CI **Test [`34107488770`](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/34107488770) 전체 success**(`gh run watch` exit 0). PostgreSQL 15에서 migration roundtrip, test shard 1~4, `ci-required` 집계까지 포함한다.
+- 자동 **Deploy [`34108177065`](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/34108177065) 실패(의도된 차단)**. 원문 근거: `ALLOW_MIGRATION=0` → `alembic/versions 변경이 포함된 배포다. 자동배포는 건너뛴다.` → 변경 목록에 nullable migration 파일 → `exit 2`. `deploy.sh:51-55`가 `git checkout`·`.env.kasset` 갱신·build 이전 단계에서 막았으므로 운영 서버의 checkout·env·이미지·DB는 그대로다. 운영 배포는 일어나지 않았다.
+- 그래서 운영 반영은 `workflow_dispatch(allow_migration=true)`가 아니라 위 수동 단계 절차로 했다. 사용자가 "단계별 배포 진행"을 승인하고 checker MAJOR2 closure를 수용한 뒤 Main만 실행했다.
+- **운영 배포 결과(2026-09-07 10:40:51 UTC / 19:40:51 KST)**: API·worker·scheduler·MCP·AI MCP 5개의 image와 build SHA가 모두 `9fefab61`로 일치, restart 0.
+  - 실제 순서는 `pg_dump` 완료 → worker·scheduler 정지 → checkout·build였다. 백업은 트랜잭션 일관 full dump이므로 "정지 상태에서 떴다"는 표현은 정확하지 않다. 산출물 `backups/pre-stoploss-9fefab61/database.dump` 93,355,726 bytes, `pg_restore --list` 2,498행, env 백업 동일 디렉터리.
+  - migration `20260907_kasset_optional_atr` 적용 후 `initial_atr`의 `is_nullable=YES`와 `initial_atr IS NULL` **0건**을 확인했다.
+  - `api`·`mcp`·`ai-mcp` 3개 healthy를 확인한 뒤 마지막에 `worker`·`scheduler`를 재개했다. 승인된 순서 그대로다.
+- **배포 후 read-only 스모크(19:43:50 KST, `transaction_read_only=on`)**: 실제 배포된 `_state_from_row` + `apply_stop_loss_floor`로 실보유 4건의 유효 손절선을 계산만 했다. KRX·US 모두 **CLOSED** 상태였다.
+  - `138040` 평단 135,100 / 3주: 저장 손절선 `119607.14285714` → 유효 `131047`.
+  - `180640` 평단 145,100 / 2주: 저장 `125342.85714286` → 유효 `140747`.
+  - `CRWD` 평단 214.13 / 4주: 저장 `176.69106567` → 유효 `207.7061`.
+  - `UBS` 평단 55.60 / 44주: 저장 `53.63499957` → 유효 `53.932`.
+  - 4건 모두 `derived_already_persisted=false`다. 장외라 기존 state의 DB 손절선은 아직 갱신되지 않았고, 다음 정규장 평가에서 적용·저장된다.
+  - 별도 no-ATR 순수 스모크는 `initial_atr=None`과 손절선 `97`(평단 100 기준)만 확인한 것이다. 이 스모크에서 청산 신호 유무는 검증하지 않았다.
+- **배포 후 자연 sweep(19:45:00 KST) 확정**: `19:45:00.003` scheduler `Sending kasset.paper_automation.run` → `19:45:00.005` worker `Executing` → `19:45:00.038` `sweep done owners=0 outcomes=[]`. Main의 원격 확인 명령은 exit 0이었다. sweep 자체는 정상 완료했다.
+  - 같은 창(19:42~19:45)의 worker 로그에 기존 개별 Toss 404 경고 1건(`0106J0`, 19:43)이 있다. sweep 동작과 무관한 기존 유형의 경고이며, "ERROR 0건"이라고 주장하지 않는다.
+  - 이 sweep은 `owners=0`이므로 실보유 손절선의 DB 갱신·손절 추천을 만들지 않았다. **다음 정규장에서의 실제 손절 적용·추천·체결은 아직 미관측이다.**
+
+### 검증 결과 (2026-09-07)
 - Main 최종 검증(MAJOR1 수정이 모두 들어간 현재 소스): 집중 스위트 `tests/extensions/kasset/automation/test_position_manager.py` **55 passed / 1 deselected**(6.18s, 외부 HTTP·socket 차단 0건, exit 0), `ruff check` all passed, `ruff format --check` 5 files unchanged, `ty check --error-on-warning` 실행코드 3파일 all passed(exit 0), 무네트워크 스모크 통과.
-- 독립 checker 1회 FAIL → Main 판정: MAJOR1(쓸 수 없는 일봉에서 ATR 생성·후발 채움 금지) ACCEPTED 후 수정 완료, MINOR(문서) ACCEPTED 후 반영. MAJOR2(nullable row 생성 이후 구버전 롤백 불가)는 코드 변경이 아니라 배포 절차 문제로, 위 "사용자 승인 대기 제안"에 기재만 했고 **아직 승인·확정되지 않았다**.
+- 독립 checker 1회 FAIL → Main 판정: MAJOR1(쓸 수 없는 일봉에서 ATR 생성·후발 채움 금지) ACCEPTED 후 수정 완료, MINOR(문서) ACCEPTED 후 반영. MAJOR2(nullable row 생성 이후 구버전 롤백 불가)는 코드가 아니라 배포 절차 문제로, 위 수동 단계 절차로 대응하고 Main이 그 closure를 수용했다(사용자 승인 포함).
 - 순수 함수 pre/post 회귀(무DB·무네트워크): 저장 손절선 70000(-30%)·장중 시가 99000·저가 96000 → 수정 전 `청산 없음`, 수정 후 `STOP @ 97000.00`(핵심 RED→GREEN). trailing 105000은 전후 모두 `TRAILING_STOP @ 105000`. 손절선이 정확히 바닥(97000)이면 전후 모두 `STOP @ 97000`. 저장 진입가 100000·실제 체결 평단 110000이면 유효 손절선 `106700.00`.
 - ATR 부재 스모크: `atr=None / initial_stop=current_stop=97.00` → 장중 저가 96에서 `STOP @ 97.00`, 장중 고가 132에서 신호 `None`(가짜 익절 없음), `bars_held=10` 일봉에서 `TIME_STOP` 없음, `adopt_initial_atr(4)` 후 stop `97.00` 유지(88로 넓어지지 않음), `adopt_initial_atr(0.5)` 후 `98.5`.
 - `python -m py_compile` 변경 6파일 통과. `alembic heads` = `20260907_kasset_optional_atr (head)` 단일 head.
-- **미검증**: DB가 필요한 `test_closed_cycle_survives_position_delete_as_audit`, migration roundtrip(`tests/services/**/test_migration*.py`), `tests/extensions/kasset/test_multi_user_migration_guards.py`, alembic `upgrade`/`downgrade` 실제 적용. 이 PC에 로컬 PostgreSQL·docker CLI가 없어 GitHub CI로 보완한다. CI·운영 배포·운영 DB 반영·실주문은 아직 하지 않았다.
-- 임시 시연물 `.worktrees/paper_stop_floor_demo.py`와 `.worktrees/_baseline_pr60/`은 스모크 완료 후 Main 승인으로 제거했다(결과 원문은 위 두 항목에 보존).
+- CI로 해소된 항목: PostgreSQL 15 기반 main CI에서 `test_closed_cycle_survives_position_delete_as_audit`, migration roundtrip(`tests/services/**/test_migration*.py`, `upgrade head → downgrade → upgrade head`), `tests/extensions/kasset/test_multi_user_migration_guards.py`, test shard 1~4가 모두 통과했다. 로컬에 PostgreSQL·docker CLI가 없어 남겨두었던 미검증 항목은 이 CI 성공으로 해소됐다.
+- **Main 최종 판정: FINAL PASS.** 판정 근거의 범위는 위에 적은 것뿐이다 — 로컬 집중 스위트·lint·type, main CI Test 전체 success(PG15 migration roundtrip 포함), 순수 함수 pre/post 회귀, 배포 후 read-only 계산 스모크, 19:45:00 자연 sweep(`owners=0 outcomes=[]`)의 정상 완료. 이 판정은 소스와 배포 절차에 대한 것이며, **다음 정규장의 실제 손절 적용·추천·체결 관측은 포함하지 않는다.**
+- 남은 확인: 다음 정규장 sweep에서 실보유 4건의 유효 손절선이 state에 저장되는지, 그리고 손절 도달 시 추천·집행이 계약대로 나오는지. 운영 DB에는 승인된 migration만 적용했고 실주문·강제 사이클은 없다.
+- **롤백 주의(유효)**: 운영에 nullable 컬럼이 적용됐다. 이후 문제가 생기면 구버전 이미지로 되돌리지 않는다. `initial_atr IS NULL` 행이 0건일 때만 `alembic downgrade` 후 이전 이미지가 가능하고, 1건 이상이면 nullable을 이해하는 버전으로 roll-forward한다(migration downgrade 자체도 NULL 행이 있으면 `RuntimeError`로 거부한다). 백업은 `backups/pre-stoploss-9fefab61/database.dump`다.
+- 임시 시연물 `.worktrees/paper_stop_floor_demo.py`, `.worktrees/_baseline_pr60/`, `.worktrees/paper_stop_floor.diff`는 Main 승인으로 제거했다(결과 원문은 위 항목들에 보존). task worktree·branch 정리는 Main이 수행한다.
 
 ### 재현 명령 (cwd `V:/HANSE/KAsset-Trader-Core/.worktrees/paper-auto-stoploss`, Main이 실행 완료)
 - 이 PC에는 로컬 PostgreSQL이 없다(`localhost:5432` 연결 실패, `*postgre*` 서비스 없음, docker CLI 없음). `db_session`이 필요한 테스트는 이 환경에서 실행할 수 없다.
