@@ -40,6 +40,7 @@ from app.models.ai_recommendations import AIRecommendation
 from app.models.kasset_paper_execution_events import KAssetPaperExecutionEvent
 from app.models.paper_trading import PaperAccount
 from app.models.trading import User, UserRole
+from app.services.ai_recommendations.service import AIRecommendationService
 from app.tasks import TASKIQ_TASK_MODULES, kasset_paper_automation_tasks
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
@@ -80,6 +81,58 @@ def _approved_recommendation(
         decided_at=now - timedelta(minutes=1),
         updated_at=now - timedelta(minutes=1),
     )
+
+
+def _position_exit_recommendation(
+    owner_user_id: int,
+    *,
+    market: str = "KRX",
+    symbol: str = "005930",
+    now: datetime = _NOW,
+) -> AIRecommendation:
+    """Position Manager가 만든 결정론 보호 청산 추천."""
+    return AIRecommendation(
+        id=f"rec-exit-{uuid4().hex}",
+        owner_user_id=owner_user_id,
+        action="SELL",
+        decision="PENDING",
+        market=market,
+        symbol=symbol,
+        currency="KRW" if market == "KRX" else "USD",
+        rationale=["장중 저가가 기존 손절선에 닿아 전량 청산합니다."],
+        risks=[],
+        evidence=[
+            {
+                "title": "Deterministic PAPER position exit",
+                "source": "position_manager",
+                "kind": "position_exit",
+                "exitKind": "STOP",
+                "evaluationHorizon": "intraday",
+            }
+        ],
+        confidence="1",
+        suggested_quantity="1",
+        source="kasset-automation",
+        created_at=now,
+        valid_until=now + timedelta(hours=1),
+        updated_at=now,
+    )
+
+
+def _owner_scoped_service(
+    db_session: AsyncSession,
+    *,
+    now: datetime,
+) -> OwnerScopedRecommendationService:
+    """선정과 승인이 같은 고정 시계를 보게 만든다.
+
+    ``decide()``는 호출자가 넘긴 시각이 아니라 자신의 clock으로 유효기간을
+    확인한다. 운영에서는 두 값이 같은 실제 시각이지만, 고정 시각 픽스처에서는
+    갈라진다. 운영 API를 바꾸지 않고 생성자 clock 주입으로 맞춘다.
+    """
+    service = OwnerScopedRecommendationService(db_session)
+    service._service = AIRecommendationService(db_session, clock=lambda: now)
+    return service
 
 
 async def _seed_owner(db_session: AsyncSession) -> tuple[int, str]:
@@ -508,6 +561,89 @@ async def test_expired_claim_is_selected_for_reconciliation(
         assert reclaimed.id == recommendation_id
         assert reclaimed.paper_execution_token != "expired-token"
         assert reclaimed.paper_execution_attempt_count == 2
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_protective_exit_is_authorized_before_an_older_buy(
+    db_session: AsyncSession,
+) -> None:
+    """소유자당 한 건만 집행하므로, 오래된 BUY가 손절을 굶겨서는 안 된다."""
+
+    owner_id, username = await _seed_owner(db_session)
+    older_buy = _approved_recommendation(owner_id)
+    protective_exit = _position_exit_recommendation(owner_id)
+    exit_id = protective_exit.id
+    try:
+        db_session.add_all([older_buy, protective_exit])
+        await db_session.commit()
+
+        service = _owner_scoped_service(db_session, now=_NOW)
+        selected = await service.authorize_next_for_auto_execution(
+            str(owner_id),
+            _NOW,
+        )
+
+        assert selected == exit_id
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_closed_market_exit_does_not_take_the_open_market_slot(
+    db_session: AsyncSession,
+) -> None:
+    """KRX 정규장 중에는 어차피 막히는 US 후보가 그 tick을 쓰지 않는다."""
+
+    owner_id, username = await _seed_owner(db_session)
+    closed_market_exit = _position_exit_recommendation(
+        owner_id,
+        market="US",
+        symbol="NVDA",
+        now=_NOW_IN_SESSION - timedelta(hours=6),
+    )
+    open_market_buy = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    buy_id = open_market_buy.id
+    try:
+        db_session.add_all([closed_market_exit, open_market_buy])
+        await db_session.commit()
+
+        service = _owner_scoped_service(db_session, now=_NOW_IN_SESSION)
+        selected = await service.authorize_next_for_auto_execution(
+            str(owner_id),
+            _NOW_IN_SESSION,
+        )
+
+        assert selected == buy_id
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_out_of_session_us_buy_does_not_starve_the_krx_protective_exit(
+    db_session: AsyncSession,
+) -> None:
+    """실측 결함: KRX 장중인데 승인된 US BUY가 슬롯을 먹고 KRX 손절이 밀렸다."""
+
+    owner_id, username = await _seed_owner(db_session)
+    us_buy = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    us_buy.market = "US"
+    us_buy.symbol = "NVDA"
+    us_buy.currency = "USD"
+    krx_exit = _position_exit_recommendation(owner_id, now=_NOW_IN_SESSION)
+    exit_id = krx_exit.id
+    try:
+        db_session.add_all([us_buy, krx_exit])
+        await db_session.commit()
+
+        service = _owner_scoped_service(db_session, now=_NOW_IN_SESSION)
+        selected = await service.authorize_next_for_auto_execution(
+            str(owner_id),
+            _NOW_IN_SESSION,
+        )
+
+        assert selected == exit_id
     finally:
         await _cleanup_owner(db_session, username)
 

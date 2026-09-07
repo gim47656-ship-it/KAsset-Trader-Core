@@ -185,6 +185,17 @@ OUT_OF_SESSION_UNKNOWN_MARKET_REASON = "unsupported_session_market"
 _CALENDAR_MARKET: dict[str, str] = {"KRX": "kr", "KR": "kr", "US": "us"}
 
 
+def _market_out_of_session_reason(market: object, *, now: datetime) -> str | None:
+    """해당 시장의 정규장이 닫혀 있으면 무인 집행 차단 사유를 돌려준다."""
+    calendar_market = _CALENDAR_MARKET.get(str(market).strip().upper())
+    if calendar_market is None:
+        # 시장을 캘린더로 증명할 수 없으면 집행하지 않는다.
+        return OUT_OF_SESSION_UNKNOWN_MARKET_REASON
+    if is_market_open(calendar_market, now=now):
+        return None
+    return OUT_OF_SESSION_BLOCK_REASON
+
+
 async def _out_of_session_block_reason(
     db: AsyncSession,
     recommendation_id: str,
@@ -195,13 +206,7 @@ async def _out_of_session_block_reason(
     recommendation = await db.get(AIRecommendation, recommendation_id)
     if recommendation is None:
         return None
-    calendar_market = _CALENDAR_MARKET.get(str(recommendation.market).strip().upper())
-    if calendar_market is None:
-        # 시장을 캘린더로 증명할 수 없으면 집행하지 않는다.
-        return OUT_OF_SESSION_UNKNOWN_MARKET_REASON
-    if is_market_open(calendar_market, now=now):
-        return None
-    return OUT_OF_SESSION_BLOCK_REASON
+    return _market_out_of_session_reason(recommendation.market, now=now)
 
 
 async def _stale_quote_block_reason(
@@ -372,7 +377,28 @@ class OwnerScopedRecommendationService:
         promotion_service = (
             StrategyPromotionService(self._db) if self._require_promotion else None
         )
-        for row in (*approved_rows, *pending_rows):
+        # 소유자당 한 tick에 한 건만 집행하므로 "무엇을 먼저 보는가"가 곧
+        # 보호 청산의 도달 가능성이다. 후보를 걸러내지 않고 순서만 정한다.
+        # 관문(정규장/시세 신선도/Hard Risk)은 그대로 최종 판정에 남는다.
+        #
+        # 1. 지금 정규장이 열린 시장을 먼저 본다. KR 장중에 US BUY가 그 tick의
+        #    슬롯을 차지하면 어차피 정규장 관문에서 막히면서 KR 손절만 굶는다.
+        # 2. 유효기간이 끝난 CLAIMED 재수습을 그다음에 본다. claim/lease를
+        #    흘리지 않는 기존 복구 우선순위를 유지한다.
+        # 3. Position Manager 보호 청산을 새 진입보다 먼저 본다. 시간순으로만
+        #    고르면 더 오래된 BUY가 계속 앞을 막아 손절이 다음 tick으로 밀린다.
+        #
+        # 안정 정렬이므로 같은 등급 안의 기존 순서(승인 우선, 그다음 시간순)는
+        # 그대로다. 후보가 하나뿐이면 순서도 결과도 이전과 동일하다.
+        candidates = sorted(
+            (*approved_rows, *pending_rows),
+            key=lambda item: (
+                _market_out_of_session_reason(item.market, now=now) is not None,
+                not _is_reclaimable_execution_claim(item, now),
+                not is_deterministic_position_exit(item.evidence),
+            ),
+        )
+        for row in candidates:
             if _is_reclaimable_execution_claim(row, now):
                 self._recommendation_id = row.id
                 return row.id

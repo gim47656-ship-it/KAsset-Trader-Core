@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,15 +14,23 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.automation import position_manager_service
+from app.extensions.kasset.automation.contracts import PriceBar
+from app.extensions.kasset.automation.intraday_data import (
+    CompletedIntradayBars,
+    IntradayBarsUnavailable,
+)
+from app.extensions.kasset.automation.market_session import RegularSession
 from app.extensions.kasset.automation.position_manager import (
     ExitKind,
     ManagedPositionState,
     PositionBar,
     evaluate_position,
+    evaluate_position_intraday,
     initialize_position,
 )
 from app.extensions.kasset.automation.position_manager_service import (
     PaperPositionManagerService,
+    _intraday_position_bars,
     _persistable_state,
     _state_matches_position_cycle,
     position_recommendation_id,
@@ -40,6 +49,9 @@ from app.models.trading import InstrumentType, User
 D = Decimal
 ENTRY_AT = datetime(2026, 8, 1, tzinfo=UTC)
 _ARTIFACT_FINGERPRINT = "a" * 64
+_INTRADAY_INTERVAL = timedelta(minutes=5)
+#: (bucket 시작 offset(분), open, high, low, close)
+_IntradayTick = tuple[int, str, str, str, str]
 
 
 def _state(
@@ -160,6 +172,43 @@ def _candle(
 
 def _atr_candles() -> list[SimpleNamespace]:
     return [_candle(day) for day in range(-13, 2)]
+
+
+def _intraday(
+    ticks: Sequence[_IntradayTick],
+    *,
+    day: int = 1,
+    symbol: str = "005930",
+    market: str = "KRX",
+) -> CompletedIntradayBars:
+    opens_at = ENTRY_AT + timedelta(days=day)
+    session = RegularSession(
+        market="kr" if market == "KRX" else "us",
+        session_date=opens_at.date(),
+        opens_at=opens_at,
+        closes_at=opens_at + timedelta(hours=6, minutes=30),
+    )
+    bars = tuple(
+        PriceBar(
+            timestamp=opens_at + timedelta(minutes=minute),
+            open=D(open_),
+            high=D(high),
+            low=D(low),
+            close=D(close),
+            volume=D("1000"),
+        )
+        for minute, open_, high, low, close in ticks
+    )
+    return CompletedIntradayBars(
+        symbol=symbol,
+        market="KRX" if market == "KRX" else "US",
+        period="5m",
+        bar_interval=_INTRADAY_INTERVAL,
+        session=session,
+        bars=bars,
+        source="toss",
+        data_as_of=bars[-1].timestamp + _INTRADAY_INTERVAL,
+    )
 
 
 def _manager(db: MagicMock, *, now: datetime) -> PaperPositionManagerService:
@@ -331,6 +380,158 @@ def test_partial_state_is_not_committed_before_paper_execution() -> None:
     persisted = _persistable_state(previous, evaluated.state, evaluated.signal.kind)
     assert evaluated.state.partial_exit_completed is True
     assert persisted.partial_exit_completed is False
+
+
+@pytest.mark.unit
+def test_intraday_stop_uses_stored_level_without_a_new_daily_bar() -> None:
+    """금요일까지 평가된 포지션도 월요일 장중에 손절선이 깨지면 신호가 나온다."""
+
+    state = _state()
+    monday = _intraday(
+        [
+            (0, "95", "96", "92", "93"),
+            (5, "92", "93", "69", "71"),
+        ],
+        day=3,
+    )
+
+    signal = evaluate_position_intraday(
+        state,
+        _intraday_position_bars(monday),
+        bar_interval=monday.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.quantity_fraction == D("1")
+    assert signal.reference_price == D("70")
+    # 신호 시각은 그 bucket이 닫힌 시각이다.
+    assert signal.signal_at == monday.bars[1].timestamp + monday.bar_interval
+
+    # 다음 tick에서 이후 bucket이 더 붙어도 같은 청산을 가리켜야 한다.
+    next_tick = _intraday(
+        [
+            (0, "95", "96", "92", "93"),
+            (5, "92", "93", "69", "71"),
+            (10, "71", "72", "68", "69"),
+        ],
+        day=3,
+    )
+    repeated = evaluate_position_intraday(
+        state,
+        _intraday_position_bars(next_tick),
+        bar_interval=next_tick.bar_interval,
+    )
+
+    assert repeated is not None
+    assert repeated.idempotency_key == signal.idempotency_key
+
+
+@pytest.mark.unit
+def test_intraday_ignores_buckets_that_started_before_entry() -> None:
+    """진입 직전 저가는 진입 후 손절 도달이 아니다."""
+
+    bars = _intraday(
+        [
+            (0, "95", "96", "60", "94"),
+            (5, "94", "95", "61", "93"),
+            (10, "93", "94", "90", "92"),
+        ],
+        day=1,
+    )
+    entered_mid_bucket = replace(
+        _state(),
+        entry_at=bars.session.opens_at + timedelta(minutes=7),
+    )
+
+    assert (
+        evaluate_position_intraday(
+            entered_mid_bucket,
+            _intraday_position_bars(bars),
+            bar_interval=bars.bar_interval,
+        )
+        is None
+    )
+
+    after_entry_break = _intraday(
+        [
+            (0, "95", "96", "60", "94"),
+            (10, "93", "94", "65", "92"),
+        ],
+        day=1,
+    )
+    signal = evaluate_position_intraday(
+        entered_mid_bucket,
+        _intraday_position_bars(after_entry_break),
+        bar_interval=after_entry_break.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.signal_at == after_entry_break.bars[1].timestamp + _INTRADAY_INTERVAL
+
+
+@pytest.mark.unit
+def test_intraday_never_trails_the_stop_from_session_highs() -> None:
+    """분봉 고가/종가로 손절선을 끌어올리지 않는다. 저장된 손절선만 본다."""
+
+    bars = _intraday(
+        [
+            (0, "100", "131", "99", "130"),
+            (5, "130", "130", "95", "96"),
+        ],
+        day=3,
+    )
+
+    # 일봉 trailing(고가 130 - 3ATR)이라면 95는 손절이지만, 저장 손절선은 70이다.
+    assert (
+        evaluate_position_intraday(
+            _state(partial=True),
+            _intraday_position_bars(bars),
+            bar_interval=bars.bar_interval,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_intraday_partial_target_uses_stored_entry_and_atr() -> None:
+    bars = _intraday([(0, "125", "132", "124", "128")], day=3)
+
+    signal = evaluate_position_intraday(
+        _state(),
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.PARTIAL_SELL
+    assert signal.quantity_fraction == D("0.5")
+    assert signal.reference_price == D("130")
+
+
+@pytest.mark.unit
+def test_intraday_full_stop_outranks_an_earlier_partial_hit() -> None:
+    """부분익절 도달이 같은 세션의 손절선 관통을 가려서는 안 된다."""
+
+    bars = _intraday(
+        [
+            (0, "125", "131", "124", "130"),
+            (5, "130", "130", "69", "71"),
+        ],
+        day=3,
+    )
+
+    signal = evaluate_position_intraday(
+        _state(),
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.quantity_fraction == D("1")
+    assert signal.reference_price == D("70")
+    assert signal.signal_at == bars.bars[1].timestamp + _INTRADAY_INTERVAL
 
 
 @pytest.mark.asyncio
@@ -595,6 +796,186 @@ async def test_unclaimed_partial_is_expired_before_emergency_full_exit() -> None
     assert state_row.last_exit_signal_key == recommendation_id
 
 
+def _exit_recommendation(
+    identifier: str,
+    *,
+    kind: str,
+    bar_as_of: datetime | None = None,
+    decision: str = "APPROVED",
+    execution_status: str | None = None,
+    valid_until: datetime = ENTRY_AT + timedelta(days=5),
+) -> AIRecommendation:
+    evidence: dict[str, object] = {"kind": "position_exit", "exitKind": kind}
+    if bar_as_of is not None:
+        evidence["barAsOf"] = bar_as_of.isoformat()
+    row = AIRecommendation(
+        id=identifier,
+        owner_user_id=23,
+        action="SELL",
+        decision=decision,
+        market="KRX",
+        symbol="005930",
+        currency="KRW",
+        rationale=[],
+        risks=[],
+        evidence=[evidence],
+        source="kasset-automation",
+        created_at=ENTRY_AT,
+        valid_until=valid_until,
+        decided_at=ENTRY_AT,
+        updated_at=ENTRY_AT,
+    )
+    row.paper_execution_status = execution_status
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_until", (ENTRY_AT + timedelta(days=5), ENTRY_AT))
+async def test_claimed_partial_blocks_a_parallel_full_exit(
+    valid_until: datetime,
+) -> None:
+    """집행 중인 부분익절이 있으면 전량 청산을 병행 생성하지 않는다."""
+
+    partial_id = "position-exit:claimed-partial:23"
+    state_row = _state_row(last_exit_signal_key=partial_id)
+    claimed = _exit_recommendation(
+        partial_id,
+        kind="PARTIAL_SELL",
+        execution_status="CLAIMED",
+        valid_until=valid_until,
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row, claimed])
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is None
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+    # claim 결과를 다음 tick에서 다시 화해할 수 있어야 한다.
+    assert claimed.valid_until == valid_until
+    assert state_row.last_exit_signal_key == partial_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "execution_status", "valid_until"),
+    (
+        ("REJECTED", None, ENTRY_AT + timedelta(days=5)),
+        ("APPROVED", "FAILED", ENTRY_AT + timedelta(days=5)),
+        ("APPROVED", None, ENTRY_AT + timedelta(days=3)),
+    ),
+)
+async def test_terminated_intraday_exit_retries_on_a_later_bucket(
+    decision: str,
+    execution_status: str | None,
+    valid_until: datetime,
+) -> None:
+    """거절·집행실패·기한만료 뒤에도 이후 완료 bucket으로 다시 보호한다."""
+
+    first_bucket_end = ENTRY_AT + timedelta(days=3, minutes=5)
+    terminated_id = "position-exit:terminated:23"
+    state_row = _state_row(last_exit_signal_key=terminated_id)
+    terminated = _exit_recommendation(
+        terminated_id,
+        kind="STOP",
+        bar_as_of=first_bucket_end,
+        decision=decision,
+        execution_status=execution_status,
+        valid_until=valid_until,
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row, terminated])
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    position = _paper_position(quantity="6")
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[],
+        intraday=_intraday(
+            [
+                (0, "95", "96", "69", "71"),
+                (5, "71", "72", "68", "69"),
+            ],
+            day=3,
+        ),
+    )
+
+    assert recommendation_id is not None
+    assert recommendation_id != terminated_id
+    retried = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    exit_evidence = next(
+        item for item in retried.evidence if item.get("kind") == "position_exit"
+    )
+    # 종료된 추천의 bucket은 다시 쓰지 않고, 그 이후 bucket으로 나간다.
+    assert exit_evidence["barAsOf"] == (
+        (ENTRY_AT + timedelta(days=3, minutes=10)).isoformat()
+    )
+    # 최신 잔량으로 산정한다.
+    assert retried.suggested_quantity == "6"
+    assert state_row.last_exit_signal_key == recommendation_id
+    assert state_row.last_evaluated_at is None
+
+
+@pytest.mark.asyncio
+async def test_terminated_intraday_exit_does_not_repeat_the_same_bucket() -> None:
+    """종료된 추천의 bucket만 남아 있으면 같은 id를 다시 만들지 않는다."""
+
+    first_bucket_end = ENTRY_AT + timedelta(days=3, minutes=5)
+    terminated_id = "position-exit:terminated-same:23"
+    state_row = _state_row(last_exit_signal_key=terminated_id)
+    terminated = _exit_recommendation(
+        terminated_id,
+        kind="STOP",
+        bar_as_of=first_bucket_end,
+        decision="REJECTED",
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row, terminated])
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is None
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+    # 재시작 뒤에도 재시도 경계를 알 수 있어야 한다.
+    assert state_row.last_exit_signal_key == terminated_id
+
+
 @pytest.mark.asyncio
 async def test_duplicate_manager_run_emits_one_exit_for_same_cycle_bar() -> None:
     state_row = _state_row()
@@ -642,6 +1023,260 @@ async def test_duplicate_manager_run_emits_one_exit_for_same_cycle_bar() -> None
     assert first is not None
     assert repeated is None
     assert list(recommendations) == [first]
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_fires_after_the_last_daily_bar_was_evaluated() -> None:
+    """실측 결함: 마지막 완료 일봉이 이미 평가돼 포지션 전체가 건너뛰어졌다."""
+
+    daily = _candle(1)
+    state_row = _state_row(last_evaluated_at=daily.time_utc)
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    now = daily.time_utc + timedelta(days=2, hours=1)
+    service = _manager(db, now=now)
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[daily],
+        intraday=_intraday(
+            [
+                (0, "95", "96", "92", "93"),
+                (5, "92", "93", "69", "71"),
+            ],
+            day=3,
+        ),
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    assert exit_evidence["exitKind"] == ExitKind.STOP.value
+    assert exit_evidence["evaluationHorizon"] == "intraday"
+    assert exit_evidence["barPeriod"] == "5m"
+    assert recommendation.suggested_quantity == "10"
+    assert state_row.last_exit_signal_key == recommendation_id
+    # 분봉 시각이 일봉 커서를 덮으면 당일 완료 일봉이 영구히 막힌다.
+    assert state_row.last_evaluated_at == daily.time_utc
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_fires_when_entry_is_newer_than_daily_history() -> None:
+    """실측 결함: 진입이 마지막 일봉보다 늦어 일봉 평가가 성립하지 않았다."""
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    position = _paper_position()
+    position.created_at = ENTRY_AT + timedelta(days=2)
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=_atr_candles(),
+        intraday=_intraday([(0, "90", "91", "87", "88")], day=3),
+    )
+
+    assert recommendation_id is not None
+    state_row = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], KAssetPaperPositionState)
+    )
+    # 진입 시점 ATR로 만든 손절선(100 - 3*4)을 장중에 그대로 적용한다.
+    assert state_row.initial_stop == D("88")
+    assert state_row.last_evaluated_at is None
+
+
+@pytest.mark.asyncio
+async def test_stale_daily_history_does_not_block_the_intraday_exit() -> None:
+    """일봉 적재가 멈춰도 보유 종목의 손절 평가는 멈추지 않는다."""
+
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=9, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[_candle(1)],
+        intraday=_intraday([(0, "71", "72", "69", "70")], day=9),
+    )
+
+    assert recommendation_id is not None
+
+
+@pytest.mark.asyncio
+async def test_repeated_intraday_ticks_emit_one_exit_for_the_same_bucket() -> None:
+    """tick 시각이 달라도 같은 완료 bucket은 한 건만 만든다."""
+
+    state_row = _state_row(last_evaluated_at=_candle(1).time_utc)
+    recommendations: dict[str, AIRecommendation] = {}
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.flush = AsyncMock()
+
+    async def get_recommendation(
+        model: type[AIRecommendation],
+        key: str,
+    ) -> AIRecommendation | None:
+        assert model is AIRecommendation
+        return recommendations.get(key)
+
+    def add_row(row: object) -> None:
+        if isinstance(row, AIRecommendation):
+            recommendations[row.id] = row
+
+    db.get = AsyncMock(side_effect=get_recommendation)
+    db.add = MagicMock(side_effect=add_row)
+    position = _paper_position()
+    first_tick = _intraday([(0, "95", "96", "69", "71")], day=3)
+    later_tick = _intraday(
+        [
+            (0, "95", "96", "69", "71"),
+            (5, "71", "72", "68", "69"),
+        ],
+        day=3,
+    )
+
+    first = await _manager(
+        db,
+        now=first_tick.data_as_of + timedelta(minutes=2),
+    )._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[_candle(1)],
+        intraday=first_tick,
+    )
+    db.scalar = AsyncMock(side_effect=[state_row, recommendations[first]])
+    repeated = await _manager(
+        db,
+        now=later_tick.data_as_of + timedelta(minutes=2),
+    )._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[_candle(1)],
+        intraday=later_tick,
+    )
+
+    assert first is not None
+    assert repeated is None
+    assert list(recommendations) == [first]
+
+
+@pytest.mark.asyncio
+async def test_intraday_full_stop_outranks_the_daily_partial_signal() -> None:
+    """일봉이 부분익절을 내도 당일 장중 손절선 관통이 우선한다."""
+
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[_candle(1, open_="125", high="132", low="90", close="128")],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    assert exit_evidence["exitKind"] == ExitKind.STOP.value
+    assert exit_evidence["evaluationHorizon"] == "intraday"
+    assert recommendation.suggested_quantity == "10"
+    # 부분익절은 나가지 않았으므로 상태에 확정되어서도 안 된다.
+    assert state_row.partial_exit_completed is False
+    # 일봉 자체는 평가됐으므로 일봉 커서는 그 봉으로 전진한다.
+    assert state_row.last_evaluated_at == _candle(1).time_utc
+
+
+@pytest.mark.asyncio
+async def test_stored_stop_is_protected_without_any_daily_history() -> None:
+    """일봉 유니버스에 없는 보유 종목도 저장된 손절선으로 보호된다."""
+
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is not None
+    assert state_row.last_evaluated_at is None
+
+
+@pytest.mark.asyncio
+async def test_new_position_without_daily_history_stays_fail_closed() -> None:
+    """ATR을 만들 근거가 없으면 손절선을 발명하지 않고 아무것도 만들지 않는다."""
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is None
+    assert db.add.call_args_list == []
 
 
 @pytest.mark.asyncio
@@ -790,31 +1425,60 @@ async def test_closed_cycle_survives_position_delete_as_audit(
     assert preserved.closed_at == closed_at
 
 
-@pytest.mark.unit
-def test_cycle_model_and_migration_preserve_closed_audit() -> None:
-    table = KAssetPaperPositionState.__table__
-    assert tuple(table.primary_key.columns.keys()) == ("position_cycle_id",)
-    position_fk = next(
-        fk
-        for fk in table.foreign_keys
-        if fk.target_fullname == "paper.paper_positions.id"
+@pytest.mark.asyncio
+async def test_intraday_load_is_bounded_to_open_markets_and_held_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """장이 닫힌 시장은 조회하지 않고, 보유 종목당 한 번만 조회한다."""
+
+    session = _intraday([(0, "100", "101", "99", "100")]).session
+    calls: list[tuple[str, str, object]] = []
+
+    async def _load(
+        *,
+        symbol: str,
+        market: str,
+        as_of: datetime,
+        session: RegularSession,
+    ) -> CompletedIntradayBars | IntradayBarsUnavailable:
+        calls.append((market, symbol, session))
+        if symbol == "000660":
+            return IntradayBarsUnavailable(
+                symbol=symbol,
+                market="KRX",
+                period="5m",
+                blocked_reason="intraday_bars_stale",
+                detail="provider lag",
+            )
+        return _intraday(
+            [(0, "100", "101", "99", "100")],
+            symbol=symbol,
+            market=market,
+        )
+
+    monkeypatch.setattr(
+        position_manager_service,
+        "current_regular_session",
+        lambda market, moment: session if market == "KRX" else None,
     )
-    assert position_fk.ondelete == "SET NULL"
-    assert table.c.paper_position_id.nullable
-    assert table.c.strategy_key.nullable
-    assert table.c.strategy_version.nullable
-    assert table.c.strategy_fingerprint.nullable
-    assert any(
-        index.name == "uq_kasset_position_state_owner_active_holding" and index.unique
-        for index in table.indexes
+    monkeypatch.setattr(position_manager_service, "load_completed_session_bars", _load)
+    service = _manager(MagicMock(), now=ENTRY_AT + timedelta(days=1))
+
+    loaded = await service._load_intraday(
+        {
+            "KRX": [
+                (_paper_position(), 17),
+                (_paper_position(position_id=102, symbol="000660"), 17),
+            ],
+            "US": [
+                (_paper_position(position_id=103, symbol="NVDA", market="US"), 17),
+            ],
+        }
     )
 
-    migration = (
-        Path(__file__).resolve().parents[4]
-        / "alembic"
-        / "versions"
-        / "20260830_kasset_position_cycles.py"
-    ).read_text(encoding="utf-8")
-    assert 'down_revision = "20260829_kasset_promotion"' in migration
-    assert 'ondelete="SET NULL"' in migration
-    assert "closed_at IS NULL" in migration
+    assert list(loaded) == [("KRX", "005930")]
+    assert [(market, symbol) for market, symbol, _ in calls] == [
+        ("KRX", "005930"),
+        ("KRX", "000660"),
+    ]
+    assert all(used is session for _m, _s, used in calls)

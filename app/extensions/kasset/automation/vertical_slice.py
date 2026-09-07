@@ -144,7 +144,7 @@ from app.extensions.kasset.automation.strategy_promotion import (
 from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.jobs.watch_market_data import is_market_open
-from app.models.ai_recommendations import AIRecommendation
+from app.models.ai_recommendations import AIRecommendation, RecommendationAction
 from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.news import NewsArticle
 from app.models.paper_trading import PaperPosition
@@ -168,7 +168,8 @@ from app.services.symbol_news_store import load_symbol_news
 
 logger = logging.getLogger(__name__)
 _RECOMMENDATION_LIMIT = 5
-_OWNER_COOLDOWN = timedelta(hours=1)
+#: 같은 owner에게 BUY 추천을 반복 생성하지 않도록 두는 중복 방지 창.
+_OWNER_BUY_COOLDOWN = timedelta(hours=1)
 
 #: 순위 상위 검토 창을 ``strategy_review_limit``의 몇 배까지 열어둘지. AI 앞단
 #: 에서 결정론적으로 걸린 행을 다음 순위 행으로 메우려면 창이 상한보다 넓어야
@@ -249,7 +250,9 @@ def _regular_market_skip_result(
     owner_user_id: int,
     cycle_trace_id: str,
     reason: str = _NO_REGULAR_MARKET_OPEN,
+    position_exit_recommendation_ids: Sequence[str] = (),
 ) -> dict[str, object]:
+    exit_ids = list(position_exit_recommendation_ids)
     return {
         "ownerUserId": owner_user_id,
         "cycleTraceId": cycle_trace_id,
@@ -260,8 +263,8 @@ def _regular_market_skip_result(
         "strategyActionableCount": 0,
         "aiReviewedCount": 0,
         "aiFailureCount": 0,
-        "recommendationIds": [],
-        "positionExitRecommendationIds": [],
+        "recommendationIds": exit_ids,
+        "positionExitRecommendationIds": list(exit_ids),
     }
 
 
@@ -521,17 +524,16 @@ class AIRecommendationVerticalSlice:
     async def run_owner(self, owner_user_id: int) -> dict[str, object]:
         """Produce one owner's recommendations under this cycle's trace id."""
 
-        cooldown_active = await self._cooldown_active(owner_user_id)
+        # 보유 포지션 관리(손절 포함)를 먼저 돌린다. 손절 추천이 나와도 같은
+        # cycle에서 새 진입 후보 검토를 계속한다. 손절은 정상 동작이며 다음
+        # 후보를 막는 사유가 아니다.
         position_exit_ids = await self._position_manager.run_owner(owner_user_id)
-        if cooldown_active or position_exit_ids:
+        # BUY 추천 중복만 막는 쿨다운이다. 손절 SELL 추천은 세지 않는다.
+        if await self._buy_cooldown_active(owner_user_id):
             return {
                 "ownerUserId": owner_user_id,
                 "cycleTraceId": self._cycle_trace_id,
-                "skipped": (
-                    "position_exit_recommendation_created"
-                    if position_exit_ids
-                    else "recommendation_cooldown_active"
-                ),
+                "skipped": "recommendation_cooldown_active",
                 "candidateCount": 0,
                 "positionExitRecommendationIds": list(position_exit_ids),
                 "recommendationIds": list(position_exit_ids),
@@ -557,6 +559,7 @@ class AIRecommendationVerticalSlice:
                     owner_user_id=owner_user_id,
                     cycle_trace_id=self._cycle_trace_id,
                     reason=_NO_CONFIGURED_REGULAR_MARKET_OPEN,
+                    position_exit_recommendation_ids=position_exit_ids,
                 )
         if self._ai_router is None:
             return {
@@ -564,8 +567,8 @@ class AIRecommendationVerticalSlice:
                 "cycleTraceId": self._cycle_trace_id,
                 "skipped": "ai_unavailable",
                 "candidateCount": 0,
-                "positionExitRecommendationIds": [],
-                "recommendationIds": [],
+                "positionExitRecommendationIds": list(position_exit_ids),
+                "recommendationIds": list(position_exit_ids),
             }
 
         snapshot = await self._policy.get_snapshot(
@@ -619,8 +622,8 @@ class AIRecommendationVerticalSlice:
                     }
                     for candidate in management_only
                 ],
-                "recommendationIds": [],
-                "positionExitRecommendationIds": [],
+                "recommendationIds": list(position_exit_ids),
+                "positionExitRecommendationIds": list(position_exit_ids),
             }
 
         candle_sync = await self._sync_missing_kr_candles(
@@ -810,6 +813,8 @@ class AIRecommendationVerticalSlice:
                     _trigger_exclusion_evidence(item, trigger_decision)
                 )
                 continue
+            # 손절 연속은 관측값으로만 남긴다. 손절 이력이 있어도 유효한 새
+            # 진입 후보는 계속 검토한다.
             loss_streak = await loss_streak_gate.evaluate(
                 self._db,
                 owner_user_id,
@@ -822,21 +827,11 @@ class AIRecommendationVerticalSlice:
                 {
                     "market": candidate.market,
                     "symbol": candidate.symbol,
+                    "buyLockObserved": loss_streak.buy_locked,
+                    "reason": loss_streak.reason,
                     **loss_streak.evidence,
                 }
             )
-            if not loss_streak.passed:
-                pre_ai_exclusions[loss_streak.reason or "loss_streak"] += 1
-                pre_ai_exclusion_evidence.append(
-                    {
-                        "source": "loss_streak_gate",
-                        "code": loss_streak.code,
-                        "reason": loss_streak.reason,
-                        "detail": loss_streak.detail,
-                        "lossStreak": loss_streak.evidence,
-                    }
-                )
-                continue
             account_state = account_state_snapshot.for_market(candidate.market)
             account_state_gate = evaluate_account_state_gate(
                 item.ensemble.action.value,
@@ -1057,8 +1052,8 @@ class AIRecommendationVerticalSlice:
                 }
                 for candidate in management_only
             ],
-            "recommendationIds": recommendation_ids,
-            "positionExitRecommendationIds": [],
+            "recommendationIds": [*position_exit_ids, *recommendation_ids],
+            "positionExitRecommendationIds": list(position_exit_ids),
         }
         if len(ranking.ranked) < self._ranker_config.minimum_candidate_target:
             result["dataPrerequisite"] = (
@@ -2156,14 +2151,17 @@ class AIRecommendationVerticalSlice:
         )
         return tuple(evidence)
 
-    async def _cooldown_active(self, owner_user_id: int) -> bool:
+    async def _buy_cooldown_active(self, owner_user_id: int) -> bool:
+        """직전 BUY 추천 중복만 막는다. 손절 SELL 추천은 세지 않는다."""
+
         count = await self._db.scalar(
             select(func.count())
             .select_from(AIRecommendation)
             .where(
                 AIRecommendation.owner_user_id == owner_user_id,
                 AIRecommendation.source == "kasset-automation",
-                AIRecommendation.created_at >= self._now - _OWNER_COOLDOWN,
+                AIRecommendation.action == RecommendationAction.BUY.value,
+                AIRecommendation.created_at >= self._now - _OWNER_BUY_COOLDOWN,
             )
         )
         return bool(count)

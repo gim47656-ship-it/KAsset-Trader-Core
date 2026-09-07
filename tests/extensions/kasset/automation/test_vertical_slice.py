@@ -8,9 +8,13 @@ from datetime import UTC, datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.security import get_password_hash
 from app.extensions.kasset.ai.model_router import _TierAnalysis
 from app.extensions.kasset.automation import vertical_slice
 from app.extensions.kasset.automation.account_state_gate import (
@@ -81,6 +85,8 @@ from app.extensions.kasset.automation.vertical_slice import (
     EvaluatedCandidate,
     TradingCandidate,
 )
+from app.models.ai_recommendations import AIRecommendation
+from app.models.trading import User, UserRole
 from app.schemas.ai_recommendations import RecommendationRanking
 
 _NOW = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
@@ -525,7 +531,7 @@ def _stub_review_cycle(
     instance._account_state_gate = SimpleNamespace(  # type: ignore[assignment]
         evaluate_owner=AsyncMock(return_value=_account_snapshot())
     )
-    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=AsyncMock(return_value=())
     )
@@ -1162,20 +1168,105 @@ def test_strategy_artifact_lookup_failure_prevents_recommendation_slice(
 
 
 @pytest.mark.asyncio
-async def test_held_positions_are_managed_before_candidate_cooldown() -> None:
-    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
+async def test_position_exit_does_not_stop_new_candidate_consideration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    db.commit = AsyncMock()
+    instance = AIRecommendationVerticalSlice(db, MagicMock(), now=_NOW)
     manager = AsyncMock(return_value=("position-exit:owner-4",))
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=manager
     )
-    instance._cooldown_active = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._policy = SimpleNamespace(  # type: ignore[assignment]
+        get_snapshot=AsyncMock(
+            return_value=SimpleNamespace(
+                limits=SimpleNamespace(
+                    currency="KRW",
+                    daily_target_rate_pct=Decimal("0.5"),
+                    max_daily_loss_rate_pct=Decimal("1.0"),
+                )
+            )
+        )
+    )
+    instance._account_state_gate = SimpleNamespace(  # type: ignore[assignment]
+        evaluate_owner=AsyncMock(return_value=_account_snapshot())
+    )
+    load_candidates = AsyncMock(return_value=[])
+    instance._load_candidates = load_candidates  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        vertical_slice.daily_routine_service,
+        "recommendation_markets",
+        AsyncMock(return_value=frozenset({"KR"})),
+    )
 
     result = await instance.run_owner(4)
 
     manager.assert_awaited_once_with(4)
-    assert result["skipped"] == "position_exit_recommendation_created"
-    assert result["recommendationIds"] == ["position-exit:owner-4"]
+    # 손절 추천이 나온 cycle에서도 새 진입 후보 탐색이 계속 진행된다.
+    load_candidates.assert_awaited_once()
+    assert result["skipped"] == "screener_candidates_unavailable"
     assert result["positionExitRecommendationIds"] == ["position-exit:owner-4"]
+    assert result["recommendationIds"] == ["position-exit:owner-4"]
+
+
+def _automation_recommendation(
+    owner_user_id: int,
+    action: str,
+    *,
+    minutes_ago: int,
+) -> AIRecommendation:
+    created = _NOW - timedelta(minutes=minutes_ago)
+    return AIRecommendation(
+        id=f"rec-cooldown-{uuid4().hex}",
+        owner_user_id=owner_user_id,
+        action=action,
+        decision="PENDING",
+        market="KRX",
+        symbol="005930",
+        currency="KRW",
+        rationale=["cooldown scope"],
+        risks=[],
+        evidence=[],
+        source="kasset-automation",
+        created_at=created,
+        updated_at=created,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_sell_recommendation_does_not_start_buy_cooldown(
+    db_session: AsyncSession,
+) -> None:
+    username = f"cooldown-owner-{uuid4().hex}"
+    user = User(
+        username=username,
+        email=f"{username}@example.com",
+        hashed_password=get_password_hash("Cooldown-owner-secret-1!"),
+        role=UserRole.trader,
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    try:
+        instance = AIRecommendationVerticalSlice(db_session, MagicMock(), now=_NOW)
+        db_session.add(_automation_recommendation(user.id, "SELL", minutes_ago=5))
+        await db_session.commit()
+
+        # 손절 SELL 추천은 다음 BUY 후보 검토를 막지 않는다.
+        assert await instance._buy_cooldown_active(user.id) is False
+
+        db_session.add(_automation_recommendation(user.id, "BUY", minutes_ago=5))
+        await db_session.commit()
+
+        # 직전 BUY 추천 중복 방지는 그대로 유지된다.
+        assert await instance._buy_cooldown_active(user.id) is True
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(User).where(User.username == username))
+        await db_session.commit()
 
 
 @pytest.mark.asyncio
@@ -1185,7 +1276,7 @@ async def test_ai_unavailable_still_runs_held_position_manager() -> None:
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=manager
     )
-    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
     result = await instance.run_owner(8)
 
@@ -1207,7 +1298,7 @@ async def test_owner_market_scope_is_intersected_before_candidate_loading(
         now=_NOW,
         allowed_markets=frozenset({"KR"}),
     )
-    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=AsyncMock(return_value=())
     )
@@ -1257,7 +1348,7 @@ async def test_owner_market_scope_mismatch_skips_before_candidates_or_router(
         allowed_markets=frozenset({"KR"}),
         cycle_trace_id="cyc-owner-mismatch",
     )
-    instance._cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=AsyncMock(return_value=())
     )

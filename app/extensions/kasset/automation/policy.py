@@ -859,12 +859,15 @@ class AITradingPolicyService:
             )
         checks = [
             HardRiskCheck(
+                # 손절은 단기 전략의 정상 동작이다. 오늘 실현손실 누계는 근거로만
+                # 남기고 다음 진입 후보를 막지 않는다. 노출·예산·주문수·kill
+                # switch가 위험을 계속 제한한다.
                 "DAILY_MAX_LOSS",
-                (not is_buy)
-                or (valid_shape and usage.realized_loss_today < daily_loss_limit),
+                True,
                 (
                     f"realizedLossToday={usage.realized_loss_today}; "
-                    f"limit={daily_loss_limit}"
+                    f"referenceLimit={daily_loss_limit}; "
+                    "일손실 한도는 참고값이며 주문을 차단하지 않습니다."
                 ),
             ),
             HardRiskCheck(
@@ -873,9 +876,15 @@ class AITradingPolicyService:
                 account_state_gate.detail,
             ),
             HardRiskCheck(
+                # 손절 연속도 관측값이다. lock 관측은 근거에 남지만 주문을
+                # 차단하지 않는다.
                 rule=loss_streak.code,
-                passed=loss_streak.passed,
-                detail=loss_streak.detail,
+                passed=True,
+                detail=(
+                    f"{loss_streak.detail}; "
+                    f"buyLockObserved={loss_streak.buy_locked}; "
+                    "연속손실은 참고값이며 주문을 차단하지 않습니다."
+                ),
             ),
             HardRiskCheck(
                 "BUDGET",
