@@ -12,6 +12,11 @@ from enum import StrEnum
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
+#: 실제 체결 평단 대비 허용하는 최대 손실폭(-3%)을 손절선 배수로 표현한 값.
+#: 손절 근거는 이것 말고도 ATR 초기 손절선과 trailing이 있다. 이 값은 그중
+#: 가장 낮은 자리를 막는 **최소 보호선**이며, 더 타이트한 손절선은 그대로 둔다.
+STOP_LOSS_FLOOR_RATIO = Decimal("0.97")
+
 
 class ExitKind(StrEnum):
     STOP = "STOP"
@@ -56,7 +61,9 @@ class ManagedPositionState:
     market: str
     symbol: str
     entry_price: Decimal
-    initial_atr: Decimal
+    #: ``None``이면 ATR 근거가 없는 보유분이다. 고정 손절선만 쓰고 ATR 파생
+    #: 판정(부분익절·trailing·TIME_STOP)은 만들지 않는다.
+    initial_atr: Decimal | None
     initial_stop: Decimal
     current_stop: Decimal
     highest_close: Decimal
@@ -81,13 +88,16 @@ class ManagedPositionState:
             raise ValueError("position_cycle_id must be positive")
         for name, value in (
             ("entry_price", self.entry_price),
-            ("initial_atr", self.initial_atr),
             ("initial_stop", self.initial_stop),
             ("current_stop", self.current_stop),
             ("highest_close", self.highest_close),
         ):
             if not value.is_finite() or value <= _ZERO:
                 raise ValueError(f"{name} must be positive and finite")
+        if self.initial_atr is not None and (
+            not self.initial_atr.is_finite() or self.initial_atr <= _ZERO
+        ):
+            raise ValueError("initial_atr must be positive and finite")
         if self.entry_at.tzinfo is None or self.entry_at.utcoffset() is None:
             raise ValueError("entry_at must be timezone-aware")
         object.__setattr__(self, "entry_at", self.entry_at.astimezone(UTC))
@@ -148,7 +158,7 @@ def initialize_position(
     market: str,
     symbol: str,
     entry_price: Decimal,
-    initial_atr: Decimal,
+    initial_atr: Decimal | None,
     entry_at: datetime,
     strategy_version: str,
     position_cycle_id: int | None = None,
@@ -156,11 +166,16 @@ def initialize_position(
 ) -> ManagedPositionState:
     if not entry_price.is_finite() or entry_price <= _ZERO:
         raise ValueError("entry_price must be positive and finite")
-    if not initial_atr.is_finite() or initial_atr <= _ZERO:
-        raise ValueError("initial_atr must be positive and finite")
-    initial_stop = entry_price - config.initial_stop_atr * initial_atr
-    if initial_stop <= _ZERO:
-        raise ValueError("initial ATR stop must stay above zero")
+    if initial_atr is None:
+        # ATR 근거가 없는 보유분. 근거 있는 손절선은 체결 평단 -3% 바닥뿐이므로
+        # 그 자리에서 시작하고, ATR 파생 판정은 만들지 않는다.
+        initial_stop = stop_loss_floor(entry_price)
+    else:
+        if not initial_atr.is_finite() or initial_atr <= _ZERO:
+            raise ValueError("initial_atr must be positive and finite")
+        initial_stop = entry_price - config.initial_stop_atr * initial_atr
+        if initial_stop <= _ZERO:
+            raise ValueError("initial ATR stop must stay above zero")
     return ManagedPositionState(
         market=market,
         symbol=symbol,
@@ -174,6 +189,81 @@ def initialize_position(
         last_evaluated_at=None,
         strategy_version=strategy_version,
         position_cycle_id=position_cycle_id,
+    )
+
+
+def stop_loss_floor(filled_average_price: Decimal) -> Decimal:
+    """Lowest stop a managed PAPER holding may carry, from its actual fill average.
+
+    기준은 **실제 체결 평단**이다. 추천가나 진입 목표가가 아니다. 체결이 목표가와
+    어긋났거나 추가매수로 평단이 움직였다면 손실률의 분모도 함께 움직여야 하므로,
+    호출자는 원장(:class:`PaperPosition.avg_price`)의 최신 평단을 넘긴다.
+
+    평단이 없거나 양수가 아니면 손절선을 발명하지 않고 실패한다. 근거 없는 보호선은
+    보호가 아니라 임의 청산이기 때문이다.
+    """
+
+    if not filled_average_price.is_finite() or filled_average_price <= _ZERO:
+        raise ValueError("filled_average_price must be positive and finite")
+    return filled_average_price * STOP_LOSS_FLOOR_RATIO
+
+
+def apply_stop_loss_floor(
+    state: ManagedPositionState,
+    *,
+    filled_average_price: Decimal,
+) -> ManagedPositionState:
+    """Raise a managed state's stops to the -3% floor, never lowering an existing one.
+
+    -3% 최소 보호선을 먹이는 유일한 지점이다. 일봉·장중 평가기는 모두 저장된
+    ``current_stop``만 읽으므로, 상태를 세우거나 되읽는 자리에서 한 번 바닥을
+    올려두면 두 horizon이 같은 손절선을 본다. 평가기마다 따로 바닥을 씌우면
+    ``TRAILING`` 판정 기준인 ``initial_stop``과 어긋나 같은 손절이 horizon에 따라
+    다른 ``ExitKind``로 보고된다.
+
+    바닥은 ``initial_stop``에 먹인다. 바닥이 곧 이 포지션의 최소 기준 손절선이므로,
+    ``current_stop``만 올리면 아무것도 추적하지 않았는데 ``current_stop >
+    initial_stop``이 되어 ``STOP``이 ``TRAILING_STOP``으로 잘못 보고된다.
+
+    이미 더 높은(더 타이트한) 손절선이 있으면 그대로 둔다. trailing으로 끌어올린
+    손절선과 평단이 내려가는 물타기 모두 이 ``max`` 하나로 보존된다. 값이 그대로면
+    같은 객체를 돌려주어 등호 경계에서 불필요한 상태 갱신을 만들지 않는다.
+    """
+
+    floor = stop_loss_floor(filled_average_price)
+    initial_stop = max(state.initial_stop, floor)
+    current_stop = max(state.current_stop, initial_stop)
+    if initial_stop == state.initial_stop and current_stop == state.current_stop:
+        return state
+    return replace(state, initial_stop=initial_stop, current_stop=current_stop)
+
+
+def adopt_initial_atr(
+    state: ManagedPositionState,
+    *,
+    initial_atr: Decimal,
+    config: PositionManagerConfig = PositionManagerConfig(),
+) -> ManagedPositionState:
+    """Fill a missing ATR later without ever loosening the stop already carried.
+
+    고정 손절선만으로 보호하던 보유분에 일봉 근거가 생기면 ATR 파생 판정을
+    되살린다. ATR 손절선이 더 타이트할 때만 손절선을 올리고, 더 넓으면 이미
+    들고 있던 손절선을 그대로 둔다.
+    """
+
+    if state.initial_atr is not None:
+        raise ValueError("initial_atr is already known for this position")
+    if not initial_atr.is_finite() or initial_atr <= _ZERO:
+        raise ValueError("initial_atr must be positive and finite")
+    initial_stop = max(
+        state.initial_stop,
+        state.entry_price - config.initial_stop_atr * initial_atr,
+    )
+    return replace(
+        state,
+        initial_atr=initial_atr,
+        initial_stop=initial_stop,
+        current_stop=max(state.current_stop, initial_stop),
     )
 
 
@@ -281,8 +371,18 @@ def evaluate_position(
             ),
         )
 
-    partial_target = state.entry_price + config.partial_profit_atr * state.initial_atr
-    if not state.partial_exit_completed and bar.high >= partial_target:
+    # ATR이 없으면 부분익절선을 세울 근거가 없다. 없는 ATR로 목표가를 만들면
+    # 손절 보호를 위해 세운 상태가 가짜 익절을 낸다.
+    partial_target = (
+        None
+        if state.initial_atr is None
+        else state.entry_price + config.partial_profit_atr * state.initial_atr
+    )
+    if (
+        partial_target is not None
+        and not state.partial_exit_completed
+        and bar.high >= partial_target
+    ):
         fill_reference = bar.open if bar.open >= partial_target else partial_target
         updated = replace(
             state,
@@ -320,7 +420,8 @@ def evaluate_position(
 
     progress = max(state.highest_close, bar.close) - state.entry_price
     if (
-        bars_held >= config.max_holding_bars
+        state.initial_atr is not None
+        and bars_held >= config.max_holding_bars
         and progress < config.no_progress_atr * state.initial_atr
     ):
         return PositionEvaluation(
@@ -337,7 +438,7 @@ def evaluate_position(
 
     highest_close = max(state.highest_close, bar.close)
     current_stop = state.current_stop
-    if state.partial_exit_completed:
+    if state.initial_atr is not None and state.partial_exit_completed:
         current_stop = max(
             current_stop,
             highest_close - config.trailing_stop_atr * state.initial_atr,
@@ -398,7 +499,12 @@ def evaluate_position_intraday(
         raise ValueError("bar_interval must be positive")
 
     trailed = state.current_stop > state.initial_stop
-    partial_target = state.entry_price + config.partial_profit_atr * state.initial_atr
+    # ATR이 없는 보유분은 저장된 손절선만 본다. 부분익절선은 근거가 없다.
+    partial_target = (
+        None
+        if state.initial_atr is None
+        else state.entry_price + config.partial_profit_atr * state.initial_atr
+    )
     partial: PositionExitSignal | None = None
     for bar in sorted(bars, key=lambda item: item.as_of):
         if bar.as_of - bar_interval < state.entry_at:
@@ -425,6 +531,7 @@ def evaluate_position_intraday(
             )
         if (
             partial is None
+            and partial_target is not None
             and not state.partial_exit_completed
             and bar.high >= partial_target
         ):

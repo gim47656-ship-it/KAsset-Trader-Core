@@ -23,6 +23,8 @@ from app.extensions.kasset.automation.position_manager import (
     PositionBar,
     PositionExitSignal,
     PositionManagerConfig,
+    adopt_initial_atr,
+    apply_stop_loss_floor,
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
@@ -126,7 +128,7 @@ def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
         market=row.market,
         symbol=row.symbol,
         entry_price=Decimal(row.entry_price),
-        initial_atr=Decimal(row.initial_atr),
+        initial_atr=None if row.initial_atr is None else Decimal(row.initial_atr),
         initial_stop=Decimal(row.initial_stop),
         current_stop=Decimal(row.current_stop),
         highest_close=Decimal(row.highest_close),
@@ -169,6 +171,7 @@ def _apply_state(
     *,
     signal_key: str | None,
 ) -> None:
+    row.initial_atr = state.initial_atr
     row.initial_stop = state.initial_stop
     row.current_stop = state.current_stop
     row.highest_close = state.highest_close
@@ -423,8 +426,7 @@ class PaperPositionManagerService:
         # 저장 일봉이 없거나 미래이거나 오래됐으면 **일봉 판정만** 접는다. 일봉
         # 적재가 멈춘 것(또는 이 종목이 일봉 유니버스에 없는 것)이 보유 종목의
         # 손절을 막는 이유가 되어서는 안 되므로, 상태 복원과 장중 보호 평가는
-        # 그대로 진행한다. 저장된 손절선이 없는 신규 포지션은 ATR을 만들 수
-        # 없으므로 아래에서 fail-closed로 끝난다.
+        # 그대로 진행한다.
         daily_usable = (
             latest_at is not None
             and latest_at <= self._now
@@ -456,20 +458,29 @@ class PaperPositionManagerService:
             market=market,
             position=position,
         )
+        # 원장의 최신 체결 평단. 손실률의 분모는 언제나 실제로 채워진 평단이며,
+        # 추가매수·부분청산으로 평단이 바뀌면 tick마다 그 값을 다시 읽는다.
+        filled_average_price = Decimal(position.avg_price)
+        # ATR은 일봉 15봉이 필요하고, **쓸 수 있는 일봉**에서만 만든다. 미래이거나
+        # 오래된 일봉은 손절선·부분익절선의 근거가 될 수 없으므로 여기서 ATR을
+        # 만들지도, 나중에 채워 넣지도 않는다. 그런 보유분은 체결 평단 -3% 고정
+        # 손절선만으로 보호한다. 이미 non-null ATR을 들고 있는 상태는 그대로 두므로
+        # 저장된 손절선으로 하는 장중 보호는 영향받지 않는다.
+        atr = _average_true_range(ordered) if daily_usable else None
         if not state_matches:
-            atr = _average_true_range(ordered)
-            if atr is None:
-                return None
             opened_at = _aware_utc(position.created_at)
-            state = initialize_position(
-                market=market,
-                symbol=str(position.symbol),
-                entry_price=Decimal(position.avg_price),
-                initial_atr=atr,
-                entry_at=opened_at,
-                strategy_version=self._strategy_version,
-                position_cycle_id=position_id,
-                config=self._config,
+            state = apply_stop_loss_floor(
+                initialize_position(
+                    market=market,
+                    symbol=str(position.symbol),
+                    entry_price=filled_average_price,
+                    initial_atr=atr,
+                    entry_at=opened_at,
+                    strategy_version=self._strategy_version,
+                    position_cycle_id=position_id,
+                    config=self._config,
+                ),
+                filled_average_price=filled_average_price,
             )
             if state_row is None:
                 state_row = KAssetPaperPositionState(position_cycle_id=position_id)
@@ -493,7 +504,21 @@ class PaperPositionManagerService:
             state_row.strategy_version = state.strategy_version
             state_row.strategy_fingerprint = self._strategy_fingerprint
         else:
-            state = _state_from_row(state_row)
+            # 이미 관리 중인 보유분도 되읽는 자리에서 바닥을 다시 먹인다. 일봉
+            # 커서가 전진하기를 기다리거나 DB를 손으로 고치지 않아도, 다음 tick의
+            # 일봉·장중 평가가 곧바로 같은 손절선을 본다.
+            state = apply_stop_loss_floor(
+                _state_from_row(state_row),
+                filled_average_price=filled_average_price,
+            )
+            if state.initial_atr is None and atr is not None:
+                # 고정 손절선으로 보호하던 보유분에 일봉 근거가 생겼다. 손절선을
+                # 낮추지 않고 ATR 파생 판정만 되살린다.
+                state = adopt_initial_atr(
+                    state,
+                    initial_atr=atr,
+                    config=self._config,
+                )
             stored_strategy_key = (state_row.strategy_key or "").strip()
             if (
                 not stored_strategy_key
@@ -689,7 +714,7 @@ class PaperPositionManagerService:
             "paperPositionId": position_id,
             "positionCycleId": state.position_cycle_id,
             "quantityFraction": str(signal.quantity_fraction),
-            "initialAtr": str(state.initial_atr),
+            "initialAtr": None if state.initial_atr is None else str(state.initial_atr),
             "initialStop": str(state.initial_stop),
             "currentStop": str(persisted_state.current_stop),
             "evaluationHorizon": exit_horizon,

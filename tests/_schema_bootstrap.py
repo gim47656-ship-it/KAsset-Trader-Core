@@ -115,10 +115,15 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v52: kasset_routine_price_alert_events(관심종목 ±5% 알림 하루 포착 기록)가 새
 # ORM 테이블로 들어온다. mirrored ALTER는 없으므로 create_all이 통째로 만든다.
 # 운영은 alembic/versions/20260903_kasset_alert_events.py를 따로 적용한다.
+# v53: kasset_paper_position_states.initial_atr가 nullable로 완화된다(ATR 근거가
+# 없는 보유분은 고정 손절선만 쓴다). create_all은 새 DB에 nullable로 만들지만
+# mirrored ALTER는 없으므로, 이미 v52인 로컬 상시 테스트 DB는 이 bump로 한 번
+# 재생성되어야 NULL 삽입이 가능하다. 운영은
+# alembic/versions/20260907_kasset_position_state_optional_atr.py를 따로 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 52
+SCHEMA_BOOTSTRAP_VERSION = 53
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

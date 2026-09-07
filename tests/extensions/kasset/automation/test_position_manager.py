@@ -24,6 +24,7 @@ from app.extensions.kasset.automation.position_manager import (
     ExitKind,
     ManagedPositionState,
     PositionBar,
+    apply_stop_loss_floor,
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
@@ -125,6 +126,8 @@ def _state_row(
     market: str = "KRX",
     symbol: str = "005930",
     partial: bool = False,
+    initial_atr: Decimal | None = D("10"),
+    stop: str = "70",
     high: str = "100",
     last_evaluated_at: datetime | None = None,
     last_exit_signal_key: str | None = None,
@@ -138,9 +141,9 @@ def _state_row(
         market=market,
         symbol=symbol,
         entry_price=D("100"),
-        initial_atr=D("10"),
-        initial_stop=D("70"),
-        current_stop=D("70"),
+        initial_atr=initial_atr,
+        initial_stop=D(stop),
+        current_stop=D(stop),
         highest_close=D(high),
         partial_exit_completed=partial,
         opened_at=ENTRY_AT,
@@ -170,8 +173,10 @@ def _candle(
     )
 
 
-def _atr_candles() -> list[SimpleNamespace]:
-    return [_candle(day) for day in range(-13, 2)]
+def _atr_candles(*, first_day: int = -13) -> list[SimpleNamespace]:
+    """ATR 14를 만들 수 있는 15봉(TR=4 고정). ``first_day``로 창을 옮긴다."""
+
+    return [_candle(day) for day in range(first_day, first_day + 15)]
 
 
 def _intraday(
@@ -240,6 +245,83 @@ def test_initialize_position_uses_three_atr_stop() -> None:
     assert state.initial_stop == D("105")
     assert state.current_stop == D("105")
     assert state.highest_close == D("120")
+
+
+@pytest.mark.unit
+def test_stop_floor_lifts_a_wide_atr_stop_to_three_percent_below_the_fill() -> None:
+    """저장된 ATR 손절선이 -30%여도 실제 체결 평단 -3%까지 끌어올린다."""
+
+    floored = apply_stop_loss_floor(_state(), filled_average_price=D("100"))
+
+    assert floored.initial_stop == D("97")
+    assert floored.current_stop == D("97")
+
+
+@pytest.mark.unit
+def test_stop_floor_keeps_a_tighter_trailing_stop() -> None:
+    """trailing으로 올려둔 손절선은 바닥이 끌어내리지 않는다."""
+
+    trailed = apply_stop_loss_floor(
+        _state(partial=True, stop="110", high="140"),
+        filled_average_price=D("100"),
+    )
+
+    assert trailed.current_stop == D("110")
+    assert trailed.initial_stop == D("97")
+
+
+@pytest.mark.unit
+def test_stop_floor_keeps_a_tighter_low_volatility_atr_stop() -> None:
+    """3 ATR이 3%보다 좁은 저변동 종목은 더 타이트한 ATR 손절선으로 청산한다."""
+
+    quiet = apply_stop_loss_floor(
+        initialize_position(
+            market="KRX",
+            symbol="005930",
+            entry_price=D("100"),
+            initial_atr=D("0.5"),
+            entry_at=ENTRY_AT,
+            strategy_version="breakout-portfolio-v1",
+            position_cycle_id=101,
+        ),
+        filled_average_price=D("100"),
+    )
+    # 바닥 97이 아니라 ATR 손절선 100 - 3*0.5 이 유효 손절선이어야 한다.
+    bars = _intraday([(0, "99", "100", "98", "98.5")], day=3)
+
+    signal = evaluate_position_intraday(
+        quiet,
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.reference_price == D("98.5")
+
+
+@pytest.mark.unit
+def test_floored_stop_triggers_when_the_low_exactly_touches_it() -> None:
+    """등호 경계: 저가가 바닥에 정확히 닿으면 손절이 나온다."""
+
+    floored = apply_stop_loss_floor(_state(), filled_average_price=D("100"))
+    bars = _intraday([(0, "99", "100", "97", "98")], day=3)
+
+    signal = evaluate_position_intraday(
+        floored,
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.reference_price == D("97")
+
+
+@pytest.mark.unit
+def test_stop_floor_refuses_to_invent_a_level_without_a_fill_average() -> None:
+    with pytest.raises(ValueError, match="filled_average_price"):
+        apply_stop_loss_floor(_state(), filled_average_price=D("0"))
 
 
 @pytest.mark.unit
@@ -612,7 +694,9 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
     assert state_row.entry_price == position.avg_price
     assert state_row.entry_price != _atr_candles()[-1].close
     assert state_row.initial_atr == D("4")
-    assert state_row.initial_stop == D("88")
+    # ATR 손절선(100 - 3*4 = 88)보다 실제 체결 평단 -3%가 더 타이트하다.
+    assert state_row.initial_stop == D("97")
+    assert state_row.current_stop == D("97")
     assert state_row.strategy_key == "qullamaggie_breakout_portfolio"
     assert state_row.strategy_version == "1.0.0"
     assert state_row.strategy_fingerprint == _ARTIFACT_FINGERPRINT
@@ -680,7 +764,7 @@ async def test_partial_fill_keeps_same_cycle_and_marks_remaining_state() -> None
         account_id=17,
         market="KRX",
         position=position,
-        rows=[_candle(1, open_="125", high="132", low="90", close="128")],
+        rows=[_candle(1, open_="125", high="132", low="120", close="128")],
     )
 
     assert recommendation_id is not None
@@ -1047,8 +1131,8 @@ async def test_intraday_exit_fires_after_the_last_daily_bar_was_evaluated() -> N
         rows=[daily],
         intraday=_intraday(
             [
-                (0, "95", "96", "92", "93"),
-                (5, "92", "93", "69", "71"),
+                (0, "99", "100", "98", "99"),
+                (5, "98", "99", "69", "71"),
             ],
             day=3,
         ),
@@ -1100,8 +1184,8 @@ async def test_intraday_exit_fires_when_entry_is_newer_than_daily_history() -> N
         for call_ in db.add.call_args_list
         if isinstance(call_.args[0], KAssetPaperPositionState)
     )
-    # 진입 시점 ATR로 만든 손절선(100 - 3*4)을 장중에 그대로 적용한다.
-    assert state_row.initial_stop == D("88")
+    # 진입 시점 ATR 손절선(100 - 3*4 = 88)보다 평단 -3%가 더 타이트하다.
+    assert state_row.initial_stop == D("97")
     assert state_row.last_evaluated_at is None
 
 
@@ -1208,8 +1292,8 @@ async def test_intraday_full_stop_outranks_the_daily_partial_signal() -> None:
         account_id=17,
         market="KRX",
         position=_paper_position(),
-        rows=[_candle(1, open_="125", high="132", low="90", close="128")],
-        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+        rows=[_candle(1, open_="125", high="132", low="120", close="128")],
+        intraday=_intraday([(0, "99", "100", "69", "71")], day=3),
     )
 
     assert recommendation_id is not None
@@ -1256,8 +1340,89 @@ async def test_stored_stop_is_protected_without_any_daily_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_position_without_daily_history_stays_fail_closed() -> None:
-    """ATR을 만들 근거가 없으면 손절선을 발명하지 않고 아무것도 만들지 않는다."""
+async def test_existing_wide_stop_is_floored_without_a_daily_cursor_advance() -> None:
+    """이미 관리 중인 보유분도 일봉 커서를 기다리지 않고 -3%에서 보호된다."""
+
+    daily = _candle(1)
+    # 저장된 ATR 손절선은 70(-30%)이고 일봉 커서는 이미 그 봉까지 전진해 있다.
+    state_row = _state_row(last_evaluated_at=daily.time_utc)
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[daily],
+        intraday=_intraday([(0, "99", "100", "96", "96")], day=3),
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    # 바닥은 기준 손절선이므로 추적한 적 없는 이 청산은 TRAILING_STOP이 아니다.
+    assert exit_evidence["exitKind"] == ExitKind.STOP.value
+    assert exit_evidence["currentStop"] == "97.00"
+    assert recommendation.reference_price == "97.00"
+    assert recommendation.suggested_quantity == "10"
+    assert state_row.initial_stop == D("97")
+    assert state_row.current_stop == D("97")
+    # 손절 바닥이 일봉 커서를 건드려서는 안 된다.
+    assert state_row.last_evaluated_at == daily.time_utc
+
+
+@pytest.mark.asyncio
+async def test_stop_floor_follows_the_actual_fill_average_not_the_stored_entry() -> (
+    None
+):
+    """추가매수로 평단이 움직이면 손실률의 분모도 그 실제 평단이다."""
+
+    # 사이클 시작 당시 평단은 100이었지만 원장의 실제 평단은 110이다.
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(avg_price="110", quantity="20"),
+        rows=[],
+        intraday=_intraday([(0, "108", "109", "106", "107")], day=3),
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    # 저장된 진입가 100이 기준이었다면 97.00이 나왔을 자리다.
+    assert recommendation.reference_price == "106.70"
+    assert recommendation.suggested_quantity == "20"
+    assert state_row.current_stop == D("106.70")
+    # 부분익절선의 기준인 진입가는 바닥 계산 때문에 덮이지 않는다.
+    assert state_row.entry_price == D("100")
+
+
+@pytest.mark.asyncio
+async def test_new_position_without_daily_history_uses_the_fixed_stop() -> None:
+    """ATR을 만들 근거가 없어도 실제 체결 평단 -3%로는 보호한다."""
 
     db = MagicMock()
     db.scalar = AsyncMock(return_value=None)
@@ -1272,11 +1437,157 @@ async def test_new_position_without_daily_history_stays_fail_closed() -> None:
         market="KRX",
         position=_paper_position(),
         rows=[],
-        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+        intraday=_intraday([(0, "99", "100", "96", "96")], day=3),
+    )
+
+    assert recommendation_id is not None
+    created = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], KAssetPaperPositionState)
+    )
+    # ATR을 발명하지 않는다. 손절선은 평단 100 * 0.97 하나뿐이다.
+    assert created.initial_atr is None
+    assert created.initial_stop == D("97.00")
+    assert created.current_stop == D("97.00")
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    assert exit_evidence["exitKind"] == ExitKind.STOP.value
+    assert exit_evidence["initialAtr"] is None
+    assert recommendation.reference_price == "97.00"
+    assert recommendation.suggested_quantity == "10"
+
+
+@pytest.mark.asyncio
+async def test_fixed_stop_without_atr_never_invents_a_take_profit() -> None:
+    """ATR이 없으면 부분익절선도 없다. 손절 보호가 가짜 익절을 만들어선 안 된다."""
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    # ATR 10이 저장돼 있었다면 부분익절선 100 + 3*10 = 130을 관통한 봉이다.
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "129", "132", "128", "131")], day=3),
     )
 
     assert recommendation_id is None
-    assert db.add.call_args_list == []
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+
+
+#: 일봉을 쓸 수 없게 만드는 두 가지 사유. 어느 쪽도 ATR의 근거가 될 수 없다.
+_UNUSABLE_DAILY_WINDOWS = (
+    pytest.param(4, id="future"),
+    pytest.param(-20, id="stale"),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_day", _UNUSABLE_DAILY_WINDOWS)
+async def test_unusable_daily_history_does_not_derive_an_atr(first_day: int) -> None:
+    """미래·오래된 일봉 15봉이 있어도 ATR을 만들지 않고 고정 손절선만 쓴다."""
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    # ATR 4를 채택했다면 부분익절선 100 + 3*4 = 112를 장중 고가 115가 관통한다.
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=_atr_candles(first_day=first_day),
+        intraday=_intraday([(0, "101", "115", "100", "114")], day=3),
+    )
+
+    assert recommendation_id is None
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+    created = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], KAssetPaperPositionState)
+    )
+    assert created.initial_atr is None
+    assert created.initial_stop == D("97.00")
+    assert created.current_stop == D("97.00")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_day", _UNUSABLE_DAILY_WINDOWS)
+async def test_unusable_daily_history_does_not_hydrate_a_fixed_stop_state(
+    first_day: int,
+) -> None:
+    """고정 손절선으로 보호 중인 보유분에 쓸 수 없는 일봉의 ATR을 채워 넣지 않는다."""
+
+    state_row = _state_row(initial_atr=None, stop="97")
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=_atr_candles(first_day=first_day),
+        intraday=_intraday([(0, "101", "115", "100", "114")], day=3),
+    )
+
+    assert recommendation_id is None
+    assert state_row.initial_atr is None
+    assert state_row.current_stop == D("97")
+
+
+@pytest.mark.asyncio
+async def test_later_atr_fills_the_state_without_loosening_the_fixed_stop() -> None:
+    """일봉 근거가 생겨도 이미 들고 있던 고정 손절선을 넓히지 않는다."""
+
+    # 고정 손절선 97로만 보호 중이던 보유분. 새로 생긴 ATR 4의 손절선은 88이다.
+    state_row = _state_row(initial_atr=None, stop="97")
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=1))
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=_atr_candles(),
+    )
+
+    assert recommendation_id is None
+    assert state_row.initial_atr == D("4")
+    assert state_row.initial_stop == D("97")
+    assert state_row.current_stop == D("97")
 
 
 @pytest.mark.asyncio

@@ -537,7 +537,9 @@ class KAssetPaperPositionState(Base):
     market: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
-    initial_atr: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    # NULL은 "일봉 ATR 근거가 아직 없는 보유분"이다. 고정 손절선만으로 보호하며
+    # ATR 파생 판정은 만들지 않는다. 위 CHECK는 NULL에서 UNKNOWN이므로 통과한다.
+    initial_atr: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     initial_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     current_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     highest_close: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
