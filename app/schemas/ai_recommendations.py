@@ -345,7 +345,15 @@ class _AITradingSettingsFields(BaseModel):
     risk_level: int = Field(ge=1, le=5, strict=True, alias="riskLevel")
     operating_budget: Decimal = Field(gt=0, alias="operatingBudget")
     daily_target_rate_pct: Decimal = Field(ge=0, le=10, alias="dailyTargetRatePct")
-    max_daily_loss_rate_pct: Decimal = Field(ge=0, le=20, alias="maxDailyLossRatePct")
+    max_daily_loss_rate_pct: Decimal = Field(
+        ge=0,
+        le=20,
+        alias="maxDailyLossRatePct",
+        description=(
+            "계좌 일손실 참고 한도이며 BUY 주문을 차단하지 않습니다. "
+            "종목 손절 기준도 아닙니다."
+        ),
+    )
     kill_switch: bool = Field(alias="killSwitch")
     currency: Literal["KRW", "USD"]
     custom_max_buys_per_day: int | None = Field(
@@ -367,7 +375,13 @@ class _AITradingSettingsFields(BaseModel):
 
 class AITradingSettingsUpdate(_AITradingSettingsFields):
     max_daily_loss_rate_pct: Decimal = Field(
-        ge=Decimal("0.1"), le=20, alias="maxDailyLossRatePct"
+        ge=Decimal("0.1"),
+        le=20,
+        alias="maxDailyLossRatePct",
+        description=(
+            "계좌 일손실 참고 한도이며 BUY 주문을 차단하지 않습니다. "
+            "종목 손절 기준도 아닙니다."
+        ),
     )
 
 
@@ -375,7 +389,14 @@ class AITradingDerivedLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     daily_target_amount: Decimal = Field(ge=0, alias="dailyTargetAmount")
-    max_daily_loss_amount: Decimal = Field(ge=0, alias="maxDailyLossAmount")
+    max_daily_loss_amount: Decimal = Field(
+        ge=0,
+        alias="maxDailyLossAmount",
+        description=(
+            "일손실 참고 금액이며 BUY 주문을 차단하지 않습니다. "
+            "종목 손절 기준도 아닙니다."
+        ),
+    )
     max_symbol_allocation_pct: Decimal = Field(
         gt=0, le=100, alias="maxSymbolAllocationPct"
     )

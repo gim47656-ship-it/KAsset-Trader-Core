@@ -29,7 +29,6 @@ _EARLY_SKIP_REASONS = frozenset(
         "ai_unavailable",
         "no_regular_market_open",
         "no_configured_regular_market_open",
-        "position_exit_recommendation_created",
         "recommendation_cooldown_active",
         "screener_candidates_unavailable",
         # 기술 판정이 정상적으로 "오늘은 진입 후보가 없다"고 끝난 상태들.

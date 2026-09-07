@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -237,7 +238,13 @@ def evaluate_position(
     trend_intact: bool = True,
     config: PositionManagerConfig = PositionManagerConfig(),
 ) -> PositionEvaluation:
-    """Evaluate one completed bar; raised close-based stops apply next bar."""
+    """Evaluate one completed **daily** bar; raised close-based stops apply next bar.
+
+    이 함수가 상태 전이의 유일한 주인이다. trailing stop 상향, TIME_STOP,
+    TREND_BROKEN은 모두 완료 일봉 horizon의 판정이며 일봉 backtest
+    (:mod:`portfolio_backtest`)가 같은 의미로 재현한다. 장중 보호 평가는
+    상태를 바꾸지 않는 :func:`evaluate_position_intraday`가 따로 맡는다.
+    """
 
     if bar.as_of <= state.entry_at:
         raise ValueError("position bar must be after entry_at")
@@ -344,3 +351,92 @@ def evaluate_position(
         ),
         signal=None,
     )
+
+
+def evaluate_position_intraday(
+    state: ManagedPositionState,
+    bars: Sequence[PositionBar],
+    *,
+    bar_interval: timedelta,
+    after: datetime | None = None,
+    config: PositionManagerConfig = PositionManagerConfig(),
+) -> PositionExitSignal | None:
+    """Read stored levels against completed intraday buckets. Never mutates state.
+
+    보유 종목의 손절은 다음 일봉을 기다릴 수 없다. 금요일 일봉까지만 평가된
+    포지션도 월요일 장중에 저장된 손절선이 깨지면 그 자리에서 보호 청산이
+    나와야 한다. 그래서 이 함수는 완료된 정규장 bucket만 읽어 **저장된**
+    손절선·부분익절선 도달 여부만 판정한다.
+
+    일봉 horizon과 의도적으로 분리한 것들:
+
+    - 상태 전이가 없다. trailing stop 상향, ``highest_close``,
+      ``last_evaluated_at``은 건드리지 않는다. 분봉 종가로 손절선을 올리면
+      장중 잡음이 손절선을 끌어올리고, 분봉 시각을 ``last_evaluated_at``에
+      쓰면 같은 날 완료 일봉이 영구히 "이미 평가됨"으로 막힌다.
+    - ``TIME_STOP``/``TREND_BROKEN``은 만들지 않는다. 둘 다 일봉 보유기간과
+      일봉 추세가 근거이므로 분을 보유 일수로 세는 순간 의미가 깨진다.
+
+    진입 전에 시작한 bucket은 버린다. 진입 직전의 저가는 진입 후 손절 도달이
+    아니다. 신호 시각은 그 bucket의 종료 시각이므로 같은 세션을 몇 번 다시
+    평가해도 ``idempotency_key``가 같고, 중복 매도가 생기지 않는다.
+
+    창 안에 전량 손절이 하나라도 있으면 **그중 가장 이른 것**을 돌려준다.
+    시간순 첫 신호를 그대로 내면, 오전에 부분익절선을 찍고 오후에 손절선을
+    관통한 세션에서 부분익절만 계속 반환되고 전량 손절이 영구히 가려진다.
+    부분익절은 창 전체에 전량 손절이 없을 때만 돌려준다.
+
+    ``after``가 있으면 그 시각 이후에 닫힌 bucket만 본다. 직전 보호 추천이
+    거절·집행실패·기한만료로 종료됐을 때, 그 추천이 가리키는 bucket을 다시
+    돌려서는 새 추천이 될 수 없다. 결정론 id가 같아 이미 종료된 행에 걸리고
+    그날 재시도가 사라진다. 그래서 호출자가 마지막 종료 추천의 bucket 시각을
+    경계로 넘긴다. 같은 bucket은 여전히 같은 id로 중복이 없고, 그 이후의 새
+    bucket은 새 id와 최신 수량으로 다시 판정된다.
+    """
+
+    if bar_interval <= timedelta(0):
+        raise ValueError("bar_interval must be positive")
+
+    trailed = state.current_stop > state.initial_stop
+    partial_target = state.entry_price + config.partial_profit_atr * state.initial_atr
+    partial: PositionExitSignal | None = None
+    for bar in sorted(bars, key=lambda item: item.as_of):
+        if bar.as_of - bar_interval < state.entry_at:
+            continue
+        if after is not None and bar.as_of <= after:
+            continue
+        if bar.open <= state.current_stop:
+            return _signal(
+                state,
+                bar,
+                kind=ExitKind.TRAILING_STOP_GAP if trailed else ExitKind.STOP_GAP,
+                fraction=_ONE,
+                price=bar.open,
+                reason="장중 봉 시가가 기존 손절선 아래여서 전량 청산합니다.",
+            )
+        if bar.low <= state.current_stop:
+            return _signal(
+                state,
+                bar,
+                kind=ExitKind.TRAILING_STOP if trailed else ExitKind.STOP,
+                fraction=_ONE,
+                price=state.current_stop,
+                reason="장중 저가가 기존 손절선에 닿아 전량 청산합니다.",
+            )
+        if (
+            partial is None
+            and not state.partial_exit_completed
+            and bar.high >= partial_target
+        ):
+            partial = _signal(
+                state,
+                bar,
+                kind=ExitKind.PARTIAL_SELL,
+                fraction=config.partial_fraction,
+                price=bar.open if bar.open >= partial_target else partial_target,
+                reason=(
+                    f"장중에 진입가 대비 +{config.partial_profit_atr} ATR에 도달해 "
+                    f"보유수량의 {config.partial_fraction * Decimal('100')}%를 익절합니다."
+                ),
+            )
+    return partial

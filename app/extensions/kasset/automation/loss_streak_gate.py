@@ -1,4 +1,4 @@
-"""닫힌 PAPER 손절 연속을 BUY 전용 Hard Risk 관문으로 적용한다."""
+"""닫힌 PAPER 손절 연속을 BUY 관측값으로 계산하고 감사 근거로 남긴다."""
 
 from __future__ import annotations
 
@@ -66,8 +66,10 @@ DEFAULT_LOSS_STREAK_CONFIG: Final = LossStreakConfig()
 
 @dataclass(frozen=True, slots=True)
 class LossStreakGateResult:
+    """손절 연속 관측 결과. ``buy_locked``는 근거이며 주문을 차단하지 않는다."""
+
     code: Literal["LOSS_STREAK"]
-    passed: bool
+    buy_locked: bool
     reason: Literal["global_lock", "symbol_lock", "sell_bypass", "unavailable"] | None
     detail: str
     evidence: dict[str, object]
@@ -92,9 +94,9 @@ class LossStreakGate:
         normalized_side = side.strip().upper()
         if normalized_side != "BUY":
             return _result(
-                passed=True,
+                buy_locked=False,
                 reason="sell_bypass",
-                detail=f"side={normalized_side or 'UNKNOWN'}; BUY 전용 관문",
+                detail=f"side={normalized_side or 'UNKNOWN'}; BUY 관측 전용",
                 global_lock=None,
                 symbol_lock=None,
                 streak_global=0,
@@ -126,7 +128,7 @@ class LossStreakGate:
                 session_closes_at=session.closes_at,
                 config=self._config,
             )
-        except Exception as exc:  # noqa: BLE001 - 관문 계산 불가는 명시적으로 fail-open
+        except Exception as exc:  # noqa: BLE001 - 관측 계산 불가는 근거로만 남긴다
             unavailable = f"{type(exc).__name__}:{exc}"
             logger.warning(
                 "kasset LOSS_STREAK gate unavailable: owner_user_id=%s market=%s "
@@ -138,7 +140,7 @@ class LossStreakGate:
                 exc_info=True,
             )
             return _result(
-                passed=True,
+                buy_locked=False,
                 reason="unavailable",
                 detail=f"unavailable={unavailable}",
                 global_lock=None,
@@ -168,15 +170,15 @@ class LossStreakGate:
         symbol_lock = combined.symbol_lock
         if global_lock.buy_locked:
             reason = "global_lock"
-            passed = False
+            buy_locked = True
         elif symbol_lock.buy_locked:
             reason = "symbol_lock"
-            passed = False
+            buy_locked = True
         else:
             reason = None
-            passed = True
+            buy_locked = False
         return _result(
-            passed=passed,
+            buy_locked=buy_locked,
             reason=reason,
             detail=(
                 f"reason={reason or 'clear'}; "
@@ -433,7 +435,7 @@ def _lock_evidence(
 
 def _result(
     *,
-    passed: bool,
+    buy_locked: bool,
     reason: Literal["global_lock", "symbol_lock", "sell_bypass", "unavailable"] | None,
     detail: str,
     global_lock: ShadowLossLockObservation | None,
@@ -454,7 +456,7 @@ def _result(
     }
     return LossStreakGateResult(
         code=LOSS_STREAK_CODE,
-        passed=passed,
+        buy_locked=buy_locked,
         reason=reason,
         detail=detail,
         evidence=evidence,

@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
 from app.extensions.kasset.api.runtime_state import runtime_state
+from app.extensions.kasset.automation import policy as policy_module
+from app.extensions.kasset.automation.loss_streak_gate import LossStreakGateResult
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
@@ -541,37 +543,52 @@ class _EmptyRiskDb:
         return None
 
 
-@pytest.mark.asyncio
-async def test_daily_loss_gate_uses_budget_derived_amount(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    limits = AITradingLimits(
-        operating_budget_krw=Decimal("2000000"),
-        max_daily_loss_rate_pct=Decimal("1.5"),
+def _loss_over_limit_snapshot() -> AITradingSnapshot:
+    """오늘 실현손실이 일손실 참고 한도에 이미 도달한 계좌 상태."""
+
+    usage = AITradingUsage(
+        realized_pnl_today=Decimal("-30000"),
+        realized_loss_today=Decimal("30000"),
     )
-    snapshot = AITradingSnapshot(
+    return AITradingSnapshot(
         mode=OperatingMode.AUTO_PAPER,
-        limits=limits,
-        usage=AITradingUsage(
-            realized_pnl_today=Decimal("-30000"),
-            realized_loss_today=Decimal("30000"),
+        limits=AITradingLimits(
+            operating_budget_krw=Decimal("2000000"),
+            max_daily_loss_rate_pct=Decimal("1.5"),
         ),
-        usage_by_currency={
-            "KRW": AITradingUsage(
-                realized_pnl_today=Decimal("-30000"),
-                realized_loss_today=Decimal("30000"),
-            ),
-            "USD": AITradingUsage(),
-        },
+        usage=usage,
+        usage_by_currency={"KRW": usage, "USD": AITradingUsage()},
         kill_switch=False,
         updated_at=_NOW,
     )
-    service = AITradingPolicyService()
+
+
+def _locked_loss_streak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """손절 연속 lock이 관측된 상태를 강제한다."""
+
     monkeypatch.setattr(
-        service,
-        "get_snapshot",
-        AsyncMock(return_value=snapshot),
+        policy_module.loss_streak_gate,
+        "evaluate",
+        AsyncMock(
+            return_value=LossStreakGateResult(
+                code="LOSS_STREAK",
+                buy_locked=True,
+                reason="global_lock",
+                detail="reason=global_lock; streakGlobal=3/3",
+                evidence={"streakGlobal": 3},
+            )
+        ),
     )
+
+
+@pytest.mark.asyncio
+async def test_realized_daily_loss_and_stop_streak_do_not_block_new_buy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _loss_over_limit_snapshot()
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+    _locked_loss_streak(monkeypatch)
 
     result = await service.evaluate_hard_risk(
         _EmptyRiskDb(),  # type: ignore[arg-type]
@@ -585,65 +602,60 @@ async def test_daily_loss_gate_uses_budget_derived_amount(
         now=_NOW,
     )
 
-    assert limits.max_daily_loss_amount == Decimal("30000")
-    assert result.passed is False
-    assert result.checks[0].rule == "DAILY_MAX_LOSS"
-    assert result.checks[0].passed is False
-    assert result.blocked_reason == "realizedLossToday=30000; limit=30000.0"
+    assert snapshot.limits.max_daily_loss_amount == Decimal("30000")
+    assert result.passed is True
+    assert result.blocked_reason is None
+    daily_loss = next(
+        check for check in result.checks if check.rule == "DAILY_MAX_LOSS"
+    )
+    loss_streak = next(check for check in result.checks if check.rule == "LOSS_STREAK")
+    assert daily_loss.passed is True
+    assert loss_streak.passed is True
+    # 차단은 사라지되 손실 근거는 감사용으로 계속 남는다.
+    assert "realizedLossToday=30000" in daily_loss.detail
+    assert result.loss_streak == {"streakGlobal": 3}
 
 
 @pytest.mark.asyncio
-async def test_daily_loss_gate_allows_risk_reducing_sell(
+async def test_budget_still_blocks_buy_after_realized_daily_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    limits = AITradingLimits(
-        operating_budget_krw=Decimal("2000000"),
-        max_daily_loss_rate_pct=Decimal("1.5"),
-    )
-    snapshot = AITradingSnapshot(
-        mode=OperatingMode.AUTO_PAPER,
-        limits=limits,
-        usage=AITradingUsage(
-            realized_pnl_today=Decimal("-30000"),
-            realized_loss_today=Decimal("30000"),
-        ),
-        usage_by_currency={
-            "KRW": AITradingUsage(
-                realized_pnl_today=Decimal("-30000"),
-                realized_loss_today=Decimal("30000"),
-            ),
-            "USD": AITradingUsage(),
-        },
-        kill_switch=False,
-        updated_at=_NOW,
-    )
+    snapshot = _loss_over_limit_snapshot()
     service = AITradingPolicyService()
-    monkeypatch.setattr(
-        service,
-        "get_snapshot",
-        AsyncMock(return_value=snapshot),
-    )
-
-    class _SellRiskDb:
-        def __init__(self) -> None:
-            self.values = iter(
-                (
-                    1,
-                    SimpleNamespace(
-                        total_invested=Decimal("70000"),
-                        quantity=Decimal("1"),
-                    ),
-                    0,
-                )
-            )
-
-        async def scalar(self, _statement: object) -> object:
-            return next(self.values)
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+    _locked_loss_streak(monkeypatch)
 
     result = await service.evaluate_hard_risk(
-        _SellRiskDb(),  # type: ignore[arg-type]
+        _EmptyRiskDb(),  # type: ignore[arg-type]
         101,
-        action="SELL",
+        action="BUY",
+        market="KRX",
+        symbol="005930",
+        quantity=Decimal("100"),
+        reference_price=Decimal("70000"),
+        ai_confidence=Decimal("0.90"),
+        now=_NOW,
+    )
+
+    assert result.passed is False
+    budget = next(check for check in result.checks if check.rule == "BUDGET")
+    assert budget.passed is False
+    assert result.blocked_reason == budget.detail
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_still_blocks_buy_after_realized_daily_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = replace(_loss_over_limit_snapshot(), kill_switch=True)
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+    _locked_loss_streak(monkeypatch)
+
+    result = await service.evaluate_hard_risk(
+        _EmptyRiskDb(),  # type: ignore[arg-type]
+        101,
+        action="BUY",
         market="KRX",
         symbol="005930",
         quantity=Decimal("1"),
@@ -652,11 +664,8 @@ async def test_daily_loss_gate_allows_risk_reducing_sell(
         now=_NOW,
     )
 
-    daily_loss = next(
-        check for check in result.checks if check.rule == "DAILY_MAX_LOSS"
-    )
-    assert daily_loss.passed is True
-    assert result.passed is True
+    assert result.passed is False
+    assert result.blocked_reason == "kill switch가 켜져 있습니다."
 
 
 @pytest.mark.asyncio

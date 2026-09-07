@@ -1,4 +1,4 @@
-"""활성 손실 연속 관문은 BUY만 차단하고 계산 불가는 통과시킨다."""
+"""손실 연속 관측은 BUY lock 사실만 계산하고 계산 불가는 근거로만 남긴다."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ async def _evaluate(*, symbol: str = "005930", side: str = "BUY"):
 
 
 @pytest.mark.asyncio
-async def test_three_recent_stop_losses_block_buy_but_sell_always_passes(
+async def test_three_recent_stop_losses_are_observed_but_sell_is_not_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loader, persister = _patch_dependencies(
@@ -99,7 +99,7 @@ async def test_three_recent_stop_losses_block_buy_but_sell_always_passes(
     sell = await _evaluate(side="SELL")
 
     assert buy.code == "LOSS_STREAK"
-    assert buy.passed is False
+    assert buy.buy_locked is True
     assert buy.reason == "global_lock"
     assert buy.evidence["schemaVersion"] == LOSS_STREAK_GATE_SCHEMA_VERSION
     assert buy.evidence["streakGlobal"] == 3
@@ -112,7 +112,7 @@ async def test_three_recent_stop_losses_block_buy_but_sell_always_passes(
         "expiresAt": (_NOW + timedelta(minutes=50)).isoformat(),
         "reason": "LOSS_STREAK_LIMIT_REACHED",
     }
-    assert sell.passed is True
+    assert sell.buy_locked is False
     assert sell.reason == "sell_bypass"
     assert loader.await_count == 1
     persister.assert_awaited_once()
@@ -133,14 +133,14 @@ async def test_general_exit_resets_stop_loss_tail(
 
     result = await _evaluate()
 
-    assert result.passed is True
+    assert result.buy_locked is False
     assert result.reason is None
     assert result.evidence["streakGlobal"] == 0
     assert result.evidence["streakSymbol"] == 0
 
 
 @pytest.mark.asyncio
-async def test_global_lock_expiry_allows_buy(
+async def test_global_lock_expiry_clears_observed_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_dependencies(
@@ -154,14 +154,14 @@ async def test_global_lock_expiry_allows_buy(
 
     result = await _evaluate(symbol="005930")
 
-    assert result.passed is True
+    assert result.buy_locked is False
     assert result.reason is None
     assert result.evidence["streakGlobal"] == 3
     assert result.evidence["globalLock"] is None
 
 
 @pytest.mark.asyncio
-async def test_two_symbol_losses_block_only_that_symbol(
+async def test_two_symbol_losses_are_observed_only_for_that_symbol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_dependencies(
@@ -175,7 +175,7 @@ async def test_two_symbol_losses_block_only_that_symbol(
     samsung = await _evaluate(symbol="005930")
     hynix = await _evaluate(symbol="000660")
 
-    assert samsung.passed is False
+    assert samsung.buy_locked is True
     assert samsung.reason == "symbol_lock"
     assert samsung.evidence["streakGlobal"] == 2
     assert samsung.evidence["streakSymbol"] == 2
@@ -188,14 +188,14 @@ async def test_two_symbol_losses_block_only_that_symbol(
         "expiresAt": (_NOW + timedelta(hours=5)).isoformat(),
         "reason": "LOSS_STREAK_LIMIT_REACHED",
     }
-    assert hynix.passed is True
+    assert hynix.buy_locked is False
     assert hynix.reason is None
     assert hynix.evidence["streakGlobal"] == 2
     assert hynix.evidence["streakSymbol"] == 0
 
 
 @pytest.mark.asyncio
-async def test_lock_persistence_failure_keeps_confirmed_buy_lock(
+async def test_lock_persistence_failure_keeps_observed_lock(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -211,7 +211,7 @@ async def test_lock_persistence_failure_keeps_confirmed_buy_lock(
 
     result = await _evaluate()
 
-    assert result.passed is False
+    assert result.buy_locked is True
     assert result.reason == "global_lock"
     assert result.evidence["streakGlobal"] == 3
     assert result.evidence["persistFailed"] == "RuntimeError:lock store offline"
@@ -219,7 +219,7 @@ async def test_lock_persistence_failure_keeps_confirmed_buy_lock(
 
 
 @pytest.mark.asyncio
-async def test_database_exception_passes_with_unavailable_evidence(
+async def test_database_exception_reports_unavailable_evidence(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -228,7 +228,7 @@ async def test_database_exception_passes_with_unavailable_evidence(
 
     result = await _evaluate()
 
-    assert result.passed is True
+    assert result.buy_locked is False
     assert result.reason == "unavailable"
     assert result.detail == "unavailable=RuntimeError:database offline"
     assert result.evidence == {
