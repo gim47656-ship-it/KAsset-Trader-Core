@@ -542,6 +542,12 @@ class KAssetPaperPositionState(Base):
     initial_atr: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     initial_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     current_stop: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    # NULL effective_at/history는 migration 전 legacy snapshot이다. updated_at을
+    # provenance로 추측하지 않고 기존 stop/ATR이 과거부터 유효했던 것으로 읽는다.
+    exit_levels_effective_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    exit_level_history: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
     highest_close: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     partial_exit_completed: Mapped[bool] = mapped_column(
         Boolean,

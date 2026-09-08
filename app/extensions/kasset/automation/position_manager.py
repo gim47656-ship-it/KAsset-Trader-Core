@@ -57,6 +57,39 @@ class PositionManagerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitLevelVersion:
+    """활성 시각 순서로 보존하는 이전 stop/ATR snapshot."""
+
+    effective_at: datetime | None
+    initial_atr: Decimal | None
+    initial_stop: Decimal
+    current_stop: Decimal
+
+    def __post_init__(self) -> None:
+        if self.effective_at is not None:
+            if (
+                self.effective_at.tzinfo is None
+                or self.effective_at.utcoffset() is None
+            ):
+                raise ValueError("exit-level effective_at must be timezone-aware")
+            object.__setattr__(
+                self,
+                "effective_at",
+                self.effective_at.astimezone(UTC),
+            )
+        if self.initial_atr is not None and (
+            not self.initial_atr.is_finite() or self.initial_atr <= _ZERO
+        ):
+            raise ValueError("exit-level initial_atr must be positive and finite")
+        for name, value in (
+            ("initial_stop", self.initial_stop),
+            ("current_stop", self.current_stop),
+        ):
+            if not value.is_finite() or value <= _ZERO:
+                raise ValueError(f"exit-level {name} must be positive and finite")
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedPositionState:
     market: str
     symbol: str
@@ -72,6 +105,13 @@ class ManagedPositionState:
     last_evaluated_at: datetime | None
     strategy_version: str
     position_cycle_id: int | None = None
+    #: 현재 stop/ATR snapshot이 유효해진 시각. ``None``은 migration 전부터
+    #: 존재하던 legacy snapshot으로, provenance를 추측하지 않고 과거 전체에
+    #: 유효했던 것으로 취급한다.
+    exit_levels_effective_at: datetime | None = None
+    #: 늦게 적재된 관측도 당시 유효했던 stop으로 평가할 수 있게 보존하는
+    #: 이전 snapshot들. activation 오름차순이며 첫 legacy version만 ``None``을 쓴다.
+    exit_level_history: tuple[ExitLevelVersion, ...] = ()
 
     def __post_init__(self) -> None:
         market = self.market.strip().upper()
@@ -112,6 +152,37 @@ class ManagedPositionState:
                 "last_evaluated_at",
                 self.last_evaluated_at.astimezone(UTC),
             )
+        if self.exit_levels_effective_at is not None:
+            if (
+                self.exit_levels_effective_at.tzinfo is None
+                or self.exit_levels_effective_at.utcoffset() is None
+            ):
+                raise ValueError("exit_levels_effective_at must be timezone-aware")
+            object.__setattr__(
+                self,
+                "exit_levels_effective_at",
+                self.exit_levels_effective_at.astimezone(UTC),
+            )
+        previous_effective_at: datetime | None = None
+        for index, version in enumerate(self.exit_level_history):
+            if index > 0 and version.effective_at is None:
+                raise ValueError("only the first exit-level version may be legacy")
+            if (
+                previous_effective_at is not None
+                and version.effective_at is not None
+                and version.effective_at <= previous_effective_at
+            ):
+                raise ValueError("exit-level history must be strictly ordered")
+            if version.effective_at is not None:
+                previous_effective_at = version.effective_at
+        if self.exit_level_history:
+            if self.exit_levels_effective_at is None:
+                raise ValueError("current exit-level version needs an effective_at")
+            if (
+                previous_effective_at is not None
+                and self.exit_levels_effective_at <= previous_effective_at
+            ):
+                raise ValueError("current exit-level version must follow its history")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +192,26 @@ class PositionBar:
     high: Decimal
     low: Decimal
     close: Decimal
+    #: 실제 OHLC 관측 구간. ``as_of``는 결정론 신호 identity용 일봉 label일 수
+    #: 있으므로 activation 비교에는 이 두 instant만 사용한다.
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.as_of.tzinfo is None or self.as_of.utcoffset() is None:
             raise ValueError("bar as_of must be timezone-aware")
         object.__setattr__(self, "as_of", self.as_of.astimezone(UTC))
+        starts_at = self.as_of if self.starts_at is None else self.starts_at
+        ends_at = self.as_of if self.ends_at is None else self.ends_at
+        for name, value in (("starts_at", starts_at), ("ends_at", ends_at)):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"bar {name} must be timezone-aware")
+        starts_at = starts_at.astimezone(UTC)
+        ends_at = ends_at.astimezone(UTC)
+        if starts_at > ends_at:
+            raise ValueError("bar starts_at must not follow ends_at")
+        object.__setattr__(self, "starts_at", starts_at)
+        object.__setattr__(self, "ends_at", ends_at)
         prices = (self.open, self.high, self.low, self.close)
         if any(not value.is_finite() or value <= _ZERO for value in prices):
             raise ValueError("bar prices must be positive and finite")
@@ -145,6 +231,9 @@ class PositionExitSignal:
     signal_at: datetime
     reason: str
     idempotency_key: str
+    initial_atr: Decimal | None
+    initial_stop: Decimal
+    current_stop: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +251,7 @@ def initialize_position(
     entry_at: datetime,
     strategy_version: str,
     position_cycle_id: int | None = None,
+    exit_levels_effective_at: datetime | None = None,
     config: PositionManagerConfig = PositionManagerConfig(),
 ) -> ManagedPositionState:
     if not entry_price.is_finite() or entry_price <= _ZERO:
@@ -189,6 +279,7 @@ def initialize_position(
         last_evaluated_at=None,
         strategy_version=strategy_version,
         position_cycle_id=position_cycle_id,
+        exit_levels_effective_at=exit_levels_effective_at or entry_at,
     )
 
 
@@ -208,48 +299,156 @@ def stop_loss_floor(filled_average_price: Decimal) -> Decimal:
     return filled_average_price * STOP_LOSS_FLOOR_RATIO
 
 
+def _transition_exit_levels(
+    state: ManagedPositionState,
+    *,
+    initial_atr: Decimal | None,
+    initial_stop: Decimal,
+    current_stop: Decimal,
+    effective_at: datetime,
+) -> ManagedPositionState:
+    """같은 instant 변경은 합치고, 새 activation이면 이전 snapshot을 보존한다."""
+
+    if effective_at.tzinfo is None or effective_at.utcoffset() is None:
+        raise ValueError("exit-level effective_at must be timezone-aware")
+    activation = effective_at.astimezone(UTC)
+    if activation < state.entry_at:
+        raise ValueError("exit-level effective_at must not precede entry_at")
+    if (
+        initial_atr == state.initial_atr
+        and initial_stop == state.initial_stop
+        and current_stop == state.current_stop
+    ):
+        return state
+    if (
+        state.exit_levels_effective_at is not None
+        and activation < state.exit_levels_effective_at
+    ):
+        raise ValueError("exit-level activation must not precede current version")
+    if activation == state.exit_levels_effective_at:
+        return replace(
+            state,
+            initial_atr=initial_atr,
+            initial_stop=max(state.initial_stop, initial_stop),
+            current_stop=max(state.current_stop, current_stop),
+        )
+    previous = ExitLevelVersion(
+        effective_at=state.exit_levels_effective_at,
+        initial_atr=state.initial_atr,
+        initial_stop=state.initial_stop,
+        current_stop=state.current_stop,
+    )
+    return replace(
+        state,
+        initial_atr=initial_atr,
+        initial_stop=initial_stop,
+        current_stop=current_stop,
+        exit_levels_effective_at=activation,
+        exit_level_history=(*state.exit_level_history, previous),
+    )
+
+
+def _raise_trailing_stop(
+    state: ManagedPositionState,
+    *,
+    raised_stop: Decimal,
+    effective_at: datetime,
+) -> ManagedPositionState:
+    """실제 close 위치에 trailing version을 넣고 이후 보호선에도 전파한다."""
+
+    if not raised_stop.is_finite() or raised_stop <= _ZERO:
+        raise ValueError("trailing stop must be positive and finite")
+    if effective_at.tzinfo is None or effective_at.utcoffset() is None:
+        raise ValueError("trailing stop effective_at must be timezone-aware")
+    activation = effective_at.astimezone(UTC)
+    if activation < state.entry_at:
+        raise ValueError("trailing stop effective_at must not precede entry_at")
+
+    versions = [
+        *state.exit_level_history,
+        ExitLevelVersion(
+            effective_at=state.exit_levels_effective_at,
+            initial_atr=state.initial_atr,
+            initial_stop=state.initial_stop,
+            current_stop=state.current_stop,
+        ),
+    ]
+    insertion = len(versions)
+    for index, version in enumerate(versions):
+        if version.effective_at is not None and version.effective_at >= activation:
+            insertion = index
+            break
+
+    if insertion < len(versions) and versions[insertion].effective_at == activation:
+        changed_from = insertion
+    else:
+        source_index = insertion - 1
+        if source_index < 0:
+            raise ValueError("exit-level history does not cover trailing activation")
+        source = versions[source_index]
+        versions.insert(
+            insertion,
+            ExitLevelVersion(
+                effective_at=activation,
+                initial_atr=source.initial_atr,
+                initial_stop=source.initial_stop,
+                current_stop=max(source.current_stop, raised_stop),
+            ),
+        )
+        changed_from = insertion
+
+    versions = [
+        (
+            replace(version, current_stop=max(version.current_stop, raised_stop))
+            if index >= changed_from
+            else version
+        )
+        for index, version in enumerate(versions)
+    ]
+    current = versions[-1]
+    return replace(
+        state,
+        initial_atr=current.initial_atr,
+        initial_stop=current.initial_stop,
+        current_stop=current.current_stop,
+        exit_levels_effective_at=current.effective_at,
+        exit_level_history=tuple(versions[:-1]),
+    )
+
+
 def apply_stop_loss_floor(
     state: ManagedPositionState,
     *,
     filled_average_price: Decimal,
+    effective_at: datetime,
 ) -> ManagedPositionState:
-    """Raise a managed state's stops to the -3% floor, never lowering an existing one.
+    """-3% floor를 올리되 더 이른 관측에는 소급하지 않는다.
 
-    -3% 최소 보호선을 먹이는 유일한 지점이다. 일봉·장중 평가기는 모두 저장된
-    ``current_stop``만 읽으므로, 상태를 세우거나 되읽는 자리에서 한 번 바닥을
-    올려두면 두 horizon이 같은 손절선을 본다. 평가기마다 따로 바닥을 씌우면
-    ``TRAILING`` 판정 기준인 ``initial_stop``과 어긋나 같은 손절이 horizon에 따라
-    다른 ``ExitKind``로 보고된다.
-
-    바닥은 ``initial_stop``에 먹인다. 바닥이 곧 이 포지션의 최소 기준 손절선이므로,
-    ``current_stop``만 올리면 아무것도 추적하지 않았는데 ``current_stop >
-    initial_stop``이 되어 ``STOP``이 ``TRAILING_STOP``으로 잘못 보고된다.
-
-    이미 더 높은(더 타이트한) 손절선이 있으면 그대로 둔다. trailing으로 끌어올린
-    손절선과 평단이 내려가는 물타기 모두 이 ``max`` 하나로 보존된다. 값이 그대로면
-    같은 객체를 돌려주어 등호 경계에서 불필요한 상태 갱신을 만들지 않는다.
+    이전 exit-level snapshot을 ``exit_level_history``에 정확히 남긴다. 따라서
+    지연된 일봉·분봉은 당시의 이전 stop을 보고, ``effective_at``에 시작한
+    관측부터 강화된 stop을 사용한다.
     """
 
     floor = stop_loss_floor(filled_average_price)
     initial_stop = max(state.initial_stop, floor)
     current_stop = max(state.current_stop, initial_stop)
-    if initial_stop == state.initial_stop and current_stop == state.current_stop:
-        return state
-    return replace(state, initial_stop=initial_stop, current_stop=current_stop)
+    return _transition_exit_levels(
+        state,
+        initial_atr=state.initial_atr,
+        initial_stop=initial_stop,
+        current_stop=current_stop,
+        effective_at=effective_at,
+    )
 
 
 def adopt_initial_atr(
     state: ManagedPositionState,
     *,
     initial_atr: Decimal,
+    effective_at: datetime,
     config: PositionManagerConfig = PositionManagerConfig(),
 ) -> ManagedPositionState:
-    """Fill a missing ATR later without ever loosening the stop already carried.
-
-    고정 손절선만으로 보호하던 보유분에 일봉 근거가 생기면 ATR 파생 판정을
-    되살린다. ATR 손절선이 더 타이트할 때만 손절선을 올리고, 더 넓으면 이미
-    들고 있던 손절선을 그대로 둔다.
-    """
+    """후발 ATR 근거를 과거 관측에 소급하지 않고 활성화한다."""
 
     if state.initial_atr is not None:
         raise ValueError("initial_atr is already known for this position")
@@ -259,11 +458,12 @@ def adopt_initial_atr(
         state.initial_stop,
         state.entry_price - config.initial_stop_atr * initial_atr,
     )
-    return replace(
+    return _transition_exit_levels(
         state,
         initial_atr=initial_atr,
         initial_stop=initial_stop,
         current_stop=max(state.current_stop, initial_stop),
+        effective_at=effective_at,
     )
 
 
@@ -295,6 +495,36 @@ def exit_signal_key(
     return f"position-exit:{hashlib.sha256(material).hexdigest()[:24]}"
 
 
+def _exit_levels_cover_observation(
+    state: ManagedPositionState,
+    starts_at: datetime,
+) -> bool:
+    earliest = (
+        state.exit_level_history[0].effective_at
+        if state.exit_level_history
+        else state.exit_levels_effective_at
+    )
+    return earliest is None or starts_at >= earliest
+
+
+def _exit_levels_for_bar(
+    state: ManagedPositionState,
+    bar: PositionBar,
+) -> tuple[Decimal | None, Decimal, Decimal]:
+    """이 관측 구간이 시작할 때 유효했던 snapshot을 돌려준다."""
+
+    starts_at = bar.starts_at
+    if starts_at is None:
+        raise ValueError("position bar starts_at is required")
+    effective_at = state.exit_levels_effective_at
+    if effective_at is None or starts_at >= effective_at:
+        return state.initial_atr, state.initial_stop, state.current_stop
+    for version in reversed(state.exit_level_history):
+        if version.effective_at is None or starts_at >= version.effective_at:
+            return version.initial_atr, version.initial_stop, version.current_stop
+    raise ValueError("exit-level history does not cover the observation")
+
+
 def _signal(
     state: ManagedPositionState,
     bar: PositionBar,
@@ -303,7 +533,13 @@ def _signal(
     fraction: Decimal,
     price: Decimal,
     reason: str,
+    exit_levels: tuple[Decimal | None, Decimal, Decimal] | None = None,
 ) -> PositionExitSignal:
+    initial_atr, initial_stop, current_stop = exit_levels or (
+        state.initial_atr,
+        state.initial_stop,
+        state.current_stop,
+    )
     return PositionExitSignal(
         kind=kind,
         quantity_fraction=fraction,
@@ -317,6 +553,9 @@ def _signal(
             signal_at=bar.as_of,
             position_cycle_id=state.position_cycle_id,
         ),
+        initial_atr=initial_atr,
+        initial_stop=initial_stop,
+        current_stop=current_stop,
     )
 
 
@@ -342,9 +581,20 @@ def evaluate_position(
         raise ValueError("position bar must be newer than last_evaluated_at")
     if bars_held < 1:
         raise ValueError("bars_held must be positive")
+    starts_at = bar.starts_at
+    if starts_at is None:
+        raise ValueError("position bar starts_at is required")
+    if not _exit_levels_cover_observation(state, starts_at):
+        # 최초 관리 전 관측에는 persisted stop provenance가 없다. 과거를
+        # 평가 완료로만 넘기고 현재 bootstrap protection을 소급하지 않는다.
+        return PositionEvaluation(
+            state=replace(state, last_evaluated_at=bar.as_of),
+            signal=None,
+        )
 
-    trailed = state.current_stop > state.initial_stop
-    if bar.open <= state.current_stop:
+    initial_atr, initial_stop, current_stop = _exit_levels_for_bar(state, bar)
+    trailed = current_stop > initial_stop
+    if bar.open <= current_stop:
         kind = ExitKind.TRAILING_STOP_GAP if trailed else ExitKind.STOP_GAP
         return PositionEvaluation(
             state=replace(state, last_evaluated_at=bar.as_of),
@@ -354,10 +604,11 @@ def evaluate_position(
                 kind=kind,
                 fraction=_ONE,
                 price=bar.open,
-                reason="시가가 기존 손절선 아래에서 형성되어 전량 청산합니다.",
+                reason="시가가 당시 유효한 손절선 아래에서 형성되어 전량 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             ),
         )
-    if bar.low <= state.current_stop:
+    if bar.low <= current_stop:
         kind = ExitKind.TRAILING_STOP if trailed else ExitKind.STOP
         return PositionEvaluation(
             state=replace(state, last_evaluated_at=bar.as_of),
@@ -366,17 +617,18 @@ def evaluate_position(
                 bar,
                 kind=kind,
                 fraction=_ONE,
-                price=state.current_stop,
-                reason="당일 저가가 기존 손절선에 닿아 전량 청산합니다.",
+                price=current_stop,
+                reason="당일 저가가 당시 유효한 손절선에 닿아 전량 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             ),
         )
 
-    # ATR이 없으면 부분익절선을 세울 근거가 없다. 없는 ATR로 목표가를 만들면
-    # 손절 보호를 위해 세운 상태가 가짜 익절을 낸다.
+    # ATR이 없으면 부분익절선을 세울 근거가 없다. 늦게 채택된 ATR은 그
+    # activation 뒤에 시작한 관측에서만 이 snapshot으로 선택된다.
     partial_target = (
         None
-        if state.initial_atr is None
-        else state.entry_price + config.partial_profit_atr * state.initial_atr
+        if initial_atr is None
+        else state.entry_price + config.partial_profit_atr * initial_atr
     )
     if (
         partial_target is not None
@@ -402,6 +654,7 @@ def evaluate_position(
                     f"진입가 대비 +{config.partial_profit_atr} ATR에 도달해 "
                     f"보유수량의 {config.partial_fraction * Decimal('100')}%를 익절합니다."
                 ),
+                exit_levels=(initial_atr, initial_stop, current_stop),
             ),
         )
 
@@ -415,14 +668,15 @@ def evaluate_position(
                 fraction=_ONE,
                 price=bar.close,
                 reason="추세 구조가 훼손되어 잔여수량을 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             ),
         )
 
     progress = max(state.highest_close, bar.close) - state.entry_price
     if (
-        state.initial_atr is not None
+        initial_atr is not None
         and bars_held >= config.max_holding_bars
-        and progress < config.no_progress_atr * state.initial_atr
+        and progress < config.no_progress_atr * initial_atr
     ):
         return PositionEvaluation(
             state=replace(state, last_evaluated_at=bar.as_of),
@@ -433,20 +687,29 @@ def evaluate_position(
                 fraction=_ONE,
                 price=bar.close,
                 reason="최대 보유기간 동안 최소 진전폭을 만들지 못해 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             ),
         )
 
     highest_close = max(state.highest_close, bar.close)
-    current_stop = state.current_stop
-    if state.initial_atr is not None and state.partial_exit_completed:
-        current_stop = max(
+    updated = state
+    if initial_atr is not None and state.partial_exit_completed:
+        raised_stop = max(
             current_stop,
-            highest_close - config.trailing_stop_atr * state.initial_atr,
+            highest_close - config.trailing_stop_atr * initial_atr,
         )
+        if raised_stop > current_stop:
+            ends_at = bar.ends_at
+            if ends_at is None:
+                raise ValueError("position bar ends_at is required")
+            updated = _raise_trailing_stop(
+                state,
+                raised_stop=raised_stop,
+                effective_at=ends_at,
+            )
     return PositionEvaluation(
         state=replace(
-            state,
-            current_stop=current_stop,
+            updated,
             highest_close=highest_close,
             last_evaluated_at=bar.as_of,
         ),
@@ -498,36 +761,46 @@ def evaluate_position_intraday(
     if bar_interval <= timedelta(0):
         raise ValueError("bar_interval must be positive")
 
-    trailed = state.current_stop > state.initial_stop
-    # ATR이 없는 보유분은 저장된 손절선만 본다. 부분익절선은 근거가 없다.
-    partial_target = (
-        None
-        if state.initial_atr is None
-        else state.entry_price + config.partial_profit_atr * state.initial_atr
-    )
+    # ATR과 stop은 bucket 시작 시점에 유효했던 하나의 snapshot에서 함께 읽는다.
+    # activation을 가로지르는 bucket의 pre-activation 저가로 새 stop을 발동하지
+    # 않으면서도, history에 남은 이전 stop crossing은 계속 보존한다.
     partial: PositionExitSignal | None = None
     for bar in sorted(bars, key=lambda item: item.as_of):
         if bar.as_of - bar_interval < state.entry_at:
             continue
         if after is not None and bar.as_of <= after:
             continue
-        if bar.open <= state.current_stop:
+        starts_at = bar.starts_at
+        if starts_at is None:
+            raise ValueError("position bar starts_at is required")
+        if not _exit_levels_cover_observation(state, starts_at):
+            continue
+        initial_atr, initial_stop, current_stop = _exit_levels_for_bar(state, bar)
+        trailed = current_stop > initial_stop
+        partial_target = (
+            None
+            if initial_atr is None
+            else state.entry_price + config.partial_profit_atr * initial_atr
+        )
+        if bar.open <= current_stop:
             return _signal(
                 state,
                 bar,
                 kind=ExitKind.TRAILING_STOP_GAP if trailed else ExitKind.STOP_GAP,
                 fraction=_ONE,
                 price=bar.open,
-                reason="장중 봉 시가가 기존 손절선 아래여서 전량 청산합니다.",
+                reason="장중 봉 시가가 당시 유효한 손절선 아래여서 전량 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             )
-        if bar.low <= state.current_stop:
+        if bar.low <= current_stop:
             return _signal(
                 state,
                 bar,
                 kind=ExitKind.TRAILING_STOP if trailed else ExitKind.STOP,
                 fraction=_ONE,
-                price=state.current_stop,
-                reason="장중 저가가 기존 손절선에 닿아 전량 청산합니다.",
+                price=current_stop,
+                reason="장중 저가가 당시 유효한 손절선에 닿아 전량 청산합니다.",
+                exit_levels=(initial_atr, initial_stop, current_stop),
             )
         if (
             partial is None
@@ -545,5 +818,6 @@ def evaluate_position_intraday(
                     f"장중에 진입가 대비 +{config.partial_profit_atr} ATR에 도달해 "
                     f"보유수량의 {config.partial_fraction * Decimal('100')}%를 익절합니다."
                 ),
+                exit_levels=(initial_atr, initial_stop, current_stop),
             )
     return partial

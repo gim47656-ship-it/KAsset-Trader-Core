@@ -22,8 +22,10 @@ from app.extensions.kasset.automation.intraday_data import (
 from app.extensions.kasset.automation.market_session import RegularSession
 from app.extensions.kasset.automation.position_manager import (
     ExitKind,
+    ExitLevelVersion,
     ManagedPositionState,
     PositionBar,
+    adopt_initial_atr,
     apply_stop_loss_floor,
     evaluate_position,
     evaluate_position_intraday,
@@ -46,9 +48,10 @@ from app.extensions.kasset.models import (
 from app.models.ai_recommendations import AIRecommendation
 from app.models.paper_trading import PaperAccount, PaperPosition
 from app.models.trading import InstrumentType, User
+from app.services.market_events.session_calendar import regular_session_bounds
 
 D = Decimal
-ENTRY_AT = datetime(2026, 8, 1, tzinfo=UTC)
+ENTRY_AT = datetime(2026, 8, 3, tzinfo=UTC)
 _ARTIFACT_FINGERPRINT = "a" * 64
 _INTRADAY_INTERVAL = timedelta(minutes=5)
 #: (bucket 시작 offset(분), open, high, low, close)
@@ -61,6 +64,8 @@ def _state(
     stop: str = "70",
     high: str = "100",
     position_cycle_id: int = 101,
+    exit_levels_effective_at: datetime | None = None,
+    exit_level_history: tuple[ExitLevelVersion, ...] = (),
 ) -> ManagedPositionState:
     return ManagedPositionState(
         market="KRX",
@@ -75,6 +80,8 @@ def _state(
         last_evaluated_at=None,
         strategy_version="breakout-portfolio-v1",
         position_cycle_id=position_cycle_id,
+        exit_levels_effective_at=exit_levels_effective_at,
+        exit_level_history=exit_level_history,
     )
 
 
@@ -132,6 +139,8 @@ def _state_row(
     last_evaluated_at: datetime | None = None,
     last_exit_signal_key: str | None = None,
     strategy_fingerprint: str | None = _ARTIFACT_FINGERPRINT,
+    exit_levels_effective_at: datetime | None = None,
+    exit_level_history: list[dict[str, object]] | None = None,
 ) -> KAssetPaperPositionState:
     return KAssetPaperPositionState(
         position_cycle_id=position_id,
@@ -153,6 +162,8 @@ def _state_row(
         strategy_key="qullamaggie_breakout_portfolio",
         strategy_version="1.0.0",
         strategy_fingerprint=strategy_fingerprint,
+        exit_levels_effective_at=exit_levels_effective_at,
+        exit_level_history=exit_level_history,
     )
 
 
@@ -173,10 +184,17 @@ def _candle(
     )
 
 
-def _atr_candles(*, first_day: int = -13) -> list[SimpleNamespace]:
-    """ATR 14를 만들 수 있는 15봉(TR=4 고정). ``first_day``로 창을 옮긴다."""
+def _atr_candles(*, first_day: int = -14) -> list[SimpleNamespace]:
+    """ATR 14를 만들 수 있는 완료 KRX 거래일 15봉(TR=4 고정)."""
 
-    return [_candle(day) for day in range(first_day, first_day + 15)]
+    candidate = first_day + 14
+    offsets: list[int] = []
+    while len(offsets) < 15:
+        day = ENTRY_AT + timedelta(days=candidate)
+        if regular_session_bounds("kr", day.date()) is not None:
+            offsets.append(candidate)
+        candidate -= 1
+    return [_candle(day) for day in reversed(offsets)]
 
 
 def _intraday(
@@ -251,10 +269,18 @@ def test_initialize_position_uses_three_atr_stop() -> None:
 def test_stop_floor_lifts_a_wide_atr_stop_to_three_percent_below_the_fill() -> None:
     """저장된 ATR 손절선이 -30%여도 실제 체결 평단 -3%까지 끌어올린다."""
 
-    floored = apply_stop_loss_floor(_state(), filled_average_price=D("100"))
+    floored = apply_stop_loss_floor(
+        _state(),
+        filled_average_price=D("100"),
+        effective_at=ENTRY_AT + timedelta(days=2),
+    )
 
     assert floored.initial_stop == D("97")
     assert floored.current_stop == D("97")
+    assert floored.exit_levels_effective_at == ENTRY_AT + timedelta(days=2)
+    assert floored.exit_level_history == (
+        ExitLevelVersion(None, D("10"), D("70"), D("70")),
+    )
 
 
 @pytest.mark.unit
@@ -264,6 +290,7 @@ def test_stop_floor_keeps_a_tighter_trailing_stop() -> None:
     trailed = apply_stop_loss_floor(
         _state(partial=True, stop="110", high="140"),
         filled_average_price=D("100"),
+        effective_at=ENTRY_AT + timedelta(days=2),
     )
 
     assert trailed.current_stop == D("110")
@@ -285,6 +312,7 @@ def test_stop_floor_keeps_a_tighter_low_volatility_atr_stop() -> None:
             position_cycle_id=101,
         ),
         filled_average_price=D("100"),
+        effective_at=ENTRY_AT,
     )
     # 바닥 97이 아니라 ATR 손절선 100 - 3*0.5 이 유효 손절선이어야 한다.
     bars = _intraday([(0, "99", "100", "98", "98.5")], day=3)
@@ -304,7 +332,11 @@ def test_stop_floor_keeps_a_tighter_low_volatility_atr_stop() -> None:
 def test_floored_stop_triggers_when_the_low_exactly_touches_it() -> None:
     """등호 경계: 저가가 바닥에 정확히 닿으면 손절이 나온다."""
 
-    floored = apply_stop_loss_floor(_state(), filled_average_price=D("100"))
+    floored = apply_stop_loss_floor(
+        _state(),
+        filled_average_price=D("100"),
+        effective_at=ENTRY_AT + timedelta(days=2),
+    )
     bars = _intraday([(0, "99", "100", "97", "98")], day=3)
 
     signal = evaluate_position_intraday(
@@ -321,7 +353,158 @@ def test_floored_stop_triggers_when_the_low_exactly_touches_it() -> None:
 @pytest.mark.unit
 def test_stop_floor_refuses_to_invent_a_level_without_a_fill_average() -> None:
     with pytest.raises(ValueError, match="filled_average_price"):
-        apply_stop_loss_floor(_state(), filled_average_price=D("0"))
+        apply_stop_loss_floor(
+            _state(),
+            filled_average_price=D("0"),
+            effective_at=ENTRY_AT,
+        )
+
+
+@pytest.mark.unit
+def test_intraday_tightening_uses_old_stop_for_the_overlapping_bucket() -> None:
+    activation = ENTRY_AT + timedelta(days=3, minutes=7)
+    tightened = apply_stop_loss_floor(
+        _state(),
+        filled_average_price=D("100"),
+        effective_at=activation,
+    )
+    bars = _intraday(
+        [
+            # 00:05~00:10은 activation을 가로지르므로 70만 유효하다.
+            (5, "99", "100", "96", "98"),
+            # 다음 온전한 bucket부터 새 97이 exact-touch로 발동한다.
+            (10, "98", "99", "97", "98"),
+        ],
+        day=3,
+    )
+
+    signal = evaluate_position_intraday(
+        tightened,
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.reference_price == D("97")
+    assert signal.signal_at == bars.bars[1].timestamp + bars.bar_interval
+
+
+@pytest.mark.unit
+def test_repeated_tightening_preserves_each_intermediate_stop_version() -> None:
+    first_activation = ENTRY_AT + timedelta(days=3, minutes=5)
+    second_activation = ENTRY_AT + timedelta(days=3, minutes=10)
+    first = apply_stop_loss_floor(
+        _state(),
+        filled_average_price=D("100"),
+        effective_at=first_activation,
+    )
+    second = apply_stop_loss_floor(
+        first,
+        filled_average_price=D("110"),
+        effective_at=second_activation,
+    )
+    bars = _intraday(
+        [
+            (0, "90", "91", "80", "89"),
+            # 97 version이 유효한 구간. 최신 106.70을 소급하면 안 된다.
+            (5, "99", "100", "96", "98"),
+        ],
+        day=3,
+    )
+
+    signal = evaluate_position_intraday(
+        second,
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.STOP
+    assert signal.reference_price == D("97")
+    assert [version.current_stop for version in second.exit_level_history] == [
+        D("70"),
+        D("97"),
+    ]
+
+
+@pytest.mark.unit
+def test_later_atr_only_enables_targets_after_its_activation() -> None:
+    activation = ENTRY_AT + timedelta(days=3, minutes=7)
+    fixed = replace(
+        _state(stop="97"),
+        initial_atr=None,
+        initial_stop=D("97"),
+    )
+    adopted = adopt_initial_atr(
+        fixed,
+        initial_atr=D("4"),
+        effective_at=activation,
+    )
+    before = _intraday([(5, "110", "115", "105", "114")], day=3)
+    after = _intraday(
+        [
+            (5, "110", "115", "105", "114"),
+            (10, "110", "115", "105", "114"),
+        ],
+        day=3,
+    )
+
+    assert (
+        evaluate_position_intraday(
+            adopted,
+            _intraday_position_bars(before),
+            bar_interval=before.bar_interval,
+        )
+        is None
+    )
+    signal = evaluate_position_intraday(
+        adopted,
+        _intraday_position_bars(after),
+        bar_interval=after.bar_interval,
+    )
+    assert signal is not None
+    assert signal.kind is ExitKind.PARTIAL_SELL
+    assert signal.reference_price == D("112")
+    assert signal.signal_at == after.bars[1].timestamp + after.bar_interval
+
+
+@pytest.mark.unit
+def test_delayed_daily_trailing_protects_the_intermediate_session() -> None:
+    activation = ENTRY_AT + timedelta(days=3)
+    tightened = apply_stop_loss_floor(
+        _state(partial=True),
+        filled_average_price=D("100"),
+        effective_at=activation,
+    )
+    delayed = PositionBar(
+        as_of=ENTRY_AT + timedelta(days=1),
+        open=D("100"),
+        high=D("145"),
+        low=D("75"),
+        close=D("140"),
+        starts_at=ENTRY_AT + timedelta(days=1),
+        ends_at=ENTRY_AT + timedelta(days=1, hours=6, minutes=30),
+    )
+
+    replayed = evaluate_position(tightened, delayed, bars_held=2)
+
+    assert replayed.signal is None
+    assert replayed.state.current_stop == D("110")
+    intermediate = PositionBar(
+        as_of=ENTRY_AT + timedelta(days=2),
+        open=D("115"),
+        high=D("116"),
+        low=D("100"),
+        close=D("106"),
+        starts_at=ENTRY_AT + timedelta(days=2),
+        ends_at=ENTRY_AT + timedelta(days=2, hours=6, minutes=30),
+    )
+    stopped = evaluate_position(replayed.state, intermediate, bars_held=3)
+    assert stopped.signal is not None
+    assert stopped.signal.kind is ExitKind.TRAILING_STOP
+    assert stopped.signal.reference_price == D("110")
+    assert stopped.signal.current_stop == D("110")
 
 
 @pytest.mark.unit
@@ -672,7 +855,7 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
     db.delete = AsyncMock()
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=1))
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=8))
     position = _paper_position(avg_price="100")
 
     created = await service._manage_position(
@@ -703,6 +886,58 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
 
 
 @pytest.mark.asyncio
+async def test_first_management_does_not_backdate_a_bootstrap_stop() -> None:
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    bootstrap_at = ENTRY_AT + timedelta(days=3, hours=8)
+    first = _manager(db, now=bootstrap_at)
+    position = _paper_position(avg_price="100")
+
+    historical = await first._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[_candle(1, open_="95", high="96", low="60", close="70")],
+    )
+
+    assert historical is None
+    state_row = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], KAssetPaperPositionState)
+    )
+    assert state_row.exit_levels_effective_at == bootstrap_at
+    assert state_row.current_stop == D("97")
+    assert state_row.last_evaluated_at == _candle(1).time_utc
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+
+    db.scalar = AsyncMock(return_value=state_row)
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=1))
+    protected = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[],
+        intraday=_intraday([(0, "98", "99", "97", "98")], day=4),
+    )
+
+    assert protected is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    assert recommendation.reference_price == "97.00"
+
+
+@pytest.mark.asyncio
 async def test_exit_recommendation_has_authorizable_strategy_identity() -> None:
     state_row = _state_row(strategy_fingerprint=None)
     db = MagicMock()
@@ -710,7 +945,7 @@ async def test_exit_recommendation_has_authorizable_strategy_identity() -> None:
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=1))
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=8))
 
     recommendation_id = await service._manage_position(
         owner_user_id=23,
@@ -758,7 +993,7 @@ async def test_partial_fill_keeps_same_cycle_and_marks_remaining_state() -> None
     db.flush = AsyncMock()
     db.add = MagicMock()
 
-    first_service = _manager(db, now=ENTRY_AT + timedelta(days=1))
+    first_service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=8))
     recommendation_id = await first_service._manage_position(
         owner_user_id=23,
         account_id=17,
@@ -778,7 +1013,7 @@ async def test_partial_fill_keeps_same_cycle_and_marks_remaining_state() -> None
     position.quantity = D("5")
     db.scalar = AsyncMock(side_effect=[state_row, partial])
     db.get = AsyncMock(return_value=None)
-    restarted = _manager(db, now=ENTRY_AT + timedelta(days=2))
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=2, hours=8))
     duplicate = await restarted._manage_position(
         owner_user_id=23,
         account_id=17,
@@ -807,7 +1042,7 @@ async def test_reentry_cycle_does_not_reuse_old_highest_close_or_partial_state()
     db.delete = AsyncMock()
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=1))
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=8))
 
     created = await service._manage_position(
         owner_user_id=23,
@@ -825,7 +1060,7 @@ async def test_reentry_cycle_does_not_reuse_old_highest_close_or_partial_state()
     )
     assert reentry.position_cycle_id != closed_cycle.position_cycle_id
     assert reentry.paper_position_id == 202
-    assert reentry.highest_close == D("105")
+    assert reentry.highest_close == D("100")
     assert reentry.highest_close != closed_cycle.highest_close
     assert reentry.partial_exit_completed is False
 
@@ -856,7 +1091,7 @@ async def test_unclaimed_partial_is_expired_before_emergency_full_exit() -> None
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
-    now = ENTRY_AT + timedelta(days=1)
+    now = ENTRY_AT + timedelta(days=1, hours=8)
     service = _manager(db, now=now)
 
     recommendation_id = await service._manage_position(
@@ -1082,7 +1317,7 @@ async def test_duplicate_manager_run_emits_one_exit_for_same_cycle_bar() -> None
 
     db.get = AsyncMock(side_effect=get_recommendation)
     db.add = MagicMock(side_effect=add_row)
-    now = ENTRY_AT + timedelta(days=1)
+    now = ENTRY_AT + timedelta(days=1, hours=8)
     first_service = _manager(db, now=now)
     second_service = _manager(db, now=now)
     position = _paper_position()
@@ -1167,7 +1402,8 @@ async def test_intraday_exit_fires_when_entry_is_newer_than_daily_history() -> N
     db.add = MagicMock()
     position = _paper_position()
     position.created_at = ENTRY_AT + timedelta(days=2)
-    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+    first_now = ENTRY_AT + timedelta(days=3, hours=1)
+    service = _manager(db, now=first_now)
 
     recommendation_id = await service._manage_position(
         owner_user_id=23,
@@ -1178,15 +1414,29 @@ async def test_intraday_exit_fires_when_entry_is_newer_than_daily_history() -> N
         intraday=_intraday([(0, "90", "91", "87", "88")], day=3),
     )
 
-    assert recommendation_id is not None
+    assert recommendation_id is None
     state_row = next(
         call_.args[0]
         for call_ in db.add.call_args_list
         if isinstance(call_.args[0], KAssetPaperPositionState)
     )
-    # 진입 시점 ATR 손절선(100 - 3*4 = 88)보다 평단 -3%가 더 타이트하다.
+    # 최초 관리 당시 ATR/floor는 과거 bucket에 소급하지 않고 그 시각부터 보호한다.
     assert state_row.initial_stop == D("97")
+    assert state_row.exit_levels_effective_at == first_now
     assert state_row.last_evaluated_at is None
+
+    db.scalar = AsyncMock(return_value=state_row)
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=1))
+    recommendation_id = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=_atr_candles(),
+        intraday=_intraday([(0, "90", "91", "87", "88")], day=4),
+    )
+
+    assert recommendation_id is not None
 
 
 @pytest.mark.asyncio
@@ -1340,26 +1590,189 @@ async def test_stored_stop_is_protected_without_any_daily_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_wide_stop_is_floored_without_a_daily_cursor_advance() -> None:
-    """이미 관리 중인 보유분도 일봉 커서를 기다리지 않고 -3%에서 보호된다."""
+async def test_hanjin_daily_catchup_uses_the_stop_valid_during_that_session() -> None:
+    """9/7 장 종료 뒤 생긴 -3% floor가 9/7 저가를 소급 청산하지 않는다."""
 
-    daily = _candle(1)
-    # 저장된 ATR 손절선은 70(-30%)이고 일봉 커서는 이미 그 봉까지 전진해 있다.
-    state_row = _state_row(last_evaluated_at=daily.time_utc)
+    old_stop = D("125342.85714286")
+    activated_at = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    state_row = _state_row(
+        symbol="180640",
+        last_evaluated_at=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    state_row.entry_price = D("145100")
+    state_row.initial_atr = D("6585.71428571")
+    state_row.initial_stop = old_stop
+    state_row.current_stop = old_stop
+    state_row.highest_close = D("145100")
+    state_row.opened_at = datetime(2026, 9, 4, 2, 25, tzinfo=UTC)
+    daily = SimpleNamespace(
+        time_utc=datetime(2026, 9, 7, tzinfo=UTC),
+        open=D("147000"),
+        high=D("149700"),
+        low=D("137000"),
+        close=D("148900"),
+    )
+    position = _paper_position(symbol="180640", quantity="2", avg_price="145100")
     db = MagicMock()
     db.scalar = AsyncMock(return_value=state_row)
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+    service = _manager(db, now=activated_at)
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=position,
+        rows=[daily],
+    )
+
+    assert recommendation_id is None
+    assert not any(
+        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
+    )
+    assert state_row.last_evaluated_at == daily.time_utc
+    assert state_row.initial_stop == D("140747")
+    assert state_row.current_stop == D("140747")
+    assert state_row.exit_levels_effective_at == activated_at
+    assert state_row.exit_level_history == [
+        {
+            "effectiveAt": None,
+            "initialAtr": "6585.71428571",
+            "initialStop": "125342.85714286",
+            "currentStop": "125342.85714286",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_evaluates_delayed_daily_bar_with_its_old_stop_version() -> None:
+    activation = ENTRY_AT + timedelta(days=3)
+    state_row = _state_row(
+        stop="97",
+        last_evaluated_at=_candle(1).time_utc,
+        exit_levels_effective_at=activation,
+        exit_level_history=[
+            {
+                "effectiveAt": None,
+                "initialAtr": "10",
+                "initialStop": "70",
+                "currentStop": "70",
+            }
+        ],
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=8))
+
+    recommendation_id = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[_candle(2, open_="75", high="80", low="69", close="72")],
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    assert recommendation.reference_price == "70"
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    assert exit_evidence["currentStop"] == "70"
+    assert state_row.current_stop == D("97")
+
+
+@pytest.mark.asyncio
+async def test_delayed_trailing_survives_json_restart_and_stops_the_next_day() -> None:
+    activation = ENTRY_AT + timedelta(days=3)
+    state_row = _state_row(
+        partial=True,
+        stop="97",
+        exit_levels_effective_at=activation,
+        exit_level_history=[
+            {
+                "effectiveAt": None,
+                "initialAtr": "10",
+                "initialStop": "70",
+                "currentStop": "70",
+            }
+        ],
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    first = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=8))
+
+    first_recommendation = await first._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[_candle(1, open_="100", high="145", low="75", close="140")],
+    )
+
+    assert first_recommendation is None
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=8))
+    recommendation_id = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[
+            _candle(1, open_="100", high="145", low="75", close="140"),
+            _candle(2, open_="115", high="116", low="100", close="106"),
+        ],
+    )
+
+    assert recommendation_id is not None
+    recommendation = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    assert recommendation.reference_price == "110"
+    exit_evidence = next(
+        item for item in recommendation.evidence if item.get("kind") == "position_exit"
+    )
+    assert exit_evidence["exitKind"] == ExitKind.TRAILING_STOP.value
+    assert exit_evidence["initialStop"] == "70"
+    assert exit_evidence["currentStop"] == "110"
+
+
+@pytest.mark.asyncio
+async def test_daily_replay_keeps_an_old_stop_crossing_after_an_earlier_partial() -> (
+    None
+):
+    """여러 미처리 일봉에서 old full stop은 새 floor와 앞선 partial에 가리지 않는다."""
+
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=state_row)
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=8))
 
     recommendation_id = await service._manage_position(
         owner_user_id=23,
         account_id=17,
         market="KRX",
         position=_paper_position(),
-        rows=[daily],
-        intraday=_intraday([(0, "99", "100", "96", "96")], day=3),
+        rows=[
+            _candle(1, open_="125", high="135", low="90", close="128"),
+            _candle(2, open_="80", high="82", low="69", close="71"),
+        ],
     )
 
     assert recommendation_id is not None
@@ -1371,15 +1784,12 @@ async def test_existing_wide_stop_is_floored_without_a_daily_cursor_advance() ->
     exit_evidence = next(
         item for item in recommendation.evidence if item.get("kind") == "position_exit"
     )
-    # 바닥은 기준 손절선이므로 추적한 적 없는 이 청산은 TRAILING_STOP이 아니다.
     assert exit_evidence["exitKind"] == ExitKind.STOP.value
-    assert exit_evidence["currentStop"] == "97.00"
-    assert recommendation.reference_price == "97.00"
-    assert recommendation.suggested_quantity == "10"
-    assert state_row.initial_stop == D("97")
-    assert state_row.current_stop == D("97")
-    # 손절 바닥이 일봉 커서를 건드려서는 안 된다.
-    assert state_row.last_evaluated_at == daily.time_utc
+    assert exit_evidence["evaluationHorizon"] == "daily"
+    assert recommendation.reference_price == "70"
+    assert state_row.last_evaluated_at == _candle(2).time_utc
+    # Full exit가 이미 성립했으므로 이 run에서 새 floor로 바꿔 증거를 오염시키지 않는다.
+    assert state_row.current_stop == D("70")
 
 
 @pytest.mark.asyncio
@@ -1395,7 +1805,8 @@ async def test_stop_floor_follows_the_actual_fill_average_not_the_stored_entry()
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+    first_now = ENTRY_AT + timedelta(days=3, hours=1)
+    service = _manager(db, now=first_now)
 
     recommendation_id = await service._manage_position(
         owner_user_id=23,
@@ -1406,18 +1817,30 @@ async def test_stop_floor_follows_the_actual_fill_average_not_the_stored_entry()
         intraday=_intraday([(0, "108", "109", "106", "107")], day=3),
     )
 
+    # activation 전 시작한 bucket은 새 106.70으로 소급 청산하지 않는다.
+    assert recommendation_id is None
+    assert state_row.current_stop == D("106.70")
+    assert state_row.exit_levels_effective_at == first_now
+    assert state_row.entry_price == D("100")
+
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=1))
+    recommendation_id = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(avg_price="110", quantity="20"),
+        rows=[],
+        intraday=_intraday([(0, "108", "109", "106", "107")], day=4),
+    )
+
     assert recommendation_id is not None
     recommendation = next(
         call_.args[0]
         for call_ in db.add.call_args_list
         if isinstance(call_.args[0], AIRecommendation)
     )
-    # 저장된 진입가 100이 기준이었다면 97.00이 나왔을 자리다.
     assert recommendation.reference_price == "106.70"
     assert recommendation.suggested_quantity == "20"
-    assert state_row.current_stop == D("106.70")
-    # 부분익절선의 기준인 진입가는 바닥 계산 때문에 덮이지 않는다.
-    assert state_row.entry_price == D("100")
 
 
 @pytest.mark.asyncio
@@ -1429,7 +1852,8 @@ async def test_new_position_without_daily_history_uses_the_fixed_stop() -> None:
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
-    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
+    first_now = ENTRY_AT + timedelta(days=3, hours=1)
+    service = _manager(db, now=first_now)
 
     recommendation_id = await service._manage_position(
         owner_user_id=23,
@@ -1440,7 +1864,7 @@ async def test_new_position_without_daily_history_uses_the_fixed_stop() -> None:
         intraday=_intraday([(0, "99", "100", "96", "96")], day=3),
     )
 
-    assert recommendation_id is not None
+    assert recommendation_id is None
     created = next(
         call_.args[0]
         for call_ in db.add.call_args_list
@@ -1450,6 +1874,20 @@ async def test_new_position_without_daily_history_uses_the_fixed_stop() -> None:
     assert created.initial_atr is None
     assert created.initial_stop == D("97.00")
     assert created.current_stop == D("97.00")
+    assert created.exit_levels_effective_at == first_now
+
+    db.scalar = AsyncMock(return_value=created)
+    restarted = _manager(db, now=ENTRY_AT + timedelta(days=4, hours=1))
+    recommendation_id = await restarted._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "99", "100", "96", "96")], day=4),
+    )
+
+    assert recommendation_id is not None
     recommendation = next(
         call_.args[0]
         for call_ in db.add.call_args_list
@@ -1468,8 +1906,9 @@ async def test_new_position_without_daily_history_uses_the_fixed_stop() -> None:
 async def test_fixed_stop_without_atr_never_invents_a_take_profit() -> None:
     """ATR이 없으면 부분익절선도 없다. 손절 보호가 가짜 익절을 만들어선 안 된다."""
 
+    state_row = _state_row(initial_atr=None, stop="97")
     db = MagicMock()
-    db.scalar = AsyncMock(return_value=None)
+    db.scalar = AsyncMock(return_value=state_row)
     db.get = AsyncMock(return_value=None)
     db.flush = AsyncMock()
     db.add = MagicMock()
@@ -1618,7 +2057,7 @@ async def test_restart_reconciles_mismatched_state_to_current_position_cycle() -
     assert stale.paper_account_id == 17
     assert stale.market == "KRX"
     assert stale.symbol == "005930"
-    assert stale.highest_close == D("105")
+    assert stale.highest_close == D("100")
     assert stale.partial_exit_completed is False
     assert not any(
         isinstance(call_.args[0], KAssetPaperPositionState)
@@ -1657,7 +2096,7 @@ async def test_restart_closes_wrong_cycle_and_creates_current_cycle() -> None:
     )
     assert fresh.position_cycle_id == 101
     assert fresh.paper_position_id == 101
-    assert fresh.highest_close == D("105")
+    assert fresh.highest_close == D("100")
     assert fresh.partial_exit_completed is False
 
 
