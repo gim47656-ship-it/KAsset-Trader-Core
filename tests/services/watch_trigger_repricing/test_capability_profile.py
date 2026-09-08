@@ -19,14 +19,9 @@ from __future__ import annotations
 import pytest
 
 from app.mcp_server.tooling.order_proposal_tools import ORDER_PROPOSAL_TOOL_NAMES
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-)
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import TOSS_LIVE_ORDER_TOOL_NAMES
 from app.mcp_server.tooling.tradingcodex_execution_registration import (
-    KIWOOM_MOCK_EXECUTION_TOOL_NAMES,
     TRADINGCODEX_EXECUTION_FORBIDDEN_TOOL_NAMES,
     TRADINGCODEX_EXECUTION_TOOL_NAMES,
 )
@@ -47,13 +42,7 @@ from .conftest import INCIDENT_TICK, make_event
 pytestmark = pytest.mark.unit
 
 # Every tool set in the repo that can mutate an order at a broker.
-MUTATION_TOOL_NAMES = (
-    ORDER_TOOL_NAMES
-    | KIS_LIVE_ORDER_TOOL_NAMES
-    | KIS_MOCK_ORDER_TOOL_NAMES
-    | TOSS_LIVE_ORDER_TOOL_NAMES
-    | KIWOOM_MOCK_EXECUTION_TOOL_NAMES
-)
+MUTATION_TOOL_NAMES = ORDER_TOOL_NAMES | TOSS_LIVE_ORDER_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------

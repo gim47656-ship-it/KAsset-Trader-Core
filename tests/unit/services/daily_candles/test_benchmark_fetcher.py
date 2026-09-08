@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services.daily_candles.benchmark_fetcher import (
-    fetch_kr_benchmark_daily,
-    fetch_kr_benchmark_daily_kis,
-)
+from app.services.daily_candles.benchmark_fetcher import fetch_kr_benchmark_daily
 
 
 class _Response:
@@ -37,43 +32,6 @@ class _Client:
         return _Response(next(self._payloads))
 
 
-class _KISClient:
-    def __init__(
-        self,
-        responses: list[tuple[dict[str, Any], dict[str, str]]],
-    ) -> None:
-        self._responses = iter(responses)
-        self._hdr_base = {"appkey": "key", "appsecret": "secret"}
-        self._settings = SimpleNamespace(kis_access_token="token")
-        self._token_manager = SimpleNamespace(clear_token=AsyncMock())
-        self._ensure_token = AsyncMock()
-        self.calls: list[dict[str, Any]] = []
-
-    def _kis_url(self, path: str) -> str:
-        return f"https://example.test{path}"
-
-    async def _request_with_rate_limit_with_headers(
-        self,
-        method: str,
-        url: str,
-        **kwargs: Any,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        self.calls.append({"method": method, "url": url, **kwargs})
-        return next(self._responses)
-
-
-def _kis_row(day: str, close: float) -> dict[str, object]:
-    return {
-        "stck_bsop_date": day,
-        "bstp_nmix_prpr": str(close),
-        "bstp_nmix_oprc": str(close - 1),
-        "bstp_nmix_hgpr": str(close + 2),
-        "bstp_nmix_lwpr": str(close - 2),
-        "acml_vol": "1000",
-        "acml_tr_pbmn": "2000000",
-    }
-
-
 def _row(day: date, close: float) -> dict[str, object]:
     return {
         "localTradedAt": day.isoformat(),
@@ -84,82 +42,6 @@ def _row(day: date, close: float) -> dict[str, object]:
         "accumulatedTradingVolume": "1,000",
         "accumulatedTradingValue": "2,000,000",
     }
-
-
-@pytest.mark.asyncio
-async def test_kis_index_history_uses_header_continuation_and_deduplicates() -> None:
-    duplicated = _kis_row("20240502", 2600.0)
-    kis = _KISClient(
-        [
-            (
-                {
-                    "rt_cd": "0",
-                    "output2": [
-                        _kis_row("20240503", 2610.0),
-                        duplicated,
-                    ],
-                },
-                {"Tr-Cont": "M"},
-            ),
-            (
-                {
-                    "rt_cd": "0",
-                    "output2": [
-                        duplicated,
-                        _kis_row("20240501", 2590.0),
-                    ],
-                },
-                {"TR_CONT": "D"},
-            ),
-        ]
-    )
-
-    frame = await fetch_kr_benchmark_daily_kis(
-        kis=kis,
-        symbol="KOSPI",
-        n=3,
-        input_date=date(2024, 5, 4),
-    )
-
-    assert frame["date"].tolist() == [
-        date(2024, 5, 1),
-        date(2024, 5, 2),
-        date(2024, 5, 3),
-    ]
-    assert [call["headers"]["tr_cont"] for call in kis.calls] == ["", "N"]
-    assert {call["params"]["FID_INPUT_DATE_1"] for call in kis.calls} == {"20240504"}
-    assert all(
-        call["tr_id"] == "FHPUP02120000"
-        and call["params"]["FID_PERIOD_DIV_CODE"] == "D"
-        and call["params"]["FID_COND_MRKT_DIV_CODE"] == "U"
-        and call["params"]["FID_INPUT_ISCD"] == "0001"
-        for call in kis.calls
-    )
-
-
-@pytest.mark.asyncio
-async def test_kosdaq_uses_its_kis_index_code() -> None:
-    kis = _KISClient(
-        [
-            (
-                {
-                    "rt_cd": "0",
-                    "output2": [_kis_row("20240503", 870.0)],
-                },
-                {"tr_cont": "D"},
-            )
-        ]
-    )
-
-    frame = await fetch_kr_benchmark_daily_kis(
-        kis=kis,
-        symbol="kosdaq",
-        n=1,
-        input_date=date(2024, 5, 4),
-    )
-
-    assert frame["close"].tolist() == [870.0]
-    assert kis.calls[0]["params"]["FID_INPUT_ISCD"] == "1001"
 
 
 @pytest.mark.asyncio
@@ -174,64 +56,6 @@ async def test_kosdaq_uses_its_naver_index_endpoint() -> None:
 
     assert frame["close"].tolist() == [870.0]
     assert client.calls[0]["url"].endswith("/KOSDAQ/price")
-
-
-@pytest.mark.asyncio
-async def test_kis_index_history_rejects_repeated_page_state() -> None:
-    page = {
-        "rt_cd": "0",
-        "output2": [_kis_row("20240503", 2610.0)],
-    }
-    kis = _KISClient(
-        [
-            (page, {"tr_cont": "M"}),
-            (page, {"tr_cont": "M"}),
-        ]
-    )
-
-    with pytest.raises(ValueError, match="페이지 상태가 반복"):
-        await fetch_kr_benchmark_daily_kis(
-            kis=kis,
-            symbol="KOSPI",
-            n=1,
-            input_date=date(2024, 5, 4),
-        )
-
-
-@pytest.mark.asyncio
-async def test_kis_index_history_reports_insufficient_rows() -> None:
-    kis = _KISClient(
-        [
-            (
-                {
-                    "rt_cd": "0",
-                    "output2": [_kis_row("20240503", 2610.0)],
-                },
-                {"tr_cont": "D"},
-            )
-        ]
-    )
-
-    with pytest.raises(ValueError, match="수가 부족"):
-        await fetch_kr_benchmark_daily_kis(
-            kis=kis,
-            symbol="KOSPI",
-            n=2,
-            input_date=date(2024, 5, 4),
-        )
-
-
-@pytest.mark.asyncio
-async def test_kis_index_history_rejects_missing_output2() -> None:
-    kis = _KISClient([({"rt_cd": "0", "output1": {}}, {"tr_cont": "D"})])
-
-    with pytest.raises(ValueError, match="output2가 없습니다"):
-        await fetch_kr_benchmark_daily_kis(
-            kis=kis,
-            symbol="KOSPI",
-            n=1,
-            input_date=date(2024, 5, 4),
-        )
 
 
 @pytest.mark.asyncio

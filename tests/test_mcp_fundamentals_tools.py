@@ -1601,7 +1601,7 @@ class TestGetShortInterest:
         assert result == {
             "success": False,
             "error": "provider_unsupported",
-            "detail": "short-interest data is unavailable from Toss/NH PLUG",
+            "detail": "short-interest data is unavailable from the retained providers",
             "source": "unsupported",
             "symbol": "005930",
             "instrument_type": "equity_kr",
@@ -2180,8 +2180,6 @@ class TestGetFxRateToolRegistration:
     #
     # ROB-760 — account_read is a physical account-sync allowlist and must not
     # inherit fundamentals tools.
-    # ROB-1782 R2 — alpaca-paper-clean is a closed-world physical-account
-    # surface and must not inherit the common fundamentals block.
     @pytest.mark.parametrize(
         "profile",
         [
@@ -2191,8 +2189,6 @@ class TestGetFxRateToolRegistration:
             not in (
                 McpProfile.SHADOW_REPLAY,
                 McpProfile.ACCOUNT_READ,
-                McpProfile.PAPER_EXECUTION,
-                McpProfile.ALPACA_PAPER_CLEAN,
             )
         ],
     )

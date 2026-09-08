@@ -88,50 +88,14 @@ def test_action_taxonomy_is_disjoint_and_total():
     assert L.ALL_KNOWN_TOOLS == L.READ_ONLY_ADVISORY_TOOLS | L.MUTATION_TOOLS
     assert L.ORDER_PROPOSAL_READ_TOOLS <= L.READ_ONLY_ADVISORY_TOOLS
     assert L.PROPOSAL_LED_TOOLS == {"order_proposal_create"}
-    assert "live_reconcile_orders" in L.RECONCILE_TOOLS
-
-
-def test_account_cleanup_route_allows_only_preflighted_alpaca_submit():
-    plan = _plan(
-        "profit_taking",
-        "us",
-        purpose=L.ACCOUNT_CLEANUP_PURPOSE,
-    )
-    direct = L.ACCOUNT_CLEANUP_DIRECT_TOOL
-
-    assert plan["success"] is True
-    assert plan["purpose"] == L.ACCOUNT_CLEANUP_PURPOSE
-    assert plan["route_contract"]["version"] == "cleanup-reduce-only-v1"
-    assert plan["route_contract"]["execution_mode"] == "cleanup_reduce_only"
-    assert plan["route_contract"]["required_tools"] == sorted(
-        L.ACCOUNT_CLEANUP_REQUIRED_TOOLS
-    )
-    assert _step_tools(plan) == [step["tool"] for step in L.ACCOUNT_CLEANUP_SEQUENCE]
-    assert direct in plan["allowed_tools"]
-    assert direct not in plan["blocked_actions"]
-    assert (L.DIRECT_BROKER_MUTATION_TOOLS - {direct}) & _ALL <= set(
-        plan["blocked_actions"]
+    assert L.RECONCILE_TOOLS == frozenset(
+        {"paper_reconcile_orders", "toss_reconcile_orders"}
     )
 
 
-def test_account_cleanup_route_fails_closed_without_preflight_tool():
-    registered = _ALL - {"alpaca_paper_execution_preflight_check"}
-    plan = _plan(
-        "profit_taking",
-        "us",
-        registered=registered,
-        purpose=L.ACCOUNT_CLEANUP_PURPOSE,
-    )
-
-    assert plan["success"] is False
-    assert plan["error"] == "required_route_tool_unavailable"
-    assert (
-        "alpaca_paper_execution_preflight_check"
-        in plan["route_contract"]["missing_required_tools"]
-    )
-    assert L.ACCOUNT_CLEANUP_DIRECT_TOOL not in plan["allowed_tools"]
-    assert L.ACCOUNT_CLEANUP_DIRECT_TOOL in plan["blocked_actions"]
-    assert L.ACCOUNT_CLEANUP_DIRECT_TOOL not in _step_tools(plan)
+def test_purpose_argument_is_rejected():
+    with pytest.raises(ValueError, match="unknown purpose"):
+        _plan("profit_taking", "us", purpose="account_cleanup")
 
 
 @pytest.mark.parametrize(

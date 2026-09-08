@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from app.services.kis_lean_execution import SyntheticNoOpStrategy
 from app.services.three_market_shadow import shadow_decision
 from app.services.three_market_shadow_lifecycle import verify_crypto_acceptance_path
 from research.three_market_shadow.calculations import (
@@ -25,18 +24,11 @@ def _snapshot() -> dict[str, object]:
     return {"symbol": "005930", "close": closes, "volume": volumes}
 
 
-def test_runner_and_harness_import_and_return_same_pure_calculation() -> None:
-    snapshot = _snapshot()
-    runner_signal = SyntheticNoOpStrategy().evaluate(snapshot)
-    harness_signal = run_harness("kr", snapshot)["signal"]
+def test_harness_reports_the_pure_calculation_contract_hash() -> None:
+    result = run_harness("kr", _snapshot())
 
-    assert runner_signal["contract_hash"] == CONTRACT_HASH
-    assert {key: value for key, value in runner_signal.items() if key != "labels"} == {
-        "decision": "NO_ORDER",
-        "symbol": "005930",
-        **harness_signal,
-    }
-    assert run_harness("kr", snapshot)["contract_hash"] == CONTRACT_HASH
+    assert result["contract_hash"] == CONTRACT_HASH
+    assert result["signal"] == calculate_signal("kr", _snapshot())
 
 
 def test_dispatch_is_shared_for_kr_us_and_crypto() -> None:

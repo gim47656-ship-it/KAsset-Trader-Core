@@ -128,8 +128,8 @@ def _create_kwargs(**overrides):
 
 def _target_snapshot(**overrides):
     payload = {
-        "broker_order_id": "manual-upbit-1",
-        "symbol": "KRW-AVAX",
+        "broker_order_id": "broker-1",
+        "symbol": "005930",
         "side": "sell",
         "order_type": "limit",
         "limit_price": "42000",
@@ -143,12 +143,12 @@ def _target_snapshot(**overrides):
 
 def _target_create_kwargs(**overrides):
     return _create_kwargs(
-        symbol="KRW-AVAX",
-        market="crypto",
-        account_mode="upbit",
+        symbol="005930",
+        market="equity_kr",
+        account_mode="toss_live",
         side="sell",
         action="replace",
-        target_broker_order_id="manual-upbit-1",
+        target_broker_order_id="broker-1",
         rungs=[
             {
                 "rung_index": 0,
@@ -229,10 +229,10 @@ async def test_create_preflights_manual_target_and_returns_action_evidence(monke
 
     assert created["success"] is True
     assert created["action"] == "replace"
-    assert created["target_broker_order_id"] == "manual-upbit-1"
-    assert calls[0]["order_id"] == "manual-upbit-1"
+    assert created["target_broker_order_id"] == "broker-1"
+    assert calls[0]["order_id"] == "broker-1"
     assert got["proposal"]["action"] == "replace"
-    assert got["proposal"]["target_broker_order_id"] == "manual-upbit-1"
+    assert got["proposal"]["target_broker_order_id"] == "broker-1"
 
 
 @pytest.mark.asyncio
@@ -657,24 +657,7 @@ async def test_create_rejects_unknown_market_with_allowed_contract_guidance():
 
     assert result["success"] is False
     assert "toss_live×equity_kr|equity_us" in result["error"]
-    assert "upbit×crypto" in result["error"]
     assert "market aliases kr→equity_kr, us→equity_us" in result["error"]
-
-
-def test_create_docstring_documents_markets_aliases_and_account_modes():
-    doc = opt.order_proposal_create.__doc__ or ""
-    for value in (
-        "equity_kr",
-        "equity_us",
-        "crypto",
-        "kr",
-        "us",
-        "toss_live",
-        "upbit",
-    ):
-        assert value in doc
-    assert "kis_live" not in doc
-    assert "kis_mock" not in doc
 
 
 @pytest.mark.asyncio

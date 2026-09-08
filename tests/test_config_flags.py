@@ -6,18 +6,10 @@ def test_toss_auto_reconcile_flags_default_false():
     assert settings.TOSS_LIVE_AUTO_RECONCILE_SAFETY_REVIEW_PASSED is False
 
 
-def test_kis_credentials_are_optional_when_unset(monkeypatch):
-    monkeypatch.delenv("KIS_APP_KEY", raising=False)
-    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
-
-    isolated_settings = Settings(_env_file=None)
-
-    assert isolated_settings.kis_app_key is None
-    assert isolated_settings.kis_app_secret is None
-
-
 def test_removed_kis_activation_fields_are_not_registered():
     removed_fields = {
+        "kis_app_key",
+        "kis_app_secret",
         "us_quote_kis_primary",
         "invest_quotes_toss_first_kr",
         "invest_quotes_toss_first_us",

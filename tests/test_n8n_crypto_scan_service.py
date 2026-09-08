@@ -24,15 +24,6 @@ def mock_top_coins() -> list[dict]:
 
 
 @pytest.fixture
-def mock_my_coins() -> list[dict]:
-    """Holdings fixture — user holds BTC and SOL (SOL not in top 3)."""
-    return [
-        {"currency": "BTC", "balance": "0.5", "locked": "0"},
-        {"currency": "SOL", "balance": "10", "locked": "0"},
-    ]
-
-
-@pytest.fixture
 def mock_ohlcv_df() -> pd.DataFrame:
     """OHLCV dataframe with enough rows for RSI/SMA calculation."""
     np.random.seed(42)
@@ -87,10 +78,6 @@ def _patch_all():
             "app.services.n8n_crypto_scan_service.fetch_top_traded_coins",
             new_callable=AsyncMock,
         ),
-        "my_coins": patch(
-            "app.services.n8n_crypto_scan_service.fetch_my_coins",
-            new_callable=AsyncMock,
-        ),
         "ohlcv": patch(
             "app.services.n8n_crypto_scan_service.fetch_ohlcv",
             new_callable=AsyncMock,
@@ -118,7 +105,6 @@ class TestFetchCryptoScan:
     async def test_happy_path_returns_all_fields(
         self,
         mock_top_coins: list[dict],
-        mock_my_coins: list[dict],
         mock_ohlcv_df: pd.DataFrame,
         mock_tickers: list[dict],
     ) -> None:
@@ -126,14 +112,12 @@ class TestFetchCryptoScan:
         patches = _patch_all()
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
             patches["korean_name"] as m_name,
         ):
             m_top.return_value = mock_top_coins
-            m_my.return_value = mock_my_coins
             m_ohlcv.return_value = mock_ohlcv_df
             m_tickers.return_value = mock_tickers
             m_fg.return_value = {
@@ -154,12 +138,10 @@ class TestFetchCryptoScan:
         assert "coins" in result
         assert "summary" in result
         assert "errors" in result
-        # Should have 4 coins: BTC, ETH, XRP (top 3) + SOL (holding)
-        assert len(result["coins"]) == 4
-        # Summary should reflect correct counts
+        assert len(result["coins"]) == 3
         assert result["summary"]["top_n_count"] == 3
-        assert result["summary"]["holdings_added"] == 1
-        assert result["summary"]["total_scanned"] == 4
+        assert result["summary"]["holdings_added"] == 0
+        assert result["summary"]["total_scanned"] == 3
 
     @pytest.mark.asyncio
     async def test_coins_sorted_by_rsi_ascending(
@@ -172,14 +154,12 @@ class TestFetchCryptoScan:
         patches = _patch_all()
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
             patches["korean_name"] as m_name,
         ):
             m_top.return_value = mock_top_coins
-            m_my.return_value = []  # no holdings
             m_ohlcv.return_value = mock_ohlcv_df
             m_tickers.return_value = mock_tickers[:3]
             m_fg.return_value = None
@@ -198,74 +178,6 @@ class TestFetchCryptoScan:
         assert rsi_values == sorted(rsi_values), "Coins must be sorted by RSI ascending"
 
     @pytest.mark.asyncio
-    async def test_holdings_added_outside_top_n(
-        self,
-        mock_top_coins: list[dict],
-        mock_my_coins: list[dict],
-        mock_ohlcv_df: pd.DataFrame,
-        mock_tickers: list[dict],
-    ) -> None:
-        """Holdings not in top_n should still appear in coins."""
-        patches = _patch_all()
-        with (
-            patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
-            patches["ohlcv"] as m_ohlcv,
-            patches["tickers"] as m_tickers,
-            patches["fear_greed"] as m_fg,
-            patches["korean_name"] as m_name,
-        ):
-            m_top.return_value = mock_top_coins
-            m_my.return_value = mock_my_coins  # holds BTC + SOL
-            m_ohlcv.return_value = mock_ohlcv_df
-            m_tickers.return_value = mock_tickers
-            m_fg.return_value = None
-            m_name.return_value = "코인"
-
-            from app.services.n8n_crypto_scan_service import fetch_crypto_scan
-
-            result = await fetch_crypto_scan(top_n=3, include_holdings=True)
-
-        symbols = [c["symbol"] for c in result["coins"]]
-        assert "KRW-SOL" in symbols, "SOL (holding but not top 3) should be included"
-        sol_coin = next(c for c in result["coins"] if c["symbol"] == "KRW-SOL")
-        assert sol_coin["is_holding"] is True
-        assert sol_coin["rank"] is None  # not in top N
-
-    @pytest.mark.asyncio
-    async def test_include_holdings_false_excludes_extra(
-        self,
-        mock_top_coins: list[dict],
-        mock_my_coins: list[dict],
-        mock_ohlcv_df: pd.DataFrame,
-        mock_tickers: list[dict],
-    ) -> None:
-        """When include_holdings=False, only top_n coins appear."""
-        patches = _patch_all()
-        with (
-            patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
-            patches["ohlcv"] as m_ohlcv,
-            patches["tickers"] as m_tickers,
-            patches["fear_greed"] as m_fg,
-            patches["korean_name"] as m_name,
-        ):
-            m_top.return_value = mock_top_coins
-            m_my.return_value = mock_my_coins
-            m_ohlcv.return_value = mock_ohlcv_df
-            m_tickers.return_value = mock_tickers[:3]
-            m_fg.return_value = None
-            m_name.return_value = "코인"
-
-            from app.services.n8n_crypto_scan_service import fetch_crypto_scan
-
-            result = await fetch_crypto_scan(top_n=3, include_holdings=False)
-
-        symbols = [c["symbol"] for c in result["coins"]]
-        assert "KRW-SOL" not in symbols
-        assert len(result["coins"]) == 3
-
-    @pytest.mark.asyncio
     async def test_include_fear_greed_false_returns_none(
         self,
         mock_top_coins: list[dict],
@@ -276,14 +188,12 @@ class TestFetchCryptoScan:
         patches = _patch_all()
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
             patches["korean_name"] as m_name,
         ):
             m_top.return_value = mock_top_coins[:1]
-            m_my.return_value = []
             m_ohlcv.return_value = mock_ohlcv_df
             m_tickers.return_value = mock_tickers[:1]
             m_fg.return_value = {
@@ -311,14 +221,12 @@ class TestFetchCryptoScan:
         patches = _patch_all()
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
             patches["korean_name"] as m_name,
         ):
             m_top.return_value = mock_top_coins[:1]
-            m_my.return_value = []
             m_ohlcv.side_effect = Exception("Upbit API error")
             m_tickers.return_value = mock_tickers[:1]
             m_fg.return_value = None
@@ -345,7 +253,6 @@ class TestFetchCryptoScan:
         patches = _patch_all()
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
@@ -353,7 +260,6 @@ class TestFetchCryptoScan:
         ):
             # BTC is rank 1 (top 10 threshold = 0.06)
             m_top.return_value = mock_top_coins
-            m_my.return_value = []
             m_ohlcv.return_value = mock_ohlcv_df
             m_tickers.return_value = [
                 {
@@ -409,7 +315,6 @@ class TestFetchCryptoScan:
 
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
@@ -418,7 +323,6 @@ class TestFetchCryptoScan:
             m_top.return_value = [
                 {"market": "KRW-TEST", "acc_trade_price_24h": 1_000_000},
             ]
-            m_my.return_value = []
             m_ohlcv.return_value = df
             m_tickers.return_value = [
                 {
@@ -470,14 +374,12 @@ class TestFetchCryptoScan:
 
         with (
             patches["top_coins"] as m_top,
-            patches["my_coins"] as m_my,
             patches["ohlcv"] as m_ohlcv,
             patches["tickers"] as m_tickers,
             patches["fear_greed"] as m_fg,
             patches["korean_name"] as m_name,
         ):
             m_top.return_value = mock_top_coins
-            m_my.return_value = []
             m_ohlcv.side_effect = alternating_ohlcv
             m_tickers.return_value = mock_tickers[:3]
             m_fg.return_value = None

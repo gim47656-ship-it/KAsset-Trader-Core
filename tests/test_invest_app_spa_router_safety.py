@@ -1,4 +1,4 @@
-"""Safety: invest_app_spa.py must not import broker/watch/redis/kis/upbit/task-queue."""
+"""Safety: invest_app_spa.py must not import broker/upbit/task-queue paths."""
 
 from __future__ import annotations
 
@@ -11,18 +11,10 @@ from pathlib import Path
 import pytest
 
 FORBIDDEN_PREFIXES = [
-    "app.services.kis",
-    "app.services.kis_trading_service",
-    "app.services.kis_trading_contracts",
     "app.services.upbit",
-    "app.services.upbit_websocket",
     "app.services.brokers",
-    "app.services.order_service",
     "app.services.fill_notification",
     "app.services.execution_event",
-    "app.services.redis_token_manager",
-    "app.services.kis_websocket",
-    "app.services.kis_websocket_internal",
     "app.tasks",
 ]
 

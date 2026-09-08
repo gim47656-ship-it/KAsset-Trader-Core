@@ -1229,7 +1229,6 @@ async def test_dispatch_records_toss_freeze_without_entering_revalidation(
     "account_mode,market",
     [
         ("toss_live", "equity_kr"),
-        ("upbit", "crypto"),
     ],
 )
 @pytest.mark.parametrize("action", ["cancel", "replace"])
@@ -1394,7 +1393,6 @@ def _real_revalidate(**broker_fns):
     "account_mode,market,symbol",
     [
         ("toss_live", "equity_kr", "005930"),
-        ("upbit", "crypto", "KRW-AVAX"),
     ],
 )
 async def test_s141_auto_approved_cancel_executes_and_reports_as_cancelled(

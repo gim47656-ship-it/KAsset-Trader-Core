@@ -38,15 +38,6 @@ def _make_toss_position(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def test_collector_module_does_not_expose_kis_runtime_symbols():
-    import app.services.portfolio_data_collector as module
-
-    assert not hasattr(module, "KISClient")
-    assert not hasattr(PortfolioDataCollector, "_collect_kis_components")
-    assert not hasattr(PortfolioDataCollector, "_collect_kis_kr_components")
-    assert not hasattr(PortfolioDataCollector, "_collect_kis_us_components")
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_collect_toss_maps_kr_and_us_general_snapshot():
@@ -131,54 +122,6 @@ async def test_collect_toss_surfaces_sanitized_partial_code():
 
     assert components == []
     assert warnings == ["Toss holdings partial: snapshot_partial"]
-
-
-# ---------------------------------------------------------------------------
-# _collect_upbit_components
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_collect_upbit_appends_warning_on_fetch_failure():
-    collector = _make_collector()
-    warnings: list[str] = []
-
-    with patch(
-        "app.services.portfolio_data_collector.upbit_service.fetch_my_coins",
-        side_effect=RuntimeError("upbit down"),
-    ):
-        components = await collector._collect_upbit_components(
-            warnings, active_upbit_markets=None, enforce_upbit_universe=False
-        )
-
-    assert components == []
-    assert len(warnings) == 1
-    assert "Upbit" in warnings[0]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_collect_upbit_skips_krw_currency():
-    collector = _make_collector()
-    warnings: list[str] = []
-
-    with patch(
-        "app.services.portfolio_data_collector.upbit_service.fetch_my_coins",
-        return_value=[
-            {
-                "currency": "KRW",
-                "balance": "100000",
-                "locked": "0",
-                "avg_buy_price": "1",
-            }
-        ],
-    ):
-        components = await collector._collect_upbit_components(
-            warnings, active_upbit_markets=None, enforce_upbit_universe=False
-        )
-
-    assert components == []
 
 
 # ---------------------------------------------------------------------------

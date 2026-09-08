@@ -7,20 +7,12 @@ import pytest
 
 FORBIDDEN_PREFIXES = [
     "app.services.brokers",
-    "app.services.kis",
-    "app.services.kis_trading_service",
-    "app.services.kis_trading_contracts",
-    "app.services.kis_holdings_service",
     "app.services.manual_holdings_service",
-    "app.services.kis_websocket",
-    "app.services.kis_websocket_internal",
     "app.services.upbit",
-    "app.services.upbit_websocket",
     "app.services.market_data",
     "app.services.fill_notification",
     "app.services.execution_event",
     "app.mcp_server.tooling.orders_registration",
-    "app.mcp_server.tooling.orders_modify_cancel",
     "app.mcp_server.tooling.paper_order_handler",
     "app.tasks",
 ]

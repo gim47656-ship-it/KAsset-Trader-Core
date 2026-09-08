@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -134,69 +134,3 @@ class TestUpbitService:
             "volume",
             "value",
         ]
-
-    @pytest.mark.asyncio
-    async def test_fetch_krw_cash_summary_includes_locked(self, monkeypatch):
-        monkeypatch.setattr(
-            upbit_service_module,
-            "fetch_my_coins",
-            AsyncMock(
-                return_value=[
-                    {"currency": "KRW", "balance": "500000.0", "locked": "200000.0"}
-                ]
-            ),
-        )
-
-        summary = await upbit_service_module.fetch_krw_cash_summary()
-
-        assert summary["balance"] == pytest.approx(700000.0)
-        assert summary["orderable"] == pytest.approx(500000.0)
-        assert summary["balance"] == pytest.approx(summary["orderable"] + 200000.0)
-
-    @pytest.mark.asyncio
-    async def test_fetch_krw_orderable_balance_reads_summary(self, monkeypatch):
-        mock_summary = AsyncMock(
-            return_value={"balance": 700000.0, "orderable": 500000.0}
-        )
-        monkeypatch.setattr(
-            upbit_service_module,
-            "fetch_krw_cash_summary",
-            mock_summary,
-        )
-
-        result = await upbit_service_module.fetch_krw_orderable_balance()
-
-        assert result == pytest.approx(500000.0)
-        mock_summary.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_fetch_krw_cash_summary_returns_zero_without_krw(self, monkeypatch):
-        monkeypatch.setattr(
-            upbit_service_module,
-            "fetch_my_coins",
-            AsyncMock(
-                return_value=[{"currency": "BTC", "balance": "0.1", "locked": "0"}]
-            ),
-        )
-
-        summary = await upbit_service_module.fetch_krw_cash_summary()
-
-        assert summary == pytest.approx({"balance": 0.0, "orderable": 0.0})
-
-
-def test_parse_upbit_account_row_preserves_modified_average_flag():
-    from app.services.brokers.upbit.client import parse_upbit_account_row
-
-    parsed = parse_upbit_account_row(
-        {
-            "currency": "SOL",
-            "balance": "1.5",
-            "locked": "0.5",
-            "avg_buy_price": "100000",
-            "avg_buy_price_modified": True,
-        }
-    )
-
-    assert parsed["total_quantity"] == 2.0
-    assert parsed["avg_buy_price"] == 100000.0
-    assert parsed["avg_buy_price_modified"] is True

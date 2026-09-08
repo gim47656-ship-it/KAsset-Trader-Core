@@ -23,7 +23,6 @@ ENTRY_POINTS = (
 
 FORBIDDEN_IMPORT_FRAGMENTS = (
     "app.services.brokers",
-    "app.services.kis_trading_service",
     "app.services.order",
     "app.mcp_server.tooling.orders",
     "app.core.scheduler",

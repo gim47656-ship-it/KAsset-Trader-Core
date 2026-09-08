@@ -65,25 +65,6 @@ def test_conflicting_account_selectors_fail():
         normalize_account_mode(account_mode="kis_mock", account_type="paper")
 
 
-def test_validate_kis_mock_config_reports_names_only():
-    from app.core.config import validate_kis_mock_config
-
-    class DummySettings:
-        kis_mock_enabled = False
-        kis_mock_app_key = None
-        kis_mock_app_secret = "secret-value"
-        kis_mock_account_no = ""
-
-    missing = validate_kis_mock_config(DummySettings())
-
-    assert missing == [
-        "KIS_MOCK_ENABLED",
-        "KIS_MOCK_APP_KEY",
-        "KIS_MOCK_ACCOUNT_NO",
-    ]
-    assert "secret-value" not in repr(missing)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["kis_live", "kis_mock"])
 @pytest.mark.parametrize(
@@ -122,11 +103,6 @@ async def test_generic_kis_operations_fail_closed_without_dispatch(
     mcp = DummyMCP()
     orders_registration.register_order_tools(mcp)
     forbidden = AsyncMock(side_effect=AssertionError("provider dispatch must not run"))
-    monkeypatch.setattr(
-        orders_registration.order_execution, "_place_order_impl", forbidden
-    )
-    monkeypatch.setattr(orders_registration, "cancel_order_impl", forbidden)
-    monkeypatch.setattr(orders_registration, "modify_order_impl", forbidden)
     monkeypatch.setattr(
         orders_registration.orders_history,
         "get_order_history_impl",

@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 import app.services.brokers.upbit.client as upbit
 import app.services.brokers.yahoo.client as yahoo
 from app.main import api
-from app.services.brokers.kis.client import KISClient
 
 
 @pytest.mark.integration
@@ -132,28 +131,6 @@ class TestExternalServiceMocking:
         await yahoo.fetch_ohlcv("AAPL")
 
         assert mock_yahoo_download.called
-
-    @pytest.mark.asyncio
-    @patch(
-        "app.services.brokers.kis.client.KISClient._ensure_token",
-        new_callable=AsyncMock,
-    )
-    @patch("httpx.AsyncClient")
-    async def test_kis_service_mocking(self, mock_http_client, mock_ensure_token):
-        """Test the dormant KIS client module against a mocked transport."""
-        kis_client = KISClient(is_mock=False)
-        mock_instance = mock_http_client.return_value.__aenter__.return_value
-
-        # GET 요청(데이터 조회)에 대한 Mock 응답 설정
-        mock_get_response = MagicMock()
-        mock_get_response.json.return_value = {"rt_cd": "0", "output": []}
-        mock_instance.get.return_value = mock_get_response
-
-        await kis_client.volume_rank()
-
-        assert mock_http_client.called
-        mock_ensure_token.assert_called_once()
-        mock_instance.get.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_analysis_workflow_placeholder(self):

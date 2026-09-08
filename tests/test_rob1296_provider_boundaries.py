@@ -292,18 +292,6 @@ async def test_finnhub_client_stub_fails_like_an_unreachable_host() -> None:
 
 
 @pytest.mark.asyncio
-async def test_kis_client_factory_yields_an_offline_transport() -> None:
-    from app.services.brokers.kis.base import BaseKISClient
-
-    client = BaseKISClient._build_http_client(object(), 1.0)
-    try:
-        with pytest.raises(httpx.ConnectError, match="External provider calls"):
-            await client.get("https://openapi.koreainvestment.com/probe")
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
 async def test_opt_out_restores_the_real_seam(
     allow_external_providers,
 ) -> None:

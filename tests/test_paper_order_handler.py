@@ -441,16 +441,8 @@ class TestPlaceOrderRegistration:
         paper_stub = AsyncMock(
             return_value={"success": True, "account_type": "paper", "dry_run": True}
         )
-        live_stub = AsyncMock(return_value={"success": True, "dry_run": True})
 
-        with (
-            patch.object(orders_registration, "_place_paper_order", paper_stub),
-            patch.object(
-                orders_registration.order_execution,
-                "_place_order_impl",
-                live_stub,
-            ),
-        ):
+        with patch.object(orders_registration, "_place_paper_order", paper_stub):
             result = await place_order(
                 symbol="005930",
                 side="buy",
@@ -468,7 +460,6 @@ class TestPlaceOrderRegistration:
         assert kwargs["side"] == "buy"
         assert kwargs["paper_account_name"] == "swing"
         assert kwargs["dry_run"] is True
-        live_stub.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_default_equity_routes_to_toss_preview(self):
@@ -520,19 +511,11 @@ class TestPlaceOrderRegistration:
                 return _wrap
 
         orders_registration.register_order_tools(DummyMCP())
-        legacy_stub = AsyncMock()
         toss_stub = AsyncMock()
-        with (
-            patch.object(
-                orders_registration.order_execution,
-                "_place_order_impl",
-                legacy_stub,
-            ),
-            patch.object(
-                orders_registration.orders_toss_variants,
-                "toss_preview_order",
-                toss_stub,
-            ),
+        with patch.object(
+            orders_registration.orders_toss_variants,
+            "toss_preview_order",
+            toss_stub,
         ):
             result = await registered["place_order"](
                 symbol="005930",
@@ -545,7 +528,6 @@ class TestPlaceOrderRegistration:
         assert result["success"] is False
         assert result["error"] == "provider kis is not operational"
         assert result["account_mode"] == account_mode
-        legacy_stub.assert_not_awaited()
         toss_stub.assert_not_awaited()
 
     @pytest.mark.asyncio

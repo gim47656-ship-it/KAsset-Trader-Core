@@ -214,49 +214,6 @@ async def test_both_serialisers_carry_linked_orders(session) -> None:
     assert mcp_item.linked_orders[0].order_no == order_no
 
 
-async def test_live_helper_delegates_to_shared_projection(db_session) -> None:
-    from app.mcp_server.tooling import live_order_ledger as m
-
-    rid = uuid.uuid4()
-    order_no = f"rob554-{uuid.uuid4().hex[:10]}"
-    await m._save_live_order_ledger(
-        broker="upbit",
-        account_scope="upbit_live",
-        market="crypto",
-        symbol="BTC",
-        exchange=None,
-        market_symbol="KRW-BTC",
-        side="buy",
-        order_kind="limit",
-        quantity=0.01,
-        price=96180000.0,
-        amount=961800.0,
-        currency="KRW",
-        order_no=order_no,
-        order_time="2026-06-12T00:00:00Z",
-        status="accepted",
-        response_code="0",
-        response_message="ok",
-        raw_response={},
-        reason="r",
-        thesis=None,
-        strategy=None,
-        target_price=None,
-        stop_loss=None,
-        min_hold_days=None,
-        notes=None,
-        exit_reason=None,
-        indicators_snapshot=None,
-        report_item_uuid=rid,
-    )
-    rows = await m.list_live_orders_by_report_item_uuid(rid)
-    row = next(r for r in rows if r["order_no"] == order_no)
-    # delegation now surfaces the fill-rollup fields the old projection lacked
-    assert "filled_qty" in row
-    assert row["market"] == "crypto"
-    assert row["status"] == "accepted"
-
-
 async def test_list_linked_orders_includes_toss(session) -> None:
     # ROB-554 — Toss is a live KR/US broker carrying report_item_uuid (ROB-545);
     # it must surface in linked_orders like LiveOrderLedger / KISLiveOrderLedger.

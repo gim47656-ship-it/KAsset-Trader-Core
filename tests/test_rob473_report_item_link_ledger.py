@@ -1,168 +1,96 @@
-"""ROB-473 — 라이브 ledger save가 report_item_uuid를 기록한다."""
+"""ROB-473 — 보고서 항목에 연결된 과거 live ledger 행의 감사 읽기.
+
+이 원장에 기록하던 주문 경로(KIS 해외·Upbit)는 제거되어 writer가 없다. 남은 계약은
+``report_item_uuid``로 이미 저장된 행을 찾아 공용 LinkedOrderView 형태로 투영하는
+읽기뿐이므로, 행은 ORM으로 직접 넣어 그 읽기만 검증한다.
+"""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_kis_live_save_records_report_item_uuid(db_session):
-    from app.mcp_server.tooling import kis_live_ledger as m
-
-    rid = uuid.uuid4()
-    order_no = f"kis-{uuid.uuid4().hex[:10]}"
-    ledger_id = await m._save_kis_live_order_ledger(
-        symbol="005930",
-        instrument_type="equity_kr",
-        side="buy",
-        order_type="limit",
-        quantity=1.0,
-        price=70000.0,
-        amount=70000.0,
-        currency="KRW",
-        order_no=order_no,
-        order_time="090000",
-        krx_fwdg_ord_orgno="00950",
-        status="accepted",
-        response_code="0",
-        response_message="ok",
-        raw_response={},
-        reason="r",
-        thesis=None,
-        strategy=None,
-        target_price=None,
-        stop_loss=None,
-        min_hold_days=None,
-        notes=None,
-        exit_reason=None,
-        indicators_snapshot=None,
-        report_item_uuid=rid,
-    )
-    assert ledger_id is not None
+async def test_list_live_orders_by_report_item_uuid_projects_linked_view(db_session):
     from app.core.db import AsyncSessionLocal
-    from app.models.review import KISLiveOrderLedger
-
-    async with AsyncSessionLocal() as db:
-        row = await db.get(KISLiveOrderLedger, ledger_id)
-        assert row.report_item_uuid == rid
-
-
-async def test_live_save_records_report_item_uuid(db_session):
     from app.mcp_server.tooling import live_order_ledger as m
-
-    rid = uuid.uuid4()
-    order_no = f"live-{uuid.uuid4().hex[:10]}"
-    ledger_id = await m._save_live_order_ledger(
-        broker="kis",
-        account_scope="kis_live",
-        market="us",
-        symbol="AAPL",
-        exchange="NASD",
-        market_symbol=None,
-        side="buy",
-        order_kind="limit",
-        quantity=1.0,
-        price=200.0,
-        amount=200.0,
-        currency="USD",
-        order_no=order_no,
-        order_time="0930",
-        status="accepted",
-        response_code="0",
-        response_message="ok",
-        raw_response={},
-        reason="r",
-        thesis=None,
-        strategy=None,
-        target_price=None,
-        stop_loss=None,
-        min_hold_days=None,
-        notes=None,
-        exit_reason=None,
-        indicators_snapshot=None,
-        report_item_uuid=rid,
-    )
-    from app.core.db import AsyncSessionLocal
     from app.models.review import LiveOrderLedger
 
+    rid = uuid.uuid4()
+    order_no = f"rob473-{uuid.uuid4().hex[:10]}"
     async with AsyncSessionLocal() as db:
-        row = await db.get(LiveOrderLedger, ledger_id)
-        assert row.report_item_uuid == rid
+        row = LiveOrderLedger(
+            trade_date=datetime(2026, 3, 4, 14, 30, tzinfo=UTC),
+            broker="kis",
+            account_scope="kis_live",
+            market="us",
+            symbol="AAPL",
+            exchange="NASD",
+            side="buy",
+            order_kind="limit",
+            quantity=Decimal("1"),
+            price=Decimal("200"),
+            amount=Decimal("200"),
+            currency="USD",
+            order_no=order_no,
+            order_time="0930",
+            status="filled",
+            lifecycle_state="reconciled",
+            filled_qty=Decimal("1"),
+            avg_fill_price=Decimal("200.5"),
+            thesis="report-driven entry",
+            report_item_uuid=rid,
+        )
+        db.add(row)
+        await db.commit()
 
-
-async def test_list_kis_live_orders_by_report_item_uuid(db_session):
-    from app.mcp_server.tooling import kis_live_ledger as m
-
-    rid = uuid.uuid4()
-    order_no = f"rob473-{uuid.uuid4().hex[:10]}"
-    await m._save_kis_live_order_ledger(
-        symbol="005930",
-        instrument_type="equity_kr",
-        side="buy",
-        order_type="limit",
-        quantity=1.0,
-        price=70000.0,
-        amount=70000.0,
-        currency="KRW",
-        order_no=order_no,
-        order_time="090000",
-        krx_fwdg_ord_orgno="00950",
-        status="accepted",
-        response_code="0",
-        response_message="ok",
-        raw_response={},
-        reason="r",
-        thesis=None,
-        strategy=None,
-        target_price=None,
-        stop_loss=None,
-        min_hold_days=None,
-        notes=None,
-        exit_reason=None,
-        indicators_snapshot=None,
-        report_item_uuid=rid,
-    )
-    rows = await m.list_kis_live_orders_by_report_item_uuid(rid)
-    assert any(r["order_no"] == order_no for r in rows)
-
-
-async def test_list_live_orders_by_report_item_uuid(db_session):
-    from app.mcp_server.tooling import live_order_ledger as m
-
-    rid = uuid.uuid4()
-    order_no = f"rob473-{uuid.uuid4().hex[:10]}"
-    await m._save_live_order_ledger(
-        broker="kis",
-        account_scope="kis_live",
-        market="us",
-        symbol="AAPL",
-        exchange="NASD",
-        market_symbol=None,
-        side="buy",
-        order_kind="limit",
-        quantity=1.0,
-        price=200.0,
-        amount=200.0,
-        currency="USD",
-        order_no=order_no,
-        order_time="0930",
-        status="accepted",
-        response_code="0",
-        response_message="ok",
-        raw_response={},
-        reason="r",
-        thesis=None,
-        strategy=None,
-        target_price=None,
-        stop_loss=None,
-        min_hold_days=None,
-        notes=None,
-        exit_reason=None,
-        indicators_snapshot=None,
-        report_item_uuid=rid,
-    )
     rows = await m.list_live_orders_by_report_item_uuid(rid)
-    assert any(r["order_no"] == order_no for r in rows)
+
+    linked = next(r for r in rows if r["order_no"] == order_no)
+    assert linked["report_item_uuid"] == str(rid)
+    assert linked["broker"] == "kis"
+    assert linked["account_scope"] == "kis_live"
+    assert linked["market"] == "us"
+    assert linked["symbol"] == "AAPL"
+    assert linked["status"] == "filled"
+    assert linked["thesis"] == "report-driven entry"
+
+
+async def test_list_live_orders_by_report_item_uuid_ignores_other_report_items(
+    db_session,
+):
+    from app.core.db import AsyncSessionLocal
+    from app.mcp_server.tooling import live_order_ledger as m
+    from app.models.review import LiveOrderLedger
+
+    linked_rid = uuid.uuid4()
+    other_rid = uuid.uuid4()
+    other_order_no = f"rob473-other-{uuid.uuid4().hex[:8]}"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            LiveOrderLedger(
+                trade_date=datetime(2026, 3, 4, 14, 30, tzinfo=UTC),
+                broker="upbit",
+                account_scope="upbit_live",
+                market="crypto",
+                symbol="BTC",
+                market_symbol="KRW-BTC",
+                side="buy",
+                order_kind="limit",
+                order_no=other_order_no,
+                status="accepted",
+                lifecycle_state="accepted",
+                report_item_uuid=other_rid,
+            )
+        )
+        await db.commit()
+
+    assert await m.list_live_orders_by_report_item_uuid(linked_rid) == []
+    assert [
+        r["order_no"] for r in await m.list_live_orders_by_report_item_uuid(other_rid)
+    ] == [other_order_no]

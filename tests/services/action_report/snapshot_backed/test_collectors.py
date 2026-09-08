@@ -305,11 +305,7 @@ async def test_portfolio_toss_failure_does_not_promote_manual_or_leak_detail():
 
 
 # ---------------------------------------------------------------------------
-# Portfolio v2 — crypto+upbit_live는 ``UpbitHomeReader``를 사용한다.
-#
-# live holdings와 KRW cash/orderable을 primary로 제공하고, manual CRYPTO
-# rows는 reference-only로 유지한다. 따라서 실제 계정이 있는데도
-# NAV/buying power가 0으로 보이는 회귀를 막는다.
+# Portfolio v2 — crypto+upbit_live는 운영 provider가 없어 unavailable이다.
 # ---------------------------------------------------------------------------
 def _crypto_upbit_request(user_id: int | None = 1) -> CollectorRequest:
     return CollectorRequest(
@@ -348,215 +344,18 @@ def _manual_crypto_session(rows: list[Any] | None = None) -> MagicMock:
     return session
 
 
-def _upbit_reader_with_holdings(
-    *,
-    warning: Any | None = None,
-    cash_krw: float | None = 365_342.0,
-    hidden_dust: int = 0,
-    hidden_inactive: int = 0,
-) -> MagicMock:
-    """UpbitHomeReader stub: one live BTC holding + KRW cash/orderable.
-
-    Upbit reports the same KRW figure for cash balance and buying power
-    (orderable), and never carries a USD leg — mirrors the real reader.
-    ``cash_krw=None`` models a KRW-less (all-coin) account; ``hidden_*`` model
-    the reader's dust/inactive filtering.
-    """
-    from app.schemas.invest_home import (
-        Account,
-        CashAmounts,
-        Holding,
-        InvestHomeHiddenCounts,
-    )
-    from app.services.invest_home_service import _SourceFetchResult
-
-    holding_btc = Holding(
-        holdingId="upbit:BTC",
-        accountId="upbit_account",
-        source="upbit",
-        accountKind="live",
-        symbol="BTC",
-        market="CRYPTO",
-        assetType="crypto",
-        assetCategory="crypto",
-        displayName="BTC",
-        quantity=0.235,
-        averageCost=90_000_000.0,
-        costBasis=21_150_000.0,
-        currency="KRW",
-        valueNative=25_384_658.0,
-        valueKrw=25_384_658.0,
-        pnlKrw=4_234_658.0,
-        pnlRate=0.20,
-        priceState="live",
-    )
-    account = Account(
-        accountId="upbit_account",
-        displayName="Upbit",
-        source="upbit",
-        accountKind="live",
-        includedInHome=True,
-        valueKrw=25_384_658.0,
-        costBasisKrw=21_150_000.0,
-        pnlKrw=4_234_658.0,
-        pnlRate=0.20,
-        cashBalances=CashAmounts(krw=cash_krw, usd=None),
-        buyingPower=CashAmounts(krw=cash_krw, usd=None),
-    )
-    hidden_counts = InvestHomeHiddenCounts()
-    hidden_counts.upbitDust = hidden_dust
-    hidden_counts.upbitInactive = hidden_inactive
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[account],
-            holdings=[holding_btc],
-            warning=warning,
-            hidden_counts=hidden_counts,
-        )
-    )
-    return reader
-
-
-def _upbit_reader_failed() -> MagicMock:
-    from app.schemas.invest_home import InvestHomeWarning
-    from app.services.invest_home_service import _SourceFetchResult
-
-    reader = MagicMock()
-    reader.fetch = AsyncMock(
-        return_value=_SourceFetchResult(
-            accounts=[],
-            holdings=[],
-            warning=InvestHomeWarning(source="upbit", message="upbit auth refused"),
-        )
-    )
-    return reader
-
-
 @pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_success_populates_upbit_primary():
-    """ROB-369 E9 — Upbit live success: primary_source=upbit, live KRW NAV/cash,
-    manual CRYPTO rows surface as reference only (never promoted)."""
+async def test_portfolio_v2_crypto_upbit_live_is_explicitly_unavailable():
+    """운영 중인 crypto 계좌 provider가 없으므로 upbit_live scope는 빈 성공이
+    아니라 명시적 unavailable로 끝난다."""
     session = _manual_crypto_session()
-    upbit_reader = _upbit_reader_with_holdings()
-    collector = PortfolioSnapshotCollector(
-        session,
-        upbit_reader=upbit_reader,
-    )
+    collector = PortfolioSnapshotCollector(session)
+
     results = await collector.collect(_crypto_upbit_request(user_id=1))
+
     assert len(results) == 1
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "fresh"
-    assert payload["primary_source"] == "upbit"
-    assert payload["count"] == 1
-    assert payload["holdings"][0]["ticker"] == "BTC"
-    assert payload["holdings"][0]["source"] == "upbit"
-    assert payload["holdings"][0]["value_krw"] == 25_384_658.0
-    # KRW cash + orderable surfaced — the E9 fix (not None/0).
-    assert payload["cash"]["krw"] == 365_342.0
-    assert payload["buying_power"]["krw"] == 365_342.0
-    # Crypto has no pending-sell concept on the reader.
-    assert payload["sellable_summary"] is None
-    # Manual CRYPTO row visible as reference, never promoted to primary.
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["reference_holdings"][0]["ticker"] == "KRW-BTC"
-    assert payload["reference_holdings"][0]["source"] == "manual"
-    # Provenance.
-    assert payload["provenance"]["upbit_fetch_status"] == "ok"
-    assert payload["provenance"]["account_scope"] == "upbit_live"
-    upbit_reader.fetch.assert_awaited_once_with(user_id=1)
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_failure_does_not_promote_manual():
-    """ROB-369 E9 — Upbit fetch failure: primary_source=none, manual stays reference."""
-    session = _manual_crypto_session()
-    upbit_reader = _upbit_reader_failed()
-    collector = PortfolioSnapshotCollector(session, upbit_reader=upbit_reader)
-    results = await collector.collect(_crypto_upbit_request(user_id=1))
-    assert len(results) == 1
-    payload = results[0].payload_json
     assert results[0].freshness_status == "unavailable"
-    assert payload["primary_source"] == "none"
-    assert payload["holdings"] == []
-    assert payload["count"] == 0
-    assert payload["cash"] is None
-    assert payload["buying_power"] is None
-    # Manual remains visible as reference, never promoted to primary.
-    assert len(payload["reference_holdings"]) == 1
-    assert payload["reference_holdings"][0]["source"] == "manual"
-    assert payload["provenance"]["upbit_fetch_status"] == "failed"
-    assert "upbit" in str(payload["provenance"]["warnings"]).lower()
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_exception_is_fail_closed():
-    """ROB-369 E9 — UpbitHomeReader raising is treated like 'failed', not a crash."""
-    session = _manual_crypto_session()
-    upbit_reader = MagicMock()
-    upbit_reader.fetch = AsyncMock(side_effect=RuntimeError("boom"))
-    collector = PortfolioSnapshotCollector(session, upbit_reader=upbit_reader)
-    results = await collector.collect(_crypto_upbit_request(user_id=1))
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "unavailable"
-    assert payload["primary_source"] == "none"
-    assert "boom" in payload["provenance"]["errors"][0]
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_price_warning_is_partial():
-    """ROB-369 E9 — a price warning with live holdings → partial, still upbit primary."""
-    from app.schemas.invest_home import InvestHomeWarning
-
-    session = _manual_crypto_session()
-    upbit_reader = _upbit_reader_with_holdings(
-        warning=InvestHomeWarning(
-            source="upbit",
-            message="일부 코인은 현재가가 없어 평가금액에서 제외했습니다.",
-        )
-    )
-    collector = PortfolioSnapshotCollector(session, upbit_reader=upbit_reader)
-    results = await collector.collect(_crypto_upbit_request(user_id=1))
-    payload = results[0].payload_json
-    assert results[0].freshness_status == "partial"
-    assert payload["primary_source"] == "upbit"
-    assert payload["provenance"]["upbit_fetch_status"] == "partial"
-    assert payload["count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_krw_less_account_emits_explicit_zero():
-    """ROB-369 E9 — a KRW-less (all-coin) Upbit account reports krw=None on the
-    reader. The collector must coerce to an explicit 0.0 (the honest value for
-    Upbit, unlike KIS-overseas None=unsupported) so the portfolio citation
-    ``$.buying_power.krw`` resolves to a real number, not null."""
-    session = _manual_crypto_session()
-    upbit_reader = _upbit_reader_with_holdings(cash_krw=None)
-    collector = PortfolioSnapshotCollector(session, upbit_reader=upbit_reader)
-    results = await collector.collect(_crypto_upbit_request(user_id=1))
-    payload = results[0].payload_json
-    # Successful fetch — a 0-KRW coin-only account is a complete, valid state.
-    assert results[0].freshness_status == "fresh"
-    assert payload["primary_source"] == "upbit"
-    # Explicit 0.0, never None — the citation must point at a real value.
-    assert payload["cash"]["krw"] == 0.0
-    assert payload["buying_power"]["krw"] == 0.0
-    assert payload["cash"]["krw"] is not None
-    assert payload["buying_power"]["krw"] is not None
-
-
-@pytest.mark.asyncio
-async def test_portfolio_v2_crypto_upbit_live_surfaces_hidden_dust_count():
-    """ROB-369 E9 — the reader hides dust (<5000 KRW) and inactive coins, so the
-    snapshot NAV undercounts the raw Upbit eval. Surface the hidden counts in
-    coverage so the divergence is auditable rather than silent."""
-    session = _manual_crypto_session()
-    upbit_reader = _upbit_reader_with_holdings(hidden_dust=3, hidden_inactive=2)
-    collector = PortfolioSnapshotCollector(session, upbit_reader=upbit_reader)
-    results = await collector.collect(_crypto_upbit_request(user_id=1))
-    coverage = results[0].coverage_json
-    assert coverage["hidden_dust_count"] == 3
-    assert coverage["hidden_inactive_count"] == 2
+    assert "provider upbit is not operational" in str(results[0].errors_json)
 
 
 # ---------------------------------------------------------------------------

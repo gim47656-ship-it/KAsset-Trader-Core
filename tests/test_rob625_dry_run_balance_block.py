@@ -1,4 +1,4 @@
-"""레거시 주문 잔액 검증의 Upbit 전용 및 KIS fail-closed 계약."""
+"""주문 잔액 검증의 crypto 잔액 부족 hard-error 계약."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.mcp_server.tooling import order_execution, order_validation
+from app.mcp_server.tooling import order_validation
 
 
 def _order_error(message: str) -> dict:
@@ -61,34 +61,3 @@ async def test_crypto_sufficient_balance_passes(
         dry_run=False,
         order_error_fn=_order_error,
     ) == (None, None)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("symbol", "market"),
-    [("005930", "kr"), ("AAPL", "us")],
-)
-async def test_legacy_equity_place_order_rejects_before_validation_or_mutation(
-    monkeypatch: pytest.MonkeyPatch,
-    symbol: str,
-    market: str,
-) -> None:
-    validation_call = AsyncMock(
-        side_effect=AssertionError("validation call is forbidden")
-    )
-    monkeypatch.setattr(order_execution, "_fetch_current_price", validation_call)
-
-    result = await order_execution._place_order_impl(
-        symbol=symbol,
-        side="buy",
-        market=market,
-        order_type="limit",
-        quantity=1.0,
-        price=100.0,
-        dry_run=True,
-    )
-
-    assert result["success"] is False
-    assert result["error"] == "provider kis is not operational"
-    assert result["mutation_sent"] is False
-    validation_call.assert_not_awaited()

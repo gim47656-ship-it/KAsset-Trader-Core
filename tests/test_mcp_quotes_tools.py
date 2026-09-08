@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from app.mcp_server.tooling import market_data_quotes as tools
-from app.services.market_data.contracts import OrderbookLevel, OrderbookSnapshot
 from app.services.us_symbol_universe_service import USSymbolInactiveError
 
 
@@ -257,28 +256,14 @@ async def test_us_intraday_provider_failure_is_error_payload(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_kr_orderbook_payload_comes_from_nh_plug_service(monkeypatch) -> None:
-    snapshot = OrderbookSnapshot(
-        symbol="005930",
-        instrument_type="equity_kr",
-        source="nhplug",
-        asks=[OrderbookLevel(70100.0, 12.0)],
-        bids=[OrderbookLevel(70000.0, 15.0)],
-        total_ask_qty=12.0,
-        total_bid_qty=15.0,
-        bid_ask_ratio=1.25,
-        venue="krx",
-        venue_label="KRX",
-    )
-    fetch = AsyncMock(return_value=snapshot)
+async def test_kr_orderbook_is_rejected_without_a_provider(monkeypatch) -> None:
+    fetch = AsyncMock()
     monkeypatch.setattr(tools.market_data_service, "get_orderbook", fetch)
 
-    result = await tools._get_orderbook_impl("5930", "kr")
+    with pytest.raises(ValueError, match="only supports the KRW crypto market"):
+        await tools._get_orderbook_impl("5930", "kr")
 
-    assert result["source"] == "nhplug"
-    assert result["venue"] == "krx"
-    assert "kis_market_code" not in result
-    fetch.assert_awaited_once_with("005930", "kr", venue=None)
+    fetch.assert_not_awaited()
 
 
 def test_kis_only_execution_strength_tool_is_not_registered() -> None:

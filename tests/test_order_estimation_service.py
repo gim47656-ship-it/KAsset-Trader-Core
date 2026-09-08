@@ -1,7 +1,7 @@
 """Tests for Order Estimation Service"""
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,7 +9,6 @@ from app.services.order_estimation_service import (
     PendingBuyCostUnavailableError,
     calculate_estimated_order_cost,
     extract_buy_prices_from_analysis,
-    fetch_pending_crypto_buy_cost,
     fetch_pending_domestic_buy_cost,
     fetch_pending_overseas_buy_cost,
 )
@@ -247,38 +246,3 @@ class TestFetchPendingBuyCost:
             await fetch_pending_domestic_buy_cost(toss_client_factory=lambda: client)
 
         assert excinfo.value.reason == "provider_unavailable"
-
-    @pytest.mark.asyncio
-    async def test_fetch_pending_crypto_buy_cost_limit_order(self):
-        """암호화폐 미체결 지정가 매수 주문"""
-        mock_orders = [
-            {
-                "side": "bid",
-                "ord_type": "limit",
-                "price": "50000000",
-                "remaining_volume": "0.001",
-            },
-        ]
-        with patch(
-            "app.services.brokers.upbit.client.fetch_open_orders",
-            new_callable=AsyncMock,
-            return_value=mock_orders,
-        ):
-            result = await fetch_pending_crypto_buy_cost()
-
-            assert result == pytest.approx(50000000 * 0.001)
-
-    @pytest.mark.asyncio
-    async def test_fetch_pending_crypto_buy_cost_market_order(self):
-        """암호화폐 미체결 시장가 매수 주문"""
-        mock_orders = [
-            {"side": "bid", "ord_type": "price", "price": "100000"},
-        ]
-        with patch(
-            "app.services.brokers.upbit.client.fetch_open_orders",
-            new_callable=AsyncMock,
-            return_value=mock_orders,
-        ):
-            result = await fetch_pending_crypto_buy_cost()
-
-            assert result == pytest.approx(100000.0)

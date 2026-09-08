@@ -8,34 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import app.services.brokers.upbit.client as upbit_service
 from app.core.config import settings
 from app.mcp_server.caller_identity import caller_agent_id_var, caller_source_var
 from app.mcp_server.tooling import order_validation
 from app.mcp_server.tooling.orders_registration import register_order_tools
 from tests._mcp_tooling_support import build_tools
-
-
-def _mock_crypto_sell_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        upbit_service,
-        "fetch_multiple_current_prices",
-        AsyncMock(return_value={"KRW-BTC": 1000.0}),
-    )
-    monkeypatch.setattr(
-        upbit_service,
-        "fetch_my_coins",
-        AsyncMock(
-            return_value=[
-                {
-                    "currency": "BTC",
-                    "balance": "2.0",
-                    "locked": "0",
-                    "avg_buy_price": "1000.0",
-                }
-            ]
-        ),
-    )
 
 
 @pytest.mark.unit
@@ -96,26 +73,6 @@ async def test_generic_paper_loss_cut_cannot_bypass_proposal_path() -> None:
     assert result["error"] == (
         "loss_cut_direct_path_disabled_use_order_proposal_create"
     )
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_non_defensive_sell_keeps_existing_floor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _mock_crypto_sell_context(monkeypatch)
-
-    result = await build_tools()["place_order"](
-        symbol="KRW-BTC",
-        side="sell",
-        order_type="limit",
-        quantity=1.0,
-        price=1005.0,
-        dry_run=True,
-    )
-
-    assert result["success"] is False
-    assert "below minimum" in result["error"]
 
 
 @pytest.mark.unit
@@ -188,22 +145,3 @@ async def test_record_order_history_persists_caller_source(
 
     record = json.loads(fake_redis.pushed[0][1])
     assert record["caller_source"] == "http_header"
-
-
-@pytest.mark.unit
-def test_kis_live_description_routes_defensive_trim_to_proposals() -> None:
-    from app.mcp_server.tooling.orders_kis_variants import register_kis_live_order_tools
-
-    captured: dict[str, str] = {}
-
-    class CapturingMCP:
-        def tool(self, *, name: str, description: str = ""):
-            captured[name] = description
-
-            def decorator(func):
-                return func
-
-            return decorator
-
-    register_kis_live_order_tools(CapturingMCP())
-    assert "order_proposal_create" in captured["kis_live_place_order"]

@@ -380,10 +380,10 @@ async def test_a_batch_action_reaches_the_batch_branch_and_fails_closed(
 class _SenderProbe:
     """A tripwire, not a transport.
 
-    Installed where the approve branch would eventually reach execution. The
-    only assertion made about it in this file is that it stays empty: these
-    tests are about routing, and any call here means an action reached a
-    branch it had no business reaching.
+    Installed on the Toss order transport, the only place the approve branch
+    can still reach execution. The only assertion made about it in this file
+    is that it stays empty: these tests are about routing, and any call here
+    means an action reached a branch it had no business reaching.
     """
 
     def __init__(self, *, price: str = "100", quantity: str = "10") -> None:
@@ -428,7 +428,7 @@ async def test_an_auto_veto_routes_to_the_veto_branch_not_the_approve_branch(
     approve branch's sender is never reached, and that the resting rung is
     left exactly as it was.
     """
-    from app.mcp_server.tooling import order_execution
+    from app.mcp_server.tooling import orders_toss_variants
     from app.services.order_proposals.callback_inbox import worker as worker_module
 
     group = await seed_auto_veto_proposal(db_session, nonce="vetolive123")
@@ -436,7 +436,8 @@ async def test_an_auto_veto_routes_to_the_veto_branch_not_the_approve_branch(
     job_id = await _queue(inbox_cleanup, data)
 
     probe = _SenderProbe()
-    monkeypatch.setattr(order_execution, "_place_order_impl", probe)
+    monkeypatch.setattr(orders_toss_variants, "toss_place_order", probe)
+    monkeypatch.setattr(orders_toss_variants, "toss_preview_order", probe)
 
     entered: list[str] = []
     real_core = callback_module.handle_normalized_callback
@@ -475,7 +476,7 @@ async def test_a_loss_cut_first_click_never_sends_an_order(
     is the *second* click. The core routes on ``group.exit_intent``, so this
     is the branch that must reach no sender at all.
     """
-    from app.mcp_server.tooling import order_execution
+    from app.mcp_server.tooling import orders_toss_variants
     from app.services.order_proposals.callback_inbox import worker as worker_module
 
     group = await seed_loss_cut_proposal(
@@ -488,7 +489,8 @@ async def test_a_loss_cut_first_click_never_sends_an_order(
     job_id = await _queue(inbox_cleanup, data)
 
     probe = _SenderProbe(price="99", quantity="1")
-    monkeypatch.setattr(order_execution, "_place_order_impl", probe)
+    monkeypatch.setattr(orders_toss_variants, "toss_place_order", probe)
+    monkeypatch.setattr(orders_toss_variants, "toss_preview_order", probe)
 
     entered: list[str] = []
     real_core = callback_module.handle_normalized_callback

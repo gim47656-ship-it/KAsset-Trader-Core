@@ -20,19 +20,7 @@ import yaml
 
 from app.core.config import settings
 from app.mcp_server.profiles import McpProfile
-from app.mcp_server.tooling.alpaca_paper import ALPACA_PAPER_READONLY_TOOL_NAMES
-from app.mcp_server.tooling.alpaca_paper_automated_orders import (
-    ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
-)
-from app.mcp_server.tooling.alpaca_paper_preview import ALPACA_PAPER_PREVIEW_TOOL_NAMES
-from app.mcp_server.tooling.market_quote_snapshot_tools import (
-    MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
-)
 from app.mcp_server.tooling.order_proposal_tools import ORDER_PROPOSAL_TOOL_NAMES
-from app.mcp_server.tooling.orders_kiwoom_us_variants import (
-    KIWOOM_MOCK_US_MUTATION_TOOL_NAMES,
-    KIWOOM_MOCK_US_READ_TOOL_NAMES,
-)
 from app.mcp_server.tooling.registry import register_all_tools
 from app.mcp_server.tooling.route_request_lanes import (
     ALL_KNOWN_TOOLS,
@@ -93,8 +81,6 @@ def _playbook_lane_tools() -> dict[str, list[str]]:
 
 def test_buckets_are_disjoint():
     assert READ_ONLY_ADVISORY_TOOLS.isdisjoint(MUTATION_TOOLS)
-    assert KIWOOM_MOCK_US_READ_TOOL_NAMES <= READ_ONLY_ADVISORY_TOOLS
-    assert KIWOOM_MOCK_US_MUTATION_TOOL_NAMES <= MUTATION_TOOLS
     assert "discover_buy_candidates_fanout" in READ_ONLY_ADVISORY_TOOLS
     assert "discover_buy_candidates_fanout" not in MUTATION_TOOLS
     assert "evaluate_buy_gate_ab_shadow" in READ_ONLY_ADVISORY_TOOLS
@@ -135,12 +121,7 @@ def test_mutation_action_taxonomy_is_disjoint_and_total():
     assert direct_name_candidates == DIRECT_BROKER_MUTATION_TOOLS
 
 
-def test_registered_direct_surfaces_are_classified_across_route_profiles(
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "alpaca_paper_default_tools_enabled", True)
-    monkeypatch.setattr(settings, "binance_demo_scalping_enabled", True)
-
+def test_registered_direct_surfaces_are_classified_across_route_profiles():
     direct_markers = (
         "place_order",
         "modify_order",
@@ -166,9 +147,12 @@ def test_registered_direct_surfaces_are_classified_across_route_profiles(
             f"{sorted(registered_direct - DIRECT_BROKER_MUTATION_TOOLS)}"
         )
 
-    assert "alpaca_paper_automated_submit_order" in DIRECT_BROKER_MUTATION_TOOLS
-    assert "alpaca_paper_automated_preview_order" in PREVIEW_REVALIDATION_TOOLS
-    assert ALPACA_PAPER_AUTOMATED_TOOL_NAMES <= MUTATION_TOOLS
+    # The sweep is only meaningful if the direct-mutation bucket is populated
+    # by the surfaces that survive: the generic order tools, Toss live and the
+    # PAPER limit-order lane.
+    assert {"place_order", "toss_place_order", "paper_place_limit_order"} <= (
+        DIRECT_BROKER_MUTATION_TOOLS
+    )
 
 
 def test_every_default_tool_is_classified():
@@ -209,14 +193,6 @@ def test_read_only_bucket_has_no_phantom_tools():
     _FLAG_GATED_OR_OPTIONAL: set[str] = {
         "analysis_bundle_create",
         "analysis_bundle_get",
-        # ROB-907: gated by settings.binance_demo_scalping_enabled (default off).
-        "binance_demo_ledger_status",
-        # Alpaca paper read/preview surface, gated by
-        # settings.alpaca_paper_default_tools_enabled (default off).
-        *ALPACA_PAPER_READONLY_TOOL_NAMES,
-        *ALPACA_PAPER_PREVIEW_TOOL_NAMES,
-        *KIWOOM_MOCK_US_READ_TOOL_NAMES,
-        *MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
         *ORDER_PROPOSAL_READ_TOOLS,
     }
     phantom = READ_ONLY_ADVISORY_TOOLS - default - _FLAG_GATED_OR_OPTIONAL

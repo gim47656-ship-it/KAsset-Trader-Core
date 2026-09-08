@@ -3,101 +3,21 @@ Tests for configuration module.
 """
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings, settings
 
-EXPECTED_KIS_API_RATE_LIMITS = {
-    "FHKST03010100|/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    "FHPST04830000|/uapi/domestic-stock/v1/quotations/daily-short-sale": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    "FHKST03010230|/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    "FHKST01010300|/uapi/domestic-stock/v1/quotations/inquire-ccnl": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    # ROB-753: current-price endpoints reject bursty same-endpoint fanout.
-    # Keep them serialized by default; operators can loosen via KIS_API_RATE_LIMITS.
-    "FHKST01010100|/uapi/domestic-stock/v1/quotations/inquire-price": {
-        "rate": 1,
-        "period": 0.2,
-    },
-    "HHDFS00000300|/uapi/overseas-price/v1/quotations/price": {
-        "rate": 1,
-        "period": 0.2,
-    },
-    "VTTS3007R|/uapi/overseas-stock/v1/trading/inquire-psamount": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8434R|/uapi/domestic-stock/v1/trading/inquire-balance": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8001R|/uapi/domestic-stock/v1/trading/inquire-daily-ccld": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8036R|/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    # ROB-585 (absorbed by ROB-645): pre-send throttle for order TRs (8/s) so
-    # batch orders stay under the KIS ledger limit without any retry re-POST.
-    "TTTC0012U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "VTTC0012U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "TTTC0011U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "VTTC0011U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "TTTC0013U|/uapi/domestic-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "VTTC0013U|/uapi/domestic-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "TTTT1002U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1002U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "TTTT1006U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1006U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1001U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "TTTT1004U|/uapi/overseas-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "VTTT1004U|/uapi/overseas-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-}
-
 EXPECTED_UPBIT_API_RATE_LIMITS = {
-    "GET /v1/accounts": {"rate": 30, "period": 1.0},
-    "GET /v1/order": {"rate": 30, "period": 1.0},
-    "GET /v1/orders/closed": {"rate": 30, "period": 1.0},
     "GET /v1/ticker": {"rate": 10, "period": 1.0},
 }
 
 
 def _required_settings_kwargs() -> dict[str, str]:
     return {
-        "kis_app_key": settings.kis_app_key,
-        "kis_app_secret": settings.kis_app_secret,
         "opendart_api_key": settings.opendart_api_key,
         "DATABASE_URL": settings.DATABASE_URL,
-        "upbit_access_key": settings.upbit_access_key,
-        "upbit_secret_key": settings.upbit_secret_key,
         "SECRET_KEY": settings.SECRET_KEY,
     }
 
@@ -123,7 +43,6 @@ class TestSettings:
     def test_settings_attributes(self):
         """Test that settings has required attributes."""
         # Test that required attributes exist (these will be None in test env)
-        assert hasattr(settings, "kis_app_key")
         assert hasattr(settings, "telegram_token")
         assert hasattr(settings, "opendart_api_key")
         assert hasattr(settings, "DATABASE_URL")
@@ -133,30 +52,9 @@ class TestSettings:
         assert hasattr(settings, "yahoo_ohlcv_cache_max_days")
         assert hasattr(settings, "yahoo_ohlcv_cache_lock_ttl_seconds")
 
-    def test_has_kis_ohlcv_cache_settings(self):
-        assert hasattr(settings, "kis_ohlcv_cache_enabled")
-        assert hasattr(settings, "kis_ohlcv_cache_max_days")
-        assert hasattr(settings, "kis_ohlcv_cache_max_hours")
-        assert hasattr(settings, "kis_ohlcv_cache_lock_ttl_seconds")
-
 
 class TestConfigLoading:
     """Test configuration loading."""
-
-    @patch.dict(
-        "os.environ",
-        {
-            "KIS_APP_KEY": "test_kis_key",
-            "TELEGRAM_TOKEN": "test_telegram_token",
-            "OPENDART_API_KEY": "test_dart_key",
-            "DATABASE_URL": "postgresql://test:test@localhost/testdb",
-        },
-    )
-    def test_environment_variables_loading(self):
-        """Test loading configuration from environment variables."""
-        # Note: This test may not work as expected due to singleton pattern
-        # The settings instance is created at module import time
-        pass
 
     def test_settings_singleton(self):
         """Test that settings is a singleton."""
@@ -179,41 +77,34 @@ class TestConfigLoading:
     def test_api_rate_limit_defaults_include_builtins(self):
         cfg = _new_settings()
 
-        assert cfg.kis_api_rate_limits == EXPECTED_KIS_API_RATE_LIMITS
         assert cfg.upbit_api_rate_limits == EXPECTED_UPBIT_API_RATE_LIMITS
 
     def test_empty_object_env_override_does_not_erase_builtins(self, monkeypatch):
-        monkeypatch.setenv("KIS_API_RATE_LIMITS", "{}")
         monkeypatch.setenv("UPBIT_API_RATE_LIMITS", "{}")
 
         cfg = _new_settings()
 
-        assert cfg.kis_api_rate_limits == EXPECTED_KIS_API_RATE_LIMITS
         assert cfg.upbit_api_rate_limits == EXPECTED_UPBIT_API_RATE_LIMITS
 
     def test_empty_string_env_override_does_not_erase_builtins(self, monkeypatch):
-        monkeypatch.setenv("KIS_API_RATE_LIMITS", "")
         monkeypatch.setenv("UPBIT_API_RATE_LIMITS", "")
 
         cfg = _new_settings()
 
-        assert cfg.kis_api_rate_limits == EXPECTED_KIS_API_RATE_LIMITS
         assert cfg.upbit_api_rate_limits == EXPECTED_UPBIT_API_RATE_LIMITS
 
     def test_partial_api_rate_limit_override_merges_endpoint_subdict(self, monkeypatch):
         monkeypatch.setenv(
-            "KIS_API_RATE_LIMITS",
-            '{"TTTC8434R|/uapi/domestic-stock/v1/trading/inquire-balance": {"rate": 25}}',
+            "UPBIT_API_RATE_LIMITS",
+            '{"GET /v1/ticker": {"rate": 25}}',
         )
 
         cfg = _new_settings()
 
-        assert cfg.kis_api_rate_limits[
-            "TTTC8434R|/uapi/domestic-stock/v1/trading/inquire-balance"
-        ] == {"rate": 25, "period": 1.0}
-        assert cfg.kis_api_rate_limits[
-            "TTTC8001R|/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-        ] == {"rate": 10, "period": 1.0}
+        assert cfg.upbit_api_rate_limits["GET /v1/ticker"] == {
+            "rate": 25,
+            "period": 1.0,
+        }
 
     def test_public_api_paths_supports_csv_env_string(self, monkeypatch):
         monkeypatch.setenv("PUBLIC_API_PATHS", "/healthz,/api/scan")
@@ -258,37 +149,23 @@ class TestConfigLoading:
         assert cfg.PUBLIC_API_PATHS == ["/healthz"]
 
     def test_invalid_api_rate_limit_json_raises_validation_error(self, monkeypatch):
-        monkeypatch.setenv("KIS_API_RATE_LIMITS", "{not-json}")
+        monkeypatch.setenv("UPBIT_API_RATE_LIMITS", "{not-json}")
 
         with pytest.raises(ValidationError, match="Invalid JSON for API rate limits"):
             _new_settings()
 
     def test_non_object_api_rate_limit_json_raises_validation_error(self, monkeypatch):
-        monkeypatch.setenv("KIS_API_RATE_LIMITS", "[]")
+        monkeypatch.setenv("UPBIT_API_RATE_LIMITS", "[]")
 
         with pytest.raises(
             ValidationError, match="API rate limits must be a JSON object"
         ):
             _new_settings()
 
-    def test_constructor_empty_kis_api_rate_limits_replaces_builtins(self):
-        cfg = _build_settings(**_required_settings_kwargs(), kis_api_rate_limits={})
-
-        assert cfg.kis_api_rate_limits == {}
-
     def test_constructor_empty_upbit_api_rate_limits_replaces_builtins(self):
         cfg = _build_settings(**_required_settings_kwargs(), upbit_api_rate_limits={})
 
         assert cfg.upbit_api_rate_limits == {}
-
-    def test_constructor_custom_kis_api_rate_limits_do_not_auto_seed_builtins(self):
-        custom_limits = {"custom": {"rate": 1}}
-
-        cfg = _build_settings(
-            **_required_settings_kwargs(), kis_api_rate_limits=custom_limits
-        )
-
-        assert cfg.kis_api_rate_limits == custom_limits
 
     def test_telegram_chat_ids_str_splits_multiple_ids(self):
         cfg = Settings(

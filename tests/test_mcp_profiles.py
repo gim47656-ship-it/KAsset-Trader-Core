@@ -8,46 +8,21 @@ Verifies that:
 
 from __future__ import annotations
 
-import inspect
 from typing import Any, cast
 
 import pytest
 
 from app.core.config import settings
 from app.mcp_server.profiles import McpProfile, resolve_mcp_profile
-from app.mcp_server.tooling import tradingcodex_execution_registration
 from app.mcp_server.tooling.account_read_registration import (
     ACCOUNT_READ_FORBIDDEN_TOOL_NAMES,
     ACCOUNT_READ_TOOL_NAMES,
 )
-from app.mcp_server.tooling.alpaca_paper import ALPACA_PAPER_READONLY_TOOL_NAMES
-from app.mcp_server.tooling.alpaca_paper_automated_orders import (
-    ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
-)
-from app.mcp_server.tooling.alpaca_paper_orders import (
-    ALPACA_PAPER_MUTATING_TOOL_NAMES,
-)
-from app.mcp_server.tooling.alpaca_paper_preview import ALPACA_PAPER_PREVIEW_TOOL_NAMES
 from app.mcp_server.tooling.analysis_readonly_registration import (
     ANALYSIS_READONLY_FORBIDDEN_TOOL_NAMES,
     ANALYSIS_READONLY_TOOL_NAMES,
 )
-from app.mcp_server.tooling.kiwoom_kr_registration import (
-    KIWOOM_KR_EXCLUDED_US_MUTATION_TOOL_NAMES,
-    KIWOOM_KR_TOOL_NAMES,
-    kiwoom_kr_profile_tool_names,
-)
-from app.mcp_server.tooling.live_reconcile_registration import (
-    LIVE_RECONCILE_TOOL_NAMES,
-)
-from app.mcp_server.tooling.market_quote_snapshot_tools import (
-    MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
-)
 from app.mcp_server.tooling.order_proposal_tools import ORDER_PROPOSAL_TOOL_NAMES
-from app.mcp_server.tooling.orders_kiwoom_us_variants import (
-    KIWOOM_MOCK_US_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import (
     TOSS_LIVE_ORDER_TOOL_NAMES,
@@ -56,16 +31,12 @@ from app.mcp_server.tooling.paper_account_registration import PAPER_ACCOUNT_TOOL
 from app.mcp_server.tooling.paper_analytics_registration import (
     PAPER_ANALYTICS_TOOL_NAMES,
 )
-from app.mcp_server.tooling.paper_execution_registration import (
-    PAPER_EXECUTION_TOOL_NAMES,
-)
 from app.mcp_server.tooling.paper_journal_registration import PAPER_JOURNAL_TOOL_NAMES
 from app.mcp_server.tooling.paper_limit_order_handler import (
     PAPER_LIMIT_ORDER_TOOL_NAMES,
 )
 from app.mcp_server.tooling.registry import register_all_tools
 from app.mcp_server.tooling.tradingcodex_execution_registration import (
-    KIWOOM_MOCK_EXECUTION_TOOL_NAMES,
     TRADINGCODEX_EXECUTION_FORBIDDEN_TOOL_NAMES,
     TRADINGCODEX_EXECUTION_TOOL_NAMES,
 )
@@ -83,13 +54,6 @@ _RETIRED_KIS_ORDER_TOOL_NAMES = {
     "kis_mock_modify_order",
     "kis_mock_get_order_history",
 }
-_ALPACA_PAPER_TOOL_NAMES = (
-    ALPACA_PAPER_READONLY_TOOL_NAMES
-    | ALPACA_PAPER_PREVIEW_TOOL_NAMES
-    | ALPACA_PAPER_MUTATING_TOOL_NAMES
-    | MARKET_QUOTE_SNAPSHOT_TOOL_NAMES
-)
-_US_PAPER_TOOL_NAMES = _ALPACA_PAPER_TOOL_NAMES
 _DB_PAPER_TOOL_NAMES = (
     PAPER_ACCOUNT_TOOL_NAMES | PAPER_ANALYTICS_TOOL_NAMES | PAPER_JOURNAL_TOOL_NAMES
 )
@@ -118,16 +82,6 @@ _REMOVED_GENERIC_TOOL_NAMES = {
     "get_long_short_ratio",
 }
 
-_EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES = {
-    "kiwoom_mock_preview_order",
-    "kiwoom_mock_place_order",
-    "kiwoom_mock_cancel_order",
-    "kiwoom_mock_modify_order",
-    "kiwoom_mock_get_order_history",
-    "kiwoom_mock_get_positions",
-    "kiwoom_mock_get_orderable_cash",
-}
-
 
 def _build_mcp(profile: McpProfile) -> DummyMCP:
     mcp = DummyMCP()
@@ -136,11 +90,9 @@ def _build_mcp(profile: McpProfile) -> DummyMCP:
 
 
 class TestDefaultProfile:
-    def test_registers_generic_orders_and_upbit_reconcile(self) -> None:
+    def test_registers_generic_orders(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
-        assert (
-            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
-        ) <= mcp.tools.keys()
+        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
 
     def test_does_not_register_retired_kis_order_variants(self) -> None:
         mcp = _build_mcp(McpProfile.DEFAULT)
@@ -151,90 +103,9 @@ class TestDefaultProfile:
         assert TOSS_LIVE_ORDER_TOOL_NAMES <= mcp.tools.keys()
 
     def test_does_not_register_split_profile_tools(self) -> None:
-        # US/DB paper surfaces are profile-isolated and never appear in DEFAULT.
-        # kiwoom_mock_* is flag-gated in DEFAULT (ROB-601) — its presence/absence
-        # is owned by ``TestKiwoomDefaultProfileGate``, not this assertion.
+        # The DB paper surface is profile-isolated and never appears in DEFAULT.
         mcp = _build_mcp(McpProfile.DEFAULT)
-        split_only = _US_PAPER_TOOL_NAMES | _DB_PAPER_TOOL_NAMES
-        assert split_only.isdisjoint(mcp.tools.keys())
-
-
-class TestAlpacaPaperPreviewProfile:
-    def test_preview_tool_registered_us_paper_profile(self) -> None:
-        mcp = _build_mcp(McpProfile.US_PAPER)
-        assert "alpaca_paper_preview_order" in mcp.tools
-
-    def test_preview_tool_not_registered_default_profile(self) -> None:
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert "alpaca_paper_preview_order" not in mcp.tools
-
-
-class TestUsPaperProfile:
-    def test_registers_us_paper_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.US_PAPER)
-        assert _US_PAPER_TOOL_NAMES <= mcp.tools.keys()
-
-
-class TestAlpacaCleanProfile:
-    def test_is_closed_world_and_contains_only_clean_alpaca_tools(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(settings, "alpaca_paper_crypto_enabled", True)
-        mcp = _build_mcp(McpProfile.ALPACA_PAPER_CLEAN)
-
-        assert len(mcp.tools) == 13
-        assert set(mcp.tools) == (
-            ALPACA_PAPER_READONLY_TOOL_NAMES
-            | ALPACA_PAPER_PREVIEW_TOOL_NAMES
-            | {
-                "alpaca_paper_ledger_list_recent",
-                "alpaca_paper_ledger_get",
-                "alpaca_paper_ledger_get_by_correlation",
-                "alpaca_paper_roundtrip_report",
-                "alpaca_paper_execution_preflight_check",
-            }
-        )
-        assert "kis_mock_mirror_execute_report" not in mcp.tools
-        assert _ALL_ORDER_TOOL_NAMES.isdisjoint(mcp.tools)
-
-    def test_pins_account_mode_and_rejects_other_account(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(settings, "alpaca_paper_crypto_enabled", True)
-        mcp = _build_mcp(McpProfile.ALPACA_PAPER_CLEAN)
-        get_account = mcp.tools["alpaca_paper_get_account"]
-
-        assert (
-            inspect.signature(get_account).parameters["account_mode"].default
-            == "alpaca_paper_crypto"
-        )
-        with pytest.raises(ValueError, match="pinned to account_mode"):
-            import asyncio
-
-            asyncio.run(get_account(account_mode="alpaca_paper"))
-
-        preview = mcp.tools["alpaca_paper_preview_order"]
-        with pytest.raises(ValueError, match="supports crypto orders only"):
-            asyncio.run(
-                preview(
-                    symbol="AAPL",
-                    side="buy",
-                    type="limit",
-                    qty=1,
-                    limit_price=100,
-                )
-            )
-        with pytest.raises(ValueError, match="crypto symbol must be one of"):
-            asyncio.run(
-                preview(
-                    symbol="XRP/USD",
-                    side="buy",
-                    type="limit",
-                    qty=1,
-                    limit_price=1,
-                    asset_class="crypto",
-                )
-            )
+        assert _DB_PAPER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
 
 class TestDbPaperProfile:
@@ -252,160 +123,25 @@ class TestCryptoProfile:
         mcp = _build_mcp(McpProfile.CRYPTO)
         assert "get_crypto_top_movers" in mcp.tools
 
-    def test_registers_crypto_trading_and_reconcile_surface(self) -> None:
-        # Generic account_mode orders and the crypto/Upbit-pinned reconcile
-        # wrapper are the active Upbit entry points.
+    def test_registers_the_generic_order_surface(self) -> None:
+        # Generic account_mode order tools stay registered; the crypto-pinned
+        # reconcile wrapper was removed with its provider.
         mcp = _build_mcp(McpProfile.CRYPTO)
-        assert (
-            _ACTIVE_GENERIC_ORDER_TOOL_NAMES | LIVE_RECONCILE_TOOL_NAMES
-        ) <= mcp.tools.keys()
+        assert _ACTIVE_GENERIC_ORDER_TOOL_NAMES <= mcp.tools.keys()
 
     def test_does_not_register_retired_kis_order_tools(self) -> None:
         mcp = _build_mcp(McpProfile.CRYPTO)
         assert _RETIRED_KIS_ORDER_TOOL_NAMES.isdisjoint(mcp.tools.keys())
 
 
-class TestKiwoomProfile:
-    def test_registers_kiwoom_mock_tools(self) -> None:
-        mcp = _build_mcp(McpProfile.KIWOOM)
-        assert KIWOOM_MOCK_TOOL_NAMES <= mcp.tools.keys()
-
-    def test_registers_kiwoom_mock_us_tools(self) -> None:
-        # ROB-867: KIWOOM profile registers both KR and US namespaces.
-        mcp = _build_mcp(McpProfile.KIWOOM)
-        assert KIWOOM_MOCK_US_TOOL_NAMES <= mcp.tools.keys()
-
-
-class TestKiwoomKrProfile:
-    """ROB-1159 — MCP_PROFILE=kiwoom_kr is MCP_PROFILE=kiwoom minus the whole
-    kiwoom_mock_us_* namespace (4 mutations + 3 reads)."""
-
-    def test_registers_exact_kr_kiwoom_namespace(self) -> None:
-        mcp = _build_mcp(McpProfile.KIWOOM_KR)
-        # Prefix-based, so a future kiwoom_mock_us_* (or any other new
-        # kiwoom_mock_*) registration leaking into this profile fails here even
-        # if the frozen name sets are also updated.
-        registered = {name for name in mcp.tools if name.startswith("kiwoom_mock")}
-        assert registered == KIWOOM_KR_TOOL_NAMES
-        assert KIWOOM_KR_TOOL_NAMES == KIWOOM_MOCK_TOOL_NAMES
-
-    def test_us_mutation_tools_are_absent(self) -> None:
-        mcp = _build_mcp(McpProfile.KIWOOM_KR)
-        assert KIWOOM_KR_EXCLUDED_US_MUTATION_TOOL_NAMES == {
-            "kiwoom_mock_us_preview_order",
-            "kiwoom_mock_us_place_order",
-            "kiwoom_mock_us_modify_order",
-            "kiwoom_mock_us_cancel_order",
-        }
-        leaked = KIWOOM_KR_EXCLUDED_US_MUTATION_TOOL_NAMES & mcp.tools.keys()
-        assert not leaked, f"kiwoom_kr leaked US mutation tools: {sorted(leaked)}"
-
-    def test_whole_us_namespace_is_absent(self) -> None:
-        mcp = _build_mcp(McpProfile.KIWOOM_KR)
-        assert KIWOOM_MOCK_US_TOOL_NAMES.isdisjoint(mcp.tools.keys())
-
-    def test_matches_closed_world_and_known_mutation_contract(self) -> None:
-        from app.mcp_server.tooling.route_request_lanes import (
-            DIRECT_BROKER_MUTATION_TOOLS,
-        )
-
-        mcp = _build_mcp(McpProfile.KIWOOM_KR)
-        assert set(mcp.tools) == kiwoom_kr_profile_tool_names()
-        allowed_direct = KIWOOM_KR_TOOL_NAMES & DIRECT_BROKER_MUTATION_TOOLS
-        assert mcp.tools.keys() & DIRECT_BROKER_MUTATION_TOOLS == allowed_direct
-
-    def test_keeps_kt00007_order_detail_read(self) -> None:
-        # ROB-1155's kiwoom_mock_get_order_detail is the reason this profile
-        # exists: it is registered on kiwoom-family profiles only, and KR-B1
-        # should reach it without also getting the US mutation surface.
-        mcp = _build_mcp(McpProfile.KIWOOM_KR)
-        assert "kiwoom_mock_get_order_detail" in mcp.tools
-
-    def test_keeps_kr_order_surface_intact(self) -> None:
-        from app.mcp_server.tooling.mirror_counterfactual_registration import (
-            MIRROR_COUNTERFACTUAL_TOOL_NAMES,
-        )
-
-        # The split narrows registration only; the KR place/cancel/modify
-        # surface a KR session needs stays present and identical to KIWOOM's.
-        kiwoom = _build_mcp(McpProfile.KIWOOM)
-        kiwoom_kr = _build_mcp(McpProfile.KIWOOM_KR)
-        kr_names = {
-            "kiwoom_mock_preview_order",
-            "kiwoom_mock_place_order",
-            "kiwoom_mock_cancel_order",
-            "kiwoom_mock_modify_order",
-        }
-        assert kr_names <= kiwoom_kr.tools.keys()
-        assert KIWOOM_MOCK_TOOL_NAMES <= kiwoom_kr.tools.keys()
-        assert kiwoom.tools.keys() - kiwoom_kr.tools.keys() == KIWOOM_MOCK_US_TOOL_NAMES
-        assert kiwoom_kr.tools.keys() - kiwoom.tools.keys() == set()
-        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom.tools)
-        assert MIRROR_COUNTERFACTUAL_TOOL_NAMES.isdisjoint(kiwoom_kr.tools)
-
-    def test_kiwoom_profile_still_registers_us_namespace(self) -> None:
-        # The split is additive: MCP_PROFILE=kiwoom is deliberately unchanged by
-        # ROB-1159, so a regression there is a separate, explicit decision.
-        mcp = _build_mcp(McpProfile.KIWOOM)
-        assert KIWOOM_MOCK_US_TOOL_NAMES <= mcp.tools.keys()
-
-
-class TestKiwoomUsDefaultProfileGate:
-    def test_registers_us_namespace_when_enabled(self, monkeypatch) -> None:
-        monkeypatch.setattr(settings, "kiwoom_mock_us_enabled", True)
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIWOOM_MOCK_US_TOOL_NAMES <= mcp.tools.keys()
-
-    def test_omits_us_namespace_when_disabled(self, monkeypatch) -> None:
-        monkeypatch.setattr(settings, "kiwoom_mock_us_enabled", False)
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIWOOM_MOCK_US_TOOL_NAMES.isdisjoint(mcp.tools.keys())
-
-
-class TestKiwoomDefaultProfileGate:
-    """ROB-601: kiwoom_mock_* tools surface in the operator DEFAULT profile when
-    ``settings.kiwoom_mock_enabled`` is true, so analyze→approval→order can run
-    through kiwoom mock in the everyday session (the isolated KIWOOM profile
-    drops every other broker's order surface and cannot substitute it).
-
-    The flag defaults to ``False`` so the out-of-box DEFAULT surface is
-    unchanged (pinned by ``TestOrderSurfaceMatrix``); fail-closed runtime config
-    validation still blocks any tool call without real credentials.
-    """
-
-    def test_registers_kiwoom_mock_in_default_when_flag_enabled(
-        self, monkeypatch
-    ) -> None:
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "kiwoom_mock_enabled", True)
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIWOOM_MOCK_TOOL_NAMES <= mcp.tools.keys()
-
-    def test_omits_kiwoom_mock_in_default_when_flag_disabled(self, monkeypatch) -> None:
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "kiwoom_mock_enabled", False)
-        mcp = _build_mcp(McpProfile.DEFAULT)
-        assert KIWOOM_MOCK_TOOL_NAMES.isdisjoint(mcp.tools.keys())
-
-
-_ALPACA_MUTATING = ALPACA_PAPER_MUTATING_TOOL_NAMES
 _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     McpProfile.DEFAULT: (
         _ACTIVE_GENERIC_ORDER_TOOL_NAMES
-        | LIVE_RECONCILE_TOOL_NAMES
         | TOSS_LIVE_ORDER_TOOL_NAMES
         | PAPER_LIMIT_ORDER_TOOL_NAMES
     ),
-    McpProfile.CRYPTO: (
-        set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES) | LIVE_RECONCILE_TOOL_NAMES
-    ),
-    McpProfile.US_PAPER: set(_ALPACA_MUTATING) | ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
+    McpProfile.CRYPTO: set(_ACTIVE_GENERIC_ORDER_TOOL_NAMES),
     McpProfile.DB_PAPER: set(),
-    McpProfile.KIWOOM: KIWOOM_MOCK_TOOL_NAMES | KIWOOM_MOCK_US_TOOL_NAMES,
-    # ROB-1159 — KR-only split: the US namespace is physically absent.
-    McpProfile.KIWOOM_KR: set(KIWOOM_MOCK_TOOL_NAMES),
     # ROB-697 M1 — shadow-replay registers zero order/mutation tools by design
     # (frozen-context read + policy + route_request only, early-return).
     McpProfile.SHADOW_REPLAY: set(),
@@ -415,9 +151,6 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
     # forbidden-surface tests below prove the mutation/write tools stay absent.
     McpProfile.ACCOUNT_READ: {
         "get_order_history",
-        "kiwoom_mock_get_order_history",
-        "kiwoom_mock_get_positions",
-        "kiwoom_mock_get_orderable_cash",
         "toss_get_order_history",
         "toss_get_positions",
         "toss_get_orderable_cash",
@@ -428,11 +161,6 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
         "get_order_history",
         "sell_ladder_fill_preview",
         "buy_ladder_fill_preview",
-        # ROB-1155 — the explicit tradingcodex allowlist, NOT the full
-        # KIWOOM_MOCK_TOOL_NAMES set: kiwoom_mock_get_order_detail (kt00007) is
-        # registered on the KIWOOM profile only and must stay out of this
-        # privileged profile unless added deliberately.
-        *KIWOOM_MOCK_EXECUTION_TOOL_NAMES,
         "toss_preview_order",
         "toss_place_order",
         "toss_cancel_order",
@@ -440,10 +168,6 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
         "toss_get_positions",
         "toss_get_orderable_cash",
     },
-    # Default-off profile: the direct registry exposes zero tools until the
-    # dedicated feature flag is explicitly enabled.
-    McpProfile.PAPER_EXECUTION: set(),
-    McpProfile.ALPACA_PAPER_CLEAN: set(),
     # ROB-1286 — the watch-fire repricing session. It may create an order
     # *proposal*; it holds no order-mutation tool at all, so this row is the
     # empty set and any future addition here is a visible diff.
@@ -452,14 +176,8 @@ _ORDER_SURFACE_MATRIX: dict[McpProfile, set[str]] = {
 _ALL_ORDER_TOOL_NAMES = (
     _ACTIVE_GENERIC_ORDER_TOOL_NAMES
     | _RETIRED_KIS_ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
-    | KIWOOM_MOCK_TOOL_NAMES
-    | KIWOOM_MOCK_US_TOOL_NAMES
-    | _ALPACA_MUTATING
-    | ALPACA_PAPER_AUTOMATED_TOOL_NAMES
     | TOSS_LIVE_ORDER_TOOL_NAMES
     | PAPER_LIMIT_ORDER_TOOL_NAMES
-    | PAPER_EXECUTION_TOOL_NAMES
 )
 
 
@@ -496,8 +214,6 @@ _PROFILES_WITH_RESEARCH_SURFACE = [
         McpProfile.ANALYSIS_READONLY,
         McpProfile.ACCOUNT_READ,
         McpProfile.TRADINGCODEX_EXECUTION,
-        McpProfile.PAPER_EXECUTION,
-        McpProfile.ALPACA_PAPER_CLEAN,
         # ROB-1286 — allowlist-only and early-returns before the "Always"
         # research block, like the other closed-world profiles above.
         McpProfile.WATCH_REPRICING,
@@ -661,10 +377,6 @@ class TestAccountReadProfile:
             "kis_mock_place_order",
             "kis_mock_cancel_order",
             "kis_mock_modify_order",
-            "kiwoom_mock_preview_order",
-            "kiwoom_mock_place_order",
-            "kiwoom_mock_cancel_order",
-            "kiwoom_mock_modify_order",
             "live_reconcile_orders",
             "toss_preview_order",
             "toss_place_order",
@@ -687,25 +399,6 @@ class TestAccountReadProfile:
             f"account_read leaked write/persistence tools: {sorted(leaked)}"
         )
 
-    def test_registers_only_three_kiwoom_mock_reads(self) -> None:
-        mcp = _build_mcp(McpProfile.ACCOUNT_READ)
-        assert KIWOOM_MOCK_TOOL_NAMES & mcp.tools.keys() == {
-            "kiwoom_mock_get_positions",
-            "kiwoom_mock_get_orderable_cash",
-            "kiwoom_mock_get_order_history",
-        }
-
-    def test_kt00007_order_detail_is_deliberately_absent(self) -> None:
-        # ROB-1155 — kiwoom_mock_get_order_detail is a pure read but is NOT on
-        # this profile by design: ACCOUNT_READ_TOOL_NAMES is unioned into
-        # TRADINGCODEX_EXECUTION_TOOL_NAMES, so listing it here would silently
-        # widen that privileged profile as well. Absence here is a decision, not
-        # an oversight; KR-B1 reaches the tool via MCP_PROFILE=kiwoom.
-        mcp = _build_mcp(McpProfile.ACCOUNT_READ)
-        assert "kiwoom_mock_get_order_detail" not in mcp.tools
-        assert "kiwoom_mock_get_order_detail" in KIWOOM_MOCK_TOOL_NAMES
-        assert "kiwoom_mock_get_order_detail" in _build_mcp(McpProfile.KIWOOM).tools
-
     def test_expected_account_read_tools_are_present(self) -> None:
         mcp = _build_mcp(McpProfile.ACCOUNT_READ)
         assert {
@@ -714,32 +407,11 @@ class TestAccountReadProfile:
             "get_cash_balance",
             "toss_get_orderable_cash",
             "get_order_history",
-            "kiwoom_mock_get_positions",
-            "kiwoom_mock_get_orderable_cash",
-            "kiwoom_mock_get_order_history",
             "toss_get_order_history",
         } <= mcp.tools.keys()
 
 
 class TestTradingCodexExecutionProfile:
-    def test_kiwoom_execution_allowlist_is_explicit_exact_seven(self) -> None:
-        explicit_allowlist = getattr(
-            tradingcodex_execution_registration,
-            "KIWOOM_MOCK_EXECUTION_TOOL_NAMES",
-            None,
-        )
-
-        assert explicit_allowlist is not None
-        assert set(explicit_allowlist) == _EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES
-        assert (
-            TRADINGCODEX_EXECUTION_TOOL_NAMES & KIWOOM_MOCK_TOOL_NAMES
-            == _EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES
-        )
-
-        mcp = _build_mcp(McpProfile.TRADINGCODEX_EXECUTION)
-        registered = {name for name in mcp.tools if name.startswith("kiwoom_mock_")}
-        assert registered == _EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES
-
     def test_registers_exact_tradingcodex_execution_allowlist(self) -> None:
         mcp = _build_mcp(McpProfile.TRADINGCODEX_EXECUTION)
         # ROB-816: order_proposal_* tools are additionally gated by
@@ -768,7 +440,6 @@ class TestTradingCodexExecutionProfile:
             "toss_get_order_history",
             "place_order",
             "cancel_order",
-            *_EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES,
             "toss_preview_order",
             "toss_place_order",
             "toss_cancel_order",
@@ -787,18 +458,10 @@ class TestTradingCodexExecutionProfile:
             "trade_retrospective_pending",
         } <= mcp.tools.keys()
 
-    def test_registers_exact_typed_kiwoom_mock_surface(self) -> None:
+    def test_removed_broker_namespaces_are_absent(self) -> None:
         mcp = _build_mcp(McpProfile.TRADINGCODEX_EXECUTION)
-        assert KIWOOM_MOCK_TOOL_NAMES & mcp.tools.keys() == (
-            _EXPECTED_KIWOOM_EXECUTION_TOOL_NAMES
-        )
-        assert {
-            "kiwoom_place_order",
-            "kiwoom_live_place_order",
-            "kiwoom_live_cancel_order",
-            "kiwoom_live_modify_order",
-            "kiwoom_live_get_order_history",
-        }.isdisjoint(mcp.tools.keys())
+        assert not [name for name in mcp.tools if name.startswith("kiwoom_")]
+        assert not [name for name in mcp.tools if name.startswith("alpaca_")]
 
     def test_does_not_register_modify_reconcile_or_unsafe_persistence_tools(
         self,
@@ -993,8 +656,9 @@ class TestResolveMcpProfile:
         with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):
             resolve_mcp_profile("hermes-paper-kis")
 
-    def test_us_paper(self) -> None:
-        assert resolve_mcp_profile("us-paper") is McpProfile.US_PAPER
+    def test_us_paper_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):
+            resolve_mcp_profile("us-paper")
 
     def test_db_paper(self) -> None:
         assert resolve_mcp_profile("db-paper") is McpProfile.DB_PAPER
@@ -1002,8 +666,9 @@ class TestResolveMcpProfile:
     def test_crypto(self) -> None:
         assert resolve_mcp_profile("crypto") is McpProfile.CRYPTO
 
-    def test_kiwoom(self) -> None:
-        assert resolve_mcp_profile("kiwoom") is McpProfile.KIWOOM
+    def test_kiwoom_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):
+            resolve_mcp_profile("kiwoom")
 
     def test_shadow_replay(self) -> None:
         assert resolve_mcp_profile("shadow-replay") is McpProfile.SHADOW_REPLAY
@@ -1020,8 +685,9 @@ class TestResolveMcpProfile:
             is McpProfile.TRADINGCODEX_EXECUTION
         )
 
-    def test_paper_execution(self) -> None:
-        assert resolve_mcp_profile("paper_execution") is McpProfile.PAPER_EXECUTION
+    def test_paper_execution_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):
+            resolve_mcp_profile("paper_execution")
 
     def test_invalid_string_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="Unknown MCP_PROFILE"):

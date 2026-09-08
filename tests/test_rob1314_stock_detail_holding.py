@@ -198,7 +198,6 @@ async def test_get_symbol_holding_projects_from_shared_snapshot_without_readers(
     monkeypatch.setattr(svc_mod, "_fetch_reader_result", None)  # readers unusable
 
     service = InvestHomeService(
-        upbit_reader=None,
         manual_reader=_Reader(),
         snapshot_cache=cache,
     )

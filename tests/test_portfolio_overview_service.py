@@ -26,7 +26,7 @@ async def test_get_overview_collects_sources_concurrently(monkeypatch) -> None:
         active_count += 1
         max_active = max(max_active, active_count)
         started.add(name)
-        if len(started) == 3:
+        if len(started) == 2:
             release.set()
         try:
             await asyncio.wait_for(release.wait(), timeout=0.1)
@@ -36,9 +36,6 @@ async def test_get_overview_collects_sources_concurrently(monkeypatch) -> None:
         return []
 
     service._collector._collect_toss_components = lambda *args, **kwargs: gated("toss")
-    service._collector._collect_upbit_components = lambda *args, **kwargs: gated(
-        "upbit"
-    )
     service._collector._collect_manual_components = lambda *args, **kwargs: gated(
         "manual"
     )
@@ -56,7 +53,7 @@ async def test_get_overview_collects_sources_concurrently(monkeypatch) -> None:
     )
 
     await service.get_overview(user_id=1)
-    assert max_active == 3, f"Only {max_active} tasks ran concurrently, expected 3"
+    assert max_active == 2, f"Only {max_active} tasks ran concurrently, expected 2"
 
 
 @pytest.mark.asyncio
@@ -174,21 +171,6 @@ def _sample_components() -> list[dict[str, object]]:
             "profit_loss": 20.0,
             "profit_rate": 0.0667,
         },
-        {
-            "market_type": "CRYPTO",
-            "symbol": "KRW-BTC",
-            "name": "KRW-BTC",
-            "account_key": "live:upbit",
-            "broker": "upbit",
-            "account_name": "Upbit 실계좌",
-            "source": "live",
-            "quantity": 0.1,
-            "avg_price": 100000000.0,
-            "current_price": 110000000.0,
-            "evaluation": 11000000.0,
-            "profit_loss": 1000000.0,
-            "profit_rate": 0.1,
-        },
     ]
 
 
@@ -198,9 +180,6 @@ async def test_get_overview_filters_by_selected_account_keys() -> None:
     components = _sample_components()
 
     service._collector._collect_toss_components = AsyncMock(return_value=components[:1])
-    service._collector._collect_upbit_components = AsyncMock(
-        return_value=components[3:]
-    )
     service._collector._collect_manual_components = AsyncMock(
         return_value=components[1:3]
     )
@@ -227,9 +206,6 @@ async def test_get_overview_applies_market_and_q_filters() -> None:
     components = _sample_components()
 
     service._collector._collect_toss_components = AsyncMock(return_value=components[:1])
-    service._collector._collect_upbit_components = AsyncMock(
-        return_value=components[3:]
-    )
     service._collector._collect_manual_components = AsyncMock(
         return_value=components[1:3]
     )
@@ -257,15 +233,6 @@ async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
         warnings.append("Toss warning")
         return []
 
-    async def collect_upbit(
-        warnings,
-        active_upbit_markets=None,
-        enforce_upbit_universe=True,
-    ):
-        _ = active_upbit_markets, enforce_upbit_universe
-        warnings.append("Upbit warning")
-        return []
-
     async def collect_manual(
         _user_id,
         warnings,
@@ -278,7 +245,6 @@ async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
 
     # Collection methods are now on the collector; patch via _collector attribute
     service._collector._collect_toss_components = collect_toss
-    service._collector._collect_upbit_components = collect_upbit
     service._collector._collect_manual_components = collect_manual
     service._fill_missing_prices = AsyncMock(return_value=None)
 
@@ -294,7 +260,7 @@ async def test_get_overview_includes_deduplicated_warnings(monkeypatch) -> None:
     )
 
     overview = await service.get_overview(user_id=1)
-    assert overview["warnings"] == ["Toss warning", "Upbit warning"]
+    assert overview["warnings"] == ["Toss warning"]
 
 
 def test_aggregate_positions_recalculates_totals_when_some_components_missing_eval() -> (
@@ -675,47 +641,6 @@ async def test_fetch_upbit_prices_resilient_recovers_missing_symbol_from_retry_b
 
 
 @pytest.mark.asyncio
-async def test_collect_upbit_components_returns_raw_components_without_price_fill(
-    monkeypatch,
-) -> None:
-    """After W2-3 refactor, price fill is delegated to _fill_missing_crypto_prices;
-    _collect_upbit_components returns raw components with current_price=None."""
-    service = PortfolioOverviewService(AsyncMock())
-    warnings: list[str] = []
-
-    import app.services.portfolio_data_collector as portfolio_collector_module
-
-    monkeypatch.setattr(
-        portfolio_collector_module.upbit_service,
-        "fetch_my_coins",
-        AsyncMock(
-            return_value=[
-                {
-                    "currency": "BTC",
-                    "unit_currency": "KRW",
-                    "balance": "0.1",
-                    "locked": "0",
-                    "avg_buy_price": "90000000",
-                }
-            ]
-        ),
-    )
-    monkeypatch.setattr(
-        portfolio_collector_module,
-        "get_active_upbit_markets",
-        AsyncMock(return_value=["KRW-BTC"]),
-    )
-
-    components = await service._collector._collect_upbit_components(warnings)
-
-    assert len(components) == 1
-    assert components[0]["symbol"] == "KRW-BTC"
-    # Price fill is now handled by _fill_missing_crypto_prices, not collector
-    assert components[0]["current_price"] is None
-    assert components[0]["evaluation"] is None
-
-
-@pytest.mark.asyncio
 async def test_fill_missing_prices_uses_resilient_fetch_helper_for_manual_crypto() -> (
     None
 ):
@@ -871,7 +796,8 @@ async def test_get_overview_keeps_crypto_when_universe_lookup_fails(
 ) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
-    async def collect_upbit(
+    async def collect_manual(
+        _user_id,
         warnings,
         active_upbit_markets=None,
         enforce_upbit_universe=True,
@@ -883,10 +809,10 @@ async def test_get_overview_keeps_crypto_when_universe_lookup_fails(
                 "market_type": "CRYPTO",
                 "symbol": "KRW-BTC",
                 "name": "KRW-BTC",
-                "account_key": "live:upbit",
-                "broker": "upbit",
-                "account_name": "Upbit 실계좌",
-                "source": "live",
+                "account_key": "manual:21",
+                "broker": "samsung",
+                "account_name": "수동 코인",
+                "source": "manual",
                 "quantity": 0.1,
                 "avg_price": 100000000.0,
                 "current_price": 101000000.0,
@@ -897,8 +823,7 @@ async def test_get_overview_keeps_crypto_when_universe_lookup_fails(
         ]
 
     service._collector._collect_toss_components = AsyncMock(return_value=[])
-    service._collector._collect_upbit_components = collect_upbit
-    service._collector._collect_manual_components = AsyncMock(return_value=[])
+    service._collector._collect_manual_components = collect_manual
     service._fill_missing_prices = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
@@ -951,7 +876,6 @@ async def test_get_overview_excludes_non_tradable_manual_crypto_everywhere(
         return_value=holdings
     )
     service._collector._collect_toss_components = AsyncMock(return_value=[])
-    service._collector._collect_upbit_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
@@ -986,7 +910,6 @@ async def test_get_overview_excludes_non_tradable_manual_crypto_everywhere(
 async def test_get_overview_skips_missing_price_fill_when_requested() -> None:
     service = PortfolioOverviewService(AsyncMock())
     service._collector._collect_toss_components = AsyncMock(return_value=[])
-    service._collector._collect_upbit_components = AsyncMock(return_value=[])
     service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock()
 
@@ -1107,7 +1030,6 @@ async def test_get_overview_includes_exchange_rate(monkeypatch) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
     service._collector._collect_toss_components = AsyncMock(return_value=[])
-    service._collector._collect_upbit_components = AsyncMock(return_value=[])
     service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 
@@ -1132,7 +1054,6 @@ async def test_get_overview_exchange_rate_none_on_failure(monkeypatch) -> None:
     service = PortfolioOverviewService(AsyncMock())
 
     service._collector._collect_toss_components = AsyncMock(return_value=[])
-    service._collector._collect_upbit_components = AsyncMock(return_value=[])
     service._collector._collect_manual_components = AsyncMock(return_value=[])
     service._fill_missing_prices = AsyncMock(return_value=None)
 

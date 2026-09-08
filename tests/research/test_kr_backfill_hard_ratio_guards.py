@@ -34,13 +34,13 @@ def test_db_insert_conflict_ratio_aborts_above_half_percent(
     collect_module: ModuleType,
 ) -> None:
     assert collect_module.DB_INSERT_CONFLICT_ABORT_RATIO == 0.005
-    at_limit = collect_module.SurfaceStats(
-        surface="mock", rows_inserted=995, rows_skipped_conflict=5
+    at_limit = collect_module.StreamStats(
+        source="toss", rows_inserted=995, rows_skipped_conflict=5
     )
     collect_module.enforce_hard_ratio_guards(at_limit)
 
-    above_limit = collect_module.SurfaceStats(
-        surface="mock", rows_inserted=994, rows_skipped_conflict=6
+    above_limit = collect_module.StreamStats(
+        source="toss", rows_inserted=994, rows_skipped_conflict=6
     )
     with pytest.raises(collect_module.AbortStream, match="DB insert conflict ratio"):
         collect_module.enforce_hard_ratio_guards(above_limit)
@@ -51,12 +51,12 @@ def test_cursor_overlap_ratio_aborts_above_forty_percent(
 ) -> None:
     assert collect_module.CURSOR_OVERLAP_ABORT_RATIO == 0.40
     at_limit = collect_module.StreamStats(
-        source="kiwoom", rows_kept=600, rows_filtered_cursor_overlap=400
+        source="toss", rows_kept=600, rows_filtered_cursor_overlap=400
     )
     collect_module.enforce_hard_ratio_guards(at_limit)
 
     above_limit = collect_module.StreamStats(
-        source="kiwoom", rows_kept=599, rows_filtered_cursor_overlap=401
+        source="toss", rows_kept=599, rows_filtered_cursor_overlap=401
     )
     with pytest.raises(collect_module.AbortStream, match="cursor overlap ratio"):
         collect_module.enforce_hard_ratio_guards(above_limit)
@@ -75,8 +75,8 @@ def test_only_proven_first_page_resume_preseed_is_excluded(
     )
     assert preseed == 702
     collect_module.enforce_hard_ratio_guards(
-        collect_module.SurfaceStats(
-            surface="live",
+        collect_module.StreamStats(
+            source="toss",
             rows_skipped_conflict=702,
             rows_skipped_conflict_preseed=preseed,
         )
@@ -106,8 +106,8 @@ def test_only_proven_first_page_resume_preseed_is_excluded(
     )
     with pytest.raises(collect_module.AbortStream, match="DB insert conflict ratio"):
         collect_module.enforce_hard_ratio_guards(
-            collect_module.SurfaceStats(
-                surface="live",
+            collect_module.StreamStats(
+                source="toss",
                 rows_inserted=994,
                 rows_skipped_conflict=708,
                 rows_skipped_conflict_preseed=702,
@@ -115,7 +115,7 @@ def test_only_proven_first_page_resume_preseed_is_excluded(
         )
 
 
-def test_both_collection_paths_enforce_non_configurable_hard_guards(
+def test_collection_path_enforces_non_configurable_hard_guards(
     collect_module: ModuleType,
 ) -> None:
     assert list(
@@ -124,21 +124,17 @@ def test_both_collection_paths_enforce_non_configurable_hard_guards(
     assert "enforce_hard_ratio_guards(stats)" in inspect.getsource(
         collect_module.run_stream
     )
-    assert "enforce_hard_ratio_guards(stats)" in inspect.getsource(
-        collect_module.run_surface
-    )
-    assert "hard_stop_event.set()" in inspect.getsource(collect_module.run_surface)
 
 
-def test_stopped_dual_surface_cannot_return_clean_success(
+def test_stopped_stream_cannot_return_clean_success(
     collect_module: ModuleType,
 ) -> None:
-    clean = collect_module.SurfaceStats(surface="mock", rows_fetched=900)
-    stopped = collect_module.SurfaceStats(
-        surface="live",
+    clean = collect_module.StreamStats(source="toss", rows_fetched=900)
+    stopped = collect_module.StreamStats(
+        source="toss",
         rows_fetched=900,
         stopped_reason="DB insert conflict ratio exceeded",
     )
 
-    assert collect_module.exit_code_for_surface_results([clean]) == 0
-    assert collect_module.exit_code_for_surface_results([clean, stopped]) == 1
+    assert collect_module.exit_code_for_results([clean]) == 0
+    assert collect_module.exit_code_for_results([clean, stopped]) == 1

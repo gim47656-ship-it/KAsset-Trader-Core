@@ -844,12 +844,12 @@ def test_non_executable_quote_kinds_fail_closed(kind, source):
     )
 
 
-def test_nhplug_read_only_quote_is_not_executable_broker_evidence():
+def test_non_toss_broker_quote_is_not_executable_broker_evidence():
     quote = TypedQuoteEvidence(
         symbol="257720",
         venue=QuoteVenue.KRX,
         quote_kind=QuoteKind.BROKER_LAST_TRADE,
-        source=QuoteSource.NHPLUG_MARKET_DATA,
+        source=QuoteSource.NXT_EXPECTED_MODEL,
         observed_at=_EVIDENCE_AT,
         executable=True,
         firm=True,
@@ -1398,8 +1398,8 @@ def test_public_policy_loader_returns_detached_policy_copy():
     ("component", "unsafe_value"),
     [
         ("lanes", []),
-        ("brokers", ["toss", "nhplug"]),
-        ("required_broker_inventory", ["toss", "nhplug"]),
+        ("brokers", ["toss", "other_broker"]),
+        ("required_broker_inventory", ["toss", "other_broker"]),
     ],
 )
 def test_schema_rejects_hidden_lane_or_non_toss_account_broker(
@@ -1427,8 +1427,8 @@ def test_schema_rejects_hidden_lane_or_non_toss_account_broker(
         ("proposal", "execution", "direct_broker_submit"),
         ("rule", "operator_approval_required", False),
         ("rule", "lanes", []),
-        ("scope", "brokers", ["toss", "nhplug"]),
-        ("scope", "required_broker_inventory", ["toss", "nhplug"]),
+        ("scope", "brokers", ["toss", "other_broker"]),
+        ("scope", "required_broker_inventory", ["toss", "other_broker"]),
         ("conditions", "min_sell_price_multiple_policy_key", "other.key"),
     ],
 )

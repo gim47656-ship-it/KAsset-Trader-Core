@@ -19,17 +19,12 @@ def mock_external_clients():
             AsyncMock(return_value=SimpleNamespace(positions=[], errors=[])),
         ) as mock_toss,
         patch(
-            "app.services.trade_journal_coverage_service.upbit_client", autospec=True
-        ) as mock_upbit,
-        patch(
             "app.services.merged_portfolio_service.get_usd_krw_rate",
             AsyncMock(return_value=1350.0),
         ),
     ):
         mock_toss.return_value = SimpleNamespace(positions=[], errors=[])
-        mock_upbit.fetch_my_coins = AsyncMock(return_value=[])
-        mock_upbit.fetch_multiple_current_prices = AsyncMock(return_value={})
-        yield mock_toss, mock_upbit
+        yield mock_toss
 
 
 @pytest.fixture

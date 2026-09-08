@@ -32,10 +32,17 @@ from app.services.order_proposals.dispatch_contract import (
 from app.services.order_proposals.service import RungInput
 
 
+@pytest.fixture(autouse=True)
+def _enable_toss_veto_for_supported_flow_tests(monkeypatch):
+    from app.services.order_proposals import auto_approve as module
+
+    monkeypatch.setattr(module.settings, "ORDER_PROPOSALS_TOSS_LIVE_VETO_ENABLED", True)
+
+
 def _group(**overrides):
     values = {
-        "market": "crypto",
-        "account_mode": "upbit",
+        "market": "equity_kr",
+        "account_mode": "toss_live",
         "broker_account_id": "acct-1",
         "order_type": "limit",
         "action": "place",
@@ -142,7 +149,11 @@ def test_sell_requires_distance_and_previewed_loss_guard():
             {"side": "sell"},
             "exit_intent_present",
         ),
-        ({"account_mode": "toss_live"}, {}, "account_not_veto_capable"),
+        (
+            {"account_mode": "upbit", "market": "crypto"},
+            {},
+            "account_not_veto_capable",
+        ),
         ({}, {"limit_price": Decimal("98000")}, "distance_below_minimum"),
         ({}, {"quantity": Decimal("3")}, "per_order_cap_exceeded"),
     ],
@@ -1040,7 +1051,7 @@ def test_expanded_unclassifiable_sell_fails_closed(preview_overrides, expected_r
 def test_expanded_does_not_widen_the_eligible_account_set():
     """Mutant ⑦ — §40차 must not hand auto-approval to a non-cancellable lane."""
     for account_mode, market in (
-        ("toss_live", "equity_kr"),
+        ("upbit", "crypto"),
         ("kis_mock", "equity_kr"),
         ("kiwoom_mock", "equity_kr"),
         ("alpaca_paper", "equity_us"),
@@ -1105,6 +1116,10 @@ def test_shipped_default_mode_is_off(monkeypatch):
 
 def test_toss_live_requires_its_separate_default_off_veto_gate(monkeypatch):
     from app.services.order_proposals import auto_approve as module
+
+    monkeypatch.setattr(
+        module.settings, "ORDER_PROPOSALS_TOSS_LIVE_VETO_ENABLED", False
+    )
 
     blocked = _evaluate(
         group_overrides={"account_mode": "toss_live", "market": "equity_kr"},
@@ -1490,7 +1505,10 @@ def test_s141_cancel_of_someone_elses_order_is_rejected():
         ({"exit_intent": "loss_cut"}, "loss_cut_intent"),
         ({"exit_intent": "defensive_trim"}, "exit_intent_present"),
         ({"thesis": "policy_deviation applied"}, "approval_required_tag"),
-        ({"account_mode": "toss_live"}, "account_not_veto_capable"),
+        (
+            {"account_mode": "upbit", "market": "crypto"},
+            "account_not_veto_capable",
+        ),
         ({"thesis": "  "}, "thesis_required_for_veto_card"),
     ],
 )

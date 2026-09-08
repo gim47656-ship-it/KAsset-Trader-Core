@@ -102,8 +102,8 @@ def _batch_callback(
 
 def _target_snapshot_payload(**overrides):
     payload = {
-        "broker_order_id": "manual-upbit-1",
-        "symbol": "KRW-AVAX",
+        "broker_order_id": "manual-target-1",
+        "symbol": "005930",
         "side": "sell",
         "order_type": "limit",
         "limit_price": "42000",
@@ -123,14 +123,14 @@ _TEST_OWNER_AGENT = "test-owner-agent"
 
 def _target_action_create_kwargs(action: str, **overrides):
     kwargs = {
-        "symbol": "KRW-AVAX",
-        "market": "crypto",
-        "account_mode": "upbit",
+        "symbol": "005930",
+        "market": "equity_kr",
+        "account_mode": "toss_live",
         "side": "sell",
         "order_type": "limit",
         "proposer": "p",
         "action": action,
-        "target_broker_order_id": "manual-upbit-1",
+        "target_broker_order_id": "manual-target-1",
         "target_order_snapshot": _target_snapshot_payload(),
         "rungs": [RungInput(0, "sell", Decimal("3.5"), Decimal("42000"), None)],
         "creator_agent_id": _TEST_OWNER_AGENT,
@@ -143,8 +143,8 @@ def _target_action_create_kwargs(action: str, **overrides):
 async def test_target_mutation_lock_serializes_same_broker_order():
     target = SimpleNamespace(
         action="replace",
-        account_mode="upbit",
-        market="crypto",
+        account_mode="toss_live",
+        market="equity_kr",
         broker_account_id=None,
         target_broker_order_id=f"manual-{uuid.uuid4()}",
     )
@@ -292,28 +292,7 @@ async def test_target_actions_allow_toss_live_equities(db_session, action, marke
     assert group.account_mode == "toss_live"
     assert group.market == market
     assert group.action == action
-    assert group.target_broker_order_id == "manual-upbit-1"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["replace", "cancel"])
-async def test_target_action_rejection_message_matches_capability_set(
-    db_session, action
-):
-    """The rejection message must be derived from the same set the action
-    actually checks membership against -- not a different action's set (the
-    ROB-972 bug: cancel/replace rejections reused place's hardcoded message
-    and falsely advertised toss_live support they didn't have).
-    """
-    with pytest.raises(OrderProposalError) as exc_info:
-        await OrderProposalsService(db_session).create_proposal(
-            **_target_action_create_kwargs(action, account_mode="kis_mock")
-        )
-    assert str(exc_info.value) == (
-        f"unsupported account_mode/market/action: kis_mock/crypto/{action} "
-        "(allowed: toss_live×equity_kr|equity_us, upbit×crypto; "
-        "market aliases kr→equity_kr, us→equity_us)"
-    )
+    assert group.target_broker_order_id == "manual-target-1"
 
 
 @pytest.mark.asyncio
@@ -370,16 +349,16 @@ async def test_replace_persists_target_snapshot_and_allows_independent_proposals
     second = await service.create_proposal(
         **_target_action_create_kwargs(
             "replace",
-            target_broker_order_id="manual-upbit-2",
+            target_broker_order_id="manual-target-2",
             target_order_snapshot=_target_snapshot_payload(
-                broker_order_id="manual-upbit-2"
+                broker_order_id="manual-target-2"
             ),
         )
     )
 
     assert first.proposal_id != second.proposal_id
     assert first.action == second.action == "replace"
-    assert first.target_broker_order_id == "manual-upbit-1"
+    assert first.target_broker_order_id == "manual-target-1"
     assert first.source_asof == {
         "origin": "manual",
         "target_order_snapshot": _target_snapshot_payload(),
@@ -596,31 +575,6 @@ async def test_loss_cut_preserves_required_approval_issue_as_audit_note(
     group = await OrderProposalsService(db_session).create_proposal(**kwargs)
 
     assert group.approval_issue_id == "legacy Paperclip note / operator context"
-
-
-@pytest.mark.asyncio
-async def test_upbit_crypto_loss_cut_is_valid(db_session, monkeypatch):
-    async def fake_lookup(session, retrospective_id):
-        return _retro(symbol="KRW-DOT")
-
-    monkeypatch.setattr(
-        "app.services.order_proposals.service.get_retrospective_by_id", fake_lookup
-    )
-    group = await OrderProposalsService(db_session).create_proposal(
-        symbol="KRW-DOT",
-        market="crypto",
-        account_mode="upbit",
-        side="sell",
-        order_type="limit",
-        proposer="p",
-        rungs=[RungInput(0, "sell", Decimal("0.1"), Decimal("3200"), None)],
-        exit_intent="loss_cut",
-        exit_reason="stop_loss",
-        retrospective_id=42,
-        approval_issue_id="ROB-800",
-        now=datetime.now(UTC),
-    )
-    assert group.exit_intent == "loss_cut"
 
 
 @pytest.mark.asyncio
@@ -1808,13 +1762,11 @@ async def test_fill_evidence_prefers_exact_broker_order_over_reused_correlation(
 
 
 @pytest.mark.asyncio
-async def test_fill_evidence_books_upbit_rung_by_identifier(db_session):
-    service, group = await _create_single_rung(
-        db_session,
-        symbol="BTC/KRW",
-        account_mode="upbit",
-        market="crypto",
-    )
+async def test_fill_evidence_books_historical_upbit_rung_by_identifier(db_session):
+    service, group = await _create_single_rung(db_session, symbol="BTC/KRW")
+    group.account_mode = "upbit"
+    group.market = "crypto"
+    await db_session.commit()
     now = datetime(2026, 7, 14, 9, 6, tzinfo=UTC)
     identifier = f"rob868-{group.proposal_id}"
     await _drive_to_submitting(service, group.proposal_id)
@@ -2033,7 +1985,7 @@ async def test_fill_evidence_rechecks_committed_state_under_lock(db_session):
     late/partial evidence arriving on a session that observed the rung earlier
     must short-circuit — it must never regress the already-`filled` rung back to
     `partially_filled`. Guards the record_fill_evidence lock + refresh re-check."""
-    from app.mcp_server.tooling.live_order_ledger import _order_session_factory
+    from app.core.db import AsyncSessionLocal
 
     service, group = await _create_single_rung(db_session)
     now = datetime(2026, 7, 11, 9, 4, tzinfo=UTC)
@@ -2044,7 +1996,7 @@ async def test_fill_evidence_rechecks_committed_state_under_lock(db_session):
     await service.get_proposal(group.proposal_id)
 
     # A concurrent session commits the terminal fill.
-    async with _order_session_factory()() as db2:
+    async with AsyncSessionLocal() as db2:
         other = OrderProposalsService(db2)
         await other.record_fill_evidence(
             broker_order_id=acked.broker_order_id,
@@ -2064,7 +2016,7 @@ async def test_fill_evidence_rechecks_committed_state_under_lock(db_session):
     )
     assert result is None
 
-    async with _order_session_factory()() as db3:
+    async with AsyncSessionLocal() as db3:
         _, rungs = await OrderProposalsService(db3).get_proposal(group.proposal_id)
         assert rungs[0].state == "filled"
         assert rungs[0].filled_qty == Decimal("1")
@@ -2284,7 +2236,7 @@ async def test_record_approval_dispatch_missing_proposal_raises(db_session):
 
 # ---------------------------------------------------------------------------
 # Final-review Finding 1 — account_mode/market/action submit allowlist.
-# Toss owns KR/US equities and Upbit owns crypto. Removed KIS modes and other
+# Toss owns active KR/US equity proposals. Removed provider modes and other
 # unsupported tuples must fail closed at proposal creation instead of
 # persisting an unexecutable intent or silently rerouting it to Toss.
 # ---------------------------------------------------------------------------
@@ -2331,9 +2283,10 @@ async def test_create_proposal_allows_toss_live_equity_us(db_session):
         ("kis_live", "equity_kr", "005930"),
         ("kis_live", "equity_us", "AAPL"),
         ("kis_mock", "equity_kr", "005930"),
+        ("upbit", "crypto", "BTC/KRW"),
     ],
 )
-async def test_create_proposal_rejects_non_operational_kis_modes(
+async def test_create_proposal_rejects_removed_provider_modes(
     db_session, account_mode, market, symbol
 ):
     with pytest.raises(OrderProposalError, match="unsupported account_mode/market"):
@@ -2346,43 +2299,6 @@ async def test_create_proposal_rejects_non_operational_kis_modes(
             proposer="p",
             rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
         )
-
-
-@pytest.mark.asyncio
-async def test_create_proposal_allows_upbit_crypto(db_session):
-    service = OrderProposalsService(db_session)
-    group = await service.create_proposal(
-        symbol="BTC/KRW",
-        market="crypto",
-        account_mode="upbit",
-        side="buy",
-        order_type="limit",
-        proposer="p",
-        rungs=[RungInput(0, "buy", Decimal("0.01"), Decimal("100000000"), None)],
-    )
-    await db_session.commit()
-    assert group.account_mode == "upbit"
-    assert group.market == "crypto"
-
-
-@pytest.mark.asyncio
-async def test_create_proposal_rejects_kis_mock_equity_kr(db_session):
-    service = OrderProposalsService(db_session)
-    with pytest.raises(OrderProposalError) as exc_info:
-        await service.create_proposal(
-            symbol="A",
-            market="equity_kr",
-            account_mode="kis_mock",
-            side="buy",
-            order_type="limit",
-            proposer="p",
-            rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
-        )
-    assert str(exc_info.value) == (
-        "unsupported account_mode/market/action: kis_mock/equity_kr/place "
-        "(allowed: toss_live×equity_kr|equity_us, upbit×crypto; "
-        "market aliases kr→equity_kr, us→equity_us)"
-    )
 
 
 @pytest.mark.asyncio
@@ -2404,7 +2320,7 @@ async def test_create_proposal_allows_toss_live_equities(db_session, market):
 
 
 @pytest.mark.asyncio
-async def test_create_proposal_rejects_db_simulated_and_upbit_wrong_market(db_session):
+async def test_create_proposal_rejects_db_simulated(db_session):
     service = OrderProposalsService(db_session)
     with pytest.raises(
         OrderProposalError, match="unsupported account_mode/market/action"
@@ -2413,18 +2329,6 @@ async def test_create_proposal_rejects_db_simulated_and_upbit_wrong_market(db_se
             symbol="A",
             market="equity_kr",
             account_mode="db_simulated",
-            side="buy",
-            order_type="limit",
-            proposer="p",
-            rungs=[RungInput(0, "buy", Decimal("1"), Decimal("100"), None)],
-        )
-    with pytest.raises(
-        OrderProposalError, match="unsupported account_mode/market/action"
-    ):
-        await service.create_proposal(
-            symbol="A",
-            market="equity_kr",
-            account_mode="upbit",
             side="buy",
             order_type="limit",
             proposer="p",

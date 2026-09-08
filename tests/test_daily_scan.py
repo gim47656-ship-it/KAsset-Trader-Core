@@ -96,9 +96,6 @@ def scanner_env(monkeypatch: pytest.MonkeyPatch):
         daily_scan.settings, "DAILY_SCAN_CRASH_THRESHOLD", 0.05, raising=False
     )
     monkeypatch.setattr(
-        daily_scan.settings, "DAILY_SCAN_CRASH_HOLDING_THRESHOLD", 0.04, raising=False
-    )
-    monkeypatch.setattr(
         daily_scan.settings, "DAILY_SCAN_CRASH_TOP10_THRESHOLD", 0.06, raising=False
     )
     monkeypatch.setattr(
@@ -258,33 +255,6 @@ async def test_send_alert_both_fails_when_agent_fails(
 
 
 @pytest.mark.asyncio
-async def test_check_overbought_holdings_sends_alert(
-    scanner_env,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    scanner, agent, _redis, daily_scan = scanner_env
-
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}, {"currency": "BTC"}]),
-    )
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_ohlcv",
-        AsyncMock(return_value=_make_ohlcv([100.0] * 50)),
-    )
-    monkeypatch.setattr(daily_scan, "_calculate_rsi", lambda _: {"14": 75.0})
-
-    alerts = await scanner.check_overbought_holdings("BTC_CTX")
-
-    assert len(alerts) == 1
-    assert "과매수" in alerts[0]
-    assert len(agent.messages) == 1
-    assert "BTC_CTX" in agent.messages[0]
-
-
-@pytest.mark.asyncio
 async def test_check_oversold_top30_sends_alert(
     scanner_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -331,11 +301,6 @@ async def test_check_price_crash_threshold_applies(
     )
     monkeypatch.setattr(
         daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}, {"currency": "XRP"}]),
-    )
-    monkeypatch.setattr(
-        daily_scan,
         "fetch_multiple_tickers",
         AsyncMock(
             return_value=[
@@ -356,7 +321,7 @@ async def test_check_price_crash_threshold_applies(
 
 
 @pytest.mark.asyncio
-async def test_check_price_crash_filters_non_tradable_holding_markets(
+async def test_check_price_crash_uses_ranked_public_universe(
     scanner_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -372,11 +337,6 @@ async def test_check_price_crash_filters_non_tradable_holding_markets(
             ]
         ),
     )
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}, {"currency": "PCI"}]),
-    )
     fetch_tickers = AsyncMock(return_value=[])
     monkeypatch.setattr(daily_scan, "fetch_multiple_tickers", fetch_tickers)
 
@@ -386,7 +346,7 @@ async def test_check_price_crash_filters_non_tradable_holding_markets(
 
 
 @pytest.mark.asyncio
-async def test_check_price_crash_applies_rank_tiers_and_holding_override(
+async def test_check_price_crash_applies_public_rank_tiers(
     scanner_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -405,27 +365,22 @@ async def test_check_price_crash_applies_rank_tiers_and_holding_override(
         "fetch_top_traded_coins",
         AsyncMock(return_value=top_coins),
     )
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "C115"}]),
-    )
     monkeypatch.setattr(daily_scan, "fetch_multiple_tickers", fetch_tickers)
 
     alerts = await scanner.check_price_crash()
 
-    assert len(alerts) == 2
-    assert len(agent.messages) == 2
+    assert len(alerts) == 1
+    assert len(agent.messages) == 1
     assert any("C050(C050) 24h +10.00% — 급등 감지" in msg for msg in agent.messages)
-    assert any("C115(C115) 24h +5.00% — 급등 감지" in msg for msg in agent.messages)
     assert all("C051(C051)" not in msg for msg in agent.messages)
+    assert all("C115(C115)" not in msg for msg in agent.messages)
 
     await_args = fetch_tickers.await_args
     assert await_args is not None
     requested_markets = list(await_args.args[0])
     assert "KRW-C101" not in requested_markets
-    assert "KRW-C115" in requested_markets
-    assert len(requested_markets) == 101
+    assert "KRW-C115" not in requested_markets
+    assert len(requested_markets) == 100
 
 
 @pytest.mark.asyncio
@@ -440,11 +395,6 @@ async def test_check_price_crash_logs_near_miss_for_tuning(
         daily_scan,
         "fetch_top_traded_coins",
         AsyncMock(return_value=[{"market": "KRW-BTC"}]),
-    )
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
         daily_scan,
@@ -464,7 +414,7 @@ async def test_check_price_crash_logs_near_miss_for_tuning(
 
 
 @pytest.mark.asyncio
-async def test_check_sma20_crossings_filters_non_tradable_holding_markets(
+async def test_check_sma20_crossings_uses_public_top_coin_universe(
     scanner_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -474,11 +424,6 @@ async def test_check_sma20_crossings_filters_non_tradable_holding_markets(
         daily_scan,
         "fetch_top_traded_coins",
         AsyncMock(return_value=[{"market": "KRW-BTC"}]),
-    )
-    monkeypatch.setattr(
-        daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}, {"currency": "PCI"}]),
     )
     fetch_ohlcv_mock = AsyncMock(return_value=_make_ohlcv([100.0] * 20))
     monkeypatch.setattr(daily_scan, "fetch_ohlcv", fetch_ohlcv_mock)
@@ -547,11 +492,6 @@ async def test_check_sma20_crossings_detects_golden_and_dead(
 
     monkeypatch.setattr(
         daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}]),
-    )
-    monkeypatch.setattr(
-        daily_scan,
         "fetch_top_traded_coins",
         AsyncMock(return_value=[{"market": "KRW-BTC"}, {"market": "KRW-ETH"}]),
     )
@@ -573,7 +513,7 @@ async def test_check_sma20_crossings_detects_golden_and_dead(
 
 
 @pytest.mark.asyncio
-async def test_cooldown_blocks_duplicate_alert(
+async def test_cooldown_blocks_duplicate_public_alert(
     scanner_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -581,18 +521,18 @@ async def test_cooldown_blocks_duplicate_alert(
 
     monkeypatch.setattr(
         daily_scan,
-        "fetch_my_coins",
-        AsyncMock(return_value=[{"currency": "KRW"}, {"currency": "BTC"}]),
+        "fetch_top_traded_coins",
+        AsyncMock(return_value=[{"market": "KRW-BTC"}]),
     )
     monkeypatch.setattr(
         daily_scan,
         "fetch_ohlcv",
         AsyncMock(return_value=_make_ohlcv([100.0] * 50)),
     )
-    monkeypatch.setattr(daily_scan, "_calculate_rsi", lambda _: {"14": 75.0})
+    monkeypatch.setattr(daily_scan, "_calculate_rsi", lambda _: {"14": 25.0})
 
-    first = await scanner.check_overbought_holdings("BTC_CTX")
-    second = await scanner.check_overbought_holdings("BTC_CTX")
+    first = await scanner.check_oversold_top30("BTC_CTX")
+    second = await scanner.check_oversold_top30("BTC_CTX")
 
     assert len(first) == 1
     assert second == []
@@ -670,12 +610,6 @@ async def test_run_strategy_scan_sends_single_batched_alert(
     )
     monkeypatch.setattr(
         scanner,
-        "check_overbought_holdings",
-        AsyncMock(return_value=["overbought message"]),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scanner,
         "check_oversold_top30",
         AsyncMock(return_value=["oversold message"]),
         raising=False,
@@ -689,7 +623,7 @@ async def test_run_strategy_scan_sends_single_batched_alert(
     monkeypatch.setattr(
         scanner,
         "check_sma20_crossings",
-        AsyncMock(return_value=[]),
+        AsyncMock(return_value=["BTC 데드크로스"]),
         raising=False,
     )
     send_mock = AsyncMock(return_value="scan-1")
@@ -708,7 +642,7 @@ async def test_run_strategy_scan_sends_single_batched_alert(
     assert "크립토 스캔 (09:30)" in batched_message
     assert "매수 신호" in batched_message
     assert "매도 신호" in batched_message
-    assert "overbought message" in batched_message
+    assert "BTC 데드크로스" in batched_message
     assert "oversold message" in batched_message
 
 
@@ -723,12 +657,6 @@ async def test_run_strategy_scan_does_not_send_when_no_alerts(
         scanner,
         "_get_btc_context",
         AsyncMock(return_value="BTC_CTX"),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scanner,
-        "check_overbought_holdings",
-        AsyncMock(return_value=[]),
         raising=False,
     )
     monkeypatch.setattr(
@@ -775,14 +703,8 @@ async def test_run_strategy_scan_returns_zero_when_batched_send_fails(
     )
     monkeypatch.setattr(
         scanner,
-        "check_overbought_holdings",
-        AsyncMock(return_value=["overbought message"]),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        scanner,
         "check_oversold_top30",
-        AsyncMock(return_value=[]),
+        AsyncMock(return_value=["oversold message"]),
         raising=False,
     )
     monkeypatch.setattr(
@@ -826,22 +748,6 @@ async def test_run_strategy_scan_records_deduped_cooldowns_on_batch_success(
         raising=False,
     )
 
-    async def fake_overbought(
-        btc_ctx: str,
-        send_immediately: bool = True,
-        pending_cooldowns: list[tuple[str, str]] | None = None,
-    ) -> list[str]:
-        _ = btc_ctx
-        assert not send_immediately
-        assert pending_cooldowns is not None
-        pending_cooldowns.extend(
-            [
-                ("BTC", "overbought"),
-                ("BTC", "overbought"),
-            ]
-        )
-        return ["overbought message"]
-
     async def fake_oversold(
         btc_ctx: str,
         send_immediately: bool = True,
@@ -853,12 +759,11 @@ async def test_run_strategy_scan_records_deduped_cooldowns_on_batch_success(
         pending_cooldowns.extend(
             [
                 ("ETH", "oversold"),
-                ("BTC", "overbought"),
+                ("ETH", "oversold"),
             ]
         )
         return ["oversold message"]
 
-    monkeypatch.setattr(scanner, "check_overbought_holdings", fake_overbought)
     monkeypatch.setattr(scanner, "check_oversold_top30", fake_oversold)
     monkeypatch.setattr(
         scanner,
@@ -888,10 +793,8 @@ async def test_run_strategy_scan_records_deduped_cooldowns_on_batch_success(
     assert result["alerts_sent"] == 1
     assert result["message"] == batched_message
     assert isinstance(result["details"], dict)
-    assert "overbought message" in batched_message
     assert "oversold message" in batched_message
     assert record_mock.await_args_list == [
-        call("BTC", "overbought"),
         call("ETH", "oversold"),
     ]
 
@@ -1046,7 +949,6 @@ async def test_run_strategy_scan_returns_message_and_details(scanner_env, monkey
         "fetch_top_traded_coins",
         AsyncMock(return_value=[{"market": "KRW-TEST"}]),
     )
-    monkeypatch.setattr(ds_mod, "fetch_my_coins", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         ds_mod,
         "fetch_multiple_tickers",
@@ -1085,7 +987,6 @@ async def test_run_crash_detection_returns_message_and_details(
         "fetch_top_traded_coins",
         AsyncMock(return_value=[{"market": "KRW-TEST"}]),
     )
-    monkeypatch.setattr(ds_mod, "fetch_my_coins", AsyncMock(return_value=[]))
     # +15% change triggers crash detection
     monkeypatch.setattr(
         ds_mod,

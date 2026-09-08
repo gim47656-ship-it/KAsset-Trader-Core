@@ -36,40 +36,11 @@ from app.services.action_report.snapshot_backed.request import (
 # Read-only methods like inquire_*/fetch_*/get_* are deliberately omitted.
 # --------------------------------------------------------------------------
 
-# app.services.brokers.kis.client.KISClient
-_KIS_MUTATION_METHODS = [
-    "order_korea_stock",
-    "sell_korea_stock",
-    "cancel_korea_order",
-    "modify_korea_order",
-    "order_overseas_stock",
-    "buy_overseas_stock",
-    "sell_overseas_stock",
-    "cancel_overseas_order",
-    "modify_overseas_order",
-]
-
-# app.services.brokers.upbit.orders (module-level async functions)
-_UPBIT_MUTATION_FUNCTIONS = [
-    "cancel_orders",
-    "place_sell_order",
-    "place_market_sell_order",
-    "place_buy_order",
-    "place_market_buy_order",
-    "cancel_and_reorder",
-]
-
-# app.services.brokers.kiwoom.domestic_orders.KiwoomDomesticOrderClient
-_KIWOOM_MUTATION_METHODS = [
-    "place_buy_order",
-    "place_sell_order",
+# app.services.brokers.toss.client.TossReadClient — the one broker client with
+# order-mutation methods that survives.
+_TOSS_MUTATION_METHODS = [
+    "place_order",
     "modify_order",
-    "cancel_order",
-]
-
-# app.services.brokers.alpaca.service.AlpacaPaperBrokerService
-_ALPACA_MUTATION_METHODS = [
-    "submit_order",
     "cancel_order",
 ]
 
@@ -114,8 +85,8 @@ def _minimal_ensure_response() -> EnsureBundleResponse:
 def _build_request() -> ReportGenerationRequest:
     """Smallest valid request that exercises the full generate() path."""
     return ReportGenerationRequest(
-        market="crypto",
-        account_scope="upbit_live",
+        market="kr",
+        account_scope="toss_live",
         created_by_profile="claude_code",
         title="safety test",
         summary="safety test",
@@ -125,7 +96,7 @@ def _build_request() -> ReportGenerationRequest:
             IngestReportItem(
                 client_item_key="w-1",
                 item_kind="watch",
-                symbol="KRW-BTC",
+                symbol="005930",
                 intent="trend_recovery_review",
                 rationale="r",
                 watch_condition=WatchConditionPayload(
@@ -211,91 +182,25 @@ def _install_spies(
 
 
 @pytest.mark.asyncio
-async def test_generate_does_not_call_kis_mutation_methods(
+async def test_generate_does_not_call_toss_mutation_methods(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every KISClient mutation method has a spy that raises if called."""
-    from app.services.brokers.kis import client as kis_module
+    """Every TossReadClient order-mutation method has a spy that raises."""
+    from app.services.brokers.toss import client as toss_module
 
     spy_calls: list[str] = []
     _install_spies(
         monkeypatch,
-        kis_module.KISClient,
-        _KIS_MUTATION_METHODS,
-        "KISClient",
+        toss_module.TossReadClient,
+        _TOSS_MUTATION_METHODS,
+        "TossReadClient",
         spy_calls,
     )
 
     generator, _, _ = _build_generator()
     await generator.generate(_build_request())
 
-    assert spy_calls == [], f"unexpected KIS mutation calls: {spy_calls}"
-
-
-@pytest.mark.asyncio
-async def test_generate_does_not_call_upbit_mutation_methods(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every upbit.orders mutation function has a spy that raises if called."""
-    from app.services.brokers.upbit import orders as upbit_module
-
-    spy_calls: list[str] = []
-    _install_spies(
-        monkeypatch,
-        upbit_module,
-        _UPBIT_MUTATION_FUNCTIONS,
-        "upbit.orders",
-        spy_calls,
-    )
-
-    generator, _, _ = _build_generator()
-    await generator.generate(_build_request())
-
-    assert spy_calls == [], f"unexpected Upbit mutation calls: {spy_calls}"
-
-
-@pytest.mark.asyncio
-async def test_generate_does_not_call_kiwoom_mutation_methods(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every Kiwoom domestic-order mutation method has a spy that raises."""
-    from app.services.brokers.kiwoom import domestic_orders as kiwoom_module
-
-    spy_calls: list[str] = []
-    _install_spies(
-        monkeypatch,
-        kiwoom_module.KiwoomDomesticOrderClient,
-        _KIWOOM_MUTATION_METHODS,
-        "KiwoomDomesticOrderClient",
-        spy_calls,
-    )
-
-    generator, _, _ = _build_generator()
-    await generator.generate(_build_request())
-
-    assert spy_calls == [], f"unexpected Kiwoom mutation calls: {spy_calls}"
-
-
-@pytest.mark.asyncio
-async def test_generate_does_not_call_alpaca_mutation_methods(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every AlpacaPaperBrokerService mutation method has a spy that raises."""
-    from app.services.brokers.alpaca import service as alpaca_module
-
-    spy_calls: list[str] = []
-    _install_spies(
-        monkeypatch,
-        alpaca_module.AlpacaPaperBrokerService,
-        _ALPACA_MUTATION_METHODS,
-        "AlpacaPaperBrokerService",
-        spy_calls,
-    )
-
-    generator, _, _ = _build_generator()
-    await generator.generate(_build_request())
-
-    assert spy_calls == [], f"unexpected Alpaca mutation calls: {spy_calls}"
+    assert spy_calls == [], f"unexpected Toss mutation calls: {spy_calls}"
 
 
 @pytest.mark.asyncio

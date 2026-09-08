@@ -1,8 +1,8 @@
-"""ROB-518 — Upbit live loss-sell 및 대기 주문 재가격 안전 경계.
+"""ROB-518 — crypto live loss-sell 안전 경계.
 
 주식은 Toss 전용 주문 구현에서 검증한다. 이 모듈은 공통 순수 guard와
-레거시 Upbit 실행 helper가 평균단가 이하의 실자금 매도를 허용하지 않는지
-검증한다.
+레거시 crypto 실행 검증 경로가 평균단가 이하의 실자금 매도를 허용하지
+않는지 검증한다.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.mcp_server.tooling import order_validation, orders_modify_cancel
+from app.mcp_server.tooling import order_validation
 from app.mcp_server.tooling.order_validation import (
     evaluate_market_sell_loss_guard,
 )
@@ -179,69 +179,3 @@ async def test_validate_sell_side_live_limit_guard_unchanged(monkeypatch) -> Non
         dry_run=False,
     )
     assert err is not None and "below minimum" in errors[0]
-
-
-# Upbit modify: live sell orders must not be repriced below the floor
-def _patch_modify_holdings(monkeypatch, avg_price: float | None) -> AsyncMock:
-    holdings = {"avg_price": avg_price, "quantity": 10} if avg_price else {}
-    mock = AsyncMock(return_value=holdings)
-    monkeypatch.setattr(orders_modify_cancel, "_get_holdings_for_order", mock)
-    return mock
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_upbit_sell_reprice_below_floor_blocked(monkeypatch) -> None:
-    _patch_modify_holdings(monkeypatch, avg_price=40000000.0)
-    monkeypatch.setattr(
-        orders_modify_cancel.upbit_service,
-        "fetch_order_detail",
-        AsyncMock(
-            return_value={
-                "state": "wait",
-                "ord_type": "limit",
-                "side": "ask",  # sell
-                "price": "41000000",
-                "remaining_volume": "0.1",
-            }
-        ),
-    )
-    reorder = AsyncMock()
-    monkeypatch.setattr(
-        orders_modify_cancel.upbit_service, "cancel_and_reorder", reorder
-    )
-    result = await orders_modify_cancel._modify_upbit(
-        "uuid-1", "KRW-BTC", "crypto", 31000000.0, None, False
-    )
-    assert result["success"] is False
-    assert "modify blocked" in result["error"].lower()
-    reorder.assert_not_called()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_modify_upbit_buy_reprice_allowed(monkeypatch) -> None:
-    holdings_mock = _patch_modify_holdings(monkeypatch, avg_price=40000000.0)
-    monkeypatch.setattr(
-        orders_modify_cancel.upbit_service,
-        "fetch_order_detail",
-        AsyncMock(
-            return_value={
-                "state": "wait",
-                "ord_type": "limit",
-                "side": "bid",  # buy
-                "price": "39000000",
-                "remaining_volume": "0.1",
-            }
-        ),
-    )
-    reorder = AsyncMock(return_value={"new_order": {"uuid": "uuid-2"}})
-    monkeypatch.setattr(
-        orders_modify_cancel.upbit_service, "cancel_and_reorder", reorder
-    )
-    result = await orders_modify_cancel._modify_upbit(
-        "uuid-1", "KRW-BTC", "crypto", 31000000.0, None, False
-    )
-    assert result["success"] is True
-    reorder.assert_called_once()
-    holdings_mock.assert_not_called()

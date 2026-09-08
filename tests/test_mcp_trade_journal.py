@@ -744,7 +744,7 @@ class TestCreateTradeJournalForBuy:
     @pytest.mark.asyncio
     async def test_create_trade_journal_for_buy_inserts_new_draft(self) -> None:
         """Helper should always insert a new draft journal row."""
-        from app.mcp_server.tooling.order_execution import _create_trade_journal_for_buy
+        from app.mcp_server.tooling.order_journal import _create_trade_journal_for_buy
         from app.models.trade_journal import JournalStatus
 
         mock_session = AsyncMock()
@@ -783,7 +783,7 @@ class TestCreateTradeJournalForBuy:
         self,
     ) -> None:
         """Re-buy should create a fresh draft instead of reusing an active journal."""
-        from app.mcp_server.tooling.order_execution import _create_trade_journal_for_buy
+        from app.mcp_server.tooling.order_journal import _create_trade_journal_for_buy
         from app.models.trade_journal import JournalStatus
 
         mock_session = AsyncMock()
@@ -831,7 +831,7 @@ class TestJournalFillIntegration:
     @pytest.mark.asyncio
     async def test_link_journal_to_fill_activates_draft(self) -> None:
         """Test that linking a fill to a draft journal activates it and sets trade_id."""
-        from app.mcp_server.tooling.order_execution import _link_journal_to_fill
+        from app.mcp_server.tooling.order_journal import _link_journal_to_fill
 
         mock_session = AsyncMock()
         # Create a mock draft journal
@@ -866,7 +866,7 @@ class TestJournalFillIntegration:
     @pytest.mark.asyncio
     async def test_link_journal_noop_when_no_draft(self) -> None:
         """Test that linking is a no-op when no draft journal exists."""
-        from app.mcp_server.tooling.order_execution import _link_journal_to_fill
+        from app.mcp_server.tooling.order_journal import _link_journal_to_fill
 
         mock_session = AsyncMock()
         # No draft journal found
@@ -891,7 +891,7 @@ class TestJournalFillIntegration:
         self,
     ) -> None:
         """Linking should target the newest draft for the symbol on re-buy."""
-        from app.mcp_server.tooling.order_execution import _link_journal_to_fill
+        from app.mcp_server.tooling.order_journal import _link_journal_to_fill
         from app.models.trade_journal import JournalStatus
 
         mock_session = AsyncMock()
@@ -930,7 +930,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_on_sell_closes_single_full_exit(self) -> None:
         """Sell quantity exactly matches journal quantity - close it."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         active = TradeJournal(
@@ -976,7 +976,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_on_sell_partial_sell_keeps_all_active(self) -> None:
         """Sell 5 when first journal has 8 - FIFO stops, no journals closed."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         first = TradeJournal(
@@ -1051,7 +1051,7 @@ class TestCloseJournalsOnSell:
         self,
     ) -> None:
         """Sell 10 with qty=8 and qty=3 journals - close first, keep second active."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         first = TradeJournal(
@@ -1125,7 +1125,7 @@ class TestCloseJournalsOnSell:
         self,
     ) -> None:
         """quantity=None journal closes immediately without affecting remaining qty."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         null_qty_journal = TradeJournal(
@@ -1168,7 +1168,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_on_sell_fully_consumes_multiple(self) -> None:
         """Sell 11 with qty=8 and qty=3 journals - both close."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         first = TradeJournal(
@@ -1224,7 +1224,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_on_sell_no_active_journals(self) -> None:
         """No active journals - return zeros."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         mock_session = AsyncMock()
         mock_scalars = MagicMock()
@@ -1265,7 +1265,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_queries_active_ordered_by_created_at(self) -> None:
         """Verify SQL queries only active journals ordered by created_at ASC."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
         from app.models.trade_journal import JournalStatus
 
         mock_session = AsyncMock()
@@ -1296,7 +1296,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_appends_defensive_trim_note(self) -> None:
         """defensive_trim context is persisted into journal notes."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
         from app.mcp_server.tooling.order_validation import DefensiveTrimContext
 
         now = datetime.now(UTC)
@@ -1348,7 +1348,7 @@ class TestCloseJournalsOnSell:
     @pytest.mark.asyncio
     async def test_close_journals_labels_realized_pnl_basis(self) -> None:
         """ROB-544: result labels the realized_pnl basis as journal_entry (FIFO lot)."""
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         first = TradeJournal(
@@ -1414,7 +1414,7 @@ class TestCloseJournalsOnSell:
         (entry 100, sell 97.39 -> -2.61%); the newer cheaper averaging-down lot
         (entry 90, would be +8.21%) is NOT consumed by a 1-share FIFO sell.
         """
-        from app.mcp_server.tooling.order_execution import _close_journals_on_sell
+        from app.mcp_server.tooling.order_journal import _close_journals_on_sell
 
         now = datetime.now(UTC)
         older_expensive = TradeJournal(

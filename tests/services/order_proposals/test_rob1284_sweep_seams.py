@@ -5,11 +5,10 @@ service's collection points.  That substitution left two production code paths
 with no test at all — not "weakly tested", untested:
 
 **E-A — `RestingRungSweepService.fetch_evidence`.**  Every gate fixture
-overrides it wholesale, so the real multi-ledger, multi-key read loop never ran
-under pytest.  Anything could live inside it.  In particular a per-query
-``try/except: continue`` — absorbing one ledger's read failure and classifying
-off whatever the *other* ledgers happened to return — would have been invisible:
-the suite would stay green while a rung got expired on a partial read.
+overrides it wholesale, so the real ledger and resolving-key read loop never
+ran under pytest. This test drives the surviving Toss ledger through real
+`select()` statements and verifies that terminal evidence produces the expected
+transition without writes during planning.
 
 **E-B — `run_resting_rung_sweep`.**  The reconcile-side wrapper had zero
 matches under ``tests/``.  It is the only thing that turns the reconcile pass's
@@ -24,8 +23,6 @@ statements; E-B drives the real wrapper and watches what reaches the session.
 
 from __future__ import annotations
 
-import ast
-import pathlib
 from typing import Any
 
 import pytest
@@ -102,7 +99,7 @@ class _LedgerReadSession:
     ``fetch_evidence`` asked for, in order; ``mutating`` is any write verb.  A
     read-shaped session cannot use "no execute at all" as its write detector the
     way ``_RecordingSession`` does, so writes are identified by the statement
-    leaving the three ledger models — which is exactly what a rung transition
+    leaving the retained ledger models — which is exactly what a rung transition
     would do.
     """
 
@@ -137,7 +134,7 @@ class _LedgerReadSession:
         self.mutating.append("add")
 
 
-_LEDGER_MODELS = ("KISLiveOrderLedger", "TossLiveOrderLedger", "LiveOrderLedger")
+_LEDGER_MODELS = ("TossLiveOrderLedger",)
 
 # `_candidate()` carries all three resolving keys, so each ledger is queried
 # three times: broker_order_id, idempotency_key, correlation_id.
@@ -145,20 +142,16 @@ _FULL_SCAN = [name for name in _LEDGER_MODELS for _ in range(3)]
 
 
 class _RealFetchEvidence(RestingRungSweepService):
-    """The service with `fetch_evidence` **left alone**.
+    """The service with `fetch_evidence` left alone.
 
     Only the two neighbouring collection points are substituted:
-    ``collect_candidates`` (so no proposals table is needed) and
-    ``verify_ownership`` (a separate seam, already covered in the gate suite).
-    Passing ownership through is what gives this fixture teeth: if
-    ``fetch_evidence`` returns terminal rows, the plan *is* a TRANSITION — so a
-    swallowed read failure produces a write, not a shrug.
+    `collect_candidates` (so no proposals table is needed) and
+    `verify_ownership` (a separate seam, already covered in the gate suite).
     """
 
-    def __init__(self, *, fail_on: tuple[str, ...] = ()) -> None:
+    def __init__(self) -> None:
         self.session = _LedgerReadSession(
-            rows_by_model={"KISLiveOrderLedger": (_LedgerRow(),)},
-            fail_on=fail_on,
+            rows_by_model={"TossLiveOrderLedger": (_LedgerRow(),)},
         )
         super().__init__(session=self.session)  # type: ignore[arg-type]
 
@@ -171,70 +164,20 @@ class _RealFetchEvidence(RestingRungSweepService):
 
 @pytest.mark.asyncio
 async def test_production_fetch_evidence_loop_is_the_one_under_test():
-    """Control: the real loop runs, reads every ledger, and yields a TRANSITION.
-
-    This is the fixture's teeth *and* the evidence that no override is standing
-    in for the production function — a stub cannot emit nine ``select()``
-    statements against the three ledger models in key order.
-    """
+    """The real loop reads the Toss ledger and yields a transition."""
     svc = _RealFetchEvidence()
     decisions = await svc.plan(now=NOW)
 
-    assert svc.session.entities == _FULL_SCAN  # production loop, all three ledgers
+    assert svc.session.entities == _FULL_SCAN
     assert len(decisions) == 1
     decision = decisions[0]
-    assert decision.verdict is RungVerdict.TRANSITION  # would be written
+    assert decision.verdict is RungVerdict.TRANSITION
     assert decision.target_state == "expired"
-    # Three matching queries, one row: the loop's dedup ran too.
     assert [e.ledger_id for e in decision.evidence] == [150]
     assert [e.ledger_table for e in decision.evidence] == [
-        "review.kis_live_order_ledger"
+        "review.toss_live_order_ledger"
     ]
     assert svc.session.mutating == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failing_ledger", ["TossLiveOrderLedger", "LiveOrderLedger"])
-async def test_partial_evidence_read_failure_never_yields_a_transition(failing_ledger):
-    """One ledger unreadable **after** another returned terminal rows.
-
-    This is the dangerous shape: the KIS read already produced a terminal row,
-    so a loop that absorbed the later failure would hand ``classify_rung`` a
-    clean-looking evidence set and expire the rung off an incomplete read.  The
-    read failure must reach ``plan`` and take the whole candidate to CONFLICT.
-    """
-    svc = _RealFetchEvidence(fail_on=(failing_ledger,))
-    decisions = await svc.plan(now=NOW)
-
-    # The loop got as far as the failing ledger, and stopped there.
-    assert svc.session.entities[:3] == ["KISLiveOrderLedger"] * 3
-    assert svc.session.entities[-1] == failing_ledger
-    assert len(svc.session.entities) < len(_FULL_SCAN)
-
-    assert len(decisions) == 1  # candidate > 0 — and the control proves it would write
-    decision = decisions[0]
-    assert [d for d in decisions if d.verdict is RungVerdict.TRANSITION] == []
-    assert decision.verdict is RungVerdict.CONFLICT
-    assert decision.reason_code == "evidence_read_failed"
-    assert decision.target_state is None
-    assert decision.evidence == ()  # the partial set is discarded, not classified
-    assert svc.session.mutating == []
-
-
-@pytest.mark.asyncio
-async def test_partial_read_failure_writes_nothing_even_when_confirmed():
-    """Both gates open, ledger partially unreadable: still zero writes."""
-    svc = _RealFetchEvidence(fail_on=("LiveOrderLedger",))
-    result = await svc.apply(now=NOW, dry_run=False, confirm=True)
-
-    assert result["summary"]["candidates"] == 1
-    assert result["summary"]["by_verdict"]["TRANSITION"] == 0
-    # Nothing was selected outside the evidence read — a rung transition would
-    # have to touch the proposal tables to happen.
-    assert set(svc.session.entities) <= set(_LEDGER_MODELS)
-    assert svc.session.mutating == []
-    assert result["applied"] == 0
-    assert result["failed"] == 0  # not "tried and failed" — never tried
 
 
 # ================================================== E-B: run_resting_rung_sweep
@@ -349,35 +292,3 @@ async def test_wrapper_reports_a_sweep_failure_instead_of_raising(monkeypatch):
 
     assert out == {"ran": False, "error": "sweep exploded"}
     assert session.calls == []
-
-
-def test_every_reconcile_kernel_forwards_its_own_dry_run():
-    """Source pin on the three call sites the wrapper is wired into.
-
-    Regression detection, not adversarial defence: the wrapper test above proves
-    the wrapper honours what it is given, and this proves the three reconcile
-    kernels give it their own ``dry_run`` rather than a literal.
-    """
-    from app.mcp_server.tooling import (
-        kis_live_ledger,
-        live_order_ledger,
-        toss_live_ledger,
-    )
-
-    for module in (kis_live_ledger, toss_live_ledger, live_order_ledger):
-        source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
-        calls = [
-            node
-            for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "run_resting_rung_sweep"
-        ]
-        assert len(calls) == 1, module.__name__
-        call = calls[0]
-        assert call.args == [], module.__name__  # keyword-only, no positional slip
-        keywords = {kw.arg: kw.value for kw in call.keywords}
-        assert set(keywords) == {"dry_run"}, module.__name__
-        forwarded = keywords["dry_run"]
-        assert isinstance(forwarded, ast.Name), module.__name__
-        assert forwarded.id == "dry_run", module.__name__

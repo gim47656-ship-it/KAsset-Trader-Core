@@ -99,37 +99,9 @@ async def test_us_quote_validates_active_symbol_before_toss(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_kr_orderbook_uses_nh_plug_krx_store(monkeypatch) -> None:
-    snapshot = {
-        "ready": True,
-        "asks": [{"price": "70100", "volume": "12"}],
-        "bids": [{"price": "70000", "volume": "15"}],
-        "totalAskVolume": "12",
-        "totalBidVolume": "15",
-        "asOf": "2026-02-23T01:30:00Z",
-    }
-    store = SimpleNamespace(get_snapshot=AsyncMock(return_value=snapshot))
-    monkeypatch.setattr(market_data, "get_orderbook_store", lambda: store)
-
-    result = await market_data.get_orderbook("5930", "kr")
-
-    assert result.symbol == "005930"
-    assert result.source == "nhplug"
-    assert result.venue == "krx"
-    assert result.asks[0].price == 70100
-    assert result.bids[0].quantity == 15
-    assert result.as_of is None
-    assert result.price_as_of_source is None
-    store.get_snapshot.assert_awaited_once_with(market="KRX", symbol="005930")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("venue", ["nxt", "unified", "통합시장"])
-async def test_nxt_and_unified_orderbook_are_explicitly_unsupported(venue: str) -> None:
-    with pytest.raises(
-        market_data.ProviderUnsupportedError, match="provider_unsupported"
-    ):
-        await market_data.get_orderbook("005930", "kr", venue=venue)
+async def test_kr_equity_orderbook_is_no_longer_supported() -> None:
+    with pytest.raises(ValueError, match="only supports the KRW crypto market"):
+        await market_data.get_orderbook("005930", "kr")
 
 
 @pytest.mark.asyncio

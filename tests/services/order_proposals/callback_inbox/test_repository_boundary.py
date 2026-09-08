@@ -89,19 +89,13 @@ def test_service_actually_imports_the_repository() -> None:
 FORBIDDEN_EXECUTION_ROOTS: tuple[str, ...] = (
     "app.services.brokers",
     "app.mcp_server.tooling.orders_",
-    "app.mcp_server.tooling.order_execution",
     "app.mcp_server.tooling.live_order_ledger",
-    "app.mcp_server.tooling.live_order_evidence",
-    "app.mcp_server.tooling.kis_live_ledger",
+    "app.services.order_send_intent_service",
+    "app.services.toss_live_order_ledger_service",
     "app.services.order_proposals.broker_gateway",
     "app.services.order_proposals.revalidation",
     "app.services.order_proposals.auto_approve",
     "app.services.order_proposals.resting_sweep",
-    "app.services.kis_trading_service",
-    "app.services.kis_holdings_service",
-    "app.services.order_send_intent_service",
-    "app.services.alpaca_paper_ledger_service",
-    "app.services.toss_live_order_ledger_service",
     "app.services.execution_ledger",
     "app.models.review",
     "app.models.binance_demo_order_ledger",
@@ -160,9 +154,9 @@ def test_no_guarded_module_imports_an_execution_surface() -> None:
 def test_the_guard_would_notice_a_second_mutation_path() -> None:
     """Anti-vacuity: the matcher really does catch what it claims to."""
     probes = (
-        "app.services.brokers.kis.client",
+        "app.services.brokers.toss.client",
         "app.mcp_server.tooling.orders_toss_variants",
-        "app.mcp_server.tooling.order_execution",
+        "app.mcp_server.tooling.live_order_ledger",
         "app.services.order_proposals.revalidation",
         "app.models.review",
     )

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -11,13 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
 from app.models.paper_validation import StrategyHypothesisDraft
-from app.services.brokers.capabilities import Broker
-from app.services.brokers.paper.application import PaperExecutionApplication
-from app.services.brokers.paper.contracts import (
-    PaperOrderRequest,
-    VerifiedExperimentProvenance,
-    VerifiedPaperOrderIntent,
-)
 from app.services.paper_validation.contracts import (
     ActorRole,
     HypothesisDraftInput,
@@ -39,75 +31,6 @@ from tests.services.paper_validation.conftest import (
 )
 
 pytestmark = pytest.mark.integration
-
-
-class _ForbiddenVerifier:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def verify(self, request: PaperOrderRequest) -> VerifiedExperimentProvenance:
-        self.calls += 1
-        raise AssertionError("forbidden validation must not reach provenance")
-
-
-class _ForbiddenAdapter:
-    broker = Broker.BINANCE
-
-    def __init__(self) -> None:
-        self.adapter_calls = 0
-        self.client_calls = 0
-        self.ledger_calls = 0
-
-    async def submit(self, intent: VerifiedPaperOrderIntent):  # noqa: ANN201
-        self.adapter_calls += 1
-        self.client_calls += 1
-        self.ledger_calls += 1
-        raise AssertionError("forbidden validation must not reach an adapter")
-
-
-class _ForbiddenRegistry:
-    def __init__(self, adapter: _ForbiddenAdapter) -> None:
-        self.adapter = adapter
-        self.broker_calls = 0
-
-    def resolve(self, broker: Broker) -> _ForbiddenAdapter:
-        self.broker_calls += 1
-        return self.adapter
-
-
-def _paper_order_request(identity: ValidationIdentity) -> PaperOrderRequest:
-    return PaperOrderRequest(
-        intent_id="intent-forbidden",
-        experiment_id=identity.experiment_id,
-        run_id="run-forbidden",
-        cohort_id=identity.cohort_id,
-        strategy_version_id=identity.strategy_version_id,
-        strategy_hash=identity.strategy_hash,
-        config_hash=identity.config_hash,
-        policy_hash=identity.policy_hash,
-        venue=Broker.BINANCE,
-        account_mode="demo",
-        product="spot",
-        symbol="BTCUSDT",
-        side="buy",
-        order_type="market",
-        notional=Decimal("10"),
-        market_snapshot_id="snapshot-forbidden",
-        market_snapshot_hash="sha256:snapshot-forbidden",
-        market_snapshot_as_of=datetime(2026, 7, 13, tzinfo=UTC),
-        market_snapshot_source="binance_public_spot",
-    )
-
-
-async def _rob849_contract_harness(
-    validation: PaperValidationService,
-    execution: PaperExecutionApplication,
-    caller_id: str,
-    identity: ValidationIdentity,
-) -> None:
-    """Exercise the future ROB-849 ordering without implementing its verifier."""
-    await validation.authorize_order_submission(caller_id, identity)
-    await execution.submit(_paper_order_request(identity))
 
 
 class _LockProbeFrozenProvider(FakeFrozenInputHashProvider):
@@ -329,25 +252,16 @@ async def test_narrative_idempotency_replays_and_conflicts(
 
 @pytest.mark.parametrize("role", [ActorRole.RESEARCHER, ActorRole.REVIEWER])
 @pytest.mark.asyncio
-async def test_forbidden_order_authorization_has_zero_external_side_effects(
+async def test_only_the_operator_may_authorize_order_submission(
     db_session: AsyncSession,
     validation_identity: ValidationIdentity,
     role: ActorRole,
 ) -> None:
+    """Researchers and reviewers never reach the order-authorization gate."""
     app = _service(db_session, validation_identity, {"caller-1": role})
-    verifier = _ForbiddenVerifier()
-    adapter = _ForbiddenAdapter()
-    registry = _ForbiddenRegistry(adapter)
-    execution = PaperExecutionApplication(registry=registry, verifier=verifier)
 
     with pytest.raises(PaperValidationError, match="forbidden"):
-        await _rob849_contract_harness(app, execution, "caller-1", validation_identity)
-
-    assert verifier.calls == 0
-    assert registry.broker_calls == 0
-    assert adapter.adapter_calls == 0
-    assert adapter.client_calls == 0
-    assert adapter.ledger_calls == 0
+        await app.authorize_order_submission("caller-1", validation_identity)
 
 
 @pytest.mark.asyncio

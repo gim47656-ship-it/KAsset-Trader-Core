@@ -29,18 +29,13 @@ async def test_equity_holdings_validation_rejects_nonoperational_kis(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("market_type", ["equity_kr", "equity_us"])
 @pytest.mark.parametrize("is_mock", [False, True])
-async def test_equity_balance_validation_rejects_without_provider_call(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_equity_balance_validation_rejects_nonoperational_kis(
     market_type: str,
     is_mock: bool,
 ) -> None:
-    provider_call = AsyncMock(side_effect=AssertionError("provider call is forbidden"))
-    monkeypatch.setattr(order_validation.upbit_service, "fetch_my_coins", provider_call)
 
     with pytest.raises(ValueError, match="^provider kis is not operational$"):
         await order_validation._get_balance_for_order(market_type, is_mock=is_mock)
-
-    provider_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -71,8 +66,3 @@ async def test_equity_balance_guard_returns_provider_unsupported(
         "provider_unsupported": True,
     }
     balance_lookup.assert_not_awaited()
-
-
-def test_order_validation_exposes_no_kis_client_factory() -> None:
-    assert not hasattr(order_validation, "_create_kis_client")
-    assert not hasattr(order_validation, "_call_kis")

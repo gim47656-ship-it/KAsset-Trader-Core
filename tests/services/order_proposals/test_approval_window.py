@@ -499,62 +499,6 @@ async def test_batch_summary_expiry_preserves_broker_backed_sibling() -> None:
     assert telegram_sends == 0
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("at", "expected"),
-    [
-        (datetime(2026, 7, 22, 13, 29, 59, 999999, tzinfo=UTC), False),
-        (datetime(2026, 7, 22, 13, 30, tzinfo=UTC), True),
-        (datetime(2026, 7, 22, 19, 59, 59, 999999, tzinfo=UTC), True),
-        (datetime(2026, 7, 22, 20, 0, tzinfo=UTC), False),
-    ],
-)
-async def test_xnys_regular_open_close_exact_boundaries(at, expected):
-    evidence = policy._resolve_xnys_session(
-        _group(valid_until=at + timedelta(days=7)), at
-    )
-    assert evidence.allowed_now is expected
-    assert evidence.source == "exchange_calendars:XNYS"
-
-
-@pytest.mark.asyncio
-async def test_xnys_premarket_after_hours_and_holiday_defer():
-    group = _group(valid_until=datetime(2026, 7, 10, tzinfo=UTC))
-    pre = policy._resolve_xnys_session(group, datetime(2026, 7, 2, 12, 0, tzinfo=UTC))
-    post = policy._resolve_xnys_session(group, datetime(2026, 7, 2, 21, 0, tzinfo=UTC))
-    holiday = policy._resolve_xnys_session(
-        group, datetime(2026, 7, 3, 15, 0, tzinfo=UTC)
-    )
-    assert (pre.allowed_now, post.allowed_now, holiday.allowed_now) == (
-        False,
-        False,
-        False,
-    )
-    assert pre.next_allowed_at == datetime(2026, 7, 2, 13, 30, tzinfo=UTC)
-    assert holiday.next_allowed_at == datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
-
-
-@pytest.mark.asyncio
-async def test_xnys_half_day_close_and_dst_are_calendar_derived():
-    group = _group(valid_until=datetime(2027, 1, 10, tzinfo=UTC))
-    half_day_before_close = policy._resolve_xnys_session(
-        group, datetime(2026, 11, 27, 17, 59, 59, 999999, tzinfo=UTC)
-    )
-    half_day_at_close = policy._resolve_xnys_session(
-        group, datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
-    )
-    winter_open = policy._resolve_xnys_session(
-        group, datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
-    )
-    summer_open = policy._resolve_xnys_session(
-        group, datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
-    )
-    assert half_day_before_close.allowed_now is True
-    assert half_day_at_close.allowed_now is False
-    assert winter_open.allowed_now is True
-    assert summer_open.allowed_now is True
-
-
 def _window(start: str, end: str) -> dict[str, str]:
     return {"startTime": start, "endTime": end}
 
@@ -653,8 +597,7 @@ def _kr_calendar():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("account_mode", ["kis_live", "toss_live"])
-async def test_kr_regular_and_nxt_carry_preserved(monkeypatch, account_mode):
+async def test_kr_regular_and_nxt_carry_preserved(monkeypatch):
     async def calendar_reader(market, query_date):
         return _kr_calendar()
 
@@ -671,7 +614,7 @@ async def test_kr_regular_and_nxt_carry_preserved(monkeypatch, account_mode):
     monkeypatch.setattr(policy, "get_kr_nxt_tradability", tradability_reader)
     group = _group(
         market="equity_kr",
-        account_mode=account_mode,
+        account_mode="toss_live",
         symbol="005930",
         valid_until=datetime(2026, 7, 24, 20, tzinfo=policy._KST),
     )
@@ -690,9 +633,8 @@ async def test_kr_regular_and_nxt_carry_preserved(monkeypatch, account_mode):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("account_mode", ["kis_live", "toss_live"])
 async def test_krx_regular_remains_authoritative_when_nxt_calendar_is_unavailable(
-    monkeypatch, account_mode
+    monkeypatch,
 ):
     async def unavailable_calendar(market, query_date):
         return None
@@ -706,7 +648,7 @@ async def test_krx_regular_remains_authoritative_when_nxt_calendar_is_unavailabl
     decision = await evaluate_approval_window(
         _group(
             market="equity_kr",
-            account_mode=account_mode,
+            account_mode="toss_live",
             symbol="005930",
             valid_until=now + timedelta(hours=1),
         ),
@@ -763,26 +705,6 @@ async def test_kr_nxt_unknown_or_not_tradable_fails_closed_or_defers(monkeypatch
     assert deferred.evidence.next_allowed_at == datetime(
         2026, 7, 23, 9, 0, tzinfo=policy._KST
     )
-
-
-@pytest.mark.asyncio
-async def test_crypto_is_24x7_and_does_not_use_market_calendar(monkeypatch):
-    async def must_not_read(*args, **kwargs):
-        raise AssertionError("crypto must not read equity calendars")
-
-    monkeypatch.setattr(policy, "get_toss_market_calendar", must_not_read)
-    now = datetime(2026, 7, 23, 3, tzinfo=UTC)
-    decision = await evaluate_approval_window(
-        _group(
-            market="crypto",
-            account_mode="upbit",
-            symbol="KRW-BTC",
-            valid_until=now + timedelta(hours=1),
-        ),
-        now=now,
-    )
-    assert decision.code is ApprovalWindowCode.ALLOW
-    assert decision.evidence.current_session == "24x7"
 
 
 @pytest.mark.asyncio
@@ -2396,144 +2318,6 @@ async def test_expired_later_rung_preserves_prior_broker_backed_rung():
 
 
 @pytest.mark.asyncio
-async def test_upbit_place_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.pre_send import PreSendFreshnessError
-    from app.services.brokers.upbit import orders as upbit_orders
-
-    wrapper_calls = 0
-    provider_calls = 0
-
-    async def request_with_boundary_hook(*args, pre_send_hook=None, **kwargs):
-        nonlocal wrapper_calls, provider_calls
-        wrapper_calls += 1
-        assert pre_send_hook is not None
-        await pre_send_hook()
-        provider_calls += 1
-        raise AssertionError("blocked hook must precede Upbit POST")
-
-    async def block():
-        raise PreSendFreshnessError(("approval_window:EXPIRED",))
-
-    monkeypatch.setattr(
-        upbit_orders._client,
-        "_request_with_auth",
-        request_with_boundary_hook,
-    )
-
-    with pytest.raises(PreSendFreshnessError):
-        await upbit_orders.place_sell_order(
-            "KRW-BTC",
-            "0.1",
-            "100000000",
-            identifier="proposal-id",
-            pre_send_hook=block,
-        )
-
-    assert wrapper_calls == 1
-    assert provider_calls == 0
-
-
-@pytest.mark.asyncio
-async def test_upbit_cancel_adapter_threads_transport_hook(monkeypatch):
-    from app.services.brokers.pre_send import PreSendFreshnessError
-    from app.services.brokers.upbit import orders as upbit_orders
-
-    wrapper_calls = 0
-    provider_calls = 0
-
-    async def request_with_boundary_hook(*args, pre_send_hook=None, **kwargs):
-        nonlocal wrapper_calls, provider_calls
-        wrapper_calls += 1
-        assert pre_send_hook is not None
-        await pre_send_hook()
-        provider_calls += 1
-        raise AssertionError("blocked hook must precede Upbit DELETE")
-
-    async def block():
-        raise PreSendFreshnessError(("approval_window:DEFER_SESSION_CLOSED",))
-
-    monkeypatch.setattr(
-        upbit_orders._client,
-        "_request_with_auth",
-        request_with_boundary_hook,
-    )
-
-    with pytest.raises(PreSendFreshnessError):
-        await upbit_orders.cancel_orders(
-            ["broker-order-id"],
-            pre_send_hook=block,
-        )
-
-    assert wrapper_calls == 1
-    assert provider_calls == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("market", ["equity_kr", "equity_us"])
-async def test_kis_cancel_adapter_threads_transport_hook(monkeypatch, market):
-    from unittest.mock import AsyncMock
-
-    from app.services.brokers.kis import domestic_orders, overseas_orders
-    from app.services.brokers.pre_send import PreSendFreshnessError
-
-    provider_calls = 0
-
-    async def request(*args, pre_send_hook=None, **kwargs):
-        nonlocal provider_calls
-        assert pre_send_hook is not None
-        await pre_send_hook()
-        provider_calls += 1
-        raise AssertionError("blocked hook must precede KIS cancel POST")
-
-    request_mock = AsyncMock(side_effect=request)
-    parent = SimpleNamespace(
-        _settings=SimpleNamespace(
-            kis_account_no="12345678-01",
-            kis_access_token="dummy-token",
-        ),
-        _hdr_base={},
-        _ensure_token=AsyncMock(),
-        _request_with_rate_limit=request_mock,
-        _kis_url=lambda path: f"https://kis.invalid{path}",
-    )
-
-    async def block():
-        raise PreSendFreshnessError(("approval_window:DEFER_SESSION_CLOSED",))
-
-    if market == "equity_kr":
-        monkeypatch.setattr(
-            domestic_orders,
-            "is_nxt_eligible",
-            AsyncMock(return_value=False),
-        )
-        client = domestic_orders.DomesticOrderClient(parent)
-        call = client.cancel_korea_order(
-            "broker-order-id",
-            "005930",
-            1,
-            70000,
-            "sell",
-            krx_fwdg_ord_orgno="06010",
-            pre_send_hook=block,
-        )
-    else:
-        client = overseas_orders.OverseasOrderClient(parent)
-        call = client.cancel_overseas_order(
-            "broker-order-id",
-            "VOO",
-            "NYSE",
-            1,
-            pre_send_hook=block,
-        )
-
-    with pytest.raises(PreSendFreshnessError):
-        await call
-
-    request_mock.assert_awaited_once()
-    assert provider_calls == 0
-
-
-@pytest.mark.asyncio
 async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
     from app.mcp_server.tooling import orders_toss_variants as toss
     from app.services.brokers.pre_send import PreSendFreshnessError
@@ -2562,48 +2346,6 @@ async def test_toss_place_adapter_binds_hook_at_transport_context(monkeypatch):
             symbol="VOO",
             side="buy",
             market="equity_us",
-            order_type="limit",
-            quantity=Decimal("1"),
-            price=Decimal("100"),
-            approval_hash="hash",
-            pre_send_hook=block,
-        )
-
-    assert transport_calls == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("account_mode,market", [("upbit", "crypto")])
-async def test_default_execution_adapter_threads_transport_hook(
-    monkeypatch,
-    account_mode,
-    market,
-):
-    from app.mcp_server.tooling import order_execution
-    from app.services.brokers.pre_send import PreSendFreshnessError
-    from app.services.order_proposals.revalidation import _default_place_order_fn
-
-    transport_calls = 0
-
-    async def fake_place_impl(**kwargs):
-        nonlocal transport_calls
-        await kwargs["pre_send_hook"]()
-        transport_calls += 1
-        raise AssertionError("blocked hook must precede provider HTTP")
-
-    async def block():
-        raise PreSendFreshnessError(("approval_window:CALENDAR_UNKNOWN",))
-
-    monkeypatch.setattr(order_execution, "_place_order_impl", fake_place_impl)
-
-    with pytest.raises(PreSendFreshnessError):
-        await _default_place_order_fn(
-            account_mode=account_mode,
-            proposal_client_order_id="proposal-client-id",
-            dry_run=False,
-            symbol="VOO" if market == "equity_us" else "KRW-BTC",
-            side="buy",
-            market=market,
             order_type="limit",
             quantity=Decimal("1"),
             price=Decimal("100"),

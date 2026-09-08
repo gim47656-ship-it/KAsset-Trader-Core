@@ -497,11 +497,7 @@ def _expected_rejection_message(
 _NONCONFTEST_ENV_BASE = {
     "PATH": os.environ.get("PATH", ""),
     "HOME": os.environ.get("HOME", ""),
-    "KIS_APP_KEY": "DUMMY_KIS_APP_KEY",
-    "KIS_APP_SECRET": "DUMMY_KIS_APP_SECRET",
     "OPENDART_API_KEY": "DUMMY_OPENDART_API_KEY",
-    "UPBIT_ACCESS_KEY": "DUMMY_UPBIT_ACCESS_KEY",
-    "UPBIT_SECRET_KEY": "DUMMY_UPBIT_SECRET_KEY",
     "SECRET_KEY": "Test_Secret_Key_12345_Test_Secret_Key_12345",
     "ENVIRONMENT": "test",
 }

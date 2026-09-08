@@ -15,7 +15,7 @@ from app.mcp_server.tooling.trade_retrospective_tools import (
     save_trade_retrospective,
     trade_retrospective_pending,
 )
-from app.models.review import KISLiveOrderLedger, TradeRetrospective
+from app.models.review import TossLiveOrderLedger, TradeRetrospective
 
 pytestmark = [
     pytest.mark.integration,
@@ -28,7 +28,7 @@ async def _cleanup(
     db_session: AsyncSession, investment_reports_cleanup_lock: AsyncSession
 ):
     await db_session.execute(delete(TradeRetrospective))
-    await db_session.execute(delete(KISLiveOrderLedger))
+    await db_session.execute(delete(TossLiveOrderLedger))
     await db_session.commit()
 
 
@@ -273,7 +273,6 @@ def test_tool_names_set_complete():
     )
 
     assert TRADE_RETROSPECTIVE_TOOL_NAMES == {
-        "save_position_intake_retrospective",
         "save_trade_retrospective",
         "get_trade_retrospectives",
         "get_retrospective_aggregate",
@@ -285,7 +284,6 @@ def test_tools_in_available_surface():
     from app.mcp_server import AVAILABLE_TOOL_NAMES
 
     for name in (
-        "save_position_intake_retrospective",
         "save_trade_retrospective",
         "get_trade_retrospectives",
         "get_retrospective_aggregate",
@@ -312,7 +310,6 @@ def test_register_wires_all_retrospective_tools():
 
     register_trade_retrospective_tools(_FakeMCP())
     assert set(registered) == {
-        "save_position_intake_retrospective",
         "save_trade_retrospective",
         "get_trade_retrospectives",
         "get_retrospective_aggregate",
@@ -357,17 +354,16 @@ async def test_save_trigger_without_next_actions_envelope():
 @pytest.mark.asyncio
 async def test_pending_tool_envelope(db_session: AsyncSession):
     db_session.add(
-        KISLiveOrderLedger(
+        TossLiveOrderLedger(
             trade_date=now_kst(),
+            operation_kind="place",
+            market="kr",
             symbol="005930",
-            instrument_type="equity_kr",
             side="buy",
             order_type="limit",
-            account_mode="kis_live",
-            broker="kis",
+            client_order_id="T-CLIENT-1",
+            broker_order_id="T-TOOL-1",
             status="filled",
-            lifecycle_state="filled",
-            order_no="K-TOOL-1",
         )
     )
     await db_session.commit()
@@ -375,26 +371,23 @@ async def test_pending_tool_envelope(db_session: AsyncSession):
     res = await trade_retrospective_pending()
     assert res["success"] is True
     refs = {p["suggested_correlation_id"] for p in res["pending"]}
-    assert "kis_live:K-TOOL-1" in refs
+    assert "toss_live:T-TOOL-1" in refs
 
 
 @pytest.mark.asyncio
 async def test_pending_tool_include_cancelled_passthrough(db_session: AsyncSession):
-    db_session.add_all(
-        [
-            KISLiveOrderLedger(
-                trade_date=now_kst(),
-                symbol="005930",
-                instrument_type="equity_kr",
-                side="buy",
-                order_type="limit",
-                account_mode="kis_live",
-                broker="kis",
-                status="cancelled",
-                lifecycle_state="cancelled",
-                order_no="K-TOOL-CANCEL",
-            )
-        ]
+    db_session.add(
+        TossLiveOrderLedger(
+            trade_date=now_kst(),
+            operation_kind="place",
+            market="kr",
+            symbol="005930",
+            side="buy",
+            order_type="limit",
+            client_order_id="T-CLIENT-CANCEL",
+            broker_order_id="T-TOOL-CANCEL",
+            status="cancelled",
+        )
     )
     await db_session.commit()
 
@@ -402,10 +395,10 @@ async def test_pending_tool_include_cancelled_passthrough(db_session: AsyncSessi
     assert default["success"] is True
     assert default["include_cancelled"] is False
     default_refs = {p["suggested_correlation_id"] for p in default["pending"]}
-    assert "kis_live:K-TOOL-CANCEL" not in default_refs
+    assert "toss_live:T-TOOL-CANCEL" not in default_refs
     assert default["excluded_by_filter"]["cancelled"] >= 1
 
     opted = await trade_retrospective_pending(include_cancelled=True)
     assert opted["include_cancelled"] is True
     opted_refs = {p["suggested_correlation_id"] for p in opted["pending"]}
-    assert "kis_live:K-TOOL-CANCEL" in opted_refs
+    assert "toss_live:T-TOOL-CANCEL" in opted_refs

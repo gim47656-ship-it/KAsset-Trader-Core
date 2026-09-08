@@ -56,27 +56,7 @@ def _toss_filled_order(**overrides: object) -> dict[str, object]:
 
 async def fake_fetcher(**_kwargs):  # noqa: ANN003
     await asyncio.sleep(0)
-    return {
-        "orders": [
-            {
-                "symbol": "BTC",
-                "raw_symbol": "KRW-BTC",
-                "instrument_type": "crypto",
-                "side": "buy",
-                "price": 100,
-                "quantity": 2,
-                "total_amount": 200,
-                "fee": 1,
-                "currency": "KRW",
-                "account": "upbit",
-                "order_id": "ord-1",
-                "filled_at": datetime(2026, 5, 13, tzinfo=UTC).isoformat(),
-                "fill_seq": 0,
-                "venue": "upbit_krw",
-                "raw_payload_json": {"safe": True},
-            }
-        ]
-    }
+    return {"orders": [_toss_filled_order()]}
 
 
 @pytest.mark.asyncio
@@ -90,7 +70,7 @@ async def test_reconciler_dry_run_classifies_without_upsert(
     repo = FakeRepo(status="inserted")
 
     diff = await ExecutionLedgerReconciler(repo, fetcher=fake_fetcher).run(
-        "upbit", dry_run=True
+        "toss", dry_run=True
     )
 
     assert diff.would_insert == 1
@@ -131,7 +111,7 @@ async def test_reconciler_commit_requires_disabled_by_default_flag(
 
     with pytest.raises(ExecutionLedgerCommitDisabledError):
         await ExecutionLedgerReconciler(FakeRepo(), fetcher=fake_fetcher).run(
-            "upbit", dry_run=False
+            "toss", dry_run=False
         )
 
 
@@ -146,7 +126,7 @@ async def test_reconciler_commit_when_flag_enabled(
     repo = FakeRepo(status="inserted")
 
     diff = await ExecutionLedgerReconciler(repo, fetcher=fake_fetcher).run(
-        "upbit", dry_run=False
+        "toss", dry_run=False
     )
 
     assert diff.committed_insert == 1
@@ -247,18 +227,16 @@ async def test_reconciler_rejects_fetch_errors_and_records_failed_run(
         await asyncio.sleep(0)
         return {
             "orders": [],
-            "errors": [{"market": "crypto", "error": "truncated window"}],
+            "errors": [{"market": "kr", "error": "truncated window"}],
         }
 
     repo = FakeRepo(status="inserted")
 
-    with pytest.raises(RuntimeError, match="crypto.*truncated window"):
-        await ExecutionLedgerReconciler(repo, fetcher=fetcher).run(
-            "upbit", dry_run=True
-        )
+    with pytest.raises(RuntimeError, match="kr.*truncated window"):
+        await ExecutionLedgerReconciler(repo, fetcher=fetcher).run("toss", dry_run=True)
 
     assert len(repo.runs) == 1
-    assert "crypto" in repo.runs[0].error_summary
+    assert "kr" in repo.runs[0].error_summary
     assert "truncated window" in repo.runs[0].error_summary
 
 

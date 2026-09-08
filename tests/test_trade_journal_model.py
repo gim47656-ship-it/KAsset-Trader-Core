@@ -167,12 +167,6 @@ async def test_journal_accepts_mock_account_type_and_correlation_id(db_session):
     assert fetched.correlation_id == "corr-405a"
 
 
-def test_bridge_flag_default_false():
-    from app.core.config import settings
-
-    assert settings.MOCK_ROUNDTRIP_JOURNAL_BRIDGE_ENABLED is False
-
-
 def test_us_fx_columns_present_on_trade_journal():
     cols = set(TradeJournal.__table__.columns.keys())
     for col in (
