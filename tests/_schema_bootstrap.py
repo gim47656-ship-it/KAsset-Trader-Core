@@ -120,10 +120,14 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # mirrored ALTER는 없으므로, 이미 v52인 로컬 상시 테스트 DB는 이 bump로 한 번
 # 재생성되어야 NULL 삽입이 가능하다. 운영은
 # alembic/versions/20260907_kasset_position_state_optional_atr.py를 따로 적용한다.
+# v54: kasset_paper_position_states에 exit-level activation/history nullable 컬럼이
+# 추가된다. create_all이 새 DB shape를 만들고 기존 행은 legacy NULL 의미를 유지한다.
+# mirrored ALTER는 없으므로 persistent local test DB는 한 번 재생성되어야 한다.
+# 운영은 alembic/versions/20260908_kasset_position_stop_history.py를 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 53
+SCHEMA_BOOTSTRAP_VERSION = 54
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

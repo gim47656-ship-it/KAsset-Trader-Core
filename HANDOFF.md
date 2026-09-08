@@ -1,11 +1,47 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-08 (PAPER/Toss 외 broker 표면 제거 — `cleanup/remove-nhplug` 소스 정리·검증 증거 기록, 독립 checker closure PASS·Main ACCEPTED·미병합·미배포 / 2026-09-07 PAPER 자동 손절 -3% 바닥은 운영 반영 완료·Main FINAL PASS)
+갱신: 2026-09-08 (PAPER stop 시간 소급 방지 구현·격리 PG15 검증·checker closure PASS, CI·PR·배포 대기 / US 일봉·분봉 기존 복구 확인·추가 코드 변경 0 / 2026-09-07 -3% floor 운영 반영 이력 보존)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
-- 운영은 `9fefab61e80a6ade8466669e75e06cdc975a95fb`(자동 손절 -3% 바닥). 2026-09-07 10:40:51 UTC(19:40:51 KST) API·worker·scheduler·MCP·AI MCP 5개 image·build SHA 일치, restart 0. 직전 운영은 `e3680671bb19c323f62d5fcac18efdcb0c91c7b7`(PR #60)였다. alembic 변경 때문에 자동배포는 `exit 2`로 막혔고, 사용자 승인 아래 수동 단계 배포로 반영했다. 이후 구버전 이미지 롤백은 금지된다(아래 롤백 주의).
-- 기존 기본 checkout은 `main`/`e4b6043`와 사용자 `HANDOFF.md` 미커밋 변경을 그대로 보존했다. 중단된 새 worktree checkout만 복구했다.
+- 현재 실제 checkout/API/worker/scheduler는 모두 `584b462df16b1aa3e05ec1d2f449b529ee9f6cd6`다. PAPER stop 시간 소급 방지 변경은 이 SHA에서 분리한 `fix/paper-temporal-market-data` worktree에만 있으며 아직 commit·PR·CI·운영 배포하지 않았다. 2026-09-07의 `9fefab61e80a6ade8466669e75e06cdc975a95fb` -3% floor 배포는 아래 역사 기록이다.
+- 기본 checkout과 다른 worktree의 사용자 변경은 건드리지 않았다. 이번 변경 파일과 이 HANDOFF는 `.worktrees/paper-temporal-market-data` 안에만 있다.
+
+## 2026-09-08 — PAPER stop 시간 소급 방지·US 시세 가용성 확인 (`fix/paper-temporal-market-data`, 배포 대기)
+### 문제와 확정 계약
+- 2026-09-07 19:40 KST 장 종료 후 배포된 한진칼(`180640`) -3% floor `140747`가 다음 9/8 sweep에서 아직 미평가였던 9/7 일봉 `L=137000`보다 먼저 적용되면, 9/7 당시 유효했던 old stop `125342.85714286` 대신 새 stop으로 과거 청산을 발명한다. 분봉도 강화 시각 전부터 시작한 완료 bucket을 뒤늦게 읽을 때 같은 결함이 있었다.
+- 현재 snapshot에는 `exit_levels_effective_at`, 이전 exact snapshot에는 `exit_level_history` JSONB를 둔다. history 항목은 `effectiveAt`, `initialAtr`, `initialStop`, `currentStop`을 decimal 문자열로 보존한다. floor·후발 ATR·일봉 trailing이 실제로 level을 바꿀 때만 snapshot을 남긴다. 지연 일봉 trailing은 그 봉에 유효했던 historical ATR/stop으로 계산해 **실제 session close 위치**에 정렬 삽입·같은 instant 병합하고, 그 뒤 모든 version과 최신 current에도 더 타이트한 stop을 전파한다. 따라서 close와 최신 floor activation 사이의 old valid trailing crossing도 보존하면서 현재 보호선은 낮추지 않는다.
+- 일봉 `time_utc`는 deterministic signal/cursor label로 유지하되, stop version 선택·trailing activation·완료 여부는 `regular_session_bounds`가 준 KR/US 실제 정규장 open/close를 쓴다. 아직 닫히지 않은 현재 session/future label은 일봉 exit·ATR·trend에 쓰지 않는다. 분봉은 bucket 시작 시각에 유효한 snapshot을 쓴다. activation을 가로지른 bucket 내부는 OHLC만으로 전후 touch를 나눌 수 없으므로 old level을 쓰고, activation과 같거나 이후에 시작한 첫 온전한 bucket부터 new level을 쓴다.
+- 미처리 일봉은 시간순으로 모두 replay한다. 앞선 partial은 후보로 보존하되 이후 old-stop full exit가 있으면 full exit가 우선하며, partial state는 기존대로 PAPER 실행 성공 전에는 확정하지 않는다. old full exit가 이미 성립한 run에서는 floor를 먼저 올려 recommendation/evidence를 오염시키지 않는다. signal evidence의 ATR/stop은 최신 state가 아니라 해당 관측에 실제 사용한 historical snapshot이다.
+- migration 전 legacy 행의 두 새 컬럼이 모두 NULL이면 `updated_at`·migration 시각을 추론하지 않는다. 현재 stop/ATR snapshot이 과거부터 유효했던 것으로 해석하고, 첫 실제 강화에서 그 snapshot을 `effectiveAt=null` history로 남긴 뒤 새 snapshot을 정확한 `_now`부터 활성화한다.
+- state가 없거나 현재 position cycle과 맞지 않아 최초 관리하는 보유분은 보호 snapshot을 `position.created_at`으로 소급하지 않고 정확한 manager `_now`부터 만든다. 최초 관리 전 일봉은 cursor만 진행하고 highest/exit를 발명하지 않으며, 최초 관리 전 시작한 분봉도 skip한다. floor/ATR은 no-data여도 즉시 저장되고 다음 valid bucket부터 보호한다. 임의 grace window, readiness/defer gate, 새 scheduler는 없다.
+- `STOP_LOSS_FLOOR_RATIO = Decimal("0.97")`, 모든 BUY threshold·Toss gate·owner scope·kill/hard-risk·approval·idempotency 계약은 바꾸지 않았다. exit evaluator의 STOP exact-touch/gap, partial, TIME_STOP, TREND_BROKEN 정책도 바꾸지 않았다.
+
+### 스키마·변경 파일
+- 새 additive revision `20260908_kasset_stop_history`(`down_revision=20260907_kasset_optional_atr`)은 `kasset_paper_position_states.exit_levels_effective_at TIMESTAMPTZ NULL`, `exit_level_history JSONB NULL` 두 컬럼만 추가한다. 기존 행 UPDATE/backfill은 없다. `tests/_schema_bootstrap.py` version은 54다.
+- 변경 파일: `app/extensions/kasset/automation/position_manager.py`, `app/extensions/kasset/automation/position_manager_service.py`, `app/extensions/kasset/models.py`, `alembic/versions/20260908_kasset_position_stop_history.py`, `tests/_schema_bootstrap.py`, `tests/extensions/kasset/automation/test_position_manager.py`, 이 문서.
+- `intraday_data.py`, `vertical_slice.py`, `producer.py`, data job, BUY sizing/threshold, scheduler는 수정하지 않았다.
+
+### US 일봉·분봉·reference sizing 조사
+- 현재 runtime `584b462df` ancestry에는 US daily 단일-symbol 실패 격리 `954861d5`, non-Toss-master 제외 `04e3450f`, US ET-naive intraday timestamp 수정 `5a5f737f`와 회귀 `83f44174`가 이미 포함돼 있다. 9/3 CRWD가 `completedThrough=2026-08-31`이었던 원인은 당시 첫 Toss `stock-not-found`가 US universe sync 전체를 중단시킨 결함이었다.
+- 현재 CRWD 9/1~9/4 일봉과 runtime `CompletedIntradayBars` 16개(Toss, `dataAsOf=2026-09-08 14:50Z`)를 확인했다. 추가 backfill·scheduler·fallback·gate·migration·운영 mutation은 필요하지 않아 US slice 코드 변경은 0개다.
+- CRWD 9/1·9/2의 `ingested_at=2026-09-07 22:06:59Z`는 conflict upsert가 `ingested_at=now()`로 갱신한 최근 **재수집** 시각이지 최초 수집 증거가 아니다. 전체 universe 해당 일봉의 남은 최소 `ingested_at`은 `2026-09-04 15:53:32Z`다. 따라서 `ingested_at`만으로 9/3 당시 CRWD row 존재를 주장하지 않는다.
+- CRWD reference `231`은 live quote가 아니라 네 strategy entry의 중앙값이다. 실제 sizing `4.0065`, trigger `213.81` 반사실 `11.6926`, fill `214.13` 반사실 `11.6751`로 reference가 더 보수적인 수량을 만들었다. market fill은 fresh quote, stop floor는 실제 `PaperPosition.avg_price`를 쓰므로 contract defect 증거가 아니며 producer/sizing은 수정하지 않았다.
+
+### 격리 검증·checker closure
+- locked deps와 격리 PostgreSQL 15 DB/container에서 최종 position-manager **64** + 영향 caller 4파일 **138**의 결합 실행은 **202 passed / 12 warnings / 153.14s**다. warnings는 기존 OpenDartReader `SyntaxWarning`이다. US data regression **20 passed / 13.59s**, migration 범위 **10 passed / 109.10s**도 유지된다. 실행 범위가 다른 US/migration 수치를 202에 합산하지 않는다.
+- 변경 6파일 `ruff check`와 `ruff format --check` 통과, source 3파일 `ty check --error-on-warning` 통과, Alembic은 `20260908_kasset_stop_history` single head다.
+- checker MAJOR 재현 test-only RED: delayed day1 close trailing `110` 뒤 최신 floor activation 전 day2 `L=100`이 `TRAILING_STOP @ 110`이어야 하는 pure/service JSON-restart 두 case가 수정 전 source에서 모두 signal/recommendation `None`으로 실패했다. **2 failed / 62 deselected / 9.82s, exit 1**.
+- source 수정 후 manager/caller 결합 GREEN은 위 **202 passed / 153.14s, exit 0**이며 external HTTP/socket blocked는 0이다. 근거: `local://temporal-trailing-red.txt`, `local://temporal-trailing-green.txt`, `local://temporal-static-closure.txt`, `local://us-data-regressions.txt`, `local://temporal-migrations.txt`.
+- 독립 checker 정확히 1회에서 delayed-trailing MAJOR를 제기했고 Main이 ACCEPTED·수정한 뒤 **동일 finding closure PASS**, 추가 material finding 없음으로 종결했다. GitHub Actions, PR, commit/push, 운영 migration/deploy는 아직 실행하지 않았다. 사용자는 최종 권고 반영과 배포를 승인했지만 Main review·PR/CI 뒤의 production mutation은 Main만 수행한다.
+
+### 승인된 운영 반영 순서·rollback 금지
+1. 현재 운영 DB full backup을 만들고 non-empty 및 `pg_restore --list`를 확인한다.
+2. worker·scheduler를 먼저 정지하여 새 code/migration 확인 전 자연 sweep을 막는다.
+3. 승인 SHA를 checkout하고 공용 image를 build한 뒤 `alembic upgrade head`로 `20260908_kasset_stop_history`를 적용한다.
+4. `api mcp ai-mcp`만 먼저 올려 image/build SHA 일치와 health를 확인한다.
+5. 그 뒤 `worker scheduler`를 같은 SHA로 올리고 다음 자연 sweep을 관찰한다. 검증 목적으로 수동 PAPER 주문이나 강제 sweep은 만들지 않는다.
+- 새 컬럼 downgrade는 temporal provenance를 삭제한다. 새 행/history가 생긴 뒤 이 revision을 모르는 구버전 image로 rollback하면 같은 과거 소급 결함을 재도입하므로 **구버전 rollback과 Alembic downgrade를 금지**하고, 실패 시 worker·scheduler 정지를 유지한 채 이 revision을 이해하는 image로 roll-forward한다. 자동 rollback 경로도 쓰지 않는다.
 
 ## 2026-09-08 — PAPER/Toss 외 broker 표면 제거 (`cleanup/remove-nhplug` 소스 정리·검증 기록, 미병합·미배포)
 ### 범위와 결과
@@ -171,76 +207,4 @@
 - 롤백/재배포: Actions → Deploy → Run workflow에 `sha` 입력.
 - `/opt/kasset-trader-core`는 `ghrunner` 소유로 바꿨다(root가 아닌 runner가 checkout·env 갱신·compose를 실행). 기존 root cron 백업(`deploy/kasset-db-backup.sh`, `/root/backups`)은 영향 없다.
 - 저장소가 public이라 fork PR 워크플로는 외부 기여자 전원 승인 필수로 설정했다. 사용자가 fork network 이탈 후 private 전환 예정(Free 플랜에서는 branch protection·environment 승인이 비활성화되지만 위 자동배포 모델은 그것에 의존하지 않는다).
-
-## 프로젝트 개요와 사용자가 원하는 방향
-KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 배포는 위 `9fefab61` 상태이며, 이번 제거 소스는 base `60f72537`의 별도 `cleanup/remove-nhplug` branch에만 있고 아직 merge·deploy하지 않았다. 이 branch에서 활성 private execution 계약은 Toss와 KAsset PAPER 모의 원장만 남고 Android 주문은 PAPER 전용이다. 역사 KIS/Upbit/Alpaca ledger·read model·migration과 인증·서명 없는 Upbit/Binance public data는 보존하되 removed provider의 private runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
-
-## 2026-09-08 — 비Toss/비PAPER broker 전면 제거 (branch 소스 정리·검증 기록, 독립 checker closure PASS)
-### 승인 범위
-- 사용자 승인으로 Core 전체에서 활성 broker provider를 `PAPER`(KAsset DB 모의 원장)와 `TOSS`만 남긴다. NH PLUG를 포함한 나머지 broker 구현·등록·job·API·config·credential·smoke·문서·테스트를 제거한다.
-- 기존 DB 테이블/행(`kasset_broker_credentials`, `symbol_master`, KIS/Upbit/Alpaca ledger 등)과 Alembic history는 보존한다. 파괴적 migration은 만들지 않는다.
-
-### 이번 슬라이스에서 실제로 한 것 (CoreRemoval 소유: NH 전면 + shared registry/schema/settings/docs)
-- 삭제: `app/services/brokers/nhplug/**`, `app/extensions/kasset/api/{nh_adapter,orderbook_store,credential_vault}.py`, `app/services/nhplug_symbol_master_service.py`, `app/jobs/nhplug_symbol_master.py`, `app/tasks/nhplug_symbol_master_tasks.py`, `scripts/{sync_nhplug_symbol_master,nhplug_mock_smoke}.py`, 대응 테스트 4종과 `tests/extensions/kasset/api/test_orderbook.py`, `docs/runbooks/{nhplug-mock-smoke,kasset-android-nh-mock-readonly}.md`.
-- Android facade: broker 카탈로그는 `PAPER` + `TOSS`(`LIVE_READ_ONLY`, 주문 capability 없음, 앱 credential 등록 없음)뿐이다. `/brokers/{provider}/credential(s)`·`/verify`·`GET /market/orderbook` 라우트와 `CredentialRequest`/`BrokerVerifyResponse`/`OrderbookResponse`/`OrderbookLevel` 스키마, `paths.py` allowlist 항목을 제거했다. 주문·정정·취소는 PAPER 전용이며 TOSS는 409 `BROKER_READ_ONLY`, 그 외 provider는 기존 fail-closed 그대로다. `Broker`/`SystemBrokerStatus`에서 credential 필드를 제거했다.
-- 시세/호가: `market_data.get_orderbook`과 MCP `get_orderbook`은 KRW crypto 전용으로 축소했고 KR equity 호가는 provider 부재로 거부한다. `stock_detail_orderbook_provider`는 crypto 외 market에서 `None`을 반환한다. Toss `/api/v1/market/stream` 호가는 그대로다.
-- config/배포: `CREDENTIAL_MASTER_KEY` 설정과 `NHPLUG_MOCK_ENABLED`, `.env.nhplug-mock.native` mount, `/opt/kasset-nhplug` 볼륨을 env 예제·compose에서 제거했다.
-
-### 유지된 제약
-- PAPER 주문/체결/포지션/reconcile, AUTO_PAPER, 장중 청산, -3% 손절 바닥, 손절이 다음 후보를 막지 않는 계약, Android 인증, KR/US 시세·유니버스는 변경하지 않았다.
-- live 실행을 새로 열지 않았고 risk/approval/kill-switch 가드를 약화하지 않았다.
-- `symbol_master` 테이블·모델·소비자와 Toss producer, KRX/NXT 유니버스는 유지했다. NH producer만 끊었다.
-
-### enum·과거 데이터 판정 (2026-09-08 Main 확정)
-- `AccountSource`/`AccountScope`/`AccountMode`/`CurrentOrderBroker` 같은 과거 원장 READ DTO discriminator와 관련 DB 모델·Alembic history는 기존 저장 행 해석용이므로 보존한다. 활성 broker 등록·주문 요청 검증·capability 카탈로그만 PAPER/TOSS로 좁힌다. 과거 행의 provider 문자열을 PAPER/TOSS로 치환하지 않는다(데이터 왜곡 금지).
-
-### 검증 기록 (독립 checker closure 포함)
-- 근거 정본은 `.tmp-verify/verification-summary.json`과 그 파일이 가리키는 XML/raw artifact다. 검증 대상은 base `60f725373446ec9cd01f7d4e5a33f9e307db6e6c`에서 분리한 `cleanup/remove-nhplug` worktree의 현재 소스다. `main` merge, 운영 deploy, production 접근·변경, 실주문은 하지 않았다.
-- Windows Core contract subset은 **1429 tests / 0 failures / 0 errors / 0 skipped**다. 최초 전체 Windows XML은 **17282 passed / 400 failed / 65 errors / 29 skipped**로 clean run이 아니다(`.tmp-verify/core-full.xml`, `artifact://587`). 실제 cutover repair 범위는 **713 passed / 7 failed**, 그 7건 수정 뒤 집중 재검증은 **99 passed / 0 failed**다. dead helper/test 정리 후 `test_revalidation.py` 집중 재검증은 **87 passed**였고 해당 delta의 Ruff와 format check도 통과했다. 이 실행들은 범위가 겹치므로 서로 더해 전체 통과 수로 주장하지 않는다.
-- Linux POSIX 전용 10파일은 Windows manifest에서 의도적으로 제외하며 실제 Linux 실행에서 **152 passed / 0 failed**다(`.tmp-verify/linux-posix-tests.log`). OS 실패 범위는 처음 **1146 tests / 1138 passed / 5 failed / 3 skipped**, 최종 환경 재확인은 **120 tests / 115 passed / 4 failed / 1 skipped**다.
-- 남은 4건은 base `60f72537` guard에서도 같은 test name과 같은 uv wrapper `CalledProcessError`로 **4 failed**였다(`.tmp-verify/baseline-guard.xml`). 따라서 이 4건은 baseline/environment 문제이며 이번 제거에서 새로 생긴 회귀가 아니다. 전체 suite가 green이라고 주장하지 않는다.
-- 현재 수집 근거는 Windows **17740** nodes와 POSIX-only **152** nodes다. Main의 `.tmp-verify/final-collected-nodes.txt`는 둘을 합친 **17892** nodes이며 다음 exact-cover 확인 입력이다. `ci_shards/weights.json`은 audit-only라 재생성하지 않았고 required jobs·gate도 바꾸지 않았다.
-- 최근 migration roundtrip은 **2 passed**다(`artifact://555`). fresh base→head 검증은 Timescale extension을 사용할 수 없어 실행하지 못했다. 우회하지 않았고 이 제거에서 migration은 변경하지 않았다.
-- Android는 **390 tests / failure 0 / error 0 / skip 0**와 `assembleDebug` 성공이다(`artifact://140`). SM-S926N에 기존 data를 유지한 `adb install -r` 설치와 `MainActivity` cold start, 기존 로그인·AI픽·PAPER 자동 운용 첫 화면 표시, 앱 PID 유지 및 해당 PID `AndroidRuntime:E` 없음까지 확인했다(`artifact://679`). 다른 앱이 foreground로 전환된 뒤 오조작 방지를 위해 추가 터치를 중단했으므로 설정·자산·종목·호가 실기기 경로는 미확인이다. Frontend는 최초 전체 **687 tests**, 최종 account selector 집중 **32 tests**, type-check·build 통과다. 로컬 브라우저에서 실제 인증 후 현재 selector와 삭제 route를 확인했다.
-- 테스트는 격리 DB와 로컬 계정만 썼다. 실기기 확인에서도 주문·설정을 변경하지 않았고, production·live Toss 주문은 검증하지 않았다. 활성 private broker execution 계약은 PAPER/TOSS만 남고 Android execution은 PAPER 전용이다. 역사 DB 모델·행·READ enum·Alembic revision과 인증·서명 없는 Upbit/Binance public data는 의도적으로 유지했다.
-- 독립 checker 1회에서 제기한 3개 findings는 문서·env와 dead helper/test 정리 후 동일 review의 closure PASS를 받았다. 최종 집중 `test_revalidation.py`는 **87 passed / 0 failures / 0 errors**였고 Ruff와 format check도 통과했으며, Main은 세 finding을 모두 ACCEPTED로 종결했다.
-
-## 2026-09-06 — 주말 과거 시세 급등락 재알림
-- 운영 원인: SOXL `+9.2468%`의 원 시세는 KST `2026-09-05 08:59:59`인데, 미국 날짜가 바뀌는 9/5·9/6 13:00 KST에 각각 새 이벤트와 `sent` 푸시가 생성됐다. 가격 감시는 주말에도 10분마다 실행되며, 기존 코드는 시세 날짜와 무관하게 요청 시각의 시장 날짜로 이벤트·중복 키를 만들었다.
-- 수정 계약: KRX/US는 관측 시세의 시장 현지 날짜가 현재 시장 날짜와 같은 경우만 신규 가격 이벤트·푸시 대상으로 삼는다. 보존된 알림 목록은 지우지 않으며, 저장 기록을 통한 새 푸시에도 같은 날짜 계약을 적용한다. 현재 `CLOSED` 여부나 임의 초 단위 유효기간을 추가하지 않아 같은 시장 날짜의 정상 시간외 알림은 유지한다. CRYPTO의 기존 일봉·날짜 동작은 변경하지 않는다.
-- 작업 기준: `origin/main`의 `4a06870f`에서 분리한 `fix/weekend-stale-price-alerts`. 기존 기본 checkout의 미커밋 작업은 보존했다. 운영 DB는 원인 조사에서 읽기만 했고, 기존 잘못 생성된 알림은 삭제하지 않았다.
-- 변경 파일: `app/extensions/kasset/daily_routine_service.py`, `app/extensions/kasset/fcm_push_service.py`, 기존 테스트 `tests/extensions/kasset/api/test_daily_routine.py`·`tests/extensions/kasset/test_fcm_push_dispatch.py`, 이 문서. 신규 테스트 파일·스키마·Android 변경은 없다.
-- 회귀 증거: 수정 전 `HEAD`의 두 서비스 소스를 메모리에 로드하고 신규 회귀 두 건을 실행했다. 금요일 시세로 토요일 알림이 생성되는 실패와 저장 이벤트의 푸시 `sent=2` 실패를 각각 확인했다(`2 failed`, exit 1). 운영 DB가 아니라 기존 전용 `kasset-test-db`의 pytest 실행별 분리 DB를 사용했다.
-- 최종 검증: `python -m pytest tests/extensions/kasset/api/test_daily_routine.py tests/extensions/kasset/test_fcm_push_dispatch.py -q --tb=short` → **25 passed**, exit 0. 기존 Pydantic deprecated-config 경고 2개만 남았다. 변경 Python 4파일의 `ruff check`·`ruff format --check`, 서비스 2파일의 `ty check --error-on-warning` 통과. 첫 실행은 원격 테스트 DB 스키마 준비 때문에 600초 제한에 도달했고, fail-fast 재실행에서 전날 시세를 쓰던 history-failure fixture 충돌을 확인한 뒤 당일 시세로 보완하여 최종 통과했다.
-- 독립 `checker` 1회 **PASS**, CRITICAL/MAJOR/MINOR 0. INFO의 저장 이벤트 목록 직접 단언 추가 제안은 기존 stored-history 회귀와 실제 목록 조립 코드가 계약을 방어하므로 `REJECTED_WITH_EVIDENCE`로 종결했다. **Main 최종 판정: PASS.** 전체 저장소 테스트·GitHub CI·실제 단말 FCM·운영 배포는 실행하지 않았다.
-- 배포 승인: 사용자가 운영 반영과 임시 원격 브랜치 생성·병합 후 삭제를 승인했다. `4a06870f`를 가리키는 원격 `fix/weekend-stale-price-alerts`를 생성하여 `git_finalize`가 요구하는 fetch 대상을 준비했다. 검증된 수정은 PR CI 통과 후 main에 병합하여 기존 자동배포 경로로 반영한다.
-
-## 2026-09-05 — Android KR 종목정보 투자지표·52주 고저·외국인 보유율 공급 (PR #57, `b710fd5d` 자동배포 완료)
-- 운영 DB 읽기 조사: `market_valuation_snapshots`는 KR 3,929행/US 10,493행, 최신 `snapshot_date=2026-08-29`, source는 양 시장 모두 `toss_openapi`뿐이다. KR 샘플 `005930/138040/180640`은 행과 `market_cap`만 있고 `per/pbr/roe/dividend_yield/high_52w/low_52w`는 모두 NULL이었다. `invest_kr_fundamentals_snapshots`는 0행, `investor_flow_snapshots`의 KR 행도 0행이라 `foreign_holding_rate` 최신 NULL 비율은 계산할 모수가 없었다. `kr_candles_1d.value`는 최신 5거래일 3,345행에서 NULL 0행이며, 세 샘플의 최근 400일 264~266행도 NULL 0행이었다.
-- 원인: `market_summary.py`는 지표를 `market_valuation_snapshots`, 외국인 보유율을 `investor_flow_snapshots`, 거래대금을 `kr_candles_1d.value`에서 읽는다. Toss symbol-master 경로는 의도적으로 `market_cap`만 쓴다. Naver 지표/수급 builder와 TaskIQ task는 이미 있지만 일반 스케줄 등록과 commit이 각각 기본 OFF 설정에 묶여 있어 운영에는 Naver 행이 한 건도 없었다. 별도 TV Screener KR snapshot flow도 deployment registration이 유예됐고 운영 테이블이 비어 있어 fallback 원천이 아니다.
-- 변경: `kasset.market_snapshots.kr.sync`를 KAsset worker가 이미 로드하는 `kasset_market_events_tasks`에 매 거래일 16:40 KST로 등록했다. 기존 KAsset bounded universe(보유 → 관심종목 → 최근 추천, 최대 50)를 한 번 해석해 기존 Naver valuation/investor-flow builder를 `commit=True`로 호출한다. 전체 KRX 크롤은 하지 않는다. `market_summary.py`는 KR 일봉을 최근 260개 읽고 snapshot의 52주 고저가 NULL일 때만 저장 일봉 `high/low`의 max/min을 사용한다. 거래대금 근사(`close*volume`)는 추가하지 않았다.
-- 수동 1회 실행(배포 컨테이너): `/app/.venv/bin/python -c "import asyncio; from app.tasks.kasset_market_events_tasks import kasset_kr_market_snapshots_sync as run; print(asyncio.run(run()))"`.
-- 검증: focused pytest `17 passed`; 변경 Python 경로 `ruff check`, `ruff format --check`, `ty check --error-on-warning` 모두 통과했다. 로컬 PostgreSQL 미기동 때문에 DB fixture가 섞인 최초 baseline 선택은 `ConnectionRefusedError: [WinError 1225]`였고, DB-free focused node로 분리해 검증했다.
-- 배포 후 SQL: `SELECT DISTINCT ON (v.symbol) v.symbol,v.snapshot_date,v.source,v.per,v.pbr,v.roe,v.dividend_yield,v.market_cap,v.high_52w,v.low_52w,f.snapshot_date AS flow_date,f.foreign_holding_rate FROM market_valuation_snapshots v LEFT JOIN investor_flow_snapshots f ON f.market='kr' AND f.symbol=v.symbol WHERE v.market='kr' AND v.symbol IN ('005930','138040','180640') ORDER BY v.symbol,(v.source='naver_finance') DESC,v.snapshot_date DESC,f.snapshot_date DESC;`
-- 배포 후 curl: `curl -fsS -H "Authorization: Bearer $KASSET_TOKEN" "$KASSET_API/api/v1/market/summary?market=KRX&symbol=005930"`.
-
-- 배포 후: 운영 worker에서 builder를 1회 수동 실행해 9종목(보유·관심·최근 추천) 채움. 메리츠 PER 9.76·PBR 1.93·ROE 22.38·52주 149,800/98,000 — 토스와 일치. 같은 날 `kr_candles_1d`에 9/3·9/4 행이 ~620종목만 있던 것(PR #50 이전 KR sync 중단 잔재)을 `run_daily_candles_sync('kr')` 1회로 3,933종목 백필(실패 7: 특수 티커 + 유니버스에 잘못 섞인 `KOSPI`). 정기 cron은 월요일 16:40 KST 첫 실행.
-
-## 2026-09-05 — Android 토스 구성용 시세 API (PR #55, `8c192b44` 자동배포 완료)
-- `GET /market/candles`: `range` 1Y/5Y/ALL(DB 일봉 260/1300/2600), `1D`는 정규장 1분봉(count 400).
-- 신규 `GET /market/summary`(당일 OHLCV·거래대금·전일대비거래량%·52주·시총·PER/PBR/ROE·배당수익률(비율)·외국인소진율, 없으면 null), `GET /market/investor-flow`(KR 최신 1건), `GET /market/fx?pair=USD-KRW`(`exchange_rate_service` projection). `market_summary.py` 신규.
-- `GET /market/orderbook`: US 422 → 200 `availability=UNAVAILABLE, reason=US_DEPTH_NOT_PROVIDED`; KR에 `availability` 추가, WS payload 불변.
-- `POST /orders/preview`: `maxQuantity`, `tickSize`(KR), `normalizedLimitPrice`, `priceAdjusted`(기존 `tick_size.py` 재사용). 제출 경로·검증 불변. 신규 route는 `paths.py` allowlist 등록.
-- 검증: focused pytest 45 passed, ruff/ty. Android 소비 측은 KAsset-Trader `c24d2417`.
-
-## 2026-09-05 — 진입·리스크 1차 묶음 (PR #54, `7ccb115c` 운영 배포 완료)
-BUY 측 관문·수량 조정만 추가했다. SELL·손절·kill switch·ORDER_COUNT의 SELL 의미론은 변경하지 않았다. 기존 SHADOW 모듈·테이블(`shadow_loss_streak.py`, `shadow_high_watermark.py`, `kasset_shadow_*`)은 계산·저장에 재사용하고 활성 정책은 별도 production 모듈로 분리했다. `shadow_manifest` activation 의미는 그대로다.
-
-- **LOSS_STREAK** (`automation/loss_streak_gate.py`): 전역 — 최근 90분 손절 3회 → 신규 BUY 60분 차단. 종목별 — 같은 정규장 세션 손절 2회 → 그 종목 세션 종료까지 차단. 손절 사유는 `position_manager.ExitKind`의 `STOP/STOP_GAP/TRAILING_STOP/TRAILING_STOP_GAP`에서 파생(문자열 중복 정의 없음). 일반 exit가 끼면 streak 리셋. lock 저장은 관측 전용이며 streak과 활성 lock은 매 평가마다 `PaperTrade` 사실에서 재계산한다. evidence `lossStreak`(`kasset.loss-streak-gate.v1`).
-- **ACCOUNT_STATE** (`automation/account_state_gate.py`): 통화 장부(KRX/KRW, US/USD)별로 세션 시작·peak·현재 평가금액을 계산. `profit_ratio ≥ 0.5×daily_goal` 또는 `peak_drawdown ≥ 0.5×max_daily_loss` → `STAGED_REDUCTION`(BUY 수량 ×0.75 후 lot 내림); `profit_ratio ≥ daily_goal` → `EXIT_ONLY`(BUY 차단, SELL 기존 경로). 임계는 owner risk preset에서 파생. 상태는 기존 HWM 테이블에 upsert. evidence `accountState`(`kasset.account-state.v1`). `position_sizing`에 `account_state_multiplier`(≤1, 초과 ValueError) 입력 추가.
-- **No-Chase** (`automation/intraday_triggers.py`): **BUY 방향에만** pivot buffer·extension cap 적용 — ORB/VWAP 돌파는 기준가×(1+0.002) 이상에서만 `triggered`, 기준가×(1+0.02) 초과는 `BLOCKED/too_extended`. SELL(보유 청산) 트리거는 기존 판정(정확 돌파, cap 없음) 그대로. BUY 세션 시가 갭이 `max(1.0×ATR14, 3%×전일종가)` 이상이면 `BLOCKED/gap_up_no_chase`. `previous_close`는 **현재 세션 거래일보다 이전인 마지막 시장 현지 일봉**만 사용(당일 partial 일봉 오인 방지), `session_open_price`는 첫 분봉 timestamp가 `opens_at`과 일치할 때만 — 둘 중 하나라도 없으면 gap 검사만 `unavailable`. `IntradayTriggerDecision.valid_until = as_of+30분`은 recommendation `valid_until`을 축소한다(같은 cycle 소비에서는 만료되지 않음). 새 status `BLOCKED`. evidence `noChase`(`kasset.no-chase.v1`) + `validUntil`.
-- **Hard Risk 순서**: `DAILY_MAX_LOSS → ACCOUNT_STATE → LOSS_STREAK → BUDGET → POSITION → ORDER_COUNT → AI_SHADOW → DAILY_GOAL`. 새 관문 두 개는 **계산 불가 시 PASS + evidence unavailable + WARNING**(기존 관문이 뒤에서 안전망), 확정 차단만 fail-closed.
-- 회귀 테스트: `test_loss_streak_gate.py`(shard-4), `test_account_state_gate.py`(shard-2), `test_intraday_triggers.py`(+10, 기존 long/short fixture는 2% cap 안쪽 가격으로 조정), `test_position_sizing.py`, `test_vertical_slice.py`, `test_ai_trading_policy.py`(우선순위) 갱신.
-- 검증: 변경 경로 `ruff check/format`, `ty check app/extensions/kasset/automation --error-on-warning` 통과, focused pytest(mock) 177 passed. 로컬 Postgres가 없어 DB fixture 테스트는 CI에서 검증(1차 커밋 `2f53058f` CI 전체 통과). **독립 checker 1회: FAIL → MAJOR 4·MINOR 6 전부 ACCEPTED·수정.** MAJOR: (1) 집행 경로 `job.py._hard_risk`가 `account_state`를 넘기지 않아 EXIT_ONLY가 집행 시 무력 → 집행 직전 owner/market 재평가 후 전달; (2) HWM/lock 관측 저장 실패가 확정 차단을 PASS로 삼킴 → 계산/저장 예외 경계 분리, 저장 실패는 `persistFailed` evidence만; (3) no-chase buffer/cap이 SELL 청산 추천을 차단 → BUY 전용으로 복원; (4) `previous_close`가 당일 partial 일봉일 수 있어 gap-up 무표시 무력 → 세션 이전 일봉만 선택. MINOR: 게이트 자체 commit 제거(호출자 commit 1회), EXIT_ONLY를 `exit_only` 사유로 funnel 집계, `representativeMarket` 병기, 첫 분봉 결측 시 `session_open_unavailable`, HANDOFF 문구 2건.
-- 운영 관찰(배포 후): 첫 미장·국장 사이클 evidence에 `accountState`·`lossStreak`·`noChase` 섹션이 채워지는지, `setup_selected>0`인 사이클에서 `trigger_failures`에 `too_extended`/`gap_up_no_chase`/`expired`가 집계되는지, HWM 테이블에 KRW/USD 장부 행이 세션마다 갱신되는지 확인한다.
 

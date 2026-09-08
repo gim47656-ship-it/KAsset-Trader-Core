@@ -19,6 +19,7 @@ from app.extensions.kasset.automation.market_session import current_regular_sess
 from app.extensions.kasset.automation.policy import AITradingPolicyService
 from app.extensions.kasset.automation.position_manager import (
     ExitKind,
+    ExitLevelVersion,
     ManagedPositionState,
     PositionBar,
     PositionExitSignal,
@@ -48,6 +49,7 @@ from app.services.daily_candles.repository import (
     DailyCandlesRepository,
     MarketKey,
 )
+from app.services.market_events.session_calendar import regular_session_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -115,9 +117,84 @@ def _intraday_position_bars(
             high=_decimal(bar.high),
             low=_decimal(bar.low),
             close=_decimal(bar.close),
+            starts_at=_aware_utc(bar.timestamp),
+            ends_at=_aware_utc(bar.timestamp) + intraday.bar_interval,
         )
         for bar in intraday.bars
     )
+
+
+def _daily_position_bar(
+    market: str,
+    row: DailyCandleRow,
+) -> PositionBar | None:
+    """일봉 날짜 label을 실제 정규장 관측 구간으로 변환한다."""
+
+    as_of = _aware_utc(row.time_utc)
+    calendar_market: Literal["kr", "us"] = "kr" if market == "KRX" else "us"
+    bounds = regular_session_bounds(calendar_market, as_of.date())
+    if bounds is None:
+        return None
+    opens_at, closes_at = bounds
+    return PositionBar(
+        as_of=as_of,
+        open=_decimal(row.open),
+        high=_decimal(row.high),
+        low=_decimal(row.low),
+        close=_decimal(row.close),
+        starts_at=opens_at,
+        ends_at=closes_at,
+    )
+
+
+def _exit_level_history_from_row(
+    raw: object,
+) -> tuple[ExitLevelVersion, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("position state exit_level_history must be an array")
+    versions: list[ExitLevelVersion] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("position state exit-level version must be an object")
+        effective_raw = item.get("effectiveAt")
+        if effective_raw is None:
+            effective_at = None
+        elif isinstance(effective_raw, str):
+            effective_at = _aware_utc(datetime.fromisoformat(effective_raw))
+        else:
+            raise ValueError("exit-level effectiveAt must be an ISO timestamp or null")
+        atr_raw = item.get("initialAtr")
+        versions.append(
+            ExitLevelVersion(
+                effective_at=effective_at,
+                initial_atr=None if atr_raw is None else _decimal(atr_raw),
+                initial_stop=_decimal(item.get("initialStop")),
+                current_stop=_decimal(item.get("currentStop")),
+            )
+        )
+    return tuple(versions)
+
+
+def _exit_level_history_json(
+    state: ManagedPositionState,
+) -> list[dict[str, str | None]]:
+    return [
+        {
+            "effectiveAt": (
+                None
+                if version.effective_at is None
+                else version.effective_at.isoformat()
+            ),
+            "initialAtr": (
+                None if version.initial_atr is None else str(version.initial_atr)
+            ),
+            "initialStop": str(version.initial_stop),
+            "currentStop": str(version.current_stop),
+        }
+        for version in state.exit_level_history
+    ]
 
 
 def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
@@ -141,6 +218,12 @@ def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
         ),
         strategy_version=strategy_version,
         position_cycle_id=int(row.position_cycle_id),
+        exit_levels_effective_at=(
+            _aware_utc(row.exit_levels_effective_at)
+            if row.exit_levels_effective_at is not None
+            else None
+        ),
+        exit_level_history=_exit_level_history_from_row(row.exit_level_history),
     )
 
 
@@ -177,6 +260,8 @@ def _apply_state(
     row.highest_close = state.highest_close
     row.partial_exit_completed = state.partial_exit_completed
     row.last_evaluated_at = state.last_evaluated_at
+    row.exit_levels_effective_at = state.exit_levels_effective_at
+    row.exit_level_history = _exit_level_history_json(state)
     row.last_exit_signal_key = signal_key
 
 
@@ -421,19 +506,21 @@ class PaperPositionManagerService:
         intraday: CompletedIntradayBars | None = None,
     ) -> str | None:
         ordered = sorted(rows, key=lambda item: item.time_utc)
-        latest = ordered[-1] if ordered else None
-        latest_at = None if latest is None else _aware_utc(latest.time_utc)
-        # 저장 일봉이 없거나 미래이거나 오래됐으면 **일봉 판정만** 접는다. 일봉
-        # 적재가 멈춘 것(또는 이 종목이 일봉 유니버스에 없는 것)이 보유 종목의
-        # 손절을 막는 이유가 되어서는 안 되므로, 상태 복원과 장중 보호 평가는
-        # 그대로 진행한다.
-        daily_usable = (
-            latest_at is not None
-            and latest_at <= self._now
-            and self._now - latest_at <= _MAX_BAR_AGE
+        completed_daily: list[tuple[DailyCandleRow, PositionBar]] = []
+        for row in ordered:
+            bar = _daily_position_bar(market, row)
+            if bar is None or bar.ends_at is None or bar.ends_at > self._now:
+                continue
+            completed_daily.append((row, bar))
+        latest_completed_at = (
+            completed_daily[-1][1].ends_at if completed_daily else None
         )
-        if not daily_usable and intraday is None:
-            return None
+        # future/current-session daily rows are labels, not completed observations.
+        # ATR, trend and exits use only bars whose real session close has passed.
+        daily_usable = (
+            latest_completed_at is not None
+            and self._now - latest_completed_at <= _MAX_BAR_AGE
+        )
 
         position_id = int(position.id)
         if position_id < 1:
@@ -458,15 +545,9 @@ class PaperPositionManagerService:
             market=market,
             position=position,
         )
-        # 원장의 최신 체결 평단. 손실률의 분모는 언제나 실제로 채워진 평단이며,
-        # 추가매수·부분청산으로 평단이 바뀌면 tick마다 그 값을 다시 읽는다.
         filled_average_price = Decimal(position.avg_price)
-        # ATR은 일봉 15봉이 필요하고, **쓸 수 있는 일봉**에서만 만든다. 미래이거나
-        # 오래된 일봉은 손절선·부분익절선의 근거가 될 수 없으므로 여기서 ATR을
-        # 만들지도, 나중에 채워 넣지도 않는다. 그런 보유분은 체결 평단 -3% 고정
-        # 손절선만으로 보호한다. 이미 non-null ATR을 들고 있는 상태는 그대로 두므로
-        # 저장된 손절선으로 하는 장중 보호는 영향받지 않는다.
-        atr = _average_true_range(ordered) if daily_usable else None
+        completed_rows = [row for row, _bar in completed_daily]
+        atr = _average_true_range(completed_rows) if daily_usable else None
         if not state_matches:
             opened_at = _aware_utc(position.created_at)
             state = apply_stop_loss_floor(
@@ -478,9 +559,11 @@ class PaperPositionManagerService:
                     entry_at=opened_at,
                     strategy_version=self._strategy_version,
                     position_cycle_id=position_id,
+                    exit_levels_effective_at=self._now,
                     config=self._config,
                 ),
                 filled_average_price=filled_average_price,
+                effective_at=self._now,
             )
             if state_row is None:
                 state_row = KAssetPaperPositionState(position_cycle_id=position_id)
@@ -494,6 +577,8 @@ class PaperPositionManagerService:
             state_row.initial_atr = state.initial_atr
             state_row.initial_stop = state.initial_stop
             state_row.current_stop = state.current_stop
+            state_row.exit_levels_effective_at = state.exit_levels_effective_at
+            state_row.exit_level_history = _exit_level_history_json(state)
             state_row.highest_close = state.highest_close
             state_row.partial_exit_completed = False
             state_row.opened_at = state.entry_at
@@ -504,21 +589,9 @@ class PaperPositionManagerService:
             state_row.strategy_version = state.strategy_version
             state_row.strategy_fingerprint = self._strategy_fingerprint
         else:
-            # 이미 관리 중인 보유분도 되읽는 자리에서 바닥을 다시 먹인다. 일봉
-            # 커서가 전진하기를 기다리거나 DB를 손으로 고치지 않아도, 다음 tick의
-            # 일봉·장중 평가가 곧바로 같은 손절선을 본다.
-            state = apply_stop_loss_floor(
-                _state_from_row(state_row),
-                filled_average_price=filled_average_price,
-            )
-            if state.initial_atr is None and atr is not None:
-                # 고정 손절선으로 보호하던 보유분에 일봉 근거가 생겼다. 손절선을
-                # 낮추지 않고 ATR 파생 판정만 되살린다.
-                state = adopt_initial_atr(
-                    state,
-                    initial_atr=atr,
-                    config=self._config,
-                )
+            # 이 snapshot으로 미처리 과거 관측을 먼저 평가한다. 새 floor/ATR은
+            # 아래 replay가 끝난 뒤 _now version으로 append한다.
+            state = _state_from_row(state_row)
             stored_strategy_key = (state_row.strategy_key or "").strip()
             if (
                 not stored_strategy_key
@@ -588,49 +661,50 @@ class PaperPositionManagerService:
         signal: PositionExitSignal | None = None
         persisted_state = state
         exit_horizon = "intraday"
-        # 같은 완료 일봉을 두 번 평가하지 않는다. 다만 이 조건은 **일봉 판정
-        # 하나만** 접는 것이며, 장중 보호 평가는 아래에서 계속한다. 예전에는
-        # 여기서 포지션 전체를 건너뛰었기 때문에, 금요일 일봉까지 평가된
-        # 포지션이 월요일 장중에 손절선을 깨도 신호가 나오지 않았다.
-        if (
-            daily_usable
-            and latest is not None
-            and latest_at is not None
-            and latest_at > state.entry_at
-            and (state.last_evaluated_at is None or latest_at > state.last_evaluated_at)
-        ):
-            exit_horizon = "daily"
-            bar = PositionBar(
-                as_of=latest_at,
-                open=_decimal(latest.open),
-                high=_decimal(latest.high),
-                low=_decimal(latest.low),
-                close=_decimal(latest.close),
-            )
-            bars_held = sum(
-                state.entry_at < _aware_utc(row.time_utc) <= latest_at
-                for row in ordered
-            )
-            evaluation = evaluate_position(
-                state,
-                bar,
-                bars_held=max(1, bars_held),
-                trend_intact=_trend_intact(ordered),
-                config=self._config,
-            )
-            signal = evaluation.signal
-            persisted_state = _persistable_state(
-                state,
-                evaluation.state,
-                signal.kind if signal is not None else None,
-            )
+        # 미처리 일봉을 최신 한 건으로 건너뛰지 않고 시간순으로 replay한다.
+        # 앞선 partial은 보존하되, 뒤에 이미 발생한 전량 exit가 있으면 그것이
+        # 우선한다. partial state는 PAPER 집행 성공 전에는 확정하지 않는다.
+        if daily_usable:
+            daily_partial: PositionExitSignal | None = None
+            for index, (_row, bar) in enumerate(completed_daily):
+                row_at = bar.as_of
+                if row_at <= persisted_state.entry_at or (
+                    persisted_state.last_evaluated_at is not None
+                    and row_at <= persisted_state.last_evaluated_at
+                ):
+                    continue
+                bars_held = sum(
+                    persisted_state.entry_at < _aware_utc(candidate.time_utc) <= row_at
+                    for candidate in completed_rows
+                )
+                evaluation = evaluate_position(
+                    persisted_state,
+                    bar,
+                    bars_held=max(1, bars_held),
+                    trend_intact=_trend_intact(completed_rows[: index + 1]),
+                    config=self._config,
+                )
+                candidate_signal = evaluation.signal
+                persisted_state = _persistable_state(
+                    persisted_state,
+                    evaluation.state,
+                    candidate_signal.kind if candidate_signal is not None else None,
+                )
+                if candidate_signal is None:
+                    continue
+                if candidate_signal.kind is ExitKind.PARTIAL_SELL:
+                    if daily_partial is None:
+                        daily_partial = candidate_signal
+                    continue
+                signal = candidate_signal
+                exit_horizon = "daily"
+                break
+            if signal is None and daily_partial is not None:
+                signal = daily_partial
+                exit_horizon = "daily"
         if intraday is not None and (
             signal is None or signal.kind is ExitKind.PARTIAL_SELL
         ):
-            # 일봉이 상향한 손절선까지 반영된 상태로 장중 도달을 본다. 이 경로는
-            # 상태를 바꾸지 않으므로 분봉이 보유일수나 손절선을 오염시키지
-            # 않는다. 일봉이 이미 전량 청산을 냈으면 더 강한 신호가 없으므로
-            # 조회하지 않고, 부분익절만 장중 전량 손절과 강도를 비교한다.
             intraday_signal = evaluate_position_intraday(
                 persisted_state,
                 _intraday_position_bars(intraday),
@@ -643,6 +717,23 @@ class PaperPositionManagerService:
             ):
                 signal = intraday_signal
                 exit_horizon = "intraday"
+
+        # Full exit는 강화 전 snapshot에서 이미 성립한 더 이른 사실이므로 먼저
+        # 내보낸다. 그 외에는 no-data여도 새 floor/ATR을 즉시 _now부터 활성화하고
+        # 이전 version을 history에 남겨 늦은 관측의 old-stop crossing을 보존한다.
+        if signal is None or signal.kind is ExitKind.PARTIAL_SELL:
+            persisted_state = apply_stop_loss_floor(
+                persisted_state,
+                filled_average_price=filled_average_price,
+                effective_at=self._now,
+            )
+            if persisted_state.initial_atr is None and atr is not None:
+                persisted_state = adopt_initial_atr(
+                    persisted_state,
+                    initial_atr=atr,
+                    effective_at=self._now,
+                    config=self._config,
+                )
         if signal is None:
             _apply_state(
                 state_row,
@@ -714,9 +805,11 @@ class PaperPositionManagerService:
             "paperPositionId": position_id,
             "positionCycleId": state.position_cycle_id,
             "quantityFraction": str(signal.quantity_fraction),
-            "initialAtr": None if state.initial_atr is None else str(state.initial_atr),
-            "initialStop": str(state.initial_stop),
-            "currentStop": str(persisted_state.current_stop),
+            "initialAtr": (
+                None if signal.initial_atr is None else str(signal.initial_atr)
+            ),
+            "initialStop": str(signal.initial_stop),
+            "currentStop": str(signal.current_stop),
             "evaluationHorizon": exit_horizon,
             "barAsOf": signal.signal_at.isoformat(),
         }
