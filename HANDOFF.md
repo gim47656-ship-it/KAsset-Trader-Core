@@ -1,13 +1,13 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-08 (PAPER stop 시간 소급 방지 구현·격리 PG15 검증·checker closure PASS, CI·PR·배포 대기 / US 일봉·분봉 기존 복구 확인·추가 코드 변경 0 / 2026-09-07 -3% floor 운영 반영 이력 보존)
+갱신: 2026-09-09 (PAPER stop 시간 소급 방지 PR #62 merge·CI·수동 단계 배포·자연주기 관측 완료 / US 일봉·분봉 기존 복구 확인·추가 코드 변경 0 / roll-forward-only)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
-- 현재 실제 checkout/API/worker/scheduler는 모두 `584b462df16b1aa3e05ec1d2f449b529ee9f6cd6`다. PAPER stop 시간 소급 방지 변경은 이 SHA에서 분리한 `fix/paper-temporal-market-data` worktree에만 있으며 아직 commit·PR·CI·운영 배포하지 않았다. 2026-09-07의 `9fefab61e80a6ade8466669e75e06cdc975a95fb` -3% floor 배포는 아래 역사 기록이다.
-- 기본 checkout과 다른 worktree의 사용자 변경은 건드리지 않았다. 이번 변경 파일과 이 HANDOFF는 `.worktrees/paper-temporal-market-data` 안에만 있다.
+- 현재 운영 checkout/API/worker/scheduler는 모두 PR #62 merge SHA `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`이다. PAPER stop temporal patch commit은 `d1293495`이며 migration `20260908_kasset_stop_history`까지 운영 반영했다. 2026-09-07의 `9fefab61e80a6ade8466669e75e06cdc975a95fb` -3% floor 배포는 아래 역사 기록이다.
+- 소스 PR #62는 merge·배포 완료했다. 이 최종 운영 기록만 최신 `origin/main`에서 분리한 `docs/paper-temporal-deployment` worktree의 `HANDOFF.md`에 남긴다. 문서 전용 후속 branch는 commit/push와 PR 기록까지만 하고, 불필요한 재배포를 피하려 merge하지 않는다. source·설정·다른 문서는 건드리지 않았다.
 
-## 2026-09-08 — PAPER stop 시간 소급 방지·US 시세 가용성 확인 (`fix/paper-temporal-market-data`, 배포 대기)
+## 2026-09-08~09 — PAPER stop 시간 소급 방지·US 시세 가용성 확인 (PR #62 merge·운영 배포 완료)
 ### 문제와 확정 계약
 - 2026-09-07 19:40 KST 장 종료 후 배포된 한진칼(`180640`) -3% floor `140747`가 다음 9/8 sweep에서 아직 미평가였던 9/7 일봉 `L=137000`보다 먼저 적용되면, 9/7 당시 유효했던 old stop `125342.85714286` 대신 새 stop으로 과거 청산을 발명한다. 분봉도 강화 시각 전부터 시작한 완료 bucket을 뒤늦게 읽을 때 같은 결함이 있었다.
 - 현재 snapshot에는 `exit_levels_effective_at`, 이전 exact snapshot에는 `exit_level_history` JSONB를 둔다. history 항목은 `effectiveAt`, `initialAtr`, `initialStop`, `currentStop`을 decimal 문자열로 보존한다. floor·후발 ATR·일봉 trailing이 실제로 level을 바꿀 때만 snapshot을 남긴다. 지연 일봉 trailing은 그 봉에 유효했던 historical ATR/stop으로 계산해 **실제 session close 위치**에 정렬 삽입·같은 instant 병합하고, 그 뒤 모든 version과 최신 current에도 더 타이트한 stop을 전파한다. 따라서 close와 최신 floor activation 사이의 old valid trailing crossing도 보존하면서 현재 보호선은 낮추지 않는다.
@@ -33,15 +33,24 @@
 - 변경 6파일 `ruff check`와 `ruff format --check` 통과, source 3파일 `ty check --error-on-warning` 통과, Alembic은 `20260908_kasset_stop_history` single head다.
 - checker MAJOR 재현 test-only RED: delayed day1 close trailing `110` 뒤 최신 floor activation 전 day2 `L=100`이 `TRAILING_STOP @ 110`이어야 하는 pure/service JSON-restart 두 case가 수정 전 source에서 모두 signal/recommendation `None`으로 실패했다. **2 failed / 62 deselected / 9.82s, exit 1**.
 - source 수정 후 manager/caller 결합 GREEN은 위 **202 passed / 153.14s, exit 0**이며 external HTTP/socket blocked는 0이다. 근거: `local://temporal-trailing-red.txt`, `local://temporal-trailing-green.txt`, `local://temporal-static-closure.txt`, `local://us-data-regressions.txt`, `local://temporal-migrations.txt`.
-- 독립 checker 정확히 1회에서 delayed-trailing MAJOR를 제기했고 Main이 ACCEPTED·수정한 뒤 **동일 finding closure PASS**, 추가 material finding 없음으로 종결했다. GitHub Actions, PR, commit/push, 운영 migration/deploy는 아직 실행하지 않았다. 사용자는 최종 권고 반영과 배포를 승인했지만 Main review·PR/CI 뒤의 production mutation은 Main만 수행한다.
+- 독립 checker 정확히 1회에서 delayed-trailing MAJOR를 제기했고 Main이 ACCEPTED·수정한 뒤 **동일 finding closure PASS**, 추가 material finding 없음으로 종결했다. Patch `d1293495`를 담은 PR #62가 merge SHA `d6ee70e6`로 병합됐고 PR CI와 main CI까지 통과했다. 사용자가 승인한 production mutation은 Main만 아래 단계로 수행했다.
 
-### 승인된 운영 반영 순서·rollback 금지
-1. 현재 운영 DB full backup을 만들고 non-empty 및 `pg_restore --list`를 확인한다.
-2. worker·scheduler를 먼저 정지하여 새 code/migration 확인 전 자연 sweep을 막는다.
-3. 승인 SHA를 checkout하고 공용 image를 build한 뒤 `alembic upgrade head`로 `20260908_kasset_stop_history`를 적용한다.
-4. `api mcp ai-mcp`만 먼저 올려 image/build SHA 일치와 health를 확인한다.
-5. 그 뒤 `worker scheduler`를 같은 SHA로 올리고 다음 자연 sweep을 관찰한다. 검증 목적으로 수동 PAPER 주문이나 강제 sweep은 만들지 않는다.
-- 새 컬럼 downgrade는 temporal provenance를 삭제한다. 새 행/history가 생긴 뒤 이 revision을 모르는 구버전 image로 rollback하면 같은 과거 소급 결함을 재도입하므로 **구버전 rollback과 Alembic downgrade를 금지**하고, 실패 시 worker·scheduler 정지를 유지한 채 이 revision을 이해하는 image로 roll-forward한다. 자동 rollback 경로도 쓰지 않는다.
+### Git·CI·자동배포 gate
+- patch `d1293495`를 담은 PR #62 merge 결과는 `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`이다. PR CI run `34246267886`은 PASS다.
+- main CI run `34247022405`는 attempt 2에서 PASS다. 첫 attempt 실패는 artifact upload HTTP 403이며 test 실패가 아니다.
+- auto Deploy run `34248381556`은 migration 감지 gate의 의도된 `exit 2`로 끝났다. checkout·env 갱신·image build 이전에 차단돼 운영 mutation은 없었고, 이후 사용자 승인대로 Main이 수동 단계 배포했다.
+
+### 운영 반영 결과 (2026-09-08 15:49~16:10 UTC / 2026-09-09 KST)
+1. `2026-09-08T15:49:52Z`에 full custom DB dump와 env backup을 만들었다. `database.dump`는 **111,469,442 bytes**, `restore.list`는 **2,498 lines**다. `continuous_agg` circular foreign-key warning이 있었지만 `pg_dump` exit 0이다. list 확인은 actual restore test가 아니다.
+2. worker·scheduler를 먼저 정지하고 `.env.kasset`의 `CORE_IMAGE_TAG`/`VCS_REF`만 갱신한 뒤 공용 image `kasset-trader-core:d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`을 build했다.
+3. migration은 `20260907_kasset_optional_atr -> 20260908_kasset_stop_history` upgrade, exit 0이다. 최초 migration command의 stdin이 후속 shell 문을 소비하여 schema 확인/API 시작은 별도 호출로 실행했다. 최종 DB는 revision `20260908_kasset_stop_history`, `exit_levels_effective_at TIMESTAMPTZ NULL`, `exit_level_history JSONB NULL`임을 확인했다.
+4. `api mcp ai-mcp`만 먼저 올렸다. 세 서비스 모두 exact image/build SHA `d6ee70e6`, healthy, restart 0이며 public health는 `{\"status\":\"ok\"}`다. host Python 3.6 관측 script의 `subprocess.run(text=True)` 오류는 `universal_newlines=True`로 고쳐 다시 관측했고 actual health는 PASS다.
+5. `2026-09-08T16:04:49Z`(2026-09-09 01:04:49 KST)에 worker·scheduler를 같은 exact image로 재개했다. `16:07:22Z` 재확인에서 두 서비스도 image와 build-file full SHA `d6ee70e6`, running, restart 0이었다. 따라서 5개 app 서비스의 image/build stamp가 모두 일치한다.
+6. 첫 PAPER 자연주기는 `16:05:03Z` scheduler `Sending` → worker `Executing` → `16:05:09Z` `sweep done owners=0 outcomes=[]`로 정상 종료했다. 당시 exact claimable recommendation은 0건이고 두 실제 enabled flag는 모두 true였으므로 장애나 자동운용 off가 아니라 처리할 owner가 없는 정상 skip이다.
+7. `16:10:00Z` market-events+paper-execution 자연 dispatch 뒤 `16:10:01.138Z` strategy owner 1 US cycle이 시작해 `16:10:07.114Z` 정상 종료했다. DB cycle `512`(owner 4, `tracecyc-6ce61cadf5b74df09d8a6503947525f7`)는 `daily_setup_not_qualified`, candidate 101 / ranked 85 / evaluated 0 / actionable 0 / recommendation 0이며 85건 모두 `no_breakout_family_direction`이었다. 전략 조건 미충족이라 BUY가 없었던 것이며 수동 주문·강제 sweep은 만들지 않았다.
+- UBS open state는 `16:10:01.169901Z` 갱신됐고 stop `53.932` 유지, `exit_levels_effective_at=NULL`, history `[]`였다. 실제 level 변경이 없으므로 legacy activation NULL이 정상이다. 이 자연주기는 새 history 추가나 stop 체결을 관측한 증거는 아니며, 배포된 scheduler/worker dispatch·job 종료·기존 state 보존 증거다.
+- 원자료: `local://temporal-production-backup.txt`, `local://temporal-production-build.txt`, `local://temporal-production-migration.txt`, `local://temporal-production-api-start.txt`, `local://temporal-production-api-health.txt`, `local://temporal-production-resume.txt`, `local://temporal-production-worker-stamps.txt`, `local://temporal-runtime-observation.txt`, `local://temporal-production-postcycle.txt`, `local://temporal-production-eligibility.txt`.
+- 새 컬럼 downgrade는 temporal provenance를 삭제한다. 새 행/history가 생긴 뒤 이 revision을 모르는 구버전 image로 rollback하면 같은 과거 소급 결함을 재도입하므로 **구버전 rollback과 Alembic downgrade를 금지**한다. 실패 시 worker·scheduler를 정지하고 이 revision을 이해하는 image로 roll-forward하며 자동 rollback 경로도 쓰지 않는다.
 
 ## 2026-09-08 — PAPER/Toss 외 broker 표면 제거 (`cleanup/remove-nhplug` 소스 정리·검증 기록, 미병합·미배포)
 ### 범위와 결과
