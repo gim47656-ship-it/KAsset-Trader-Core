@@ -50,7 +50,6 @@ def test_get_upbit_rate_limit_candles_wildcard_is_fixed():
 @pytest.mark.parametrize(
     ("api_key", "expected_rate", "expected_period"),
     [
-        ("GET /v1/accounts", 30, 1.0),
         ("GET /v1/ticker", 10, 1.0),
     ],
 )

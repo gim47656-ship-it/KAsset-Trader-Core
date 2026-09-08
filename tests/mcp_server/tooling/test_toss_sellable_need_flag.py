@@ -52,13 +52,12 @@ async def test_collect_portfolio_positions_defaults_to_no_sellable_and_allows_ex
     )
     monkeypatch.setattr(portfolio_holdings, "fetch_toss_portfolio_snapshot", fake_fetch)
 
-    # Isolate the sibling active collectors — with market=None this path would
-    # otherwise call the real Upbit API and manual-holdings DB. Only the Toss
-    # forwarding contract belongs in this unit test.
+    # Isolate the sibling active collector — with market=None this path would
+    # otherwise hit the manual-holdings DB. Only the Toss forwarding contract
+    # belongs in this unit test.
     async def _empty(*args, **kwargs):
         return [], []
 
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", _empty)
 
     # General holdings reads omit sellable by default.
@@ -154,7 +153,6 @@ async def test_collect_portfolio_positions_forwards_fresh_sellable(monkeypatch):
     monkeypatch.setattr(
         portfolio_holdings, "_collect_toss_api_positions", fake_collect_toss
     )
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", _empty)
 
     await portfolio_holdings._collect_portfolio_positions(

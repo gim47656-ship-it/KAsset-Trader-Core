@@ -13,7 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, not_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,13 +35,6 @@ from app.schemas.trade_retrospective import (
     IntendedVsHappened,
     NextAction,
 )
-from app.services.alpaca_paper_ledger_service import (
-    RECORD_KIND_EXECUTION as _ALPACA_PAPER_RECORD_KIND_EXECUTION,
-)
-from app.services.alpaca_paper_ledger_service import (
-    RECORD_KIND_RECONCILE as _ALPACA_PAPER_RECORD_KIND_RECONCILE,
-)
-from app.services.brokers.kis.mock_scalping_exec.ledger_state import real_order_filter
 from app.services.trade_journal.retrospective_action_repository import (
     ActionControlError,
     RetrospectiveActionRepository,
@@ -72,13 +65,42 @@ from app.services.trade_journal.retrospective_type import (
     retrospective_type_from_snapshot,
 )
 
+# 삭제된 provider 모듈에서 값·의미 그대로 옮겨온 과거 행 해석용 상수/술어다.
+# 새 주문을 만들지 않고 이미 저장된 원장 행만 읽는다.
+# ``app.services.alpaca_paper_ledger_service``의 record_kind 어휘.
+_ALPACA_PAPER_RECORD_KIND_EXECUTION = "execution"
+_ALPACA_PAPER_RECORD_KIND_RECONCILE = "reconcile"
+
+# ``app.services.brokers.kis.mock_scalping_exec.ledger_state``의 control-row 어휘
+# (ROB-843 P2). 과거 revision이 남긴 control/reservation 행을 거래로 세지 않기
+# 위한 방어이며 규칙을 완화하지 않는다.
+_MOCK_CONTROL_SYMBOL = "__ledger_tracking__"
+_MOCK_CONTROL_ROLES: frozenset[str] = frozenset(
+    {"tracking_degraded", "native_fallback"}
+)
+_MOCK_CONTROL_REASONS: frozenset[str] = frozenset(
+    {"ledger_tracking_degraded", "ledger_tracking_fallback"}
+)
+
+
+def real_order_filter():
+    """control 행을 제외하고 실제 주문 행만 고르는 SQLAlchemy 술어."""
+    return and_(
+        KISMockOrderLedger.symbol != _MOCK_CONTROL_SYMBOL,
+        or_(
+            KISMockOrderLedger.scalping_role.is_(None),
+            not_(KISMockOrderLedger.scalping_role.in_(_MOCK_CONTROL_ROLES)),
+        ),
+        or_(
+            KISMockOrderLedger.reason.is_(None),
+            not_(KISMockOrderLedger.reason.in_(_MOCK_CONTROL_REASONS)),
+        ),
+    )
+
+
 # Sentinel: distinguishes "caller did not provide this field" (preserve on
 # upsert) from "caller explicitly set None" (clear the field).
 _UNSET: Any = object()
-# Module-private capability used only after the ROB-1285 terminal-event guard
-# succeeds.  Generic execution-retrospective callers cannot label their own
-# evidence as intake and thereby bypass the dedicated creation path.
-_INTAKE_WRITE_CAPABILITY: Any = object()
 
 _VALID_ACCOUNT_MODES = {
     "kis_mock",
@@ -269,31 +291,19 @@ class TradeRetrospectiveRepository:
         payload: dict[str, Any],
         *,
         create_defaults: dict[str, Any] | None = None,
-        _write_capability: Any = None,
     ) -> tuple[str, TradeRetrospective]:
-        intake_write = _write_capability is _INTAKE_WRITE_CAPABILITY
-        if _write_capability is not None and not intake_write:
-            raise RetrospectiveValidationError(
-                "invalid retrospective repository write capability"
-            )
-
         def _assert_type_boundary(existing: TradeRetrospective | None) -> None:
             if existing is not None:
-                existing_is_intake = is_intake_retrospective(existing)
-                if existing_is_intake != intake_write:
+                if is_intake_retrospective(existing):
                     raise RetrospectiveValidationError(
-                        "retrospective_type boundary violation: intake rows may only "
-                        "be written by save_position_intake_retrospective"
+                        "retrospective_type boundary violation: historical intake "
+                        "rows are read-only"
                     )
                 return
             snapshot = payload.get("evidence_snapshot")
-            creates_intake = (
-                retrospective_type_from_snapshot(snapshot) == INTAKE_RETROSPECTIVE_TYPE
-            )
-            if creates_intake != intake_write:
+            if retrospective_type_from_snapshot(snapshot) == INTAKE_RETROSPECTIVE_TYPE:
                 raise RetrospectiveValidationError(
-                    "retrospective_type boundary violation: intake rows may only "
-                    "be created by save_position_intake_retrospective"
+                    "retrospective_type boundary violation: intake creation is retired"
                 )
 
         cid = payload.get("correlation_id")
@@ -411,27 +421,15 @@ async def save_retrospective(
     guardrail_fired: Any = _UNSET,
     policy_version: Any = _UNSET,
     actor: str = "internal:save_retrospective",
-    _write_capability: Any = None,
 ) -> tuple[str, TradeRetrospective]:
-    intake_write = _write_capability is _INTAKE_WRITE_CAPABILITY
-    if _write_capability is not None and not intake_write:
-        raise RetrospectiveValidationError("invalid retrospective write capability")
     has_reserved_type = (
         isinstance(evidence_snapshot, dict)
         and RETROSPECTIVE_TYPE_KEY in evidence_snapshot
     )
-    if has_reserved_type and not intake_write:
+    if has_reserved_type:
         raise RetrospectiveValidationError(
             "evidence_snapshot.retrospective_type is reserved; "
-            "use save_position_intake_retrospective"
-        )
-    if intake_write and (
-        not has_reserved_type
-        or retrospective_type_from_snapshot(evidence_snapshot)
-        != INTAKE_RETROSPECTIVE_TYPE
-    ):
-        raise RetrospectiveValidationError(
-            "position intake writes require retrospective_type='intake' evidence"
+            "historical intake rows are read-only"
         )
     if account_mode not in _VALID_ACCOUNT_MODES:
         raise RetrospectiveValidationError(f"invalid account_mode: {account_mode}")
@@ -485,9 +483,9 @@ async def save_retrospective(
     if intended_vs_happened is not _UNSET and intended_vs_happened is not None:
         intended_vs_happened_value = _coerce_intended_vs_happened(intended_vs_happened)
 
-    # Note: kiwoom_mock is legacy special case; for US/crypto live, evidence
-    # should be available.
-    fill_evidence_available = False if intake_write else account_mode != "kiwoom_mock"
+    # Note: kiwoom_mock is a legacy special case; other retained history is
+    # expected to carry execution evidence.
+    fill_evidence_available = account_mode != "kiwoom_mock"
     if not fill_evidence_available and (
         (realized_pnl is not _UNSET and realized_pnl is not None)
         or (fill_price is not _UNSET and fill_price is not None)
@@ -665,7 +663,6 @@ async def save_retrospective(
     status, retro = await repo.upsert(
         payload,
         create_defaults=create_defaults,
-        _write_capability=_write_capability,
     )
 
     if _is_canonical and next_actions is not _UNSET and next_actions is not None:
@@ -1181,204 +1178,6 @@ _GENERIC_LIVE_TERMINAL = _GENERIC_LIVE_DEFAULT_TERMINAL | _GENERIC_LIVE_CANCEL_T
 _TOSS_TERMINAL = _TOSS_DEFAULT_TERMINAL | _TOSS_CANCEL_TERMINAL
 _KIS_MOCK_TERMINAL = _KIS_MOCK_DEFAULT_TERMINAL | _KIS_MOCK_CANCEL_TERMINAL
 _ALPACA_PAPER_TERMINAL = _ALPACA_PAPER_DEFAULT_TERMINAL | _ALPACA_PAPER_CANCEL_TERMINAL
-
-# ROB-1285 is deliberately KIS-live-KR-only.  With that scope pinned, this is
-# the exhaustive terminal-event contract for the lot guard: one table, one raw
-# state column, and every terminal status emitted by kis_live_ledger.py.
-KIS_LIVE_INTAKE_TERMINAL_STATUSES = _KIS_LIVE_TERMINAL
-KIS_LIVE_INTAKE_TERMINAL_DEFINITION = {
-    "table": "review.kis_live_order_ledger",
-    "state_column": "status",
-    "statuses": tuple(sorted(KIS_LIVE_INTAKE_TERMINAL_STATUSES)),
-}
-_INTAKE_ACQUISITION_PROVENANCE = frozenset(
-    {"external_acquisition", "pre_ledger_migration", "unknown_external"}
-)
-_INTAKE_SNAPSHOT_MAX_AGE = timedelta(hours=24)
-_INTAKE_SNAPSHOT_FUTURE_SKEW = timedelta(minutes=5)
-
-
-def _positive_intake_decimal(field: str, value: Any) -> Decimal:
-    try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise RetrospectiveValidationError(f"{field} must be a finite number") from exc
-    if not parsed.is_finite() or parsed <= 0:
-        raise RetrospectiveValidationError(f"{field} must be positive and finite")
-    return parsed
-
-
-async def assert_no_kis_live_terminal_event_for_intake(
-    db: AsyncSession,
-    *,
-    symbol: str,
-    checked_at: datetime,
-) -> dict[str, Any]:
-    """Fail closed when any terminal KIS-live-KR event exists for ``symbol``.
-
-    The KIS live ledger does not store a broker-account discriminator, so the
-    narrowest durable lot identity is ``account_mode='kis_live' + symbol``.
-    Deliberately checking the full history makes an uncertain account/lot match
-    reject rather than turn intake into a normal-retrospective bypass.
-    """
-    bind = db.get_bind()
-    if bind.dialect.name != "postgresql":
-        raise RetrospectiveValidationError(
-            "position intake terminal guard requires PostgreSQL table locking"
-        )
-    # Serialize the absence check with live-ledger INSERT/UPDATE transactions.
-    # Intake is an exceptional one-shot path; holding this lock only through
-    # the retrospective INSERT closes the check-then-create race.
-    await db.execute(text("LOCK TABLE review.kis_live_order_ledger IN SHARE MODE"))
-    terminal = (
-        await db.execute(
-            select(
-                KISLiveOrderLedger.id,
-                KISLiveOrderLedger.status,
-                KISLiveOrderLedger.trade_date,
-            )
-            .where(
-                KISLiveOrderLedger.account_mode == "kis_live",
-                KISLiveOrderLedger.symbol == symbol,
-                KISLiveOrderLedger.status.in_(KIS_LIVE_INTAKE_TERMINAL_STATUSES),
-            )
-            .order_by(KISLiveOrderLedger.id.asc())
-            .limit(1)
-        )
-    ).first()
-    if terminal is not None:
-        raise RetrospectiveValidationError(
-            "position_intake_terminal_event_exists: "
-            f"table=review.kis_live_order_ledger ledger_id={terminal.id} "
-            f"status={terminal.status}"
-        )
-    return {
-        **KIS_LIVE_INTAKE_TERMINAL_DEFINITION,
-        "scope": {"account_mode": "kis_live", "symbol": symbol},
-        "matched_terminal_events": 0,
-        "checked_at": checked_at.isoformat(),
-        "lock_mode": "SHARE",
-    }
-
-
-async def save_position_intake_retrospective(
-    db: AsyncSession,
-    *,
-    symbol: str,
-    account_ref: str,
-    quantity: Any,
-    average_price: Any,
-    current_price: Any,
-    observed_at: datetime,
-    evidence_source: str,
-    acquisition_provenance: str,
-    acquisition_note: str,
-    correlation_id: str,
-    trigger_type: str,
-    next_actions: list[dict[str, Any]],
-    created_by_profile: str,
-    policy_version: str | None = None,
-    actor: str = "internal:save_position_intake_retrospective",
-    now: datetime | None = None,
-) -> tuple[str, TradeRetrospective]:
-    """Create a non-execution intake retrospective after the terminal guard."""
-    normalized_symbol = _normalize_symbol(symbol, "equity_kr")
-    if not normalized_symbol:
-        raise RetrospectiveValidationError("symbol is required")
-    normalized_account_ref = (account_ref or "").strip()
-    if not normalized_account_ref:
-        raise RetrospectiveValidationError("account_ref is required")
-    normalized_source = (evidence_source or "").strip()
-    if not normalized_source:
-        raise RetrospectiveValidationError("evidence_source is required")
-    normalized_note = (acquisition_note or "").strip()
-    if not normalized_note:
-        raise RetrospectiveValidationError("acquisition_note is required")
-    normalized_correlation = (correlation_id or "").strip()
-    if not normalized_correlation:
-        raise RetrospectiveValidationError("correlation_id is required")
-    normalized_profile = (created_by_profile or "").strip()
-    if not normalized_profile:
-        raise RetrospectiveValidationError("created_by_profile is required")
-    if acquisition_provenance not in _INTAKE_ACQUISITION_PROVENANCE:
-        raise RetrospectiveValidationError(
-            "invalid acquisition_provenance "
-            f"(allowed: {sorted(_INTAKE_ACQUISITION_PROVENANCE)})"
-        )
-    if trigger_type not in {"stop_loss", "thesis_change"}:
-        raise RetrospectiveValidationError(
-            "position intake trigger_type must be stop_loss or thesis_change"
-        )
-    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
-        raise RetrospectiveValidationError("observed_at must be timezone-aware")
-
-    checked_at = now or now_kst()
-    if checked_at.tzinfo is None:
-        raise RetrospectiveValidationError("intake clock must be timezone-aware")
-    if observed_at > checked_at + _INTAKE_SNAPSHOT_FUTURE_SKEW:
-        raise RetrospectiveValidationError("position intake snapshot is in the future")
-    if checked_at - observed_at > _INTAKE_SNAPSHOT_MAX_AGE:
-        raise RetrospectiveValidationError("position intake snapshot is stale (>24h)")
-
-    qty = _positive_intake_decimal("quantity", quantity)
-    avg = _positive_intake_decimal("average_price", average_price)
-    current = _positive_intake_decimal("current_price", current_price)
-    pnl_pct = (current - avg) / avg * Decimal("100")
-
-    terminal_guard = await assert_no_kis_live_terminal_event_for_intake(
-        db,
-        symbol=normalized_symbol,
-        checked_at=checked_at,
-    )
-    evidence_snapshot = {
-        RETROSPECTIVE_TYPE_KEY: INTAKE_RETROSPECTIVE_TYPE,
-        "learning_eligibility": {
-            "execution_scoring": False,
-            "reason": "non_execution_position_intake",
-        },
-        "position_intake": {
-            "account_mode": "kis_live",
-            "account_ref": normalized_account_ref,
-            "market": "equity_kr",
-            "symbol": normalized_symbol,
-            "quantity": str(qty),
-            "average_price": str(avg),
-            "current_price": str(current),
-            "pnl_pct": str(pnl_pct),
-            "observed_at": observed_at.isoformat(),
-            "evidence_source": normalized_source,
-            "acquisition_provenance": acquisition_provenance,
-            "acquisition_note": normalized_note,
-            "terminal_guard": terminal_guard,
-        },
-    }
-    return await save_retrospective(
-        db,
-        symbol=normalized_symbol,
-        instrument_type="equity_kr",
-        account_mode="kis_live",
-        outcome="unfilled",
-        side="sell",
-        market="kr",
-        correlation_id=normalized_correlation,
-        pnl_pct=pnl_pct,
-        rationale=(
-            "Position intake for an externally acquired/pre-ledger lot; "
-            "no execution outcome is asserted."
-        ),
-        result_summary=(
-            f"Current position snapshot {qty} shares at average {avg}; "
-            f"observed {current} ({pnl_pct:.4f}%)."
-        ),
-        evidence_snapshot=evidence_snapshot,
-        created_by_profile=normalized_profile,
-        trigger_type=trigger_type,
-        next_actions=next_actions,
-        guardrail_fired="position_intake_terminal_absence_guard",
-        policy_version=policy_version,
-        actor=actor,
-        _write_capability=_INTAKE_WRITE_CAPABILITY,
-    )
 
 
 # Representative selection is independent of mutable metadata timestamps.

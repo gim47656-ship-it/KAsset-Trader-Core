@@ -354,9 +354,6 @@ def _build_orderbook_payload(
     """시장별 호가 응답과 검증 가능한 freshness 필드를 만든다.
 
     Upbit 호가는 provider 시각이 있어 N=5분 freshness 경계를 적용한다.
-    NH PLUG mock store의 ``asOf``는 transport 수신 시각이므로 shared
-    snapshot에 전달하지 않으며, KR 응답에는 ``as_of``와
-    ``price_as_of_source``를 싣지 않는다.
     """
     pressure = _classify_orderbook_pressure(snapshot.bid_ask_ratio)
     spread, spread_pct = _calculate_orderbook_spread(snapshot)
@@ -1200,32 +1197,17 @@ async def _get_orderbook_impl(
     """Implementation for get_orderbook tool."""
     requested_market = str(market or "kr").strip() or "kr"
     market_type = _normalize_market(requested_market)
-    if market_type is None:
-        raise ValueError(f"Unsupported market: {market}")
+    if market_type != "crypto":
+        raise ValueError("get_orderbook only supports the KRW crypto market")
+    if venue is not None and str(venue).strip():
+        raise ValueError("venue is not supported for the crypto orderbook")
 
-    source = "nhplug"
-    instrument_type = "equity_kr"
-
-    if market_type == "equity_kr":
-        symbol = _normalize_symbol_input(symbol, "kr")
-        if not symbol:
-            raise ValueError("symbol is required")
-        _, symbol = _resolve_market_type(symbol, "kr")
-    elif market_type == "crypto":
-        if venue is not None and str(venue).strip():
-            raise ValueError("venue is only supported for KR equity orderbook")
-        symbol = _validate_crypto_orderbook_symbol_input(symbol)
-        source = "upbit"
-        instrument_type = "crypto"
-    else:
-        raise ValueError("get_orderbook only supports KR equity and KRW crypto markets")
+    source = "upbit"
+    instrument_type = "crypto"
+    symbol = _validate_crypto_orderbook_symbol_input(symbol)
 
     try:
-        snapshot = await market_data_service.get_orderbook(
-            symbol,
-            "crypto" if market_type == "crypto" else "kr",
-            venue=venue if market_type == "equity_kr" else None,
-        )
+        snapshot = await market_data_service.get_orderbook(symbol, "crypto")
         return _build_orderbook_payload(snapshot)
     except Exception as exc:
         payload = _error_payload_from_exception(
@@ -1357,9 +1339,8 @@ def _register_market_data_tools_impl(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_orderbook",
         description=(
-            "KR equity는 NH PLUG mock feed, KRW crypto는 Upbit에서 호가를 "
-            "읽습니다. NH PLUG는 KRX만 지원하며 NXT/unified venue 요청은 "
-            "provider_unsupported를 반환합니다."
+            "KRW crypto 호가를 Upbit에서 읽습니다. KR/US equity 호가는 "
+            "제공하지 않습니다."
         ),
     )
     async def get_orderbook(

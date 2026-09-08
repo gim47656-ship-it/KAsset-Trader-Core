@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.mcp_server.tooling import order_execution, orders_registration
+from app.mcp_server.tooling import orders_registration
 from tests._mcp_tooling_support import build_tools
 
 
@@ -29,13 +29,11 @@ async def test_default_equity_preview_delegates_to_toss(
             "approval_hash": "approval-token",
         }
     )
-    legacy = AsyncMock(side_effect=AssertionError("legacy order path called"))
     monkeypatch.setattr(
         orders_registration.orders_toss_variants,
         "toss_preview_order",
         preview,
     )
-    monkeypatch.setattr(order_execution, "_place_order_impl", legacy)
 
     result = await build_tools()["place_order"](
         symbol=symbol,
@@ -49,7 +47,6 @@ async def test_default_equity_preview_delegates_to_toss(
     assert preview.await_args.kwargs["symbol"] == expected_symbol
     assert preview.await_args.kwargs["market"] == expected_market
     assert preview.await_args.kwargs["account_mode"] == "toss_live"
-    legacy.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -101,13 +98,11 @@ async def test_kis_equity_intent_rejects_without_rerouting(
     account_mode: str,
 ):
     toss = AsyncMock()
-    legacy = AsyncMock()
     monkeypatch.setattr(
         orders_registration.orders_toss_variants,
         "toss_preview_order",
         toss,
     )
-    monkeypatch.setattr(order_execution, "_place_order_impl", legacy)
 
     result = await build_tools()["place_order"](
         symbol="005930",
@@ -124,14 +119,11 @@ async def test_kis_equity_intent_rejects_without_rerouting(
         "symbol": "005930",
     }
     toss.assert_not_awaited()
-    legacy.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_crypto_keeps_upbit_legacy_path(monkeypatch):
-    legacy = AsyncMock(return_value={"success": True, "source": "upbit"})
+async def test_crypto_orders_are_not_operational(monkeypatch):
     toss = AsyncMock()
-    monkeypatch.setattr(order_execution, "_place_order_impl", legacy)
     monkeypatch.setattr(
         orders_registration.orders_toss_variants,
         "toss_preview_order",
@@ -145,28 +137,10 @@ async def test_crypto_keeps_upbit_legacy_path(monkeypatch):
         price=100_000_000,
     )
 
-    assert result["success"] is True
-    assert result["account_mode"] == "upbit"
-    assert legacy.await_args.kwargs["is_mock"] is False
-    toss.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_explicit_toss_selector_rejects_crypto(monkeypatch):
-    legacy = AsyncMock()
-    monkeypatch.setattr(order_execution, "_place_order_impl", legacy)
-
-    result = await build_tools()["place_order"](
-        symbol="KRW-BTC",
-        side="buy",
-        quantity=0.01,
-        price=100_000_000,
-        account_mode="toss_live",
-    )
-
     assert result["success"] is False
-    assert "does not support crypto" in result["error"]
-    legacy.assert_not_awaited()
+    assert result["error"] == orders_registration._CRYPTO_NOT_OPERATIONAL
+    assert result["symbol"] == "KRW-BTC"
+    toss.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -268,24 +242,3 @@ async def test_generic_modify_delegates_to_toss_confirm_boundary(monkeypatch):
         "confirm_high_value_order": True,
         "account_mode": "toss_live",
     }
-
-
-@pytest.mark.asyncio
-async def test_legacy_direct_equity_order_is_fail_closed_before_provider(monkeypatch):
-    provider = AsyncMock()
-    price = AsyncMock()
-    monkeypatch.setattr(order_execution, "_execute_order", provider)
-    monkeypatch.setattr(order_execution, "_fetch_current_price", price)
-
-    result = await order_execution._place_order_impl(
-        symbol="005930",
-        side="buy",
-        quantity=1,
-        price=70000,
-    )
-
-    assert result["success"] is False
-    assert result["error"] == "provider kis is not operational"
-    assert result["mutation_sent"] is False
-    provider.assert_not_awaited()
-    price.assert_not_awaited()

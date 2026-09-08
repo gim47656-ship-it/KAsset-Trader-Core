@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.auth.security import get_password_hash
 from app.extensions.kasset.api.auth import MobileAuthService
-from app.extensions.kasset.api.credential_vault import CredentialVault
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper import paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
@@ -343,44 +342,6 @@ async def test_same_client_order_id_is_independent_and_foreign_order_is_hidden(
             f"PAPER-{account_ids[0]}",
         )
     assert hidden_account.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_credentials_are_isolated_by_owner(
-    db_session: AsyncSession,
-    two_owners: list[User],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        CredentialVault,
-        "_master_key",
-        staticmethod(lambda: b"kasset-test-master-key-32-bytes!"),
-    )
-    vault = CredentialVault()
-    owner_a, owner_b = two_owners
-
-    credential_a = await vault.store_nh(
-        db_session,
-        owner_a.id,
-        app_key="a-key",
-        app_secret="a-secret",
-        account_no="a-account",
-    )
-    credential_b = await vault.store_nh(
-        db_session,
-        owner_b.id,
-        app_key="b-key",
-        app_secret="b-secret",
-        account_no="b-account",
-    )
-
-    assert credential_a.id != credential_b.id
-    assert (await vault.reveal_nh(db_session, owner_a.id)).app_key == "a-key"
-    assert (await vault.reveal_nh(db_session, owner_b.id)).app_key == "b-key"
-
-    await vault.delete_nh(db_session, owner_b.id)
-    assert await vault.record(db_session, owner_b.id, "NH") is None
-    assert await vault.record(db_session, owner_a.id, "NH") is not None
 
 
 @pytest.mark.asyncio

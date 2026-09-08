@@ -2,11 +2,9 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.extensions.kasset.api.credential_vault import credential_vault
+from app.core.config import settings, validate_toss_api_config
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.paper import iso_z
 from app.extensions.kasset.api.schemas import Broker, BrokerCapabilities
-from app.services.brokers.nhplug.gating import mock_enabled
 
 
 class AndroidBrokerRegistry:
@@ -17,13 +15,8 @@ class AndroidBrokerRegistry:
         db: AsyncSession,
         owner_user_id: int,
     ) -> list[Broker]:
-        return [
-            self._paper(),
-            await self._nh(db, owner_user_id),
-            self._preparing("KIS", "한국투자증권"),
-            self._preparing("TOSS", "토스증권"),
-            self._preparing("KB", "KB증권"),
-        ]
+        del db, owner_user_id
+        return [self._paper(), self._toss()]
 
     async def get_broker(
         self,
@@ -60,61 +53,29 @@ class AndroidBrokerRegistry:
         )
 
     @staticmethod
-    async def _nh(db: AsyncSession, owner_user_id: int) -> Broker:
-        record = await credential_vault.record(db, owner_user_id, "NH")
-        credential_id: str | None = None
-        credential_readable = False
-        app_key_masked: str | None = None
-        account_no_masked: str | None = None
-        last_verified_at: str | None = None
-        if record is not None:
-            credential_id = record.id
-            last_verified_at = (
-                iso_z(record.last_verified_at)
-                if record.last_verified_at is not None
-                else None
-            )
-            try:
-                revealed = await credential_vault.reveal_nh(db, owner_user_id)
-            except MobileApiError:
-                revealed = None
-            if revealed is not None:
-                credential_readable = True
-                app_key_masked = credential_vault.mask(revealed.app_key)
-                account_no_masked = credential_vault.mask(revealed.account_no)
+    def _toss() -> Broker:
+        """Toss is the server-side market data source, never an app order path.
+
+        Credentials live in the server environment, so the app never registers
+        them, and the catalog must not advertise an order capability the
+        Android contract keeps refusing.
+        """
+
         return Broker(
-            provider="NH",
-            display_name="NH투자증권 PLUG",
-            connected=(
-                last_verified_at is not None and credential_readable and mock_enabled()
-            ),
-            credential_id=credential_id,
-            app_key_masked=app_key_masked,
-            account_no_masked=account_no_masked,
-            last_verified_at=last_verified_at,
+            provider="TOSS",
+            display_name="토스증권",
+            connected=not validate_toss_api_config(settings),
             implemented=True,
-            requires_credential=True,
-            supported_modes=["MOCK_READ_ONLY"],
-            mode="MOCK_READ_ONLY",
+            requires_credential=False,
+            supported_modes=["LIVE_READ_ONLY"],
+            mode="LIVE_READ_ONLY",
             capabilities=BrokerCapabilities(
                 domestic_stock=True,
+                us_stock=True,
+                foreign_stock=True,
                 rest=True,
-                paper_trading=True,
                 read_only=True,
             ),
-        )
-
-    @staticmethod
-    def _preparing(provider: str, display_name: str) -> Broker:
-        return Broker(
-            provider=provider,
-            display_name=display_name,
-            connected=False,
-            implemented=False,
-            requires_credential=True,
-            supported_modes=[],
-            mode="PREPARING",
-            capabilities=BrokerCapabilities(),
         )
 
 

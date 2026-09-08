@@ -353,8 +353,9 @@ Paste this into the Linear issue or PR after the smoke. Do not include secrets.
   returns `None`, the verdict is advisory (`block=false, advisory=true`), and
   KR trading is never frozen.
 - **Alternatives** on a block: `retry_at_regular` (KRX regular session) and
-  `route_via_kis` (KIS domestic order sets `EXCG_ID_DVSN_CD='SOR'` for
-  NXT-eligible symbols; see `app/services/brokers/kis/domestic_orders.py`).
+  `route_via_kis` (a legacy alternative label still returned by
+  `app/services/nxt_preflight.py`; the KIS domestic order path itself no longer
+  exists in this repo).
 - **Belt-and-suspenders:** any preflight miss still surfaces the broker 422
   `market-not-supported-for-stock` as a typed
   `error_code:"nxt_session_not_tradable"` with the same alternatives.

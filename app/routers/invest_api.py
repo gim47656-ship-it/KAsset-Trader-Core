@@ -158,10 +158,8 @@ def get_invest_home_service(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvestHomeService:
     from app.services.invest_home_readers import (
-        AlpacaPaperHomeReader,
         ManualHomeReader,
         TossApiHomeReader,
-        UpbitHomeReader,
     )
     from app.services.invest_quote_service import InvestQuoteService
     from app.services.portfolio_snapshot_cache import (
@@ -171,10 +169,8 @@ def get_invest_home_service(
     quote_service = InvestQuoteService(db)
 
     return InvestHomeService(
-        upbit_reader=UpbitHomeReader(db),
         manual_reader=ManualHomeReader(db, quote_service=quote_service),
         toss_api_reader=TossApiHomeReader(),
-        paper_readers=[AlpacaPaperHomeReader()],
         snapshot_cache=get_shared_portfolio_snapshot_cache(),
     )
 

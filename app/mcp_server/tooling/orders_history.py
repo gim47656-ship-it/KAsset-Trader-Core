@@ -6,11 +6,9 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-import app.services.brokers.upbit.client as upbit_service
 from app.mcp_server.tooling import orders_toss_variants
-from app.mcp_server.tooling.order_execution import _normalize_market_type_to_external
-from app.mcp_server.tooling.orders_modify_cancel import _normalize_upbit_order
 from app.mcp_server.tooling.shared import (
+    _normalize_market_type_to_external,
     logger,
 )
 from app.mcp_server.tooling.shared import (
@@ -78,7 +76,7 @@ def _validate_history_inputs(
             "(broker fill/cancel history is keyed by symbol). "
             "Use status='pending' or status='all' for symbol-free queries "
             "(open orders across markets), "
-            "or provide a symbol (e.g. symbol='KRW-BTC')."
+            "or provide a symbol (e.g. symbol='005930')."
         )
 
     symbol = (symbol or "").strip() or None
@@ -108,16 +106,20 @@ def _validate_history_inputs(
         if norm is None:
             raise ValueError(f"Unsupported market: {market_hint}")
         market_types = [norm]
+    if "crypto" in market_types:
+        # PAPER와 Toss만 운영 provider다. crypto 주문 이력을 조회할 broker가
+        # 없으므로 빈 결과를 성공으로 위장하지 않고 명시적으로 거부한다.
+        raise ValueError(
+            "crypto order history is not supported: no crypto order provider "
+            "is operational"
+        )
     if not market_types and status in ("pending", "all", "expired"):
         # ROB-665 item 3: expired (dead day orders) surface via the live
         # KR/US inquiries just like pending, so scan all markets when unscoped.
-        market_types = ["crypto", "equity_kr", "equity_us"]
+        market_types = ["equity_kr", "equity_us"]
 
     if not market_types and order_id:
-        if "-" in order_id and len(order_id) == 36:
-            market_types = ["crypto"]
-        else:
-            market_types = ["crypto", "equity_kr", "equity_us"]
+        market_types = ["equity_kr", "equity_us"]
 
     return (
         symbol,
@@ -129,30 +131,6 @@ def _validate_history_inputs(
         market_types,
         normalized_symbol,
     )
-
-
-async def _fetch_crypto_orders(
-    normalized_symbol: str | None,
-    status: str,
-    limit_val: float,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Fetch and normalize Upbit (crypto) orders."""
-    fetched: list[dict[str, Any]] = []
-
-    if status in ("all", "pending"):
-        open_ops = await upbit_service.fetch_open_orders(market=normalized_symbol)
-        fetched.extend([_normalize_upbit_order(o) for o in open_ops])
-
-    if status in ("all", "filled", "cancelled") and normalized_symbol:
-        fetch_limit = 100 if limit_val == float("inf") else max(limit, 20)
-        closed_ops = await upbit_service.fetch_closed_orders(
-            market=normalized_symbol,
-            limit=fetch_limit,
-        )
-        fetched.extend([_normalize_upbit_order(o) for o in closed_ops])
-
-    return fetched
 
 
 _TOSS_STATUS_MAP = {
@@ -462,20 +440,6 @@ async def get_order_history_impl(
 
     orders: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-
-    if "crypto" in market_types:
-        try:
-            fetched = await _fetch_crypto_orders(
-                normalized_symbol if market_types == ["crypto"] else None,
-                status,
-                limit_val,
-                limit or 50,
-            )
-            for order in fetched:
-                order["_source_market"] = "crypto"
-            orders.extend(fetched)
-        except Exception as exc:
-            errors.append({"market": "crypto", "error": str(exc)})
 
     equity_market_types = {
         market_type

@@ -14,7 +14,6 @@ from app.jobs.intraday_order_review import (
     is_us_trading_hours as _is_us_trading_hours,
 )
 from app.jobs.intraday_order_review import (
-    run_crypto_order_review,
     run_kr_order_review,
     run_us_order_review,
 )
@@ -22,17 +21,6 @@ from app.jobs.intraday_order_review import (
 # Re-export private aliases so existing tests importing from this module continue to work.
 _is_kr_trading_hours = _is_kr_trading_hours  # noqa: PLW0127
 _is_us_trading_hours = _is_us_trading_hours  # noqa: PLW0127
-
-
-@broker.task(
-    schedule=[
-        {"cron": "0 14 * * *"},
-        {"cron": "0 21 * * *"},
-    ],
-)
-async def intraday_crypto_order_review() -> dict[str, object]:
-    """Intraday order review for crypto market (14:00, 21:00 KST)."""
-    return await run_crypto_order_review()
 
 
 @broker.task(
@@ -58,7 +46,6 @@ async def intraday_us_order_review() -> dict[str, object]:
 
 
 __all__ = [
-    "intraday_crypto_order_review",
     "intraday_kr_order_review",
     "intraday_us_order_review",
 ]

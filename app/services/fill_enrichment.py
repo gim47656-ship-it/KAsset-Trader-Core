@@ -1,7 +1,7 @@
 """Best-effort, fail-open enrichment for fill notifications.
 
-Toss/Upbit read-only 보유 조회로 체결 시점 평단·포지션·실현손익 근사치를
-얻는다. 어떤 provider 예외도 알림을 막지 않는다.
+Toss read-only 보유 조회로 체결 시점 평단·포지션·실현손익 근사치를 얻는다.
+어떤 provider 예외도 알림을 막지 않는다.
 """
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ async def fetch_fill_enrichment(order: FillOrder) -> FillEnrichment | None:
     try:
         if order.market_type in ("kr", "us"):
             return await _fetch_toss(order)
-        if order.market_type == "crypto":
-            return await _fetch_upbit(order)
     except Exception:
         logger.warning(
             "fill enrichment failed (fail-open): symbol=%s market=%s",
@@ -63,22 +61,3 @@ async def _fetch_toss(order: FillOrder) -> FillEnrichment | None:
         qty=float(position.quantity),
         avg=float(position.avg_buy_price),
     )
-
-
-async def _fetch_upbit(order: FillOrder) -> FillEnrichment | None:
-    from app.services.brokers.upbit.client import (
-        fetch_my_coins,
-        parse_upbit_account_row,
-    )
-
-    currency = order.symbol.split("-")[-1] if "-" in order.symbol else order.symbol
-    accounts = await fetch_my_coins()
-    for row in accounts:
-        if str(row.get("currency", "")).upper() == currency.upper():
-            parsed = parse_upbit_account_row(row)
-            return _build(
-                order,
-                qty=float(parsed["total_quantity"]),
-                avg=float(parsed["avg_buy_price"]),
-            )
-    return None

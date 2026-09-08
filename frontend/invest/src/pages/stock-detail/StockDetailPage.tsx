@@ -71,6 +71,9 @@ function currencyValue(currency: string, value: number | null | undefined) {
 function orderbookMessage(data: StockDetailResponse): string {
   if (data.orderbookSupport.supported && data.orderbook) return "호가를 표시합니다";
   if (data.orderbookSupport.reason === "us_unsupported") return "US 호가는 아직 지원하지 않습니다";
+  // 국내(KR) 호가 제공자가 제거되어 백엔드가 항상 kr_unavailable을 돌려줍니다.
+  // "일시적 조회 실패"로 읽히지 않도록 미제공임을 명시합니다.
+  if (data.orderbookSupport.reason === "kr_unavailable") return "국내 호가는 제공하지 않습니다";
   if (data.orderbookSupport.reason === "provider_unavailable") return "호가 제공자 데이터를 사용할 수 없습니다";
   if (data.orderbookSupport.reason === "crypto_deferred") return "크립토 호가는 다음 단계에서 연결합니다";
   return "호가 데이터를 사용할 수 없습니다";

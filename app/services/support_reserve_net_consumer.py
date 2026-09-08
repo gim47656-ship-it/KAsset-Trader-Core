@@ -44,10 +44,13 @@ PROPOSAL_CREATION_CALL_SITE: Final = (
 # deliberately not a policy-file edit owned by #1840.
 KR_NEW_MIN_AVAILABLE_CASH: Final = Decimal("400000")
 
+# Upbit 주문 어댑터가 제거되어 crypto에는 admissible한 account_mode가 없다.
+# 항목 자체를 지워 crypto 후보는 기존 authoritative 게이트에서
+# ``market_not_supported``로 닫힌다(별도 validator를 새로 만들지 않는다).
+# 과거 행을 읽는 read enum과 달리 여기는 active request admission이다.
 _SUPPORTED_ACCOUNT_MODES: Final[dict[str, frozenset[str]]] = {
     "equity_kr": frozenset({"toss_live"}),
     "equity_us": frozenset({"toss_live"}),
-    "crypto": frozenset({"upbit"}),
 }
 _CURRENCY_FOR_MARKET: Final[dict[str, str]] = {
     "equity_kr": "KRW",

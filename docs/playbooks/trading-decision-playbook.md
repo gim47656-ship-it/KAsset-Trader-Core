@@ -118,7 +118,7 @@ lanes:
    `quick` value — `analyze_stock_batch` never attaches a `position` field;
    use `get_holdings` for per-account positions. Consensus/recommendation
    require `quick=False`.
-3. `get_intraday_investor_flow` is physically unregistered because Toss/NH PLUG
+3. `get_intraday_investor_flow` is physically unregistered because Toss
    has no equivalent evidence. Do not call it or synthesize a foreign-flow
    replacement; a decision that requires this evidence must remain fail-closed.
 4. **Support selection:** prefer the **confluence** of BB-lower / fib-0 / value

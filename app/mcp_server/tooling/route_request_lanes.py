@@ -12,23 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.mcp_server.tooling.alpaca_paper import ALPACA_PAPER_READONLY_TOOL_NAMES
-from app.mcp_server.tooling.alpaca_paper_automated_orders import (
-    ALPACA_PAPER_AUTOMATED_TOOL_NAMES,
-)
-from app.mcp_server.tooling.alpaca_paper_orders import ALPACA_PAPER_MUTATING_TOOL_NAMES
-from app.mcp_server.tooling.alpaca_paper_preview import ALPACA_PAPER_PREVIEW_TOOL_NAMES
-from app.mcp_server.tooling.live_reconcile_registration import (
-    LIVE_RECONCILE_TOOL_NAMES,
-)
-from app.mcp_server.tooling.market_quote_snapshot_tools import (
-    MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_us_variants import (
-    KIWOOM_MOCK_US_MUTATION_TOOL_NAMES,
-    KIWOOM_MOCK_US_READ_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import TOSS_LIVE_ORDER_TOOL_NAMES
 
@@ -182,64 +165,13 @@ ROUTE_CONTRACT_VERSION = "proposal-led-v1"
 PROPOSAL_TOOL = "order_proposal_create"
 PROPOSAL_LED_LANES: frozenset[str] = frozenset({"buy", "sell"})
 
-# ROB-1209: maintenance is not a strategic order.  This narrow route is still
-# advisory, but it expresses the only direct broker action an account-cleanup
-# caller may be shown: a preflighted, quantity-bounded Alpaca Paper sell.  The
-# route never grants generic place/cancel/modify access and purpose alone is not
-# enough to make preflight treat an order as reducing.
-ACCOUNT_CLEANUP_PURPOSE = "account_cleanup"
-ACCOUNT_CLEANUP_MARKETS: frozenset[str] = frozenset({"us", "crypto"})
-ACCOUNT_CLEANUP_DIRECT_TOOL = "alpaca_paper_submit_order"
-ACCOUNT_CLEANUP_REQUIRED_TOOLS: frozenset[str] = frozenset(
-    {
-        "alpaca_paper_list_positions",
-        "alpaca_paper_list_orders",
-        "alpaca_paper_execution_preflight_check",
-        ACCOUNT_CLEANUP_DIRECT_TOOL,
-    }
-)
-ACCOUNT_CLEANUP_SEQUENCE: tuple[dict[str, str], ...] = (
-    {
-        "tool": "alpaca_paper_list_positions",
-        "purpose": "fresh current position evidence for an exact reducing sell",
-    },
-    {
-        "tool": "alpaca_paper_list_orders",
-        "purpose": "fresh open-order evidence before maintenance execution",
-    },
-    {
-        "tool": "alpaca_paper_execution_preflight_check",
-        "purpose": "evaluate the exact sell as snapshot-verified reduce-only",
-    },
-    {
-        "tool": ACCOUNT_CLEANUP_DIRECT_TOOL,
-        "purpose": "submit only after passing preflight and per-call confirmation",
-    },
-)
-ACCOUNT_CLEANUP_HARD_CONSTRAINTS: tuple[str, ...] = (
-    "account_cleanup is sell-only: a finite positive qty must be no greater than the verified current position for the same execution symbol",
-    "purpose text alone never downgrades preflight; buy, notional-only, unknown-symbol, over-sized, stale, or unattested candidates stay blocked",
-    "preflight remains required: unverified snapshots, open orders, duplicate IDs, fill/ledger mismatches, and stale packets remain blockers",
-    "only alpaca_paper_submit_order is allowed directly; all other direct broker mutations remain blocked",
-    "alpaca_paper_submit_order keeps its existing trusted quote, current-position, reservation, and confirm=True gates",
-)
-
 # The legacy MUTATION_TOOLS bucket intentionally remains public and broad for
 # backwards compatibility. ROB-1045 overlays explicit, disjoint action classes
 # so proposal-led lanes can fail closed on direct broker mutations without also
 # blocking pure previews, reconcile reads/writes, or read/status helpers.
 DIRECT_BROKER_MUTATION_TOOLS: frozenset[str] = frozenset(
     {
-        "alpaca_paper_cancel_order",
-        "alpaca_paper_automated_submit_order",
-        "alpaca_paper_submit_order",
         "cancel_order",
-        "kiwoom_mock_cancel_order",
-        "kiwoom_mock_modify_order",
-        "kiwoom_mock_place_order",
-        "kiwoom_mock_us_cancel_order",
-        "kiwoom_mock_us_modify_order",
-        "kiwoom_mock_us_place_order",
         "modify_order",
         "paper_cancel_pending_order",
         "paper_place_limit_order",
@@ -269,19 +201,14 @@ ORDER_PROPOSAL_READ_TOOLS: frozenset[str] = frozenset(
 
 PREVIEW_REVALIDATION_TOOLS: frozenset[str] = frozenset(
     {
-        "alpaca_paper_automated_preview_order",
         "buy_ladder_fill_preview",
-        "kiwoom_mock_preview_order",
-        "kiwoom_mock_us_preview_order",
         "sell_ladder_fill_preview",
         "toss_preview_order",
     }
 )
 
 RECONCILE_TOOLS: frozenset[str] = frozenset(
-    LIVE_RECONCILE_TOOL_NAMES
-    | {
-        "alpaca_paper_reconcile_orders",
+    {
         "paper_reconcile_orders",
         "toss_reconcile_orders",
     }
@@ -292,13 +219,6 @@ RECONCILE_TOOLS: frozenset[str] = frozenset(
 STATUS_HELPER_TOOLS: frozenset[str] = frozenset(
     {
         "get_order_history",
-        "kiwoom_mock_get_order_history",
-        # ROB-1155: kt00007 read-only order-detail lookup. Lands in the legacy
-        # MUTATION_TOOLS bucket only because KIWOOM_MOCK_TOOL_NAMES is unioned in
-        # wholesale; it never calls the order client.
-        "kiwoom_mock_get_order_detail",
-        "kiwoom_mock_get_orderable_cash",
-        "kiwoom_mock_get_positions",
         "toss_get_order_history",
         "toss_get_orderable_cash",
         "toss_get_positions",
@@ -312,20 +232,7 @@ STATUS_HELPER_TOOLS: frozenset[str] = frozenset(
 
 _LEGACY_MUTATION_TOOLS: frozenset[str] = frozenset(
     ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
-    | ALPACA_PAPER_AUTOMATED_TOOL_NAMES
     | TOSS_LIVE_ORDER_TOOL_NAMES
-    | KIWOOM_MOCK_TOOL_NAMES
-    | KIWOOM_MOCK_US_MUTATION_TOOL_NAMES
-    # ROB-908/ROB-953: Alpaca paper confirm-gated mutations — submit/cancel plus
-    # alpaca_paper_reconcile_orders, which reads the broker read-only but WRITES
-    # lifecycle state to review.alpaca_paper_order_ledger. Flag-
-    # gated in DEFAULT (settings.alpaca_paper_default_tools_enabled, default off);
-    # the read/preview/us_dual/ledger surface is read-only and lives in
-    # READ_ONLY_ADVISORY_TOOLS. The automated preview/submit pair is US_PAPER-
-    # only (ROB-842) but is classified above because route_request is present
-    # on that profile too.
-    | frozenset(ALPACA_PAPER_MUTATING_TOOL_NAMES)
     | frozenset(
         {
             # ROB-703: paper resting-limit sim mutations (paper-table writes only,
@@ -420,13 +327,7 @@ _MARKET_EXEC_PURPOSE: dict[str, str] = {
 # drift guard the issue requires.
 READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
     {
-        *KIWOOM_MOCK_US_READ_TOOL_NAMES,
-        # DEFAULT에서 flag로 여는 Alpaca paper 읽기/preview surface다.
-        # confirm-gated submit/cancel mutation과 DB write reconcile은
-        # ``MUTATION_TOOLS``에서 별도로 분류한다.
-        *ALPACA_PAPER_READONLY_TOOL_NAMES,
-        *ALPACA_PAPER_PREVIEW_TOOL_NAMES,
-        *MARKET_QUOTE_SNAPSHOT_TOOL_NAMES,
+        # 유지되는 read-only advisory surface.
         *ORDER_PROPOSAL_READ_TOOLS,
         "route_request",
         "analysis_artifact_get",
@@ -447,10 +348,6 @@ READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
         # earnings rows this repo already stores and returns candidates with
         # their links, or an explicit unattributed verdict. Writes nothing.
         "get_spike_attribution",
-        # ROB-907: read-only Demo ledger status (flag-gated —
-        # settings.binance_demo_scalping_enabled). The mutation-path submit
-        # tool this once shared a gate comment with was removed (ROB-1147).
-        "binance_demo_ledger_status",
         "execution_ledger_fill_events_list_recent",
         "forecast_resolve",
         "forecast_save",
@@ -536,7 +433,6 @@ READ_ONLY_ADVISORY_TOOLS: frozenset[str] = frozenset(
         "research_session_get",
         "research_session_list_recent",
         "research_summary_get",
-        "save_position_intake_retrospective",
         "save_trade_journal",
         "save_trade_retrospective",
         "screen_stocks",
@@ -577,28 +473,6 @@ def _route_contract(
     registered_tools: set[str] | None,
     purpose: str | None = None,
 ) -> dict[str, Any]:
-    if purpose == ACCOUNT_CLEANUP_PURPOSE:
-        required_tools = sorted(ACCOUNT_CLEANUP_REQUIRED_TOOLS)
-        missing_required_tools = (
-            required_tools
-            if registered_tools is None
-            else sorted(set(required_tools) - registered_tools)
-        )
-        execution_ready = registered_tools is not None and not missing_required_tools
-        return {
-            "version": "cleanup-reduce-only-v1",
-            "state": "ready" if execution_ready else "degraded",
-            "execution_mode": "cleanup_reduce_only",
-            "execution_ready": execution_ready,
-            "proposal_tool": None,
-            "approval_channel": "per_call_confirm",
-            "human_approval_required": True,
-            "preview_owner": "preflight_reduce_only",
-            "reconcile_requirement": "broker_evidence",
-            "required_tools": required_tools,
-            "missing_required_tools": missing_required_tools,
-        }
-
     proposal_led = lane in PROPOSAL_LED_LANES
     required_tools = sorted(PROPOSAL_LED_TOOLS) if proposal_led else []
     missing_required_tools = (
@@ -674,11 +548,7 @@ def build_registry_unavailable_plan(
         ),
         "verdict_thresholds": verdict_thresholds,
         "policy_version": policy_version,
-        "hard_constraints": list(
-            ACCOUNT_CLEANUP_HARD_CONSTRAINTS
-            if purpose == ACCOUNT_CLEANUP_PURPOSE
-            else HARD_CONSTRAINTS[lane]
-        ),
+        "hard_constraints": list(HARD_CONSTRAINTS[lane]),
     }
 
 
@@ -694,62 +564,8 @@ def build_route_plan(
     """Assemble the deterministic route plan. Pure — no IO. Caller validates
     intent/market and resolves policy before calling."""
     lane = INTENT_TO_LANE[intent]
-    account_cleanup = purpose == ACCOUNT_CLEANUP_PURPOSE
-    if account_cleanup and (
-        intent != "profit_taking" or market not in ACCOUNT_CLEANUP_MARKETS
-    ):
-        raise ValueError(
-            "account_cleanup is only supported for US/crypto profit_taking"
-        )
-
-    if account_cleanup:
-        route_contract = _route_contract(
-            lane,
-            registered_tools=registered_tools,
-            purpose=purpose,
-        )
-        success = route_contract["execution_ready"]
-        sequence = [
-            step
-            for step in ACCOUNT_CLEANUP_SEQUENCE
-            if step["tool"] in registered_tools
-        ]
-        # A missing read/preflight tool must not leave a visible submit shortcut.
-        # The advisory router cannot enforce a tool call, so fail closed in its
-        # own output rather than relying on callers to notice success=false.
-        if not success:
-            sequence = [
-                step for step in sequence if step["tool"] != ACCOUNT_CLEANUP_DIRECT_TOOL
-            ]
-        standard_tool_sequence = [
-            {"step": i, "tool": step["tool"], "purpose": step["purpose"]}
-            for i, step in enumerate(sequence, start=1)
-        ]
-        allowed = (
-            set(READ_ONLY_ADVISORY_TOOLS) | set(ACCOUNT_CLEANUP_REQUIRED_TOOLS)
-        ) & registered_tools
-        if not success:
-            allowed.discard(ACCOUNT_CLEANUP_DIRECT_TOOL)
-        blocked = (MUTATION_TOOLS & registered_tools) - allowed
-        result: dict[str, Any] = {
-            "success": success,
-            "degraded": not success,
-            "intent": intent,
-            "lane": lane,
-            "market": market,
-            "purpose": purpose,
-            "standard_tool_sequence": standard_tool_sequence,
-            "allowed_tools": sorted(allowed),
-            "blocked_actions": sorted(blocked),
-            "blocked_actions_basis": "live_registered_surface",
-            "route_contract": route_contract,
-            "verdict_thresholds": verdict_thresholds,
-            "policy_version": policy_version,
-            "hard_constraints": list(ACCOUNT_CLEANUP_HARD_CONSTRAINTS),
-        }
-        if not success:
-            result["error"] = "required_route_tool_unavailable"
-        return result
+    if purpose is not None:
+        raise ValueError(f"unknown purpose {purpose!r}")
 
     lane_tools = lane_tool_names(lane)
     proposal_led = lane in PROPOSAL_LED_LANES
@@ -835,12 +651,6 @@ __all__ = [
     "LANE_SEQUENCES",
     "HARD_CONSTRAINTS",
     "ROUTE_CONTRACT_VERSION",
-    "ACCOUNT_CLEANUP_PURPOSE",
-    "ACCOUNT_CLEANUP_MARKETS",
-    "ACCOUNT_CLEANUP_DIRECT_TOOL",
-    "ACCOUNT_CLEANUP_REQUIRED_TOOLS",
-    "ACCOUNT_CLEANUP_SEQUENCE",
-    "ACCOUNT_CLEANUP_HARD_CONSTRAINTS",
     "PROPOSAL_TOOL",
     "PROPOSAL_LED_LANES",
     "DIRECT_BROKER_MUTATION_TOOLS",

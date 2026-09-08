@@ -113,33 +113,20 @@ def test_the_profile_grants_proposal_create_and_no_submit_path() -> None:
         "order_proposal_redispatch",
         "order_proposal_void",
         "place_order",
-        "kis_live_place_order",
+        "modify_order",
+        "cancel_order",
         "toss_place_order",
         "toss_modify_order",
         "toss_cancel_order",
-        "upbit_place_order",
-        "kis_mock_place_order",
-        "kiwoom_mock_place_order",
     ):
         assert beyond not in provisioned
 
 
 def test_the_profile_is_disjoint_from_every_order_mutation_registry() -> None:
-    from app.mcp_server.tooling.orders_kis_variants import (
-        KIS_LIVE_ORDER_TOOL_NAMES,
-        KIS_MOCK_ORDER_TOOL_NAMES,
-    )
-    from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
     from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
     from app.mcp_server.tooling.orders_toss_variants import TOSS_LIVE_ORDER_TOOL_NAMES
 
-    mutations = (
-        set(ORDER_TOOL_NAMES)
-        | set(KIS_LIVE_ORDER_TOOL_NAMES)
-        | set(KIS_MOCK_ORDER_TOOL_NAMES)
-        | set(KIWOOM_MOCK_TOOL_NAMES)
-        | set(TOSS_LIVE_ORDER_TOOL_NAMES)
-    )
+    mutations = set(ORDER_TOOL_NAMES) | set(TOSS_LIVE_ORDER_TOOL_NAMES)
     # toss_get_positions is a read that lives in the Toss order registry.
     assert PROPOSAL_ONLY_TOOLS & mutations == set()
 

@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from app.mcp_server.tooling.route_request_lanes import (
-    ACCOUNT_CLEANUP_MARKETS,
-    ACCOUNT_CLEANUP_PURPOSE,
     INTENT_TO_LANE,
     LANE_TO_POLICY_LANE,
     VALID_MARKETS,
@@ -101,32 +99,12 @@ def register_route_request_tools(mcp: FastMCP) -> None:
                 "detail": f"unknown market {market!r}; valid: {sorted(VALID_MARKETS)}",
             }
         normalized_purpose = (purpose or "").strip() or None
-        if normalized_purpose not in {None, ACCOUNT_CLEANUP_PURPOSE}:
+        if normalized_purpose is not None:
             return {
                 "success": False,
                 "error": "unknown_purpose",
-                "detail": (
-                    f"unknown purpose {purpose!r}; valid: {[ACCOUNT_CLEANUP_PURPOSE]}"
-                ),
+                "detail": f"unknown purpose {purpose!r}; no purpose is supported",
             }
-        if normalized_purpose == ACCOUNT_CLEANUP_PURPOSE:
-            if intent != "profit_taking":
-                return {
-                    "success": False,
-                    "error": "purpose_not_supported_for_intent",
-                    "detail": (
-                        "purpose='account_cleanup' requires intent='profit_taking'"
-                    ),
-                }
-            if market not in ACCOUNT_CLEANUP_MARKETS:
-                return {
-                    "success": False,
-                    "error": "purpose_not_supported_for_market",
-                    "detail": (
-                        "purpose='account_cleanup' supports markets "
-                        f"{sorted(ACCOUNT_CLEANUP_MARKETS)}"
-                    ),
-                }
         lane = INTENT_TO_LANE[intent]
         policy_lane = LANE_TO_POLICY_LANE[lane]
         version = policy_version_stamp()

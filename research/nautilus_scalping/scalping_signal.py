@@ -1,4 +1,10 @@
-"""ROB-307 PR1 — deterministic trend micro-breakout scalping signal.
+"""ROB-307 PR1 — deterministic trend micro-breakout scalping signal (pure).
+
+Binance demo 실행 어댑터가 제거되면서 원래 위치
+(``app.services.brokers.binance.demo_scalping.signal``)에 있던 **순수 계산**만
+이 연구 모듈로 옮겼다. 브로커·주문·DB·네트워크 의존은 원래도 없었고, 옮긴 뒤에도
+없다. 시그널 값과 reason code 문자열은 기존 구현과 동일하게 유지한다(연구 산출물의
+parity 테스트가 이 값을 고정한다).
 
 Operator-selected strategy:
 
@@ -19,12 +25,26 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Literal
 
-from app.services.brokers.binance.demo_scalping.contract import ReasonCode, Side
+Side = Literal["BUY", "SELL"]
 
 _BPS = Decimal("10000")
 # Reference separation/margin (in bps) that maps to full confidence.
 _CONFIDENCE_REFERENCE_BPS = Decimal("50")
+
+
+class ReasonCode:
+    """Signal-outcome reason codes (append-only string constants).
+
+    옮겨 오면서 시그널 판정에 쓰이는 코드만 남겼다. 리스크/원장 게이트 코드는
+    제거된 demo 실행 경로 전용이었으므로 함께 사라졌다.
+    """
+
+    ENTER_LONG_BREAKOUT = "enter_long_breakout"
+    ENTER_SHORT_BREAKDOWN = "enter_short_breakdown"
+    NO_SIGNAL = "no_signal"
+    INSUFFICIENT_HISTORY = "insufficient_history"
 
 
 @dataclass(frozen=True)

@@ -48,7 +48,6 @@ import { DesktopMarketPage } from "./pages/desktop/DesktopMarketPage";
 import { InvestInsightsRoute } from "./pages/InsightsRoute";
 import { FxMacroRoute } from "./pages/desktop/FxMacroPage";
 import { DesktopCryptoPage } from "./pages/desktop/DesktopCryptoPage";
-import { ScalpingRoute } from "./pages/desktop/DesktopScalpingPage";
 import {
   InvestmentReportBundleRoute,
   InvestmentReportsRoute,
@@ -108,7 +107,6 @@ export const router = createBrowserRouter(
     { path: "/crypto", element: <DesktopCryptoPage /> },
     { path: "/crypto/:pair", element: <CryptoPairRedirect /> },
     { path: "/screener", element: <DesktopScreenerPage /> },
-    { path: "/scalping", element: <ScalpingRoute /> },
     { path: "/reports", element: <InvestmentReportsRoute /> },
     { path: "/reports/:reportUuid", element: <InvestmentReportBundleRoute /> },
     { path: "/stocks/:market/:symbol", element: <StockDetailPage /> },

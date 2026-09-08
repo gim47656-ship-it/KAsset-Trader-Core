@@ -92,7 +92,7 @@ async def test_main_commits_dry_run_audit_row_on_reconcile_error(monkeypatch):
         [
             "reconcile_execution_ledger.py",
             "--broker",
-            "upbit",
+            "toss",
             "--dry-run",
         ],
     )
@@ -108,7 +108,7 @@ async def test_main_commits_dry_run_audit_row_on_reconcile_error(monkeypatch):
             assert repository is session
 
         async def run(self, broker: str, **kwargs: object) -> None:
-            assert broker == "upbit"
+            assert broker == "toss"
             assert kwargs["dry_run"] is True
             raise RuntimeError("filled-orders fetch returned errors")
 

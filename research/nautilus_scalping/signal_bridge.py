@@ -1,10 +1,11 @@
 """ROB-316 spike — bridge between Nautilus bars and the production signal.
 
 The whole point of the spike is to backtest the **real** strategy, not a
-reimplementation. So this module reuses
-``app.services.brokers.binance.demo_scalping.signal.evaluate_signal``
-verbatim; it only adapts Nautilus ``Bar`` objects into the ``Candle`` shape
-the signal expects and maintains a rolling window of **closed** bars.
+reimplementation. So this module reuses ``scalping_signal.evaluate_signal``
+verbatim (the pure signal moved into this research package when the Binance
+demo execution adapters were removed); it only adapts Nautilus ``Bar`` objects
+into the ``Candle`` shape the signal expects and maintains a rolling window of
+**closed** bars.
 
 No-lookahead is structural: ``SignalState.update`` appends the just-closed
 candle and only ever passes already-closed candles to ``evaluate_signal``.
@@ -15,13 +16,7 @@ from __future__ import annotations
 from collections import deque
 
 from nautilus_trader.model.data import Bar
-
-from app.services.brokers.binance.demo_scalping.signal import (
-    Candle,
-    SignalConfig,
-    SignalDecision,
-    evaluate_signal,
-)
+from scalping_signal import Candle, SignalConfig, SignalDecision, evaluate_signal
 
 _NS_PER_MS = 1_000_000
 _MINUTE_MS = 60_000

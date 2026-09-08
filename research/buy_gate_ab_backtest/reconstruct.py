@@ -26,11 +26,7 @@ import pandas as pd
 # runs must never load operating credentials, so inert placeholders are pinned
 # here *before* the first app import. No network or DB call is made either way.
 os.environ.setdefault("ENV_FILE", "/dev/null")
-os.environ.setdefault("KIS_APP_KEY", "research-offline-unused")
-os.environ.setdefault("KIS_APP_SECRET", "research-offline-unused")
 os.environ.setdefault("OPENDART_API_KEY", "research-offline-unused")
-os.environ.setdefault("UPBIT_ACCESS_KEY", "research-offline-unused")
-os.environ.setdefault("UPBIT_SECRET_KEY", "research-offline-unused")
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://research:research@127.0.0.1:1/research_offline_unused",

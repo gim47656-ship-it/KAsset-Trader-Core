@@ -198,32 +198,3 @@ def test_approval_lane_fails_closed_when_a_bound_is_unknown(
         per_order_auto_approve_cap=cap,
     )
     assert lane == "human_card"
-
-
-@pytest.mark.unit
-def test_matches_the_policy_table_implementation() -> None:
-    """Anti-drift: app/ and scripts/ must agree on A(k) to the last digit."""
-
-    from scripts.policy_table.core.averaging import averaging_math
-
-    cases = [
-        (Decimal("1000000"), Decimal("1000"), Decimal("800")),
-        (Decimal("3210000"), Decimal("1234.5"), Decimal("1000.25")),
-        (Decimal("500000"), Decimal("100"), Decimal("120")),
-    ]
-    for cost_basis, average_price, price in cases:
-        reference = averaging_math(
-            cost_basis=cost_basis,
-            average_price=average_price,
-            current_price=price,
-            k=Decimal("0.10"),
-        )
-        assert (
-            averaging_additional_notional(
-                cost_basis=cost_basis,
-                average_price=average_price,
-                price=price,
-                k=Decimal("0.10"),
-            )
-            == reference["additional_notional"]
-        )

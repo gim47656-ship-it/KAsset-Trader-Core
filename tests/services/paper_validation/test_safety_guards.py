@@ -21,18 +21,11 @@ SOURCES = [
 ]
 FORBIDDEN_IMPORT_FRAGMENTS = {
     "app.services.order_proposals",
-    "app.services.kis_trading_service",
     "app.services.paper_trading_service",
-    "app.services.alpaca_paper_order_application",
     "app.services.order_send_intent_service",
-    "app.services.brokers.alpaca",
     "app.services.brokers.binance",
-    "app.services.brokers.kiwoom",
-    "app.services.brokers.paper",
     "app.services.brokers.toss",
     "app.services.brokers.upbit",
-    "app.mcp_server.tooling.alpaca_paper_orders",
-    "app.mcp_server.tooling.order_execution",
     "app.mcp_server.tooling.order_proposal_tools",
     "app.mcp_server.tooling.orders",
     "app.mcp_server.tooling.paper_order_handler",

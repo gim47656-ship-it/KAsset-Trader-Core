@@ -9,30 +9,16 @@ import sys
 from pathlib import Path
 
 RESEARCH_RUN_FORBIDDEN_PREFIXES = [
-    "app.services.kis",
     "app.services.upbit",
     "app.services.brokers",
-    "app.services.order_service",
-    "app.services.orders",
-    "app.services.watch_alerts",
     "app.services.paper_trading_service",
     "app.services.agent_gateway",
     "app.services.crypto_trade_cooldown_service",
     "app.services.fill_notification",
     "app.services.execution_event",
-    "app.services.kis_websocket",
-    "app.services.kis_websocket_internal",
-    "app.services.kis_trading_service",
-    "app.services.kis_trading_contracts",
-    "app.services.kis_holdings_service",
-    "app.services.upbit_websocket",
-    "app.services.redis_token_manager",
     "app.services.pending_orders_service",
-    "app.mcp_server.tooling.order_execution",
     "app.mcp_server.tooling.orders_history",
-    "app.mcp_server.tooling.orders_modify_cancel",
     "app.mcp_server.tooling.orders_registration",
-    "app.mcp_server.tooling.watch_alerts_registration",
     "app.tasks",
     "redis",
 ]
@@ -43,15 +29,9 @@ NEWS_BRIEF_FORBIDDEN_PREFIXES = [
     if prefix
     not in {
         "app.services.crypto_trade_cooldown_service",
-        "app.services.kis_websocket_internal",
-        "app.services.kis_trading_contracts",
-        "app.services.kis_holdings_service",
         "app.services.pending_orders_service",
-        "app.mcp_server.tooling.order_execution",
         "app.mcp_server.tooling.orders_history",
-        "app.mcp_server.tooling.orders_modify_cancel",
         "app.mcp_server.tooling.orders_registration",
-        "app.mcp_server.tooling.watch_alerts_registration",
     }
 ]
 

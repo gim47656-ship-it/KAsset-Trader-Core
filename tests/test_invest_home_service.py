@@ -364,9 +364,6 @@ def test_home_summary_uses_account_value_sum() -> None:
 async def test_invest_home_service_synthesizes_toss_manual_account() -> None:
     from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
 
-    upbit_reader = AsyncMock()
-    upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
-
     manual_reader = AsyncMock()
     h = _h(
         holdingId="m1",
@@ -377,7 +374,6 @@ async def test_invest_home_service_synthesizes_toss_manual_account() -> None:
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[h])
 
     service = InvestHomeService(
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
     )
 
@@ -505,8 +501,6 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
         ],
         holdings=[],
     )
-    upbit_reader = AsyncMock()
-    upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     manual_reader = AsyncMock()
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
 
@@ -538,7 +532,6 @@ async def test_paper_readers_appear_in_accounts_but_excluded_from_home_summary()
 
     service = InvestHomeService(
         toss_api_reader=toss_reader,
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         paper_readers=[mock_paper_reader],
     )
@@ -580,8 +573,6 @@ async def test_paper_reader_partial_failure_does_not_break_live_accounts() -> No
         ],
         holdings=[],
     )
-    upbit_reader = AsyncMock()
-    upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     manual_reader = AsyncMock()
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
 
@@ -591,7 +582,6 @@ async def test_paper_reader_partial_failure_does_not_break_live_accounts() -> No
 
     service = InvestHomeService(
         toss_api_reader=toss_reader,
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         paper_readers=[broken_reader],
     )
@@ -613,15 +603,12 @@ async def test_service_without_paper_readers_unchanged() -> None:
 
     toss_reader = AsyncMock()
     toss_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
-    upbit_reader = AsyncMock()
-    upbit_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
     manual_reader = AsyncMock()
     manual_reader.fetch.return_value = _SourceFetchResult(accounts=[], holdings=[])
 
     # No paper_readers arg — backward-compatible construction
     service = InvestHomeService(
         toss_api_reader=toss_reader,
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
     )
     response = await service.get_home(user_id=1)
@@ -654,7 +641,6 @@ async def test_get_home_does_not_invoke_paper_readers_when_include_paper_false()
     spy = _SpyPaperReader()
     service = InvestHomeService(
         toss_api_reader=_Stub(),
-        upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[spy],
     )
@@ -691,7 +677,6 @@ async def test_get_home_invokes_only_requested_paper_sources():
 
     service = InvestHomeService(
         toss_api_reader=_Stub(),
-        upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[_SpyDbSimulated(), _SpyAlpaca()],
     )
@@ -731,7 +716,6 @@ async def test_get_home_invokes_all_paper_readers_when_sources_none():
 
     service = InvestHomeService(
         toss_api_reader=_Stub(),
-        upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[_SpyDbSimulated(), _SpyAlpaca()],
     )
@@ -790,7 +774,6 @@ async def test_paper_reader_exception_does_not_break_live_response():
 
     service = InvestHomeService(
         toss_api_reader=_StubLiveReader(),
-        upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_ExplodingPaperReader()],
     )
@@ -820,7 +803,6 @@ async def test_paper_reader_exception_does_not_break_account_panel_view():
 
     service = InvestHomeService(
         toss_api_reader=_EmptyReader(),
-        upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_ExplodingPaperReader()],
     )
@@ -891,7 +873,6 @@ async def test_get_home_creates_reader_spans(monkeypatch):
 
     service = InvestHomeService(
         toss_api_reader=_EmptyReader(),
-        upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         paper_readers=[_Paper()],
     )
@@ -902,7 +883,6 @@ async def test_get_home_creates_reader_spans(monkeypatch):
 
     names = [n for n, _ in spans]
     assert "invest.home.toss_api" in names
-    assert "invest.home.upbit" in names
     assert "invest.home.manual" in names
     assert "invest.home.alpaca_paper" in names
 
@@ -951,81 +931,12 @@ async def test_get_home_default_skips_paper_spans(monkeypatch):
 
     service = InvestHomeService(
         toss_api_reader=_Stub(),
-        upbit_reader=_Stub(),
         manual_reader=_Stub(),
         paper_readers=[_Paper()],
     )
     await service.get_home(user_id=1)
 
     assert "invest.home.alpaca_paper" not in spans
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_get_home_runs_primary_readers_concurrently() -> None:
-    from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
-
-    active = 0
-    peak_active = 0
-
-    class _ConcurrentReader:
-        async def fetch(self, *, user_id: int) -> _SourceFetchResult:
-            nonlocal active, peak_active
-            assert user_id == 1
-            active += 1
-            peak_active = max(peak_active, active)
-            await asyncio.sleep(0.01)
-            active -= 1
-            return _SourceFetchResult(accounts=[], holdings=[])
-
-    class _ManualReader:
-        async def fetch(self, *, user_id: int) -> _SourceFetchResult:
-            assert user_id == 1
-            return _SourceFetchResult(accounts=[], holdings=[])
-
-    service = InvestHomeService(
-        upbit_reader=_ConcurrentReader(),
-        manual_reader=_ManualReader(),
-        toss_api_reader=_ConcurrentReader(),
-    )
-
-    await service.get_home(user_id=1)
-
-    assert peak_active == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_account_panel_view_runs_primary_readers_concurrently() -> None:
-    from app.services.invest_home_service import InvestHomeService, _SourceFetchResult
-
-    active = 0
-    peak_active = 0
-
-    class _ConcurrentReader:
-        async def fetch(self, *, user_id: int) -> _SourceFetchResult:
-            nonlocal active, peak_active
-            assert user_id == 1
-            active += 1
-            peak_active = max(peak_active, active)
-            await asyncio.sleep(0.01)
-            active -= 1
-            return _SourceFetchResult(accounts=[], holdings=[])
-
-    class _ManualReader:
-        async def fetch(self, *, user_id: int) -> _SourceFetchResult:
-            assert user_id == 1
-            return _SourceFetchResult(accounts=[], holdings=[])
-
-    service = InvestHomeService(
-        upbit_reader=_ConcurrentReader(),
-        manual_reader=_ManualReader(),
-        toss_api_reader=_ConcurrentReader(),
-    )
-
-    await service.build_account_panel_view(user_id=1)
-
-    assert peak_active == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1054,18 +965,6 @@ async def test_get_held_pairs_fails_closed_without_snapshot_or_db_key_reader():
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        upbit_reader=_Reader(
-            holdings=[
-                _h(
-                    source="upbit",
-                    symbol="KRW-BTC",
-                    market="CRYPTO",
-                    assetType="crypto",
-                    assetCategory="crypto",
-                    currency="KRW",
-                )
-            ]
-        ),
         manual_reader=_Reader(
             holdings=[
                 _h(
@@ -1132,7 +1031,6 @@ async def test_calendar_held_pairs_reads_snapshot_or_db_keys_without_full_reader
     await cache.put(scope, {"schema_version": 1, "held_pairs": [["us", "AAPL"]]})
     manual_reader = _ManualKeyReader()
     service = InvestHomeService(
-        upbit_reader=_ExplodingReader(),
         manual_reader=manual_reader,
         toss_api_reader=_ExplodingReader(),
         snapshot_cache=cache,
@@ -1159,7 +1057,7 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
     PortfolioSnapshotCache = whole_snapshot.PortfolioSnapshotCache
     portfolio_snapshot_scope = whole_snapshot.portfolio_snapshot_scope
 
-    calls = {"upbit": 0, "toss_api": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
 
     # ROB-1310 R7: gate the leader on an explicit Event instead of a real
     # 3.2s sleep. The old sleep exceeded the 3s follower wait budget, so the
@@ -1182,16 +1080,6 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
                 accounts=[], holdings=[self.holding] if self.holding else []
             )
 
-    upbit_reader = _CountingReader(
-        "upbit",
-        _h(
-            source="upbit",
-            symbol="KRW-BTC",
-            market="CRYPTO",
-            assetType="crypto",
-            assetCategory="crypto",
-        ),
-    )
     toss_reader = _CountingReader(
         "toss_api",
         _h(
@@ -1220,13 +1108,11 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
         poll_interval_seconds=0.01,
     )
     service_a = InvestHomeService(
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         toss_api_reader=toss_reader,
         snapshot_cache=cache_a,
     )
     service_b = InvestHomeService(
-        upbit_reader=upbit_reader,
         manual_reader=manual_reader,
         toss_api_reader=toss_reader,
         snapshot_cache=cache_b,
@@ -1243,7 +1129,7 @@ async def test_cross_facade_whole_snapshot_composes_readers_once_and_excludes_se
     first, second = await asyncio.gather(leader_task, follower_task)
 
     assert first == second
-    assert calls == {"upbit": 1, "toss_api": 1, "manual": 1}
+    assert calls == {"toss_api": 1, "manual": 1}
     payload = await cache_a.get(
         portfolio_snapshot_scope(user_id=1, include_paper=False, paper_sources=None)
     )
@@ -1313,7 +1199,6 @@ async def test_get_home_uses_toss_api_instead_of_manual_when_toss_api_has_holdin
         ]
     )
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
     )
@@ -1375,7 +1260,6 @@ async def test_get_home_keeps_manual_holding_when_toss_api_does_not_duplicate_sy
         ]
     )
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
     )
@@ -1498,7 +1382,6 @@ async def test_get_home_summary_excludes_manual_value_removed_by_toss_api_dedup(
         holdings=manual_holdings,
     )
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=manual_reader,
         toss_api_reader=toss_api_reader,
     )
@@ -1529,7 +1412,6 @@ async def test_get_home_falls_back_to_manual_when_toss_api_returns_warning_only(
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=_Reader(
             holdings=[
                 Holding(
@@ -1569,7 +1451,6 @@ async def test_get_home_falls_back_to_manual_when_toss_api_has_cash_only_account
     from app.services.invest_home_service import InvestHomeService
 
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=_Reader(
             holdings=[
                 Holding(
@@ -1678,7 +1559,6 @@ async def test_home_warnings_attribute_manual_failures_to_each_source(
     )
 
     service = InvestHomeService(
-        upbit_reader=_Reader(),
         manual_reader=readers.ManualHomeReader(
             db=None,  # type: ignore[arg-type]
             quote_service=quote_service,  # type: ignore[arg-type]

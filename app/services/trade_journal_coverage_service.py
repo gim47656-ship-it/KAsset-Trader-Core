@@ -1,7 +1,7 @@
 # app/services/trade_journal_coverage_service.py
 """ROB-120 — Read-only coverage aggregator for the thesis journal page.
 
-Joins (live + manual + Upbit) holdings against the latest open journal
+Joins (live + manual) holdings against the latest open journal
 per (symbol, account_type='live') and the latest research_summary for
 that symbol's stock_info row. Produces one row per holding.
 """
@@ -21,7 +21,6 @@ from app.schemas.trade_journal import (
     JournalCoverageResponse,
     JournalCoverageRow,
 )
-from app.services.brokers.upbit import client as upbit_client
 from app.services.merged_portfolio_service import MergedPortfolioService
 
 logger = logging.getLogger(__name__)
@@ -56,51 +55,6 @@ class TradeJournalCoverageService:
                 holdings.extend(us)
             except Exception as exc:
                 logger.warning(f"Failed to fetch US holdings: {exc}")
-
-        # 3. Crypto (Upbit)
-        if market_filter in (None, "CRYPTO"):
-            try:
-                upbit_coins = await upbit_client.fetch_my_coins()
-                # We need prices for evaluation/weight
-                tickers = [
-                    f"KRW-{c['currency']}"
-                    for c in upbit_coins
-                    if c["currency"] != "KRW"
-                ]
-                prices = await upbit_client.fetch_multiple_current_prices(tickers)
-
-                for coin in upbit_coins:
-                    currency = str(coin.get("currency", "")).upper()
-                    if currency == "KRW":
-                        continue
-                    qty = float(coin.get("balance", 0) or 0) + float(
-                        coin.get("locked", 0) or 0
-                    )
-                    if qty <= 0:
-                        continue
-                    symbol = f"KRW-{currency}"
-                    price = prices.get(symbol, 0.0)
-                    eval_ = qty * price
-
-                    # Mock a structure compatible with the loop below
-                    holdings.append(
-                        type(
-                            "obj",
-                            (object,),
-                            {
-                                "ticker": symbol,
-                                "name": currency,
-                                "market_type": type(
-                                    "obj", (object,), {"value": "CRYPTO"}
-                                ),
-                                "total_quantity": qty,
-                                "evaluation": eval_,
-                                "instrument_type": "crypto",
-                            },
-                        )
-                    )
-            except Exception as exc:
-                logger.warning(f"Failed to fetch Upbit holdings: {exc}")
 
         total_value = float(
             sum((getattr(h, "evaluation", 0.0) or 0.0) for h in holdings)

@@ -35,7 +35,6 @@ FORBIDDEN_IMPORT_FRAGMENTS = (
     "app.services.order_proposals",
     "app.mcp_server.tooling.orders",
     BOUNDARY_MODULE,
-    "app.services.kis_trading_service",
     "app.services.trade_journal",
 )
 

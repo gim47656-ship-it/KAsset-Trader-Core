@@ -292,7 +292,7 @@ async def test_holdings_home_and_briefing_share_one_slow_whole_snapshot_owner(
     if importlib.util.find_spec("app.services.portfolio_snapshot_cache") is not None:
         from app.services import portfolio_snapshot_cache as whole_snapshot
 
-    calls = {"upbit": 0, "toss_api": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
     owner_started = asyncio.Event()
 
     class _Reader:
@@ -329,11 +329,6 @@ async def test_holdings_home_and_briefing_share_one_slow_whole_snapshot_owner(
         pnlRate=20000 / 700000,
     )
 
-    monkeypatch.setattr(
-        invest_home_readers,
-        "UpbitHomeReader",
-        lambda db: _Reader("upbit"),
-    )
     monkeypatch.setattr(
         invest_home_readers,
         "ManualHomeReader",
@@ -391,10 +386,6 @@ async def test_holdings_home_and_briefing_share_one_slow_whole_snapshot_owner(
             "profit_rate": 0.028,
         }
 
-    async def _collect_upbit(*args, **kwargs):
-        calls["upbit"] += 1
-        return [], []
-
     async def _collect_manual(*args, **kwargs):
         calls["manual"] += 1
         return [], []
@@ -403,7 +394,6 @@ async def test_holdings_home_and_briefing_share_one_slow_whole_snapshot_owner(
         calls["toss_api"] += 1
         return [_position("toss_api", "toss")], [], True
 
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _collect_upbit)
     monkeypatch.setattr(
         portfolio_holdings, "_collect_manual_positions", _collect_manual
     )
@@ -485,8 +475,8 @@ async def test_holdings_home_and_briefing_share_one_slow_whole_snapshot_owner(
     assert home.holdings[0].symbol == "005930"
     assert holdings["total_positions"] == 1
     assert briefing["success"] is True
-    # 전체 스냅샷 단일 소유자가 각 Toss/Upbit/manual 원천을 한 번만 합성한다.
-    assert calls == {"upbit": 1, "toss_api": 1, "manual": 1}
+    # 전체 스냅샷 단일 소유자가 Toss/manual 원천을 한 번만 합성한다.
+    assert calls == {"toss_api": 1, "manual": 1}
 
 
 @pytest.mark.asyncio
@@ -510,7 +500,7 @@ async def test_holdings_home_and_briefing_share_one_healthy_six_second_owner_wit
     from app.services import portfolio_snapshot_cache as whole_snapshot
     from app.services.invest_home_service import _SourceFetchResult
 
-    calls = {"upbit": 0, "toss_api": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
     owner_started = asyncio.Event()
 
     class _Reader:
@@ -547,11 +537,6 @@ async def test_holdings_home_and_briefing_share_one_healthy_six_second_owner_wit
         pnlRate=20000 / 700000,
     )
 
-    monkeypatch.setattr(
-        invest_home_readers,
-        "UpbitHomeReader",
-        lambda db: _Reader("upbit"),
-    )
     monkeypatch.setattr(
         invest_home_readers,
         "ManualHomeReader",
@@ -608,10 +593,6 @@ async def test_holdings_home_and_briefing_share_one_healthy_six_second_owner_wit
             "profit_rate": 0.028,
         }
 
-    async def _collect_upbit(*args, **kwargs):
-        calls["upbit"] += 1
-        return [], []
-
     async def _collect_manual(*args, **kwargs):
         calls["manual"] += 1
         return [], []
@@ -620,7 +601,6 @@ async def test_holdings_home_and_briefing_share_one_healthy_six_second_owner_wit
         calls["toss_api"] += 1
         return [_position("toss_api", "toss")], [], True
 
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _collect_upbit)
     monkeypatch.setattr(
         portfolio_holdings, "_collect_manual_positions", _collect_manual
     )
@@ -702,7 +682,7 @@ async def test_holdings_home_and_briefing_share_one_healthy_six_second_owner_wit
     assert home.holdings[0].symbol == "005930"
     assert holdings["total_positions"] == 1
     assert briefing["success"] is True
-    assert calls == {"upbit": 1, "toss_api": 1, "manual": 1}
+    assert calls == {"toss_api": 1, "manual": 1}
 
 
 @pytest.mark.asyncio
@@ -739,7 +719,6 @@ async def test_home_router_translates_hung_owner_hard_bound_to_sanitized_503(
 
     service = InvestHomeService(
         toss_api_reader=_Reader(),
-        upbit_reader=_Reader(),
         manual_reader=_Reader(),
         snapshot_cache=_HungCache(),
     )
@@ -799,7 +778,7 @@ async def test_calendar_entrypoint_reads_held_snapshot_without_full_reader_calls
     if importlib.util.find_spec("app.services.portfolio_snapshot_cache") is not None:
         from app.services import portfolio_snapshot_cache as whole_snapshot
 
-    calls = {"upbit": 0, "toss_api": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
 
     class _Reader:
         def __init__(self, source: str):
@@ -809,9 +788,6 @@ async def test_calendar_entrypoint_reads_held_snapshot_without_full_reader_calls
             calls[self.source] += 1
             return _SourceFetchResult(accounts=[], holdings=[])
 
-    monkeypatch.setattr(
-        invest_home_readers, "UpbitHomeReader", lambda db: _Reader("upbit")
-    )
     monkeypatch.setattr(
         invest_home_readers,
         "ManualHomeReader",
@@ -863,7 +839,7 @@ async def test_calendar_entrypoint_reads_held_snapshot_without_full_reader_calls
     )
 
     assert result == {"ok": True}
-    assert calls == {"upbit": 0, "toss_api": 0, "manual": 0}
+    assert calls == {"toss_api": 0, "manual": 0}
 
 
 @pytest.mark.asyncio
@@ -913,7 +889,6 @@ async def test_briefing_summary_reuses_whole_snapshot_without_source_recollectio
     cache = PortfolioSnapshotCache(redis_client=redis_client, ttl_seconds=30)
     service = InvestHomeService(
         toss_api_reader=_Reader(),
-        upbit_reader=_EmptyReader(),
         manual_reader=_EmptyReader(),
         snapshot_cache=cache,
     )
@@ -930,7 +905,6 @@ async def test_briefing_summary_reuses_whole_snapshot_without_source_recollectio
         raise AssertionError("briefing must not recollect source readers")
 
     for name in (
-        "_collect_upbit_positions",
         "_collect_manual_positions",
         "_collect_toss_api_positions",
     ):
@@ -1696,7 +1670,7 @@ async def test_corrupt_whole_snapshot_fallback_is_singleflight_across_facades():
         portfolio_snapshot_scope,
     )
 
-    calls = {"toss_api": 0, "upbit": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
 
     class _Reader:
         def __init__(self, source: str):
@@ -1714,13 +1688,11 @@ async def test_corrupt_whole_snapshot_fallback_is_singleflight_across_facades():
 
     service_a = InvestHomeService(
         toss_api_reader=_Reader("toss_api"),
-        upbit_reader=_Reader("upbit"),
         manual_reader=_Reader("manual"),
         snapshot_cache=cache_a,
     )
     service_b = InvestHomeService(
         toss_api_reader=_Reader("toss_api"),
-        upbit_reader=_Reader("upbit"),
         manual_reader=_Reader("manual"),
         snapshot_cache=cache_b,
     )
@@ -1731,7 +1703,7 @@ async def test_corrupt_whole_snapshot_fallback_is_singleflight_across_facades():
     )
 
     assert home_a.holdings == home_b.holdings == []
-    assert calls == {"toss_api": 1, "upbit": 1, "manual": 1}
+    assert calls == {"toss_api": 1, "manual": 1}
 
 
 @pytest.mark.asyncio
@@ -1744,7 +1716,7 @@ async def test_home_corrupt_snapshot_recovery_does_not_delete_newer_valid_payloa
         portfolio_snapshot_scope,
     )
 
-    calls = {"toss_api": 0, "upbit": 0, "manual": 0}
+    calls = {"toss_api": 0, "manual": 0}
 
     class _Reader:
         def __init__(self, source: str):
@@ -1762,13 +1734,11 @@ async def test_home_corrupt_snapshot_recovery_does_not_delete_newer_valid_payloa
 
     service_a = InvestHomeService(
         toss_api_reader=_Reader("toss_api"),
-        upbit_reader=_Reader("upbit"),
         manual_reader=_Reader("manual"),
         snapshot_cache=cache_a,
     )
     service_b = InvestHomeService(
         toss_api_reader=_Reader("toss_api"),
-        upbit_reader=_Reader("upbit"),
         manual_reader=_Reader("manual"),
         snapshot_cache=cache_b,
     )
@@ -1788,10 +1758,10 @@ async def test_home_corrupt_snapshot_recovery_does_not_delete_newer_valid_payloa
     task_a = asyncio.create_task(service_a.get_home(user_id=1))
     await task_a
 
-    assert calls == {"toss_api": 1, "upbit": 1, "manual": 1}
+    assert calls == {"toss_api": 1, "manual": 1}
     allow_delete.set()
     await task_b
-    assert calls == {"toss_api": 1, "upbit": 1, "manual": 1}
+    assert calls == {"toss_api": 1, "manual": 1}
 
 
 @pytest.mark.asyncio
@@ -1859,7 +1829,7 @@ async def test_calendar_cold_snapshot_fails_closed_without_live_reader_fanout():
     from app.services.invest_home_service import InvestHomeService
     from app.services.portfolio_snapshot_cache import PortfolioSnapshotCache
 
-    calls = {"upbit": 0, "toss_api": 0}
+    calls = {"toss_api": 0}
 
     class _ExplodingLiveReader:
         def __init__(self, source: str):
@@ -1885,7 +1855,6 @@ async def test_calendar_cold_snapshot_fails_closed_without_live_reader_fanout():
     )
     manual_reader = _ManualKeyReader()
     service = InvestHomeService(
-        upbit_reader=_ExplodingLiveReader("upbit"),
         manual_reader=manual_reader,
         toss_api_reader=_ExplodingLiveReader("toss_api"),
         snapshot_cache=cache,
@@ -1894,7 +1863,7 @@ async def test_calendar_cold_snapshot_fails_closed_without_live_reader_fanout():
     with pytest.raises(RuntimeError, match="portfolio_snapshot_unavailable"):
         await service.get_held_pairs(user_id=1)
 
-    assert calls == {"upbit": 0, "toss_api": 0}
+    assert calls == {"toss_api": 0}
     assert manual_reader.held_key_calls == 1
 
 
@@ -1920,7 +1889,6 @@ async def test_calendar_cold_snapshot_surfaces_explicit_503_metadata(monkeypatch
             return [("kr", "005930")]
 
     service = InvestHomeService(
-        upbit_reader=_ExplodingLiveReader(),
         manual_reader=_ManualKeyReader(),
         toss_api_reader=_ExplodingLiveReader(),
         snapshot_cache=PortfolioSnapshotCache(
@@ -1972,7 +1940,7 @@ async def test_calendar_cold_manual_db_failure_is_typed_503_without_live_fanout(
     from app.services.invest_home_service import InvestHomeService
     from app.services.portfolio_snapshot_cache import PortfolioSnapshotCache
 
-    calls = {"upbit": 0, "toss_api": 0}
+    calls = {"toss_api": 0}
 
     class _ExplodingLiveReader:
         def __init__(self, source: str):
@@ -1990,7 +1958,6 @@ async def test_calendar_cold_manual_db_failure_is_typed_503_without_live_fanout(
             raise RuntimeError("fake manual DB unavailable")
 
     service = InvestHomeService(
-        upbit_reader=_ExplodingLiveReader("upbit"),
         manual_reader=_BrokenManualKeyReader(),
         toss_api_reader=_ExplodingLiveReader("toss_api"),
         snapshot_cache=PortfolioSnapshotCache(
@@ -2026,7 +1993,7 @@ async def test_calendar_cold_manual_db_failure_is_typed_503_without_live_fanout(
     assert caught.value.detail["source"] == "portfolio_snapshot"
     assert caught.value.detail["manual_pairs_available"] is False
     assert caught.value.detail["unavailable_reason"]
-    assert calls == {"upbit": 0, "toss_api": 0}
+    assert calls == {"toss_api": 0}
 
 
 @pytest.mark.asyncio
@@ -2051,7 +2018,6 @@ async def test_manual_held_key_failure_does_not_log_exception_secret(caplog):
             raise AssertionError("held-key path must not call live readers")
 
     service = InvestHomeService(
-        upbit_reader=_NoLiveReader(),
         manual_reader=_BrokenManualKeyReader(),
         toss_api_reader=_NoLiveReader(),
         snapshot_cache=PortfolioSnapshotCache(
@@ -2244,7 +2210,6 @@ async def test_service_manual_held_pairs_use_market_aware_symbol_helpers() -> No
         ttl_seconds=30,
     )
     service = InvestHomeService(
-        upbit_reader=_ExplodingReader(),
         manual_reader=_ManualKeyReader(),
         toss_api_reader=_ExplodingReader(),
         snapshot_cache=cache,

@@ -273,11 +273,13 @@ class ExpiredDefensiveProposal:
 
 
 # 제안 생성 단계에서 실제 제출 어댑터가 있는 조합만 허용한다.
+# Upbit 주문 어댑터가 제거되면서 crypto 제출 경로에는 남은 공급자가 없다.
+# 여기에 남겨 두면 제출 불가능한 제안이 승인 대기까지 올라가므로 생성 시점에
+# 닫는다.
 _SUBMITTABLE_ACCOUNT_MODE_MARKETS: frozenset[tuple[str, str]] = frozenset(
     {
         ("toss_live", "equity_kr"),
         ("toss_live", "equity_us"),
-        ("upbit", "crypto"),
     }
 )
 

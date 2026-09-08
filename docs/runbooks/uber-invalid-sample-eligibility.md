@@ -1,7 +1,9 @@
 # UBER invalid-sample eligibility — `uber-invalid-sample-eligibility.v1`
 
-ROB-1036. Additive eligibility record + contract-compatible post-fill writer for the
-`alpaca_paper_lab` UBER `invalid_sample_cleanup` case.
+ROB-1036. Additive eligibility record + contract-compatible post-fill writer. It was
+first recorded for the (now removed) `alpaca_paper_lab` UBER
+`invalid_sample_cleanup` case; the record and contract surface itself is
+provider-agnostic.
 
 This runbook describes **what exists in code**. It does not authorise an order, a
 cleanup retry, a forecast resolve, a migration apply, or a scheduler registration.
@@ -172,21 +174,15 @@ directly comparable.
 
 ### 6-2. Trade performance (ROB-1036 B2)
 
-`TradePerformanceEligibility` is wired into the real Alpaca PnL path:
+`TradePerformanceEligibility` has no consumer in this repo: the
+`paper_evaluation` PnL/evidence package it was wired into was removed with the
+deleted paper-cohort surfaces.
 
 - `InvalidSampleEligibilityService.list_trade_performance_excluded(correlation_ids)`
-  resolves explicit `trade_performance_exclude` decisions.
-- `paper_evaluation/evidence.py` — `_trade_performance_excluded_row_ids()` turns
-  those into **native row ids**, and `_load_native` skips them when building
-  `alpaca_fills`. Row ids (not correlation ids) are used so the ROB-850
-  assignment-scoping guard on `_load_native` stays intact: nothing is discovered
-  by correlation id, an already-discovered row is merely filtered out.
-- `paper_evaluation/pnl.py` — `compute_alpaca_view(..., excluded_correlation_ids=…)`
-  skips both the correlation bucket and any individual row carrying an excluded
-  lifecycle id.
-
-Only an explicit `EXCLUDE` filters. An undecided lifecycle is `UNIDENTIFIABLE`
-and stays, so with no decisions on record the PnL inputs are unchanged.
+  still resolves explicit `trade_performance_exclude` decisions, so a future
+  consumer can apply the same predicate.
+- Only an explicit `EXCLUDE` would filter. An undecided lifecycle is
+  `UNIDENTIFIABLE` and stays.
 
 ## 7. Post-fill completion gate
 
@@ -263,7 +259,7 @@ Verified in an isolated throwaway database by
   call names its cohort, and the default cohort admits undecided samples while
   reporting them separately (§6). The termination condition for that stage is in
   §6-1-1 — this is transitional, not the end state.
-- The trade-performance gate is wired into the Alpaca PnL path (§6-2). Other
+- The trade-performance gate currently has no consumer (§6-2). Other
   aggregates (`trade_journal/aggregates.py`, keyed by symbol/tag over
   `review.trades`) have no forecast/lifecycle identity to join on and are
   untouched; a future consumer applies the same predicate.

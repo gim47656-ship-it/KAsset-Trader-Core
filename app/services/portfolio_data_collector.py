@@ -12,7 +12,6 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import app.services.brokers.upbit.client as upbit_service
 from app.core.normalizers import to_float as _to_float
 from app.models.manual_holdings import MarketType
 from app.services.manual_holdings_service import ManualHoldingsService
@@ -126,71 +125,6 @@ class PortfolioDataCollector:
         for error in snapshot.errors:
             code = error.get("code") if isinstance(error, dict) else None
             warnings.append(f"Toss holdings partial: {code or 'unknown'}")
-        return components
-
-    # ------------------------------------------------------------------
-    # Upbit
-    # ------------------------------------------------------------------
-
-    async def _collect_upbit_components(
-        self,
-        warnings: list[str],
-        active_upbit_markets: set[str] | None = None,
-        enforce_upbit_universe: bool = True,
-    ) -> list[dict[str, Any]]:
-        components: list[dict[str, Any]] = []
-
-        try:
-            coins = await upbit_service.fetch_my_coins()
-        except Exception as exc:
-            _log_broker_failure("Upbit", exc, warnings)
-            return components
-
-        tradable_set: set[str] | None = None
-        if enforce_upbit_universe:
-            tradable_set = active_upbit_markets
-            if tradable_set is None:
-                tradable_set = await get_active_upbit_markets(quote_currency=None)
-            tradable_set = {
-                str(market).strip().upper()
-                for market in tradable_set
-                if str(market).strip()
-            }
-
-        for coin in coins:
-            currency = str(coin.get("currency", "")).strip().upper()
-            if not currency or currency == "KRW":
-                continue
-
-            unit_currency = str(coin.get("unit_currency") or "KRW").strip().upper()
-            symbol = _normalize_symbol(f"{unit_currency}-{currency}", _MARKET_CRYPTO)
-            if tradable_set is not None and symbol not in tradable_set:
-                logger.info("Skipping non-tradable Upbit holding symbol=%s", symbol)
-                continue
-            quantity = _to_float(coin.get("balance")) + _to_float(coin.get("locked"))
-            if quantity <= 0:
-                continue
-
-            components.append(
-                {
-                    "market_type": _MARKET_CRYPTO,
-                    "symbol": symbol,
-                    "name": symbol,
-                    "account_key": "live:upbit",
-                    "broker": "upbit",
-                    "account_name": "Upbit 실계좌",
-                    "source": "live",
-                    "quantity": quantity,
-                    "avg_price": _to_float(coin.get("avg_buy_price")),
-                    "current_price": None,
-                    "evaluation": None,
-                    "profit_loss": None,
-                    "profit_rate": None,
-                }
-            )
-
-        # Price fill for Upbit components is handled by PortfolioOverviewService
-        # (_fetch_upbit_prices_resilient / _fill_missing_crypto_prices).
         return components
 
     # ------------------------------------------------------------------

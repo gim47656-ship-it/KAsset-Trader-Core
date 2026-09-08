@@ -54,24 +54,7 @@ from app.services.action_report.snapshot_backed.collectors.symbol import (
 from app.services.action_report.snapshot_backed.collectors.watch_context import (
     WatchContextSnapshotCollector,
 )
-from app.services.brokers.upbit.orders import (
-    fetch_open_orders as _upbit_fetch_open_orders,
-)
 from app.services.investment_snapshots.collectors import SnapshotCollectorRegistry
-
-
-class _UpbitOpenOrdersAdapter:
-    """Read-only adapter exposing only ``fetch_open_orders``.
-
-    The Upbit broker module also exports order placement/cancellation
-    functions. Wrapping just the read function here keeps the registry
-    wiring intentionally narrow — the collector cannot reach mutation
-    paths via the bound client.
-    """
-
-    @staticmethod
-    async def fetch_open_orders(market: str | None = None) -> list[dict[str, Any]]:
-        return await _upbit_fetch_open_orders(market=market)
 
 
 class _UpbitQuoteOrderbookAdapter:
@@ -220,11 +203,9 @@ def production_collector_registry(session: AsyncSession) -> SnapshotCollectorReg
     registry.register(TossRemoteDebugStubCollector())
     registry.register(BrowserProbeStubCollector())
 
-    # Equity는 Toss OPEN orders, crypto는 좁은 Upbit read adapter를 사용한다.
-    registry.register(
-        PendingOrdersSnapshotCollector(
-            upbit_client=_UpbitOpenOrdersAdapter(),
-        )
-    )
+    # Equity는 Toss OPEN orders를 사용한다. Upbit 미체결 조회는 인증이 필요한
+    # 계좌 읽기였고 해당 브로커 주문 모듈이 제거되어 더 이상 공급자가 없다.
+    # crypto 요청은 임의로 빈 목록을 만들지 않고 unavailable로 닫힌다.
+    registry.register(PendingOrdersSnapshotCollector(upbit_client=None))
 
     return registry

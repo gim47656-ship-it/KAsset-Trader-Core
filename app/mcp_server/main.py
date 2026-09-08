@@ -1,6 +1,6 @@
 import logging
 
-from app.core.config import settings, validate_kiwoom_mock_config
+from app.core.config import settings
 from app.core.logging_config import configure_dependency_log_levels
 from app.mcp_server.env_utils import (
     _env,
@@ -58,84 +58,15 @@ def _validate_profile_auth_token(
     token_required_profiles = {
         McpProfile.ACCOUNT_READ,
         McpProfile.TRADINGCODEX_EXECUTION,
-        McpProfile.PAPER_EXECUTION,
-        McpProfile.ALPACA_PAPER_CLEAN,
     }
     if profile in token_required_profiles and not (token or "").strip():
         raise RuntimeError(
             f"MCP_PROFILE={profile.value} requires non-empty MCP_AUTH_TOKEN"
         )
-    if mcp_type not in {"streamable-http", "sse"} or (token or "").strip():
-        return
-    if profile in {McpProfile.KIWOOM, McpProfile.KIWOOM_KR}:
-        raise RuntimeError(
-            f"MCP_PROFILE={profile.value} requires non-empty MCP_AUTH_TOKEN "
-            "for network transports"
-        )
-    if profile is McpProfile.DEFAULT and bool(
-        getattr(settings, "kiwoom_mock_us_enabled", False)
-    ):
-        raise RuntimeError(
-            "Kiwoom US mutation exposure requires non-empty MCP_AUTH_TOKEN "
-            "for network transports"
-        )
+    del mcp_type
 
 
 def _validate_profile_runtime_settings(profile: McpProfile) -> None:
-    if profile is McpProfile.ALPACA_PAPER_CLEAN:
-        if not settings.alpaca_paper_crypto_enabled:
-            raise RuntimeError(
-                "MCP_PROFILE=alpaca-paper-clean requires "
-                "ALPACA_PAPER_CRYPTO_ENABLED=true"
-            )
-        # Validate only non-secret configuration here. The broker service
-        # performs the remote account read and fails closed on mismatch.
-        required = (
-            "alpaca_paper_crypto_api_key",
-            "alpaca_paper_crypto_api_secret",
-            "alpaca_paper_crypto_expected_account_id_suffix",
-            "alpaca_paper_crypto_expected_account_number_suffix",
-        )
-        missing = [name for name in required if not getattr(settings, name, None)]
-        if missing:
-            raise RuntimeError(
-                f"MCP_PROFILE={profile.value} has incomplete Alpaca clean config: "
-                + ", ".join(missing)
-            )
-        return
-    if profile is McpProfile.PAPER_EXECUTION:
-        if not settings.PAPER_EXECUTION_ENABLED:
-            raise RuntimeError(
-                "MCP_PROFILE=paper_execution requires PAPER_EXECUTION_ENABLED=true"
-            )
-        return
-
-    restricted_profiles = {
-        McpProfile.ACCOUNT_READ,
-        McpProfile.TRADINGCODEX_EXECUTION,
-        # ROB-1159 — the KR-only Kiwoom profile is mock-pinned by construction,
-        # so it fails closed at startup on incomplete mock config or a base URL
-        # that is not the mock host, instead of only at first tool call. This
-        # tightening applies to the new profile only; MCP_PROFILE=kiwoom startup
-        # behavior is deliberately left unchanged.
-        McpProfile.KIWOOM_KR,
-    }
-    if profile in restricted_profiles and bool(
-        getattr(settings, "kiwoom_mock_enabled", False)
-    ):
-        missing = validate_kiwoom_mock_config(settings)
-        if missing:
-            raise RuntimeError(
-                f"MCP_PROFILE={profile.value} has incomplete Kiwoom mock config: "
-                + ", ".join(missing)
-            )
-        mock_base_url = str(settings.kiwoom_mock_base_url).rstrip("/")
-        if mock_base_url != "https://mockapi.kiwoom.com":
-            raise RuntimeError(
-                f"MCP_PROFILE={profile.value} requires Kiwoom mock host "
-                "https://mockapi.kiwoom.com"
-            )
-
     if profile is McpProfile.TRADINGCODEX_EXECUTION:
         if settings.order_approval_hash_mode != "required":
             raise RuntimeError(

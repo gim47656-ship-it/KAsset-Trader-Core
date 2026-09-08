@@ -114,7 +114,7 @@ async def test_market_data_quote_provider_preserves_missing_price(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_market_data_orderbook_provider_maps_kr_snapshot(monkeypatch):
+async def test_market_data_orderbook_provider_maps_crypto_snapshot(monkeypatch):
     from app.services.invest_view_model import stock_detail_providers as providers
 
     async def fake_get_orderbook(
@@ -122,8 +122,8 @@ async def test_market_data_orderbook_provider_maps_kr_snapshot(monkeypatch):
     ):
         return OrderbookSnapshot(
             symbol=symbol,
-            instrument_type="equity_kr",
-            source="kis",
+            instrument_type="crypto",
+            source="upbit",
             asks=[OrderbookLevel(price=71100, quantity=10)],
             bids=[OrderbookLevel(price=71000, quantity=12)],
             total_ask_qty=10,
@@ -136,7 +136,7 @@ async def test_market_data_orderbook_provider_maps_kr_snapshot(monkeypatch):
     monkeypatch.setattr(market_data_service, "get_orderbook", fake_get_orderbook)
 
     orderbook = await providers.stock_detail_orderbook_provider(
-        "kr", "005930", object()
+        "crypto", "KRW-BTC", object()
     )
 
     assert orderbook is not None

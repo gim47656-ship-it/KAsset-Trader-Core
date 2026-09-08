@@ -109,66 +109,26 @@ def test_profit_taking_labels_kr_single_share_rule_as_shadow_only():
     assert rule["proposal"]["auto_approve"] is False
 
 
-def test_account_cleanup_route_allows_only_alpaca_reduce_only_path():
+def test_purpose_argument_is_rejected():
     out = asyncio.run(
         _route_tool()(
             intent="profit_taking",
-            market="us",
-            purpose="account_cleanup",
-        )
-    )
-
-    assert out["success"] is True
-    assert out["purpose"] == "account_cleanup"
-    assert out["route_contract"]["execution_mode"] == "cleanup_reduce_only"
-    assert [step["tool"] for step in out["standard_tool_sequence"]] == [
-        "alpaca_paper_list_positions",
-        "alpaca_paper_list_orders",
-        "alpaca_paper_execution_preflight_check",
-        "alpaca_paper_submit_order",
-    ]
-    assert "alpaca_paper_submit_order" in out["allowed_tools"]
-    assert "alpaca_paper_submit_order" not in out["blocked_actions"]
-    assert (DIRECT_BROKER_MUTATION_TOOLS - {"alpaca_paper_submit_order"}) <= set(
-        out["blocked_actions"]
-    )
-
-
-def test_account_cleanup_purpose_cannot_unlock_a_strategy_buy():
-    out = asyncio.run(
-        _route_tool()(
-            intent="buy_analysis",
             market="us",
             purpose="account_cleanup",
         )
     )
 
     assert out["success"] is False
-    assert out["error"] == "purpose_not_supported_for_intent"
+    assert out["error"] == "unknown_purpose"
 
+
+def test_every_direct_broker_mutation_stays_blocked_without_a_purpose():
     strategy_buy = asyncio.run(_route_tool()(intent="buy_analysis", market="us"))
-    assert "alpaca_paper_submit_order" in strategy_buy["blocked_actions"]
-    assert "alpaca_paper_submit_order" not in strategy_buy["allowed_tools"]
-
     strategy_sell = asyncio.run(_route_tool()(intent="profit_taking", market="us"))
-    assert "alpaca_paper_submit_order" in strategy_sell["blocked_actions"]
-    assert "alpaca_paper_submit_order" not in strategy_sell["allowed_tools"]
 
-
-def test_us_paper_profile_is_cleanup_route_ready():
-    mcp = _build_profile_mcp(McpProfile.US_PAPER)
-
-    out = asyncio.run(
-        mcp.tools["route_request"](
-            intent="profit_taking",
-            market="us",
-            purpose="account_cleanup",
-        )
-    )
-
-    assert out["success"] is True
-    assert out["route_contract"]["missing_required_tools"] == []
-    assert "alpaca_paper_submit_order" in out["allowed_tools"]
+    for plan in (strategy_buy, strategy_sell):
+        assert plan["success"] is True
+        assert set(plan["allowed_tools"]).isdisjoint(DIRECT_BROKER_MUTATION_TOOLS)
 
 
 def test_market_brief_has_version_but_empty_thresholds():
@@ -357,16 +317,7 @@ def test_discovery_preview_and_direct_execution_non_regression(
 class TestRouteRequestRegisteredEveryProfile:
     @pytest.mark.parametrize(
         "profile",
-        [
-            profile
-            for profile in McpProfile
-            if profile
-            not in (
-                McpProfile.ACCOUNT_READ,
-                McpProfile.PAPER_EXECUTION,
-                McpProfile.ALPACA_PAPER_CLEAN,
-            )
-        ],
+        [profile for profile in McpProfile if profile != McpProfile.ACCOUNT_READ],
     )
     def test_route_request_present(self, profile: McpProfile) -> None:
         tools = build_tools(profile=profile)

@@ -24,93 +24,11 @@ ApiRateLimitMap = dict[str, ApiRateLimitEntry]
 PORTFOLIO_SNAPSHOT_MEASURED_COLD_COMPOSE_REGIME_SECONDS: float = 16.28
 
 
-DEFAULT_KIS_API_RATE_LIMITS: ApiRateLimitMap = {
-    "FHKST03010100|/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    "FHPST04830000|/uapi/domestic-stock/v1/quotations/daily-short-sale": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    "FHKST03010230|/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    # ROB-485: get_execution_strength (주식현재가 체결, tick rows)
-    "FHKST01010300|/uapi/domestic-stock/v1/quotations/inquire-ccnl": {
-        "rate": 20,
-        "period": 1.0,
-    },
-    # ROB-753: batch /invest KIS fallback uses these current-price endpoints.
-    # Live measurement showed same-endpoint concurrent bursts can fail most US
-    # symbols, while sequential calls succeed. Keep the default process-local
-    # limiter conservative; operators can override with KIS_API_RATE_LIMITS.
-    "FHKST01010100|/uapi/domestic-stock/v1/quotations/inquire-price": {
-        "rate": 1,
-        "period": 0.2,
-    },
-    "HHDFS00000300|/uapi/overseas-price/v1/quotations/price": {
-        "rate": 1,
-        "period": 0.2,
-    },
-    # ROB-951: mock-US buy preflight and the read-only probe use VTTS3007R.
-    "VTTS3007R|/uapi/overseas-stock/v1/trading/inquire-psamount": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8434R|/uapi/domestic-stock/v1/trading/inquire-balance": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8001R|/uapi/domestic-stock/v1/trading/inquire-daily-ccld": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    "TTTC8036R|/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl": {
-        "rate": 10,
-        "period": 1.0,
-    },
-    # ROB-585 (absorbed by ROB-645): order TRs throttled to 8/s so batch orders
-    # stay under the KIS ledger limit (EGW00215 '초당 거래건수 초과'). ROB-645
-    # removes all order re-POST retries, so this pre-send wait is the only guard
-    # against the rate limit — orders that still exceed it fail fast, never re-sent.
-    "TTTC0012U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "VTTC0012U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "TTTC0011U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "VTTC0011U|/uapi/domestic-stock/v1/trading/order-cash": {"rate": 8, "period": 1.0},
-    "TTTC0013U|/uapi/domestic-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "VTTC0013U|/uapi/domestic-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "TTTT1002U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1002U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "TTTT1006U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1006U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "VTTT1001U|/uapi/overseas-stock/v1/trading/order": {"rate": 8, "period": 1.0},
-    "TTTT1004U|/uapi/overseas-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-    "VTTT1004U|/uapi/overseas-stock/v1/trading/order-rvsecncl": {
-        "rate": 8,
-        "period": 1.0,
-    },
-}
-
 DEFAULT_UPBIT_API_RATE_LIMITS: ApiRateLimitMap = {
-    "GET /v1/accounts": {"rate": 30, "period": 1.0},
-    "GET /v1/order": {"rate": 30, "period": 1.0},
-    "GET /v1/orders/closed": {"rate": 30, "period": 1.0},
     "GET /v1/ticker": {"rate": 10, "period": 1.0},
 }
 
 _DEFAULT_API_RATE_LIMITS_BY_FIELD: dict[str, ApiRateLimitMap] = {
-    "kis_api_rate_limits": DEFAULT_KIS_API_RATE_LIMITS,
     "upbit_api_rate_limits": DEFAULT_UPBIT_API_RATE_LIMITS,
 }
 
@@ -120,10 +38,6 @@ def _copy_api_rate_limit_map(api_rate_limits: ApiRateLimitMap) -> ApiRateLimitMa
         endpoint_key: dict(limit_config)
         for endpoint_key, limit_config in api_rate_limits.items()
     }
-
-
-def _default_kis_api_rate_limits() -> ApiRateLimitMap:
-    return _copy_api_rate_limit_map(DEFAULT_KIS_API_RATE_LIMITS)
 
 
 def _default_upbit_api_rate_limits() -> ApiRateLimitMap:
@@ -225,68 +139,6 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    # Dormant KIS adapters retain transport configuration for historical reads
-    # and explicit operator-only tooling, but deployed runtimes do not require it.
-    kis_app_key: str | None = None
-    kis_app_secret: str | None = None
-    kis_base_url: str = "https://openapi.koreainvestment.com:9443"
-    kis_access_token: str | None = None  # 최초엔 비워두고 자동 발급
-    kis_account_no: str | None = None  # 계좌번호 (예: "12345678-01")
-
-    # KIS official mock/sandbox account. Disabled by default and must be
-    # explicitly configured by the runtime environment.
-    kis_mock_enabled: bool = False
-    kis_mock_app_key: str | None = None
-    kis_mock_app_secret: str | None = None
-    kis_mock_base_url: str = "https://openapivts.koreainvestment.com:29443"
-    kis_mock_account_no: str | None = None
-    kis_mock_access_token: str | None = None
-    kis_mock_scalping_enabled: bool = False
-
-    # ROB-671: gate the aggressive "unsettled regular-session buy → 15:30 death"
-    # expiry downgrade. Default off — a regular-session BUY keeps expected_expiry
-    # at 20:00 KST (conservative). Flip to true ONLY after a live measurement
-    # confirms the 15:30 death is session expiry (not a D+2 unsettled-cash cancel).
-    kis_regular_buy_unsettled_expiry_1530: bool = False
-
-    # Kiwoom Securities mock account. Disabled by default; mock-only foundation
-    # added in ROB-97. Live URL is recorded so the runtime can defensively
-    # reject it — no code path may target the live host in this PR.
-    kiwoom_mock_enabled: bool = False
-    kiwoom_mock_app_key: str | None = None
-    kiwoom_mock_app_secret: str | None = None
-    kiwoom_mock_account_no: str | None = None
-    kiwoom_mock_base_url: str = "https://mockapi.kiwoom.com"
-    kiwoom_base_url: str = "https://api.kiwoom.com"  # live disabled in this PR
-    kiwoom_mock_access_token: str | None = None
-
-    # Kiwoom LIVE read-only market data (charts only). Disabled by default.
-    # 🔴 Minimal surface on purpose: app key, app secret, and base URL ONLY.
-    # No account number is exposed here — ``KiwoomLiveReadOnlyClient`` must not
-    # be able to reach an account, and an AST guard forbids the live module from
-    # naming ``kiwoom_account_no`` / ``KIWOOM_ACCOUNT_NO`` at all.
-    # ⚠️ That combination prevents *accidental* order/account reach and makes a
-    # regression statically detectable; it is not a structural impossibility
-    # proof, since the account number exists in the deployment env file.
-    kiwoom_live_marketdata_enabled: bool = False
-    kiwoom_live_app_key: str | None = None
-    kiwoom_live_app_secret: str | None = None
-    kiwoom_live_base_url: str = "https://api.kiwoom.com"
-
-    # ROB-867: US-only Kiwoom mock namespace. Same mock host, separate
-    # app_key/app_secret/account_no; never reads or falls back to KR settings.
-    kiwoom_mock_us_enabled: bool = False
-    kiwoom_mock_us_app_key: str | None = None
-    kiwoom_mock_us_app_secret: str | None = None
-    kiwoom_mock_us_account_no: str | None = None
-
-    # ROB-908: surface Alpaca paper read/preview/confirm-gated order/ledger tools
-    # in the DEFAULT profile (mock_alpaca operator session runs on DEFAULT, not a
-    # separate us-paper instance). Flag-gated off by default, mirroring the
-    # ROB-601/ROB-867 kiwoom-mock DEFAULT gate; the automated-submit tool stays
-    # US_PAPER-only regardless (ROB-842 governance).
-    alpaca_paper_default_tools_enabled: bool = False
-
     # Toss Securities Open API. Live-only, disabled by default. ROB-530 adds
     # read-only client support; order mutations are handled by follow-up issues.
     toss_api_enabled: bool = False
@@ -343,43 +195,12 @@ class Settings(BaseSettings):
     # off | optional | warn | required. Default warn-first: preview always warns,
     # place blocks a live send only when set to 'required'.
     toss_nxt_preflight_mode: str = "warn"
-    # Dormant KIS WebSocket parser/client transport defaults. No runtime service
-    # or launcher registers these clients; keeping construction defaults preserves
-    # historical parser tests without providing an activation switch.
-    kis_ws_hts_id: str = ""
-    kis_ws_reconnect_delay_seconds: int = 5
-    kis_ws_max_reconnect_attempts: int = 10
-    kis_ws_ping_interval: int = 30
-    kis_ws_ping_timeout: int = 10
-
-    # Master capability gate for the remaining Binance Demo scalping surfaces
-    # (ROB-907 read-only ledger status tool; ROB-844 root-reservation
-    # reconcile task). The scheduler/executor/LLM-decision auto-order
-    # orchestration lane that also read this flag was removed (ROB-1147).
-    binance_demo_scalping_enabled: bool = False
-    # ROB-845 — isolated canonical Binance Demo / Alpaca Paper experiment
-    # façade. The dedicated MCP profile must remain physically absent unless
-    # the operator opts in; startup also requires MCP bearer authentication.
-    PAPER_EXECUTION_ENABLED: bool = False
-    # ROB-849 — immutable BTC/ETH cohort scheduler. Disabled means the TaskIQ
-    # label is absent; direct task calls audit recoverable claims before returning.
-    PAPER_COHORT_ENABLED: bool = False
-    PAPER_COHORT_CRON: str = "* * * * *"
     # ROB-848 — authenticated caller id -> validation role. Empty/unmapped is
     # intentionally fail-closed; caller-owned payload roles are never accepted.
     PAPER_VALIDATION_ACTOR_ROLES: dict[str, str] = Field(default_factory=dict)
-    # Bound to the authenticated PAPER_EXECUTION bearer token at the process
+    # Bound to the authenticated MCP bearer principal at the process
     # composition boundary. Never derive this principal from a caller header.
     PAPER_VALIDATION_AUTHENTICATED_ACTOR_ID: str = ""
-
-    # KIS Rate Limiting (HTTP API)
-    kis_rate_limit_rate: int = 19  # 초당 최대 요청 수 (안전 마진으로 20-1)
-    kis_rate_limit_period: float = 1.0  # 윈도우 기간 (초)
-
-    # KIS Per-API Rate Limits (JSON map: "TR_ID|/path" -> {"rate": int, "period": float})
-    kis_api_rate_limits: Annotated[ApiRateLimitMap, NoDecode] = Field(
-        default_factory=_default_kis_api_rate_limits
-    )
 
     # Upbit Rate Limiting (HTTP API)
     upbit_rate_limit_rate: int = 10  # 초당 최대 요청 수
@@ -397,10 +218,6 @@ class Settings(BaseSettings):
     yahoo_ohlcv_cache_enabled: bool = True
     yahoo_ohlcv_cache_max_days: int = 400
     yahoo_ohlcv_cache_lock_ttl_seconds: int = 10
-    kis_ohlcv_cache_enabled: bool = True
-    kis_ohlcv_cache_max_days: int = 400
-    kis_ohlcv_cache_max_hours: int = 400 * 24
-    kis_ohlcv_cache_lock_ttl_seconds: int = 10
 
     # ROB-638: fetch-layer Redis cache for the slowly-changing analyze provider
     # fetches (KR naver snapshot, US yfinance bundle, US finnhub profile).
@@ -423,17 +240,6 @@ class Settings(BaseSettings):
     api_rate_limit_retry_429_max: int = 2  # 429 에러 시 최대 재시도 횟수
     api_rate_limit_retry_429_base_delay: float = 0.2  # 지수 백오프 기본 대기 시간 (초)
 
-    # ROB-699: per-process in-process circuit breaker for KIS transport connect
-    # failures (e.g. KIS maintenance). Closed = pure passthrough; open = fail-fast
-    # so /invest KIS→Toss fallbacks fire in ~0ms instead of burning the connect
-    # timeout on every call. Default ON; False = complete no-op.
-    kis_circuit_breaker_enabled: bool = True
-    kis_circuit_breaker_failure_threshold: int = (
-        5  # consecutive connect-failures -> open
-    )
-    kis_circuit_breaker_cooldown_seconds: int = (
-        45  # open -> half-open cooldown (monotonic s)
-    )
     # Telegram
     telegram_token: str | None = None
     telegram_chat_id: str | None = None
@@ -444,14 +250,6 @@ class Settings(BaseSettings):
     discord_webhook_kr: str | None = None
     discord_webhook_crypto: str | None = None
     discord_webhook_alerts: str | None = None
-
-    # ROB-99 — crypto pending-order reminders
-    crypto_pending_order_alert_enabled: bool = False
-    crypto_pending_order_alert_channel_id: str = "1500719153508515870"
-    crypto_pending_order_failure_channel_id: str = "1500722535678083102"
-    crypto_pending_order_alert_webhook_url: str | None = None
-    crypto_pending_order_failure_webhook_url: str | None = None
-    crypto_pending_order_discord_bot_token: SecretStr | None = None
 
     # Strategy
     top_n: int = 30
@@ -494,7 +292,7 @@ class Settings(BaseSettings):
             return None
         return int(v)
 
-    @field_validator("kis_api_rate_limits", "upbit_api_rate_limits", mode="before")
+    @field_validator("upbit_api_rate_limits", mode="before")
     @classmethod
     def parse_api_rate_limits(cls, v: Any) -> ApiRateLimitMap:
         return _parse_api_rate_limit_overrides(v)
@@ -541,8 +339,6 @@ class Settings(BaseSettings):
     opendart_api_key: str
     opendart_daily_request_budget: int = 18000
     DATABASE_URL: str
-    upbit_access_key: str
-    upbit_secret_key: str
 
     # Finnhub API (optional - for news and fundamentals)
     finnhub_api_key: str | None = None
@@ -665,7 +461,6 @@ class Settings(BaseSettings):
 
     DAILY_SCAN_ENABLED: bool = False
     DAILY_SCAN_CRASH_THRESHOLD: float = 0.05
-    DAILY_SCAN_CRASH_HOLDING_THRESHOLD: float = 0.04
     DAILY_SCAN_CRASH_TOP10_THRESHOLD: float = 0.06
     DAILY_SCAN_CRASH_TOP30_THRESHOLD: float = 0.08
     DAILY_SCAN_CRASH_TOP50_THRESHOLD: float = 0.10
@@ -686,7 +481,6 @@ class Settings(BaseSettings):
     # Optional here so non-production remains usable; production middleware
     # fails closed when it is absent.
     KASSET_ADMIN_EDGE_KEY: SecretStr | None = None
-    CREDENTIAL_MASTER_KEY: SecretStr | None = None
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False
     # PAPER-only automated execution of owner-approved AI recommendations.
@@ -831,26 +625,11 @@ class Settings(BaseSettings):
     # ROB-211 execution ledger ships inert; commit/backfill activation is a separate approval-gated ops change.
     EXECUTION_LEDGER_COMMIT_ENABLED: bool = False
 
-    # ROB-844 — scheduleless Binance Demo abandoned-reservation reconcile.
-    # The canonical ``binance_demo_scalping_enabled`` master above and the
-    # reconcile gate must both be enabled. Do not duplicate the case-insensitive
-    # BINANCE_DEMO_SCALPING_ENABLED alias here. Broker reads stay dry-run until
-    # the independent confirm gate is enabled; candidates younger than one hour
-    # are never queried.
-    BINANCE_DEMO_RESERVATION_RECONCILE_ENABLED: bool = False
-    BINANCE_DEMO_RESERVATION_RECONCILE_CONFIRM: bool = False
-    BINANCE_DEMO_RESERVATION_RECONCILE_MIN_AGE_SECONDS: int = 3600
-
     # ROB-574 — paused periodic auto-reconcile for Toss live KR/US orders.
     # Default off and scheduleless in this repo. Recurrence belongs to the
     # operator automation layer; unattended booking requires both gates.
     TOSS_LIVE_AUTO_RECONCILE_ENABLED: bool = False
     TOSS_LIVE_AUTO_RECONCILE_SAFETY_REVIEW_PASSED: bool = False
-
-    # Paused periodic reconcile settings retained for the operational Upbit path.
-    # Default off and scheduleless; operator automation owns recurrence.
-    LIVE_AUTO_RECONCILE_ENABLED: bool = False
-    LIVE_AUTO_RECONCILE_DRY_RUN: bool = True
 
     # ROB-757 — Toss REST fill poller. Default off; read-only broker scan plus
     # evidence-gated local booking only after operator activation.
@@ -863,9 +642,6 @@ class Settings(BaseSettings):
     # ROB-402 — watch auto_execute_mock. Default off: the merged PR is inert
     # (no real mock orders) until an operator flips this.
     WATCH_AUTO_EXECUTE_MOCK_ENABLED: bool = False
-    # ROB-405 Slice A — mock roundtrip → trade_journal bridge. Default off:
-    # no journals are created until an operator flips this.
-    MOCK_ROUNDTRIP_JOURNAL_BRIDGE_ENABLED: bool = False
     # ROB-405 Slice B — auto journal verdict. Default off.
     JOURNAL_VERDICT_AUTO_ENABLED: bool = False
     # ROB-405 Slice C — journal counterfactual sync. Default off.
@@ -1016,38 +792,6 @@ class Settings(BaseSettings):
 
     public_base_url: str = "https://mgh3326.duckdns.org"
 
-    # Alpaca paper-trading broker adapter (ROB-57)
-    # Only paper credentials/endpoint — no live trading support.
-    alpaca_paper_api_key: str | None = None
-    alpaca_paper_api_secret: SecretStr | None = None
-    alpaca_paper_expected_account_id_suffix: str | None = None
-    alpaca_paper_expected_account_number_suffix: str | None = None
-    # directional-lab uses a distinct Alpaca paper account. The endpoint is
-    # intentionally shared; credentials are not allowed to fall back.
-    alpaca_paper_lab_api_key: str | None = None
-    alpaca_paper_lab_api_secret: SecretStr | None = None
-    alpaca_paper_lab_expected_account_id_suffix: str | None = None
-    alpaca_paper_lab_expected_account_number_suffix: str | None = None
-    # Clean-account onboarding. Credentials are intentionally a separate
-    # namespace; they must never fall back to default or lab credentials.
-    alpaca_paper_crypto_enabled: bool = False
-    alpaca_paper_crypto_api_key: str | None = None
-    alpaca_paper_crypto_api_secret: SecretStr | None = None
-    # Expected suffixes are deployment bindings, not account-purpose labels.
-    # They are required for the clean onboarding profile and are never inferred
-    # from the credential keyset or from an MCP/profile name.
-    alpaca_paper_crypto_expected_account_id_suffix: str | None = None
-    alpaca_paper_crypto_expected_account_number_suffix: str | None = None
-    alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
-    alpaca_paper_data_base_url: str = "https://data.alpaca.markets"
-
-    # ROB-326 — US dual-paper premarket preview/preflight path (read-only, default off)
-    us_dual_paper_preview_enabled: bool = False
-
-    # ROB-842 — automated Alpaca paper submit boundary (preview→claim→POST). The
-    # automated cohort broker mutation is fail-closed unless this gate is armed.
-    alpaca_paper_automated_submit_enabled: bool = False
-
     @field_validator(
         "KASSET_AI_API_BASE_URL",
         "KASSET_AI_OPENROUTER_BASE_URL",
@@ -1097,24 +841,6 @@ class Settings(BaseSettings):
                 "credentials, whitespace, query strings, or fragments"
             )
         return value
-
-    @field_validator("alpaca_paper_base_url", mode="before")
-    @classmethod
-    def validate_alpaca_paper_base_url(cls, v: Any) -> str:
-        _PAPER_URL = "https://paper-api.alpaca.markets"
-        _FORBIDDEN = {"https://api.alpaca.markets", "https://data.alpaca.markets"}
-        normalised = str(v).rstrip("/")
-        if normalised in _FORBIDDEN:
-            raise ValueError(
-                f"alpaca_paper_base_url must be the paper endpoint "
-                f"({_PAPER_URL}), got '{normalised}' which is a forbidden URL"
-            )
-        if normalised != _PAPER_URL:
-            raise ValueError(
-                f"alpaca_paper_base_url must be exactly '{_PAPER_URL}', "
-                f"got '{normalised}'"
-            )
-        return normalised
 
     @field_validator("SECRET_KEY")
     @classmethod
@@ -1292,76 +1018,6 @@ settings = _load_settings()  # import 하면 전역 singleton
 
 def _has_nonempty_value(value: Any) -> bool:
     return bool(str(value or "").strip())
-
-
-def validate_kis_mock_config(settings_obj: Any = settings) -> list[str]:
-    """Return missing KIS mock env names without exposing configured values."""
-
-    missing: list[str] = []
-    if not bool(getattr(settings_obj, "kis_mock_enabled", False)):
-        missing.append("KIS_MOCK_ENABLED")
-    if not _has_nonempty_value(getattr(settings_obj, "kis_mock_app_key", None)):
-        missing.append("KIS_MOCK_APP_KEY")
-    if not _has_nonempty_value(getattr(settings_obj, "kis_mock_app_secret", None)):
-        missing.append("KIS_MOCK_APP_SECRET")
-    if not _has_nonempty_value(getattr(settings_obj, "kis_mock_account_no", None)):
-        missing.append("KIS_MOCK_ACCOUNT_NO")
-    return missing
-
-
-def validate_kiwoom_mock_config(settings_obj: Any = settings) -> list[str]:
-    """Return missing Kiwoom mock env names without exposing configured values."""
-
-    missing: list[str] = []
-    if not bool(getattr(settings_obj, "kiwoom_mock_enabled", False)):
-        missing.append("KIWOOM_MOCK_ENABLED")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_mock_app_key", None)):
-        missing.append("KIWOOM_MOCK_APP_KEY")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_mock_app_secret", None)):
-        missing.append("KIWOOM_MOCK_APP_SECRET")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_mock_account_no", None)):
-        missing.append("KIWOOM_MOCK_ACCOUNT_NO")
-    return missing
-
-
-def validate_kiwoom_live_marketdata_config(settings_obj: Any = settings) -> list[str]:
-    """Return missing Kiwoom live read-only env names without exposing values.
-
-    Read-only chart access only. Deliberately does NOT check an account number:
-    the live read-only client has no account surface at all.
-    """
-
-    missing: list[str] = []
-    if not bool(getattr(settings_obj, "kiwoom_live_marketdata_enabled", False)):
-        missing.append("KIWOOM_LIVE_MARKETDATA_ENABLED")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_live_app_key", None)):
-        missing.append("KIWOOM_LIVE_APP_KEY")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_live_app_secret", None)):
-        missing.append("KIWOOM_LIVE_APP_SECRET")
-    return missing
-
-
-def validate_kiwoom_mock_us_config(settings_obj: Any = settings) -> list[str]:
-    """Return missing Kiwoom mock US env names without exposing configured values.
-
-    ROB-867: US namespace is completely independent from KR. It never reads or
-    falls back to ``kiwoom_mock_*`` credentials.
-    """
-
-    missing: list[str] = []
-    if not bool(getattr(settings_obj, "kiwoom_mock_us_enabled", False)):
-        missing.append("KIWOOM_MOCK_US_ENABLED")
-    if not _has_nonempty_value(getattr(settings_obj, "kiwoom_mock_us_app_key", None)):
-        missing.append("KIWOOM_MOCK_US_APP_KEY")
-    if not _has_nonempty_value(
-        getattr(settings_obj, "kiwoom_mock_us_app_secret", None)
-    ):
-        missing.append("KIWOOM_MOCK_US_APP_SECRET")
-    if not _has_nonempty_value(
-        getattr(settings_obj, "kiwoom_mock_us_account_no", None)
-    ):
-        missing.append("KIWOOM_MOCK_US_ACCOUNT_NO")
-    return missing
 
 
 def validate_toss_api_config(settings_obj: Any = settings) -> list[str]:

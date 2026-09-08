@@ -124,12 +124,6 @@ async def test_toss_group_routable_consistent_on_api_failure(monkeypatch):
         portfolio_holdings, "_collect_manual_positions", fake_collect_manual_positions
     )
 
-    # Mocking other collectors to return empty
-    async def _empty_upbit(*args, **kwargs):
-        return [], []
-
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty_upbit)
-
     result = await portfolio_holdings._get_holdings_impl(
         include_current_price=False,
         routing_account_mode="toss_live",
@@ -177,11 +171,6 @@ async def test_samsung_manual_stays_non_routable(monkeypatch):
         return [], [], True
 
     monkeypatch.setattr(portfolio_holdings, "_collect_toss_api_positions", _empty_toss)
-
-    async def _empty_upbit(*args, **kwargs):
-        return [], []
-
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", _empty_upbit)
 
     result = await portfolio_holdings._get_holdings_impl(
         include_current_price=False,

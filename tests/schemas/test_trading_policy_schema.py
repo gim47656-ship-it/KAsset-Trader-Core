@@ -970,8 +970,8 @@ def test_single_share_exit_rule_rejects_live_activation_or_enabled_proposal():
     ("field", "unsafe_value"),
     [
         ("lanes", []),
-        ("brokers", ["toss", "nhplug"]),
-        ("required_broker_inventory", ["toss", "nhplug"]),
+        ("brokers", ["toss", "other_broker"]),
+        ("required_broker_inventory", ["toss", "other_broker"]),
     ],
 )
 def test_single_share_exit_rule_rejects_hidden_lane_or_non_toss_broker(
@@ -1483,7 +1483,7 @@ def test_rob_1289_preserves_all_preexisting_policy_keys_and_values():
         ][key]
 
     # Only the explicitly enumerated cap deltas, §115차 additions, and the
-    # single-share Toss/NH PLUG provider/lane cutover are accepted; every other
+    # single-share Toss provider/lane cutover are accepted; every other
     # pre-existing key/value, including the retained exclusions list, must
     # still match the ROB-1289 baseline exactly.
     assert normalized_current_dump == baseline_dump
@@ -1593,10 +1593,10 @@ def test_us_notional_usd_range_one_share_exception_missing_required_field_reject
 
 _LADDER_TIER_ID = "breakeven_extension_ladder"
 
-# Exact transcription of the Upbit KRW price-unit table documented on
-# ``app.services.brokers.upbit.orders.adjust_price_to_upbit_unit``. Pinned to
-# that production helper by
-# ``test_crypto_krw_tick_transcription_matches_the_production_upbit_grid``.
+# Exact transcription of the published Upbit KRW price-unit table. The crypto
+# sell-side ladder tiers below are specified against this grid, so it stays a
+# declared table here: no production Upbit order helper remains to derive it
+# from.
 _UPBIT_KRW_TICK_BANDS: tuple[tuple[Decimal, Decimal], ...] = (
     (Decimal("2000000"), Decimal("1000")),
     (Decimal("1000000"), Decimal("500")),
@@ -1696,25 +1696,6 @@ def _ladder_matches(tier, *, market: str, fresh_named_resistance_count: int) -> 
         and fresh_named_resistance_count
         == conditions["fresh_named_resistance_count_eq"]
     )
-
-
-def test_crypto_krw_tick_transcription_matches_the_production_upbit_grid():
-    from app.services.brokers.upbit.orders import adjust_price_to_upbit_unit
-
-    for probe in (
-        Decimal("3168337"),
-        Decimal("3485170.7"),
-        Decimal("1234567"),
-        Decimal("777777"),
-        Decimal("123456"),
-        Decimal("54321"),
-        Decimal("4321"),
-        Decimal("321"),
-    ):
-        tick = _crypto_krw_tick(probe)
-        snapped = Decimal(str(adjust_price_to_upbit_unit(float(probe))))
-        assert snapped % tick == 0, (probe, tick, snapped)
-        assert abs(snapped - probe) <= tick
 
 
 def test_breakeven_extension_ladder_reproduces_eth_rungs():

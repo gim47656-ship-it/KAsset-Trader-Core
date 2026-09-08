@@ -127,10 +127,6 @@ def _boom_holdings_reads(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.mcp_server.tooling.portfolio_holdings._collect_toss_api_positions",
         _raiser("_collect_toss_api_positions"),
     )
-    monkeypatch.setattr(
-        "app.mcp_server.tooling.portfolio_holdings._collect_upbit_positions",
-        _raiser("_collect_upbit_positions"),
-    )
 
 
 def _fake_build(monkeypatch: pytest.MonkeyPatch, results: list[dict[str, Any]]) -> None:

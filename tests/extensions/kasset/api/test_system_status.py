@@ -58,11 +58,8 @@ def stub_status_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         "list_brokers",
         AsyncMock(
             return_value=[
-                SimpleNamespace(
-                    provider="NH",
-                    connected=True,
-                    last_verified_at="2026-08-30T00:00:00Z",
-                )
+                SimpleNamespace(provider="PAPER", connected=True),
+                SimpleNamespace(provider="TOSS", connected=True),
             ]
         ),
     )
@@ -103,7 +100,7 @@ async def test_system_status_reports_the_applied_migration_revision() -> None:
     assert status.database.status == "ok"
     assert status.database.migration_revision == _APPLIED_REVISION
     assert status.trading_mode == "PAPER"
-    assert [broker.provider for broker in status.brokers] == ["NH"]
+    assert [broker.provider for broker in status.brokers] == ["PAPER", "TOSS"]
 
 
 @pytest.mark.asyncio

@@ -10,11 +10,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-# Imports will FAIL until Task 2 creates the module.
 from app.jobs.intraday_order_review import (
     is_kr_trading_hours,
     is_us_trading_hours,
-    run_crypto_order_review,
     run_kr_order_review,
     run_us_order_review,
 )
@@ -60,43 +58,6 @@ class TestTradingHoursHelpers:
         # Children's Day in Korea.
         dt_value = datetime(2026, 5, 5, 10, 0)
         assert is_kr_trading_hours(dt_value) is False
-
-
-class TestRunCryptoOrderReview:
-    @pytest.mark.asyncio
-    async def test_returns_order_count_and_orders(self) -> None:
-        mock_result = {
-            "summary": {"total": 2},
-            "orders": [
-                {
-                    "symbol": "KRW-BTC",
-                    "side": "buy",
-                    "gap_pct": -1.5,
-                    "indicators": {"rsi_14": 48.0},
-                }
-            ],
-        }
-        with patch(
-            "app.jobs.intraday_order_review.fetch_pending_orders",
-            AsyncMock(return_value=mock_result),
-        ):
-            result = await run_crypto_order_review()
-        assert result["market"] == "crypto"
-        assert result["order_count"] == 2
-        assert len(result["orders"]) == 1
-        assert result["orders"][0]["symbol"] == "KRW-BTC"
-
-    @pytest.mark.asyncio
-    async def test_calls_fetch_with_correct_params(self) -> None:
-        with patch(
-            "app.jobs.intraday_order_review.fetch_pending_orders",
-            AsyncMock(return_value={"summary": {"total": 0}, "orders": []}),
-        ) as mock_fetch:
-            await run_crypto_order_review()
-        call_kwargs = mock_fetch.call_args.kwargs
-        assert call_kwargs["market"] == "crypto"
-        assert call_kwargs["include_current_price"] is True
-        assert call_kwargs["include_indicators"] is True
 
 
 class TestRunKrOrderReview:

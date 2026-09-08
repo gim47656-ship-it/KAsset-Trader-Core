@@ -297,49 +297,6 @@ async def _resolve_toss_us_session(
     )
 
 
-def _resolve_xnys_session(group: Any, now: datetime) -> SubmissionSessionEvidence:
-    local = now.astimezone(_NEW_YORK)
-    bounds = regular_session_bounds("us", local.date())
-    next_day = next_trading_session("us", local.date())
-    next_bounds = (
-        regular_session_bounds("us", next_day) if next_day is not None else None
-    )
-    next_open: datetime | None = None
-    if bounds is not None:
-        session_open, session_close = bounds
-        if session_open <= now.astimezone(UTC) < session_close:
-            return SubmissionSessionEvidence(
-                known=True,
-                source="exchange_calendars:XNYS",
-                current_session="regular",
-                allowed_sessions=("regular",),
-                allowed_now=True,
-                allowed_until=session_close,
-                next_allowed_at=next_bounds[0] if next_bounds is not None else None,
-            )
-        if now.astimezone(UTC) < session_open:
-            next_open = session_open
-    if next_open is None:
-        next_open = next_bounds[0] if next_bounds is not None else None
-    if next_open is None:
-        return SubmissionSessionEvidence(
-            known=False,
-            source="exchange_calendars:XNYS",
-            current_session="closed",
-            allowed_sessions=("regular",),
-            allowed_now=False,
-            detail="next_regular_window_unavailable",
-        )
-    return SubmissionSessionEvidence(
-        known=True,
-        source="exchange_calendars:XNYS",
-        current_session="closed",
-        allowed_sessions=("regular",),
-        allowed_now=False,
-        next_allowed_at=next_open,
-    )
-
-
 async def _resolve_kr_session(group: Any, now: datetime) -> SubmissionSessionEvidence:
     local = now.astimezone(_KST)
     krx_bounds = regular_session_bounds("kr", local.date())
@@ -483,22 +440,15 @@ async def resolve_submission_session(
     Proposal orders have DAY semantics and no persisted extended-hours
     capability bit. US live proposals are therefore regular-session only.
     KR retains KRX regular plus NXT carry only when the existing symbol
-    universe positively proves current NXT tradability. Crypto remains 24/7.
+    universe positively proves current NXT tradability.
+
+    Upbit crypto와 KIS live 제출 경로가 제거되면서 남은 제출 계약은 Toss뿐이다.
+    제거된 조합은 아래 fail-closed 분기로 떨어져 ``allowed_now=False``가 된다.
     """
     market, account_mode, _action, _order_type = _contract_fields(group)
-    if market == "crypto" and account_mode == "upbit":
-        return SubmissionSessionEvidence(
-            known=True,
-            source="crypto:24x7",
-            current_session="24x7",
-            allowed_sessions=("24x7",),
-            allowed_now=True,
-        )
     if market == "equity_us" and account_mode == "toss_live":
         return await _resolve_toss_us_session(group, now)
-    if market == "equity_us" and account_mode == "kis_live":
-        return _resolve_xnys_session(group, now)
-    if market == "equity_kr" and account_mode in {"kis_live", "toss_live"}:
+    if market == "equity_kr" and account_mode == "toss_live":
         return await _resolve_kr_session(group, now)
     return SubmissionSessionEvidence(
         known=False,
@@ -659,8 +609,6 @@ def recheck_approval_window_decision(
             observed_at=now,
             detail="session_evidence_missing_at_completion",
         )
-    if evidence.allowed_sessions == ("24x7",):
-        return replace(decision, observed_at=now)
     if evidence.allowed_until is None:
         return replace(
             decision,

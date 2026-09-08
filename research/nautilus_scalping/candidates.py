@@ -14,11 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from meanrev_signal import MeanRevConfig, evaluate_meanrev
-
-from app.services.brokers.binance.demo_scalping.signal import (
-    SignalConfig,
-    evaluate_signal,
-)
+from scalping_signal import SignalConfig, evaluate_signal
 
 
 @dataclass(frozen=True)

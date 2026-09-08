@@ -20,8 +20,8 @@ proposal execution and ROB-858 Toss loss-cut/reconcile convergence:
   `main`/production.
 - **PR 2** — the Telegram button-approval flow documented in the
   "Telegram Approval" sections below (bot setup, webhook receiver,
-  click-time revalidation, safety boundaries, live smoke, troubleshooting,
-  evidence template). Merged as
+  click-time revalidation, safety boundaries, troubleshooting, and evidence
+  template). Merged as
   [#1490](https://github.com/mgh3326/auto_trader/pull/1490) and deployed on
   `main`/production; Linear records the Telegram activation smoke as deployed.
 - **PR 3a** — loss-cut approval bindings, proposal expiry/void safety, and
@@ -30,9 +30,9 @@ proposal execution and ROB-858 Toss loss-cut/reconcile convergence:
   below. Merged as
   [#1497](https://github.com/mgh3326/auto_trader/pull/1497) and deployed on
   `main`/production.
-- **PR 3a-2 + PR 3b** — fail-closed Telegram submit identity binding, Upbit
-  loss-cut support, and native Toss proposal preview/submit routing.
-- **PR 3c / #1498** — generic live-ledger proposal-rung projection.
+- **PR 3a-2 + PR 3b** — fail-closed Telegram submit identity binding and
+  native Toss proposal preview/submit routing.
+- **PR 3c / #1498** — broker-evidence proposal-rung projection.
 - **ROB-858** — opens `toss_live × equity_kr|equity_us` loss-cut only after
   adding shared ROB-800 guards, Toss audit fields, broker-evidence projection,
   and a terminal-row repair sweep. The canonical GO rationale and risks are in
@@ -115,16 +115,16 @@ See the full design in
 - **Approval-window defense in depth.** Dispatch checks `valid_until` and the
   broker/market execution session before minting a nonce or publishing a
   button. Callback handling repeats that check before nonce consumption;
-  revalidation repeats it before provider preview, and a transport hook
-  re-resolves it at the final KIS, Toss, or Upbit HTTP boundary for both
-  submit and cancel. The evidence carries the current allowed interval end,
-  so crossing the close while an awaited calendar/preview call is in flight
-  also fails closed. `now >= valid_until` is expired. Missing, malformed, or
-  timezone-naive validity, a missing/mismatched policy stamp, and
-  unknown/stale calendar or venue evidence fail closed. US DAY proposals use
-  authoritative regular-session calendars (holiday, half-day, and DST aware);
-  KR preserves KRX regular and fresh, positively confirmed NXT carry; Upbit
-  crypto is 24/7. Protective exits are deliberately validity-only at this
+  revalidation repeats it before Toss preview, and a transport hook re-resolves
+  it at the final Toss HTTP boundary for both submit and cancel. The evidence
+  carries the current allowed interval end, so crossing the close while an
+  awaited calendar/preview call is in flight also fails closed. `now >=
+  valid_until` is expired. Missing, malformed, or timezone-naive validity, a
+  missing/mismatched policy stamp, and unknown/stale calendar or venue evidence
+  fail closed. US DAY proposals use authoritative regular-session calendars
+  (holiday, half-day, and DST aware); KR preserves KRX regular and fresh,
+  positively confirmed NXT carry. Crypto proposal execution is not operational.
+  Protective exits are deliberately validity-only at this
   boundary: a non-null `exit_intent` (including `loss_cut` and the
   forward-compatible `defensive_trim`) bypasses session/calendar resolution
   and approval-window policy-stamp binding at the common evaluator entry
@@ -147,21 +147,18 @@ See the full design in
   — distinct from the `ORDER_PROPOSALS_TELEGRAM_TOKEN` webhook secret, which
   only proves the request came from Telegram (authn), not that it came from
   an approved chat (authz).
-- **Fresh broker-specific checks at every submit-capable click.** A Telegram approve does not
-  submit the payload that was true at proposal-create time. KIS/Upbit rerun
-  their applicable ROB-800 checks through the shared
-  `_place_order_impl` dry-run preview and repeat final guards at submit. Toss
-  instead calls `toss_preview_order`, never `_place_order_impl`; that preview
-  supplies the normalized payload/tick plus its actual read-only warning,
-  price/cost, NXT-context, and advisory sector-concentration checks. A Toss
-  `loss_cut` preview also reruns the shared caller/retrospective gate
-  and validates the current-price slip band. On unchanged payload,
-  `toss_place_order` applies the mutation activation/confirmation gates,
-  high-value check, warnings guard, opposite-pending-order guard, sell-loss
-  guard, and configured NXT preflight immediately before the POST. Sell-loss
-  and required mutation gates fail closed; sector concentration is advisory
-  and never authorizes or blocks the send. A create-time check is never an
-  approval-time bypass. See "Approval Flow" below.
+- **Fresh Toss checks at every submit-capable click.** A Telegram approve does
+  not submit the payload that was true at proposal-create time. Toss calls
+  `toss_preview_order`, which supplies the normalized payload/tick plus its
+  read-only warning, price/cost, NXT-context, and advisory
+  sector-concentration checks. A Toss `loss_cut` preview also reruns the shared
+  caller/retrospective gate and validates the current-price slip band. On an
+  unchanged payload, `toss_place_order` applies the mutation
+  activation/confirmation gates, high-value check, warnings guard,
+  opposite-pending-order guard, sell-loss guard, and configured NXT preflight
+  immediately before the POST. Sell-loss and required mutation gates fail
+  closed; sector concentration remains advisory. A create-time check is never
+  an approval-time bypass. See "Approval Flow" below.
 - **Explicit submit identity, scoped to Telegram.**
   `ORDER_PROPOSALS_SUBMIT_AGENT_ID` defaults to the empty string. The Telegram
   approve callback trims it and temporarily binds it as caller identity only
@@ -172,21 +169,21 @@ See the full design in
   value in `LOSS_CUT_ALLOWED_AGENT_IDS`. Do not add a hardcoded UUID to satisfy
   this contract.
 - **Loss-cut binding scope.** `exit_intent="loss_cut"` proposals are supported
-  for `kis_live|toss_live` + `equity_kr|equity_us` and `upbit` + `crypto`.
-  All lanes remain limit-sell/live only. The first approve click submits
-  nothing: it renders symbol/quantity/limit/current price/loss/slip band and
-  retrospective evidence with a new `⚠️ 손절 확인` button. That second button
-  carries a 90-second single-use nonce bound to proposal, rung, and approval
-  revision. Only the second click reruns caller, retrospective-symbol/trigger,
-  72-hour freshness, fresh preview, slip-band, and approval-hash checks and may
-  submit. The second freshness check is intentional: a valid create can become
-  stale while waiting for Telegram approval.
+  only for `toss_live` + `equity_kr|equity_us`. All lanes remain
+  limit-sell/live only. The first approve click submits nothing: it renders
+  symbol/quantity/limit/current price/loss/slip band and retrospective evidence
+  with a new `⚠️ 손절 확인` button. That second button carries a 90-second
+  single-use nonce bound to proposal, rung, and approval revision. Only the
+  second click reruns caller, retrospective-symbol/trigger, 72-hour freshness,
+  fresh preview, slip-band, and approval-hash checks and may submit. The second
+  freshness check is intentional: a valid create can become stale while
+  waiting for Telegram approval.
 - **Native Toss routing and exact handoff.** `toss_live` +
   `equity_kr|equity_us` proposals route through `toss_preview_order` and
-  `toss_place_order`, never the shared `_place_order_impl`. Preview supplies
-  the canonical wire price/quantity, including KR tick normalization, while
-  `toss_place_order` owns the fail-closed sell-loss and mutation checks directly
-  before broker POST. Sector concentration from preview is advisory/soft.
+  `toss_place_order`. Preview supplies the canonical wire price/quantity,
+  including KR tick normalization, while `toss_place_order` owns the
+  fail-closed sell-loss and mutation checks directly before broker POST.
+  Sector concentration from preview is advisory/soft.
   Proposal `Decimal` values cross the Toss tool boundary as exact `str | int`
   values, with no float coercion. Revalidation privately binds a stable client
   ID derived only from `proposal_id + rung` around both preview and submit,
@@ -323,6 +320,10 @@ Persists a new proposal group + its rungs. `rungs` is a list of
 `{success, proposal_id, lifecycle_state, rungs}` on success or
 `{success: false, error}` on validation failure.
 
+Current action admission is `toss_live × equity_kr|equity_us` for `place`,
+`replace`, and `cancel`. Crypto and historical KIS/Upbit account modes fail
+closed before approval dispatch.
+
 When proposal persistence succeeds but approval dispatch is blocked, the
 success response additionally contains
 `approval_dispatch={status:"blocked", code, observed_at, valid_until,
@@ -383,8 +384,7 @@ next session rebuilt the same judgment from scratch instead of being told it
 had died.
 
 - **`exit_intent="defensive_trim"` is still rejected at create time** — code
-  review caught that every submit path (`order_execution.py`,
-  `orders_kis_variants.py`, `orders_toss_variants.py`) only recognizes
+  review caught that the submit path (`orders_toss_variants.py`) only recognizes
   `exit_intent="loss_cut"`. An earlier draft of this PR accepted
   `"defensive_trim"` at create, which would TTL-floor and list correctly but
   die in revalidation the instant it was approved — a zombie lane. That was
@@ -400,7 +400,7 @@ had died.
   research); KR `08:10-09:30 KST` plus a shorter `12:00-12:15 KST` noon
   check-in (the noon window's exact width wasn't in the 07-15 record — this is
   a conservative, operator-adjustable default). Markets without a defined
-  window (e.g. `crypto`) are unaffected. `DEFENSIVE_EXIT_INTENTS` also names
+  window are unaffected. `DEFENSIVE_EXIT_INTENTS` also names
   `"defensive_trim"` for forward-compat with the read-only handoff tool below,
   but since create rejects it, only `loss_cut` proposals actually reach this
   floor today.
@@ -428,10 +428,10 @@ exactly one new-order rung. `cancel` requires a target and exactly one rung
 that exactly snapshots the target's side, remaining quantity, and limit price;
 it never submits a new order.
 
-The supported target-action tuples are only `kis_live/equity_kr`,
-`kis_live/equity_us`, and `upbit/crypto`. Create-time target lookup is
-read-only and captures the open-order evidence. Manual or unattributed broker
-orders are valid targets when that evidence matches the requested proposal.
+The supported target-action tuples are only `toss_live/equity_kr` and
+`toss_live/equity_us`. Create-time target lookup is read-only and captures the
+open-order evidence. Manual or unattributed broker orders are valid targets
+when that evidence matches the requested proposal.
 
 At the Telegram click, replace re-fetches and compares the target evidence,
 performs the fresh replacement preview, requests cancellation, and requires an
@@ -571,23 +571,20 @@ The approval settings live in `app/core/config.py`:
 
 ### Resting-class automatic submission (ROB-871)
 
-The checked-in policy seed is 3% minimum distance (`order_proposals.auto_approve.min_distance_pct`,
-unchanged since ROB-871). 🔴 Per-order/daily settlement-currency caps are **not**
-reproduced here — they have moved repeatedly since this section was written
-(§65차/§133차 KR, §65차/§145차 US, §145차 crypto; see
-`docs/runbooks/toss-auto-acceptance.md` "캡 유도와 활성화 한계" for the drift
-history) and any number copied into this table goes stale again the next time
-a cap moves. Read the live values from `config/trading_policy.yaml` →
-`order_proposals.auto_approve.per_order_cap` / `.daily_cap` (keys `kr`/`us`/`crypto`)
-or via `get_trading_policy(market=..., lane="sell")`. The env gate remains the
-master switch.
+The checked-in policy seed is 3% minimum distance
+(`order_proposals.auto_approve.min_distance_pct`, unchanged since ROB-871).
+Per-order and daily settlement-currency caps are not reproduced here because
+they have moved repeatedly. Read the live `kr`/`us` values from
+`config/trading_policy.yaml` under
+`order_proposals.auto_approve.per_order_cap` and `.daily_cap`, or call
+`get_trading_policy(market=..., lane="sell")`. The env gate remains the master
+switch.
 
 Eligibility is evaluated from the fresh dry-run preview immediately before
 submit: buy limit at or below `current × (1-distance)`, or sell limit at or
 above `current × (1+distance)` after the existing average-cost loss guard.
-Only account/market pairs with the existing target-order cancel adapter are
-eligible (`kis_live` equities and `upbit` crypto); Toss and multi-rung ladders
-remain human-gated so the veto and all-or-human fallback stay lossless.
+Only `toss_live/equity_kr` and `toss_live/equity_us` are eligible. Multi-rung
+ladders remain human-gated so the veto and all-or-human fallback stay lossless.
 Daily usage is the KST-day sum of DB rungs whose group already carries an
 `auto_approved` audit; the account/day check is transaction-serialized. A
 successful submit sends a summary tagged `auto:policy@<version>` with a
@@ -888,22 +885,19 @@ submitted blind would defeat the entire point of a human-approval gate.
    provider preview, `revalidate_and_submit` independently repeats the
    expiry/session/stamp gate. It then re-runs every `pending_approval` rung
    through a fresh
-   `place_order_fn(dry_run=True, ...)` call. For `kis_live` equities and
-   `upbit` crypto this delegates to `_place_order_impl`, which enforces the
-   applicable ROB-800 guards and repeats final guards on live
-   submit. For `toss_live` equities it delegates to `toss_preview_order`,
-   never `_place_order_impl`; Toss preview returns the canonical wire
-   `payload_preview`, including KR tick normalization, and performs only its
+   `place_order_fn(dry_run=True, ...)` call. Supported `toss_live` equities
+   delegate to `toss_preview_order`, which returns the canonical wire
+   `payload_preview`, including KR tick normalization, and performs its
    read-only warning, price/cost, NXT-context, and advisory sector-concentration
-   checks. For Toss `loss_cut`, it additionally runs the shared ROB-800
-   authorization and loss-cut slip-band guard. After an
-   unchanged comparison, `toss_place_order` runs confirmation/activation,
-   high-value, warnings, opposite-pending-order, sell-loss, and configured NXT
-   guards immediately before POST. Sell-loss and required mutation gates fail
-   closed; sector concentration remains advisory/soft. This happens on every
-   click regardless of the create-time retrospective check. A preview guard
-   rejection comes back as `guard_blocked` and the rung returns to
-   `pending_approval` (retryable, not terminal).
+   checks. For Toss `loss_cut`, it also runs the shared ROB-800 authorization
+   and loss-cut slip-band guard. After an unchanged comparison,
+   `toss_place_order` runs confirmation/activation, high-value, warnings,
+   opposite-pending-order, sell-loss, and configured NXT guards immediately
+   before POST. Sell-loss and required mutation gates fail closed; sector
+   concentration remains advisory. This happens on every click regardless of
+   the create-time retrospective check. A preview guard rejection comes back
+   as `guard_blocked` and the rung returns to `pending_approval` (retryable,
+   not terminal).
 8. **Price/qty comparison against what the operator approved.** The fresh
    preview's normalized `price`/`quantity` is compared (`_norm`, which
    canonicalizes `NUMERIC(38,12)` DB values against fresh preview values so
@@ -913,16 +907,15 @@ submitted blind would defeat the entire point of a human-approval gate.
    market orders, so comparing it would always spuriously mismatch).
 9. **Unchanged → submit; changed → `NEEDS_RECONFIRM`.** If the comparison
    matches, the approval-window policy is checked before entering submission
-   and again by a pre-send hook immediately before the provider HTTP
-   submit/cancel. Only then can a mutation leave the process. An initial
-   pre-send block proves HTTP=0. A retry-time block can follow one explicit
-   429/auth rejection, but never an accepted or ambiguous mutation (Upbit
-   mutations are one-shot). On that proof the callback restores the
-   rung/lease and, when no sibling mutation occurred, the durable proposal
+   and again by a pre-send hook immediately before the Toss HTTP submit/cancel.
+   Only then can a mutation leave the process. An initial pre-send block proves
+   HTTP=0. A retry-time block can follow one explicit 429/auth rejection, but
+   never an accepted or ambiguous mutation. On that proof the callback restores
+   the rung/lease and, when no sibling mutation occurred, the durable proposal
    nonce to its retryable pre-click state; expiry instead converges terminally.
-   The submit uses the **freshly
-   minted** `approval_hash` from step 7's preview — never the one from the
-   original proposal-create preview. Toss receives a privately bound client
+   The submit uses the **freshly minted** `approval_hash` from step 7's preview,
+   never the one from the original proposal-create preview. Toss receives a
+   privately bound client
    ID derived only from the proposal ID and rung for both preview and submit,
    so retries and date boundaries cannot change the identity; preview must
    return the exact bound ID or submission fails closed. The proposal
@@ -964,118 +957,14 @@ ID/lesson excerpt. An optional `approval_issue_id` is only an audit note.
 | `commit_lease_until` | `order_proposals.commit_lease_until` | proposal-level | The short (~10s) in-flight lock from `acquire_commit_lease` that stops a double-click from double-submitting — not a business-meaningful deadline, purely a mutex with a TTL. |
 | *(resting deadline)* | rendered from `group.source_asof["resting_deadline"]` in `build_approval_message`'s `_build_time_lines` | proposal-level, optional | How long a resting (limit, unfilled) order is expected to stay open before it would be expected to expire/need attention — surfaced in the Telegram message when present, not a DB column of its own. |
 
-**Server-internalized TTL (Task 13's design).** The `_place_order_impl` path
-underneath `_default_place_order_fn` has its own `approval_hash` TTL (~300s,
-ROB-651/ROB-653) meant to bound the time between "operator saw this exact
-price/qty" and "it actually got submitted." Because `revalidate_and_submit`
-mints a **brand-new** `approval_hash` from a **fresh** preview at the moment
-of submission (steps 7–9 above), that hash's age at submit time is always
-~0 seconds — the underlying 300s TTL is structurally never at risk of
-tripping from a slow *human* round-trip (an operator taking 20 minutes to
-click "approve" doesn't matter; what matters is the freshness of the preview
-taken *at the click*, not the freshness of the proposal's original numbers).
+**Approval-token freshness.** `toss_preview_order` mints a new
+`approval_hash` from the click-time preview. `revalidate_and_submit` submits
+that token only after the normalized price and quantity still match the
+approved rung, so a slow human round-trip never reuses the proposal-create
+preview token.
 
 ---
 
-## Live Smoke (operator-only)
-
-**Not run in CI.** Every test in this repo's suite mocks the real
-Telegram Bot API, the real broker, and every `httpx` call — see the global
-ROB-816 constraint. This section is a manual, staged operator playbook
-against a real Telegram bot and a real (or KIS/Kiwoom **mock**) broker
-account. Never point this at a live-money account you are not prepared to
-place a real (small) order through.
-
-### Post-merge operator smoke checklist — not performed now
-
-These are intentionally unchecked. Run them only after the PR is merged and
-deployed, with the operator present and all normal live-order gates satisfied.
-No test, documentation command, or pre-merge verification should perform either
-live action.
-
-- [ ] **DOT residual loss-cut canary:** approve the residual KRW-DOT stop-loss
-  proposal and verify the Upbit accepted-only ledger/correlation record, then
-  cancel or reconcile as planned.
-- [ ] **Toss KR loss-cut canary during market hours:** create a fresh <=72h
-  retrospective, then perform both Telegram clicks on a minimal KR limit-sell
-  proposal. Verify the first click submits nothing, the confirmation expires
-  after 90 seconds, tick normalization, the supplied
-  `approval_hash`/rung handoff, exact preview `clientOrderId`, accepted-only
-  Toss audit fields, and no KIS submission. Acceptance alone must not be
-  reported as filled. Prove either the enabled fill-poller cadence or run
-  targeted `toss_reconcile_orders(order_id=<broker-order-id>, dry_run=False)`;
-  verify the proposal rung reaches partial/filled/cancelled from broker evidence.
-
-### Preflight
-
-1. Confirm both env gates are set in the target process's environment:
-   `ORDER_PROPOSALS_ENABLED=true` and `ORDER_PROPOSALS_TELEGRAM_ENABLED=true`.
-2. For a loss-cut canary, confirm `ORDER_PROPOSALS_SUBMIT_AGENT_ID` is
-   explicitly non-blank and its exact trimmed value appears in
-   `LOSS_CUT_ALLOWED_AGENT_IDS`. Do not rely on an implicit or hardcoded
-   identity; missing/whitespace must remain fail-closed.
-3. Confirm `TELEGRAM_TOKEN` (the actual bot token — not
-   `ORDER_PROPOSALS_TELEGRAM_BOT_TOKEN`, which is unused), `TELEGRAM_CHAT_IDS_STR`,
-   `ORDER_PROPOSALS_TELEGRAM_TOKEN`, and
-   `ORDER_PROPOSALS_TELEGRAM_CHAT_ALLOWLIST_STR` are all set (see
-   "Telegram Approval — Activation").
-4. `curl .../getWebhookInfo` (see "Telegram Bot Setup" step 5) and confirm
-   the registered `url` points at the target host and `last_error_message`
-   is empty.
-5. Restart the MCP process / FastAPI app so the new env values are loaded.
-
-### Staged run
-
-1. **Create a proposal** via `order_proposal_create` with a real (or mock)
-   `account_mode` and a deliberately small quantity/notional — treat this
-   like the first real order on a new integration, not a routine trade.
-   **What to check:** the tool returns `{success: true, proposal_id, ...}`,
-   and within a few seconds a Telegram message with `[✅ 승인]`/`[❌ 거부]`
-   buttons arrives in the allowlisted chat, rendering symbol/market/side/
-   order type/rungs/thesis/strategy/valid_until — and **no raw hash or nonce
-   text visible anywhere in the message** (redaction check).
-2. **Verify DB state matches the message** using the DB Verification
-   queries above: `lifecycle_state='proposed'`, rung `state='pending_approval'`,
-   `approval_nonce` set, `approval_nonce_used_at IS NULL`.
-3. **Click Deny on a throwaway proposal first** (cheapest path to exercise
-   the whole plumbing without touching a broker). **What to check:** the
-   Telegram message updates to "❌ 거부됨", the rung's `state` becomes
-   `rejected` in the DB, and a second click on the same (now-stale) buttons
-   answers "이미 처리되었거나 유효하지 않은 요청입니다" and changes nothing
-   (nonce-replay proof).
-4. **Click Approve on a real small-quantity proposal** against a mock/paper
-   account first (`kis_mock`, Binance Spot Demo, etc. per your broker
-   preference — never start this staged run against a live account).
-   **What to check:** the Telegram message updates with a per-rung result
-   summary (e.g. "체결 대기(접수)" / "주문 유지(대기)"), the rung transitions
-   through `revalidating → approved → submitting → acked|resting` in the DB,
-   `broker_order_id` and `correlation_id` are populated, and (for a market
-   order) `record_ack` fired / (for a limit order) `record_resting` fired —
-   confirm via the DB Verification query, not just the Telegram text.
-5. **Force a `NEEDS_RECONFIRM` cycle deliberately**: create a limit-order
-   proposal, then before approving, move the market away from the limit
-   price enough that a fresh preview would price it differently (or just
-   wait through a volatile few minutes on a liquid symbol). Click Approve.
-   **What to check:** a **new** Telegram message arrives with "재확인 필요"
-   framing and an explicit before/after diff, the original message is
-   edited to "⚠️ 재확인 필요...", the rung is `needs_reconfirm` in the DB,
-   and a fresh `approval_nonce` was minted (different from the original).
-6. **Only after 3–5 clean cycles on mock/paper**, repeat step 4 once against
-   a real live account with the smallest possible size, with a human
-   watching the whole way through — this is the actual bar for calling PR 2
-   "live-verified," not just "code review passed."
-7. **Confirm `UNVERIFIED` handling** by killing network connectivity (or
-   otherwise forcing a submit-phase exception) mid-approve on a mock/paper
-   proposal, if your test environment supports it. **What to check:** the
-   rung lands in `unverified` (never a terminal state). Broker reconcile can
-   later establish what happened in the broker ledger, but this branch does
-   not automatically converge the proposal rung; that wiring is PR 3c / #1498.
-   See Troubleshooting.
-
-Record the `proposal_id` and DB query output for every step you run (see
-"Evidence Template" below) so results are auditable, not just "it worked."
-
----
 
 ## Evidence Template
 
@@ -1283,11 +1172,10 @@ classify the broker's response after a real submit attempt (network
 exception, ambiguous status, missing `broker_order_id` — see
 `revalidation.py`'s `_classify_submit`). By design this is a **holding**
 state, not terminal, and nothing in this feature auto-voids it. To investigate,
-run the broker-evidence reconciler for the rung's actual operational provider.
-For Toss use targeted
+run the Toss evidence reconciler. Use targeted
 `toss_reconcile_orders(order_id=<broker-order-id>, dry_run=False)`; it projects
 confirmed partial/fill/cancel evidence through `record_fill_evidence` and
-retries terminal-row projection drift. Use the existing Upbit evidence path for
-crypto. A historical KIS intent remains `unverified` for manual review and is
-never reinterpreted or resubmitted through Toss.
+retries terminal-row projection drift. Historical KIS or Upbit intents remain
+`unverified` for manual review and are never reinterpreted or resubmitted
+through Toss.
 Pending/unknown evidence never infers a terminal proposal state.

@@ -10,7 +10,6 @@ import pandas as pd
 
 from app.core.async_rate_limiter import RateLimitExceededError
 from app.core.timezone import KST
-from app.extensions.kasset.api.orderbook_store import get_orderbook_store
 from app.extensions.kasset.api.toss_market_data import toss_market_data
 from app.services.brokers.upbit.client import fetch_multiple_current_prices
 from app.services.brokers.upbit.client import fetch_ohlcv as fetch_upbit_ohlcv
@@ -215,23 +214,6 @@ def _parse_upbit_orderbook_levels(
     return levels
 
 
-def _parse_nh_orderbook_levels(
-    levels: object,
-) -> list[OrderbookLevel]:
-    if not isinstance(levels, list):
-        return []
-    parsed: list[OrderbookLevel] = []
-    for raw in levels:
-        if not isinstance(raw, dict):
-            continue
-        price = _to_float(raw.get("price"))
-        quantity = _to_float(raw.get("volume"))
-        if price <= 0 or quantity < 0:
-            continue
-        parsed.append(OrderbookLevel(price=price, quantity=quantity))
-    return parsed
-
-
 def _parse_upbit_orderbook_as_of(
     raw_timestamp: Any,
 ) -> dt.datetime | None:
@@ -250,7 +232,8 @@ def _parse_upbit_orderbook_as_of(
 
 async def get_kr_volume_rank() -> list[dict[str, Any]]:
     raise ProviderUnsupportedError(
-        "provider_unsupported: KR volume ranking is unavailable from Toss/NH PLUG"
+        "provider_unsupported: KR volume ranking is unavailable from the "
+        "retained providers"
     )
 
 
@@ -376,68 +359,15 @@ async def get_orderbook(
         except Exception as exc:
             raise _map_error(exc) from exc
 
-    if resolved_market != "equity_kr":
-        raise ValueError("get_orderbook only supports KR equity and KRW crypto markets")
-
-    requested_venue = str(venue or "krx").strip().lower()
-    if requested_venue in {
-        "nxt",
-        "ntx",
-        "nx",
-        "afterhours",
-        "extended",
-        "unified",
-        "combined",
-        "integrated",
-        "all",
-        "un",
-        "통합",
-        "통합시장",
-    }:
-        raise ProviderUnsupportedError(
-            "provider_unsupported: NH PLUG orderbook supports KRX only"
-        )
-    if requested_venue not in {"krx", "regular", "j"}:
-        raise ValueError(f"unsupported KR orderbook venue: {venue!r}")
-
-    resolved_symbol = _normalize_symbol(symbol, resolved_market)
-    try:
-        raw = await get_orderbook_store().get_snapshot(
-            market="KRX",
-            symbol=resolved_symbol,
-        )
-        asks = _parse_nh_orderbook_levels(raw.get("asks"))
-        bids = _parse_nh_orderbook_levels(raw.get("bids"))
-        total_ask_qty = _to_float(raw.get("totalAskVolume"))
-        total_bid_qty = _to_float(raw.get("totalBidVolume"))
-        # NH store의 ``asOf``는 수신 시각이므로 provider 시각 증거로 전달하지 않는다.
-        is_empty_book = not bool(raw.get("ready")) or not asks or not bids
-        return OrderbookSnapshot(
-            symbol=resolved_symbol,
-            instrument_type="equity_kr",
-            source="nhplug",
-            asks=asks,
-            bids=bids,
-            total_ask_qty=total_ask_qty,
-            total_bid_qty=total_bid_qty,
-            bid_ask_ratio=(
-                round(total_bid_qty / total_ask_qty, 2) if total_ask_qty > 0 else None
-            ),
-            venue="krx",
-            venue_label="KRX",
-            is_empty_book=is_empty_book,
-            requires_final_recheck=is_empty_book,
-            empty_reason="empty_nh_orderbook" if is_empty_book else None,
-        )
-    except Exception as exc:
-        raise _map_error(exc) from exc
+    raise ValueError("get_orderbook only supports the KRW crypto market")
 
 
 async def get_short_interest(symbol: str, days: int = 20) -> dict[str, object]:
     _normalize_symbol(symbol, "equity_kr")
     _ = days
     raise ProviderUnsupportedError(
-        "provider_unsupported: short-interest data is unavailable from Toss/NH PLUG"
+        "provider_unsupported: short-interest data is unavailable from the "
+        "retained providers"
     )
 
 

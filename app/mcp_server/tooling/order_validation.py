@@ -16,9 +16,6 @@ from app.mcp_server.tooling.market_data_quotes import (
 )
 from app.mcp_server.tooling.shared import logger
 from app.mcp_server.tooling.shared import to_float as _to_float
-from app.services.brokers.upbit.client import (
-    parse_upbit_account_row as _parse_upbit_account_row,
-)
 
 _TRADER_AGENT_ID_DEFAULT = "6b2192cc-14fa-4335-b572-2fe1e0cb54a7"
 
@@ -359,9 +356,8 @@ def _log_scalping_exit_bypass(
     phase: str,
 ) -> None:
     logger.warning(
-        "kis_mock_scalping_exit_bypass: sell guards bypassed",
+        "scalping_exit_bypass: sell guards bypassed",
         extra={
-            "account_mode": "kis_mock",
             "symbol": symbol,
             "market_type": market_type,
             "price": price,
@@ -540,41 +536,6 @@ def _loss_cut_max_slip_value() -> float:
     return loss_cut_max_slip()
 
 
-_SCALPING_EXIT_REASONS = frozenset({"stop_loss", "take_profit", "time_stop"})
-
-
-def _resolve_scalping_exit_context(
-    *,
-    scalping_exit: bool,
-    strategy_id: str | None,
-    reason: str | None,
-    side: str,
-    order_type: str,
-    is_mock: bool,
-) -> ScalpingExitContext | None:
-    """Fail-closed resolution of a mock scalping exit authorization.
-
-    Returns None when not requested. Raises ValueError on any condition that
-    would let a live/generic order acquire the bypass.
-    """
-    if not scalping_exit:
-        return None
-    if not settings.kis_mock_scalping_enabled:
-        raise ValueError("scalping_exit requires KIS_MOCK_SCALPING_ENABLED=true")
-    if not is_mock:
-        raise ValueError("scalping_exit is only available for kis_mock orders")
-    if side != "sell":
-        raise ValueError("scalping_exit requires side='sell'")
-    if order_type != "limit":
-        raise ValueError("scalping_exit requires order_type='limit'")
-    if not strategy_id:
-        raise ValueError("scalping_exit requires strategy_id")
-    resolved_reason = reason or "stop_loss"
-    if resolved_reason not in _SCALPING_EXIT_REASONS:
-        raise ValueError(f"invalid scalping_exit reason: {resolved_reason}")
-    return ScalpingExitContext(strategy_id=strategy_id, reason=resolved_reason)
-
-
 async def _get_current_price_for_order(symbol: str, market_type: str) -> float | None:
     if market_type == "crypto":
         prices = await upbit_service.fetch_multiple_current_prices(
@@ -668,41 +629,24 @@ async def _lookup_symbol_sector_label(
 async def _get_holdings_for_order(
     symbol: str, market_type: str, is_mock: bool = False
 ) -> dict[str, Any] | None:
-    """레거시 주문 경로에서 Upbit 보유만 조회한다.
+    """레거시 주문 경로의 보유 조회는 더 이상 어떤 공급자도 갖지 않는다.
 
-    주식 주문 검증은 Toss 전용 도구가 직접 수행한다. 이 레거시 helper의 주식
-    호출은 KIS intent이므로 어떤 공급자도 조회하지 않고 닫는다.
+    주식 주문 검증은 Toss 전용 도구가 직접 수행하고, PAPER는 자체 원장을
+    쓴다. 이 helper의 주식 호출은 KIS intent이고 crypto 호출은 Upbit intent라
+    둘 다 비운영으로 닫는다.
     """
-    _ = is_mock
-    if market_type != "crypto":
-        raise ValueError("provider kis is not operational")
-
-    coins = await upbit_service.fetch_my_coins()
-    currency = symbol.replace("KRW-", "")
-    for coin in coins:
-        if coin.get("currency") == currency:
-            parsed = _parse_upbit_account_row(coin)
-            return {
-                "quantity": parsed["orderable_quantity"],
-                "total_quantity": parsed["total_quantity"],
-                "locked": parsed["locked"],
-                "avg_price": parsed["avg_buy_price"],
-                "sellable_observed": True,
-            }
-    return None
+    _ = (symbol, is_mock)
+    if market_type == "crypto":
+        raise ValueError("provider upbit is not operational")
+    raise ValueError("provider kis is not operational")
 
 
 async def _get_balance_for_order(market_type: str, is_mock: bool = False) -> float:
-    """레거시 주문 경로에서 Upbit KRW 잔액만 조회한다."""
+    """레거시 주문 경로의 잔액 조회도 운영 공급자가 없다."""
     _ = is_mock
-    if market_type != "crypto":
-        raise ValueError("provider kis is not operational")
-
-    coins = await upbit_service.fetch_my_coins()
-    for coin in coins:
-        if coin.get("currency") == "KRW":
-            return float(coin.get("balance", 0))
-    return 0.0
+    if market_type == "crypto":
+        raise ValueError("provider upbit is not operational")
+    raise ValueError("provider kis is not operational")
 
 
 async def _record_order_history(

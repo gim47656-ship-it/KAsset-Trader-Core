@@ -11,16 +11,11 @@ from app.services.order_estimation_service import (
     PendingBuyCostUnavailableError,
     calculate_estimated_order_cost,
     extract_buy_prices_from_analysis,
-    fetch_pending_crypto_buy_cost,
     fetch_pending_domestic_buy_cost,
     fetch_pending_overseas_buy_cost,
 )
 from app.services.stock_info_service import StockAnalysisService
-from app.services.symbol_trade_settings_service import (
-    SymbolTradeSettingsService,
-    UserTradeDefaultsService,
-)
-from app.services.upbit_symbol_universe_service import get_active_upbit_base_currencies
+from app.services.symbol_trade_settings_service import SymbolTradeSettingsService
 
 router = APIRouter(prefix="/api/symbol-settings", tags=["symbol-settings"])
 
@@ -226,108 +221,6 @@ async def get_all_estimated_costs(
         total_symbols=len(results),
         pending_buy_orders_cost=0.0,
         net_estimated_cost=grand_total,
-    )
-
-
-@router.get("/symbols/crypto/estimated-cost", response_model=AllEstimatedCostResponse)
-async def get_crypto_estimated_costs(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """암호화폐 예상 매수 비용 합계 (미체결 매수 주문 금액 차감)
-
-    보유 코인 전체에 대해 예상 비용을 계산합니다.
-    - 종목 설정이 있으면 설정된 금액 사용
-    - 종목 설정이 없으면 사용자 기본 설정(crypto_default_buy_amount) 또는 10,000원 사용
-    기존 미체결 매수 주문 금액을 차감한 순 비용을 반환합니다.
-    """
-    import app.services.brokers.upbit.client as upbit
-
-    user = await get_user_from_request(request, db)
-    settings_service = SymbolTradeSettingsService(db)
-    analysis_service = StockAnalysisService(db)
-    defaults_service = UserTradeDefaultsService(db)
-
-    # 사용자 기본 설정에서 기본 매수 금액 조회
-    user_defaults = await defaults_service.get_or_create(user.id)
-    default_buy_amount = (
-        float(user_defaults.crypto_default_buy_amount) if user_defaults else 10000.0
-    )
-
-    # 보유 코인 조회
-    my_coins = await upbit.fetch_my_coins()
-    tradable_currencies = await get_active_upbit_base_currencies(
-        quote_currency="KRW",
-        db=db,
-    )
-
-    # 거래 가능한 코인만 필터링
-    MIN_TRADE_THRESHOLD = 1000
-    tradable_coins = [
-        coin
-        for coin in my_coins
-        if str(coin.get("currency") or "").upper() != "KRW"
-        and (
-            (float(coin.get("balance", 0)) + float(coin.get("locked", 0)))
-            * float(coin.get("avg_buy_price", 0))
-        )
-        >= MIN_TRADE_THRESHOLD
-        and str(coin.get("currency") or "").upper() in tradable_currencies
-    ]
-
-    # 종목별 설정 조회
-    all_settings = await settings_service.get_all(user.id, active_only=True)
-    settings_map = {
-        s.symbol: s for s in all_settings if s.instrument_type == InstrumentType.crypto
-    }
-
-    results = []
-    grand_total = 0.0
-
-    for coin in tradable_coins:
-        currency = coin.get("currency")
-        market = f"KRW-{currency}"
-
-        analysis = await analysis_service.get_latest_analysis_by_symbol(market)
-        if not analysis:
-            continue
-
-        buy_prices = extract_buy_prices_from_analysis(analysis)
-        if not buy_prices:
-            continue
-
-        # 설정 조회 (없으면 기본값 사용)
-        settings_obj = settings_map.get(market)
-        if settings_obj:
-            buy_amount = float(settings_obj.buy_quantity_per_order)
-            buy_price_levels = settings_obj.buy_price_levels
-        else:
-            buy_amount = default_buy_amount
-            buy_price_levels = 4
-
-        limited_buy_prices = buy_prices[:buy_price_levels]
-
-        # 암호화폐는 금액 기반 매수 → amount_based=True
-        result = calculate_estimated_order_cost(
-            symbol=market,
-            buy_prices=limited_buy_prices,
-            quantity_per_order=buy_amount,
-            currency="KRW",
-            amount_based=True,
-        )
-
-        results.append(EstimatedCostResponse(**result))
-        grand_total += result["total_cost"]
-
-    pending_buy_cost = await fetch_pending_crypto_buy_cost()
-    net_cost = max(0.0, grand_total - pending_buy_cost)
-
-    return AllEstimatedCostResponse(
-        symbols=results,
-        grand_total_cost=grand_total,
-        total_symbols=len(results),
-        pending_buy_orders_cost=pending_buy_cost,
-        net_estimated_cost=net_cost,
     )
 
 

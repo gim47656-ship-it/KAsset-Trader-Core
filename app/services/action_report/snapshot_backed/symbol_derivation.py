@@ -51,22 +51,6 @@ _JOURNAL_MARKET_TO_INSTRUMENT: dict[str, InstrumentType] = {
 }
 
 
-def _normalize_crypto_symbol(raw: object) -> str | None:
-    """Normalize a crypto symbol to the pipeline's ``KRW-XXX`` market code.
-
-    ``UpbitHomeReader`` emits the bare currency (e.g. ``"BTC"``) while
-    ``manual_holdings`` already store the KRW market code. Trim/uppercase,
-    prefix bare currencies with ``KRW-``, keep already-prefixed codes, and
-    drop blanks so the portfolio source unions cleanly.
-    """
-    text = str(raw or "").strip().upper()
-    if not text:
-        return None
-    if text.startswith("KRW-"):
-        return text
-    return f"KRW-{text}"
-
-
 class SymbolDerivation(BaseModel):
     """Result of a single derivation pass."""
 
@@ -161,41 +145,6 @@ class _DefaultWatchRepo:
         return [a.symbol for a in alerts if a.symbol]
 
 
-class _DefaultLiveHoldingsRepo:
-    """ROB-357 — 읽기 전용 live-holdings adapter.
-
-    Crypto 보유는 ``manual_holdings``가 아니라 Upbit에 있으므로 별도로
-    종목 범위에 합친다. 저수준 broker client 대신 승인된 읽기 전용
-    ``UpbitHomeReader``를 사용한다. 오류는 서비스의 best-effort ``_safe``
-    wrapper로 전달되어 ``source_errors``에 기록되고 결과는 ``[]``가 된다.
-    """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def list_held_symbols(self, *, market: str, user_id: int | None) -> list[str]:
-        if market != "crypto":
-            return []
-        from app.services.invest_home_readers import UpbitHomeReader
-
-        reader = UpbitHomeReader(self._session)
-        result = await reader.fetch(user_id=user_id or 0)
-        # ``UpbitHomeReader.fetch`` returns a ``_SourceFetchResult`` whose
-        # positions live on ``result.holdings`` (a flat ``list[Holding]``) —
-        # there is no ``result.account``. Reading the wrong attribute silently
-        # drops every live holding (ROB-357 Hermes review).
-        holdings = getattr(result, "holdings", None) or []
-        symbols: list[str] = []
-        seen: set[str] = set()
-        for holding in holdings:
-            normalized = _normalize_crypto_symbol(getattr(holding, "symbol", None))
-            if normalized is None or normalized in seen:
-                continue
-            seen.add(normalized)
-            symbols.append(normalized)
-        return symbols
-
-
 class _DefaultCandidateRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -261,7 +210,7 @@ class SymbolDerivationService:
         self._journal = journal_repo or _DefaultJournalRepo(session)
         self._watch = watch_repo or _DefaultWatchRepo(session)
         self._candidate = candidate_repo or _DefaultCandidateRepo(session)
-        self._live = live_holdings_repo or _DefaultLiveHoldingsRepo(session)
+        self._live = live_holdings_repo
         self._max_symbols = max_symbols
         self._top_held = top_held
         self._top_candidates = top_candidates
@@ -302,14 +251,14 @@ class SymbolDerivationService:
                 source_errors[name] = f"{type(exc).__name__}: {exc}"
                 return []
 
-        # Portfolio = manual_holdings ∪ live broker holdings. For crypto the
-        # held positions live on Upbit (not manual_holdings), so we union in
-        # the read-only live source; manual rows still come first for KR/US.
+        # Portfolio = manual_holdings ∪ injected live broker holdings. No
+        # operational provider exposes live crypto holdings any more, so the
+        # live source only contributes when a caller injects a repository.
         manual_portfolio = await _safe(
             "portfolio", self._manual.list_tickers(market=market)
         )
         live_portfolio: list[str] = []
-        if market == "crypto":
+        if market == "crypto" and self._live is not None:
             live_portfolio = await _safe(
                 "portfolio_live",
                 self._live.list_held_symbols(market=market, user_id=user_id),

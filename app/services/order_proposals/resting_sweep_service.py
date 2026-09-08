@@ -23,11 +23,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.review import (
-    KISLiveOrderLedger,
-    LiveOrderLedger,
-    TossLiveOrderLedger,
-)
+from app.models.review import TossLiveOrderLedger
 from app.services.order_proposals.resting_sweep import (
     LedgerEvidence,
     RungCandidate,
@@ -46,25 +42,15 @@ class SweepNotConfirmed(RuntimeError):
     """Raised when a write was requested without the explicit operator confirm."""
 
 
-# (model, table label, broker-order-id column, client-key column or None)
+# Active sweep evidence is restricted to the only retained live execution
+# ledger. Historical KIS/Upbit rows remain available through read/report APIs,
+# but they cannot drive current proposal-rung state transitions.
 _LEDGER_SOURCES: tuple[tuple[Any, str, Any, Any], ...] = (
-    (
-        KISLiveOrderLedger,
-        "review.kis_live_order_ledger",
-        KISLiveOrderLedger.order_no,
-        KISLiveOrderLedger.idempotency_key,
-    ),
     (
         TossLiveOrderLedger,
         "review.toss_live_order_ledger",
         TossLiveOrderLedger.broker_order_id,
         TossLiveOrderLedger.client_order_id,
-    ),
-    (
-        LiveOrderLedger,
-        "review.live_order_ledger",
-        LiveOrderLedger.order_no,
-        LiveOrderLedger.idempotency_key,
     ),
 )
 
@@ -107,11 +93,10 @@ class RestingRungSweepService:
     async def fetch_evidence(
         self, candidate: RungCandidate
     ) -> tuple[LedgerEvidence, ...]:
-        """Collect every committed ledger row matching this rung's keys.
+        """Collect every committed Toss ledger row matching this rung's keys.
 
-        All matches across all three ledgers are returned -- deliberately not
-        "the first one".  Disagreement between two rows is a CONFLICT the
-        operator must see, and a first-match-wins read would hide it.
+        Every matching row is returned rather than selecting the first match.
+        Disagreement between rows is a CONFLICT the operator must see.
         """
         found: list[LedgerEvidence] = []
         for model, label, order_col, client_col in _LEDGER_SOURCES:

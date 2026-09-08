@@ -36,7 +36,6 @@ DOCS_GATED_JOB_IDS = (
     "security",
     "alpaca-track-fast-tests",
     "intraday-harness-v2-tests",
-    "kiwoom-dual-surface-smoke",
     "alpaca-track-walkforward-tests",
     "frontend",
 )

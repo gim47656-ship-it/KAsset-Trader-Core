@@ -7,11 +7,10 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 - KR/US live account, order, portfolio, quote, and candle paths use Toss.
   `account_mode` defaults to `toss_live`; ambiguous `real`/`live` values and
   `kis_live`/`kis_mock` operational dispatch fail closed.
-- NH PLUG is a KR mock read-only source for account, balance, positions, and
-  quotes. It has no order, fill, reconcile, scheduler, or US capability.
-- KIS registrars, tasks, WebSockets, and provider-backed tools are not part of
-  any deployed MCP profile. Dormant adapters and KIS ledger models remain only
-  so historical rows can be read without reinterpretation.
+- KIS registrars, tasks, WebSockets, provider transports, and provider-backed
+  tools are removed. Only the KIS ledger models and their historical
+  `account_mode` values remain so historical rows can be read without
+  reinterpretation.
 - Toss fill confirmation is polling-based. Production live equity operation
   requires `toss_live.poll_fills_periodic` at least every two minutes
   (`TOSS_FILL_POLL_ENABLED=true`, `TOSS_FILL_POLL_CRON=*/2 * * * *`) or an
@@ -54,8 +53,7 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
   - `artifact`: analysis/stage artifact persistence
   - `proposal`: `order_proposal_create`
   - `fill`: reconcile/fill-evidence tools
-  - `retrospective`: `save_trade_retrospective`,
-    `save_position_intake_retrospective`
+  - `retrospective`: `save_trade_retrospective`
   - Other calls use `other`; join stages with caller/session/run/correlation and report/artifact/proposal identifiers rather than raw symbols.
 
 ## Tools
@@ -111,9 +109,9 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
   - `default_rate` mirrors the scalar exchange-rate behavior used by existing portfolio and cash consumers.
   - Unsupported pairs raise a tool argument error. FX pairs are not market indices; `get_market_index("USDKRW")` remains unsupported.
   - Trends, bank-specific quotes, preferential effective rates, exchange execution, and US-order total-cost routing are outside ROB-567 P1.
-- `get_orderbook(symbol, market="kr", venue="krx")`
-  - KR orderbook support is limited to the NH PLUG mock read-only KRX
-    10-level snapshot. NXT/unified venues return `provider_unsupported`.
+- `get_orderbook(symbol, market="crypto")`
+  - Orderbook support is limited to the KRW crypto market. KR/US equity
+    orderbooks have no provider and are rejected.
 - KR quote responses expose `price_as_of`, `price_freshness`
   (`fresh|stale|unavailable`), `price_usable`, and a stable
   `price_unavailable_reason` when unusable. Missing timestamps and epoch-zero
@@ -164,7 +162,7 @@ MCP tools (market data, portfolio, order execution) exposed via `fastmcp`.
 - `get_short_interest(symbol, days=20)`
   - KIS-only short-interest data is unavailable. The tool returns
     `provider_unsupported` and does not synthesize a replacement.
-- `get_intraday_investor_flow` and `get_execution_strength` are not registered because their provider-only evidence has no Toss/NH PLUG equivalent
+- `get_intraday_investor_flow` and `get_execution_strength` are not registered because their provider-only evidence has no Toss equivalent
 - `get_toss_buy_balance(symbol)`
   - Toss orderbook balance rate (buyBalanceRate/sellBalanceRate) and foreigner holding ratio — NOT user buy ratio. Live per-call, operator-gated. Disabled by default (returns `status='disabled'` unless `TOSS_CONSUMER_SIGNALS_ENABLED=true` is set). Korean stocks only.
 - `get_toss_ai_signal(symbol)`
@@ -328,47 +326,6 @@ without refreshing it. Likewise, a provider failure captured as an unavailable
 section retains its original error and remains unavailable; get never calls a
 provider to fill it.
 
-### Paper execution validation boundary (ROB-848)
-
-The default-off `paper_execution` profile is one exact union under
-`PAPER_EXECUTION_ENABLED`: the unchanged six names in
-`PAPER_EXECUTION_TOOL_NAMES` plus the independent names in
-`PAPER_VALIDATION_TOOL_NAMES` and the operator-only
-`PAPER_COHORT_CONTROL_TOOL_NAMES`. The three registrars meet only in the
-profile registry composition branch.
-
-Validation caller identity is bound server-side to the authenticated profile
-token through `PAPER_VALIDATION_AUTHENTICATED_ACTOR_ID`; caller headers are not
-trusted for validation authorization. `PAPER_VALIDATION_ACTOR_ROLES` maps that
-server-derived ID to `researcher`, `reviewer`, `operator`, or `system`; both
-settings default empty and every absent, unmapped, or invalid role fails closed.
-Actor ID and role are absent from all tool payloads.
-Frozen-input and policy providers are injected contracts. Until their production
-composition is supplied by their owning follow-ups, evidence-requiring mutations
-return `evidence_stamp_unavailable` and never reach a broker, adapter, or ledger.
-
-Researchers may append only fixed-shape hypothesis drafts, reviewers may append
-only narrative postmortems, and operators/systems own registration, state
-transitions, order-submit authorization, promotion, rejection, and abort. Order
-authorization returns an exact-bound frozen contract; it does not submit an
-order. Promotion requires a separate explicit confirmation against the current
-experiment/cohort/strategy/config/policy/input hashes.
-
-For an active ROB-849 cohort, use `paper_cohort_kill_switch` before disabling
-the profile. It commits an immutable terminal fence, recovery-links any
-prepared native order without POST, then performs cohort-owned cleanup. See
-[`docs/runbooks/paper-cohort-kill-switch.md`](../../docs/runbooks/paper-cohort-kill-switch.md).
-Disabling `PAPER_EXECUTION_ENABLED` physically removes all three registrars;
-existing audit/fence rows remain immutable.
-
-The `analysis_readonly` Codex/headless profile exposes
-`analysis_bundle_get` only when the gate is enabled. It never exposes
-`analysis_bundle_create`, preserving the consumer's get-only boundary.
-
-The ROB-833 runner handoff is exactly:
-
-`watch/fill event → bundle create → same bundle_id into claude -p sessions → bundle get only`.
-
 ### Session Context Tools
 
 `session_context_append(entries)` persists append-only operator context for
@@ -473,244 +430,13 @@ full payload, by numeric `id` or `artifact_uuid` string. Missing ids return
 - `investment_report_add_items(report_uuid, items, actor=None)` - Append new proposal items to an existing draft investment report. The item payload contract matches `investment_report_create`. Duplicate `client_item_key` rows are returned as existing items and are not rewritten. Non-draft reports return `error="not_draft"`. No broker, order, or watch mutation is performed.
 - `investment_report_update(report_uuid, title=None, summary=None, risk_summary=None, thesis_text=None, no_action_note=None, market_snapshot=None, portfolio_snapshot=None, metadata=None, valid_until=None, actor=None, reason=None)` - Update draft report header fields without changing report identity, lifecycle status, predecessor chain, account scope, generator version, or items. Each successful update appends an audit entry to `report.metadata.draft_updates`. Non-draft reports return `error="not_draft"`.
 
-### Alpaca paper read-only smoke tools
-
-ROB-69 exposes Alpaca paper broker inspection via explicit read-only MCP tool
-names only. These tools are registered under `MCP_PROFILE=us-paper`; they are
-not part of the default surface.
-
-- `alpaca_paper_get_account(account_mode="alpaca_paper")`
-- `alpaca_paper_get_cash(account_mode="alpaca_paper")`
-- `alpaca_paper_list_positions(account_mode="alpaca_paper")`
-- `alpaca_paper_list_orders(status="open", limit=50, account_mode="alpaca_paper")`
-- `alpaca_paper_get_order(order_id, account_mode="alpaca_paper")`
-- `alpaca_paper_list_assets(status="active", asset_class="us_equity", account_mode="alpaca_paper")`
-- `alpaca_paper_list_fills(after=None, until=None, limit=50, account_mode="alpaca_paper")`
-- `alpaca_paper_ledger_list_recent(limit=50, lifecycle_state=None, account_mode="alpaca_paper")`
-- `alpaca_paper_ledger_get(client_order_id, account_mode="alpaca_paper")`
-- `alpaca_paper_execution_preflight_check(...)`
-
-All existing calls keep `account_mode="alpaca_paper"` by default. The
-directional-lab lane selects its isolated paper account with
-`account_mode="alpaca_paper_lab"`. That mode reads
-`ALPACA_PAPER_LAB_API_KEY` and `ALPACA_PAPER_LAB_API_SECRET`, while reusing
-`ALPACA_PAPER_BASE_URL`. Both lab credentials are mandatory: missing or
-incomplete lab credentials raise a configuration error and never fall back to
-the existing Alpaca paper credentials. Lab order preview/submit is restricted
-to `asset_class="us_equity"`; Alpaca crypto paper remains on the existing
-account only. Ledger, preflight, roundtrip, cancel status sync, and reconcile
-lookups are scoped to the selected account mode.
-
-### Alpaca paper fill reconcile (DB-writing mutation, ROB-953)
-
-`alpaca_paper_reconcile_orders(symbol=None, client_order_id=None, dry_run=True,
-confirm=False, limit=100, account_mode="alpaca_paper")` is **not** part of the
-read-only surface above. It is
-a **DB-writing mutation** classified in `MUTATION_TOOLS`, denied by the
-read-only settings profile, and exposed on the **DEFAULT** profile behind
-`settings.alpaca_paper_default_tools_enabled` (default off) — not `us-paper`
-only. Broker access is read-only (it never submits, replaces, or cancels), but
-it writes lifecycle state to `review.alpaca_paper_order_ledger`.
-
-It is the confirm-gated, evidence-first fill-booking tool for manually
-submitted Alpaca paper orders. It queries the broker by the ledger
-`client_order_id`, normalizes the order/fill evidence through the shared fill
-classifier, and only books confirmed cumulative fills. `dry_run=True` returns
-transition plans without ledger writes; `dry_run=False` requires `confirm=True`.
-
-Evidence handling is fail-closed. For `status=filled`, the tool always walks the
-complete FILL activity feed with Alpaca `page_token` pagination, even when the
-order already includes `filled_qty` and `filled_avg_price`. The row is left
-unchanged and returned with `requires_manual_review=true` when the broker read
-fails, the order is missing, or the observed fills are empty, incomplete, or do
-not sum to the order's cumulative `filled_qty`. The reported `action` and the
-persisted `lifecycle_state` are derived from the confirmed write result, so they
-cannot disagree. The tool books to `filled` / `partial` / `anomaly` / `canceled`
-only; it deliberately does not infer position or final reconciliation without
-independent evidence.
-
-`alpaca_paper_execution_preflight_check` is a read-only runner gate for the
-later automated paper cycle. It reads recent ledger rows and accepts
-caller-supplied read-only `open_orders`, `positions`, and `approval_packet`
-snapshots, then returns severity-classified anomalies plus `should_block`. Scoped
-callers may pass `lifecycle_correlation_id`, `client_order_id`, `candidate_uuid`,
-`briefing_artifact_run_uuid`, or an `approval_packet` containing those keys; the
-tool then reads only matching ledger rows and returns `scoped_by` so decision
-sessions do not get blocked by unrelated recent ETH/SOL/BTC rows. Calls without
-scope keep the broad recent-ledger safety behavior for global runners. Passing
-`legacy_cycle_blockers_as_warnings=True` is an explicit Alpaca Paper execution
-flow test-mode: residual positions and stale preview/approval packets are
-returned as warnings instead of blockers so operators can test buy/sell/order
-adjust/close flows on a used paper account. That test-mode flag by itself does
-not weaken open-order
-conflicts, duplicate `client_order_id`, ledger/order/fill anomalies, missing
-linked sells, unclosed sell snapshots, unverified broker snapshots, or symbol
-mismatches; those remain
-blocking. ROB-93
-checks include unexpected open orders, residual positions, duplicate
-`client_order_id`, filled buys without linked sells, filled sells without a zero
-final position snapshot, ledger/order/fill mismatches, stale previews/approval
-packets, and signal/execution symbol mismatches. Stale same-scope preview
-findings return the dry-run action hint
-`recommended_action="mark_stale_preview_cleanup_required"` and
-`lifecycle_state="stale_preview_cleanup_required"`; operators can use this to
-surface an explicit cleanup-required state before any separately approved repair
-write. The preflight itself performs no broker mutation, no repair writes, and
-no direct DB backfill.
-
-ROB-1209 adds optional `candidate_order` context for an account-maintenance
-sell. It does **not** skip preflight or trust a `purpose`/`reduce_only` label.
-The report treats a candidate as reduce-only only when all of the following are
-true: `side="sell"`, an execution symbol is present, `qty` (or packet-style
-`max_qty`) is finite and positive, the positions snapshot is fresh/attested for
-the selected account, and the requested quantity is no greater than that exact
-live position. Notional-only, unknown-symbol, oversized, or buy candidates do
-not qualify. If an `approval_packet` supplies order fields, the candidate must
-also match its side, execution symbol, and any `max_qty`; a sell context cannot
-clear a buy packet. Under that narrow condition, `residual_position_exists`,
-`sell_source_evidence_invalid`, and `previous_buy_filled_sell_missing` remain
-visible as warnings rather than blocking the reducing sell. All other evidence
-gates remain unchanged: missing/stale snapshots, open orders, duplicate IDs,
-ledger/fill inconsistencies, unclosed prior sells, stale packets, and symbol
-mismatches still block. The submit boundary separately re-reads live available
-quantity before any broker POST.
-
-The broker snapshot is fail-closed (ROB-1130). `open_orders` and `positions` must
-both be supplied together with `broker_snapshot_fetched_at`, the time the
-snapshot was read from the broker, and `broker_snapshot_account_mode`, the
-account those reads were taken from:
-
-```python
-positions = await alpaca_paper_list_positions(account_mode="alpaca_paper")
-open_orders = await alpaca_paper_list_orders(status="open", account_mode="alpaca_paper")
-report = await alpaca_paper_execution_preflight_check(
-    account_mode="alpaca_paper",
-    positions=positions["positions"],
-    open_orders=open_orders["orders"],
-    broker_snapshot_fetched_at=datetime.now(UTC).isoformat(),
-    broker_snapshot_account_mode=positions["account_mode"],
-)
-```
-
-A snapshot that is missing, empty without an attestation, older than
-`snapshot_max_age_minutes` (default 5), or carries an unparseable/future
-timestamp is reported as a `broker_snapshot_unverified` blocker. Previously an
-omitted snapshot silently became `positions=0` and passed the gate while the
-account held positions. `counts.positions` and `counts.open_orders` are now
-omitted rather than reported as `0` when the snapshot cannot be verified, and
-`broker_snapshot` carries the per-kind `provided` / `verified` / `reason` state.
-This blocker is never downgraded by `legacy_cycle_blockers_as_warnings`.
-
-Two further shapes of "empty means flat" are also blocked rather than passed:
-
-- Passing the whole MCP response envelope (or any mapping/string) instead of the
-  row list — `positions={...}` normalizes to an empty list and would otherwise
-  read as a flat account. Reason: `snapshot_container_not_a_row_list`.
-- A snapshot read from the other paper account. `alpaca_paper` and
-  `alpaca_paper_lab` use different credentials and hold different inventory, so
-  an unattested or mismatched `broker_snapshot_account_mode` blocks with reason
-  `snapshot_account_unattested` / `snapshot_account_mismatch`, and
-  `broker_snapshot.account` reports `expected` vs `attested`.
-
-Buy legs that hold an open position are no longer reported as missing sell legs
-(ROB-1129). A filled/reconciled buy with no linked sell row is classified against
-the verified position snapshot: still-held symbols produce the informational
-`open_position_without_sell_leg` finding, while symbols the broker no longer
-holds, buys already in `closed`/`final_reconciled`, and rows with no verified
-snapshot keep blocking under `previous_buy_filled_sell_missing` with a per-row
-`reason`. The only exception is the ROB-1209 candidate context above: a verified,
-snapshot-bounded reducing sell may continue while retaining that historical
-lifecycle discrepancy as a warning; it never releases a buy or unbounded sell.
-
-The broker inspection tools instantiate `AlpacaPaperBrokerService`, so they
-inherit the
-service-level endpoint guard: the trading base URL must be exactly
-`https://paper-api.alpaca.markets`. The Alpaca dashboard may display
-`https://paper-api.alpaca.markets/v2`, but runtime env should **not** include
-`/v2`; service methods append `/v2/...` paths internally, and setting the env to
-`.../v2` would produce duplicated `/v2/v2/...` requests.
-
-Safety boundary: there are no Alpaca live MCP tools. ROB-73 adds explicit
-paper-only, confirm-gated `alpaca_paper_submit_order` and
-`alpaca_paper_cancel_order` tools for dev-owned smoke, with no runtime live
-switch and no bulk/by-symbol cancel. ROB-74 extends those explicit paper-only
-surfaces to a narrow crypto contract; ROB-86 permits guarded paper sell/close
-smokes through the same explicit Alpaca Paper submit surface. Crypto remains
-buy/sell limit-only, allowlisted to `BTC/USD`, `ETH/USD`, and `SOL/USD`,
-`time_in_force` limited to `gtc`/`ioc`, and capped at $50 max notional or
-estimated cost.
-There is still no Alpaca paper `place_order`, `replace_order`, `modify_order`,
-`cancel_all`, close-position/liquidate, or generic Alpaca order-routing surface.
-
-#### Unified submit boundary (ROB-842)
-
-Every real Alpaca Paper broker POST — manual and automated — passes through a
-single server-side boundary: **server-owned approval packet → existing
-`review.alpaca_paper_order_ledger` atomic claim → broker POST → stored-result
-replay**. There is no direct-POST fallback, and this holds for `us-paper` only.
-
-- **Roles.** `alpaca_paper_submit_order` is the **manual operator** tool
-  (confirm-gated $10-scale smoke). `alpaca_paper_automated_preview_order` +
-  `alpaca_paper_automated_submit_order` are the **automated cohort** tools —
-  registered only under `MCP_PROFILE=us-paper` and **default-off** behind
-  `ALPACA_PAPER_AUTOMATED_SUBMIT_ENABLED` (fail-closed when unset).
-- **Server-observed market evidence for every submit.** Both tools require an
-  opaque, server-issued `quote_snapshot_id` (a trusted `market_quote_snapshots`
-  row) at `confirm=True` — there is no origin-based bypass of market/freshness
-  checks. The caller never supplies correlation, snapshot, market-data as-of/
-  source, ceiling, `origin`, or `client_order_id`: the server loads identity,
-  market provenance and the trusted reference price from that row, and the ceiling
-  is the server **hard-cap** policy ($1,000 equity / $50 crypto). A market/qty
-  order's implied notional (trusted price × qty) is bounded by the same cap. A
-  missing / stale / symbol-mismatched / non-finite-priced snapshot fails closed
-  before any packet is built. Packet + policy hashes are recorded in the ledger
-  preview evidence.
-- **Snapshot retrieval & build lever (ROB-913).** Two MCP tools are provided to manage market quote evidence:
-  - `market_quote_snapshot_latest(market: "kr"|"us"|"crypto", symbol: str)` reads the latest snapshot row and exposes its metadata along with `age_seconds`, `is_fresh` (within 5 minutes: `0 <= age <= 300`), and `submit_ready` (indicating whether it passes the server-side submit gates).
-  - `market_quote_snapshot_ensure(market: "kr"|"us"|"crypto", symbol: str)` ensures a fresh snapshot exists. If the latest row is fresh and submit-ready, it reuses it (`reused: true`). Otherwise, it builds a new snapshot for the symbol (`reused: false`) and validates it. Price injection is strictly forbidden; price is only fetched from the trusted server-side quote sources.
-- **Replay before freshness.** Immutable token/key/hash/account binding is checked
-  first; a completed or terminally-failed order then replays its original result
-  even after the packet's freshness window has elapsed. Freshness / market-data /
-  live-position checks apply only to a not-yet-claimed new submit.
-- **Exactly once.** Duplicate intents (sequential or concurrent) produce exactly
-  one broker HTTP submit; every other caller replays the winner's result.
-- **Live sell eligibility + no oversell.** A sell is verified against the
-  **current** Alpaca paper position re-read right before the POST, with
-  `qty_available` required as a broker-owned upper bound. Position evidence,
-  lifecycle reconciliation, local reservations, and the atomic claim are bound
-  under one account+symbol advisory lock. Every sell claim stores its `qty` /
-  `qty_available` baseline in the existing `position_snapshot` JSONB; a later
-  immediate or crash-recovered open/partial, `filled`, and unknown/unparseable
-  statuses retain `submitted`; a `filled` status releases the hold only after the
-  position response proves the fill is reflected. Unknown statuses retain their
-  reservation, and ambiguous/stale fill evidence returns
-  `position_reconciliation_pending`, so two *different* sell intents cannot consume
-  the same shares. Cancel read-back syncs known broker truth while retaining the
-  hold for open/partial/filled. Automated sell is **explicitly disabled**
-  (reason `automated_sell_disabled`) until ROB-845 wires an opaque buy/position
-  source; manual sell is supported.
-- **Public success contract.** `success` is true only for
-  `submitted` / `replayed` / `recovered`; `failed`, `rejected` and
-  `idempotency_in_progress` are `success=false`.
-- **Deterministic failure vs uncertainty.** An HTTP 4xx/422 rejection is booked
-  as a terminal outcome and replayed on retry (no re-POST). A 5xx/timeout/
-  crash-after-send is reconciled via `get_order_by_client_order_id` — recovered
-  if the order exists, otherwise left in-flight — never re-POSTed.
-- **Paper only.** The only broker built is `AlpacaPaperBrokerService`
-  (paper-host-pinned); no live endpoint or live-credential path is imported.
-
-Read-only operator runbook: [`docs/runbooks/alpaca-paper-readonly-smoke.md`](../../docs/runbooks/alpaca-paper-readonly-smoke.md)
-Read-only smoke helper: `scripts/smoke/alpaca_paper_readonly_smoke.py` (argumentless, read-only, exits non-zero on failure)
-Dev submit/cancel smoke runbook: [`docs/runbooks/alpaca-paper-dev-smoke.md`](../../docs/runbooks/alpaca-paper-dev-smoke.md)
-Dev submit/cancel smoke helper: `scripts/smoke/alpaca_paper_dev_smoke.py` (preview-only by default, side effects require dual explicit gates)
-
 ### Execution Ledger Fill Event Tools (ROB-755)
 
 ROB-755 exposes the same fill-event triage surface that powers the operator-host
 alert poller (`scripts/list_recent_fill_events.py`) over MCP. Read-only; no broker
 mutation; no order mutation; no watch mutation. Registered in the "Always" block
-of `register_all_tools` (default, crypto, us-paper, db-paper, and Kiwoom
-profiles). Not on `analysis_readonly`, which uses its own curated allowlist.
+of `register_all_tools`, so every profile registers it except
+`analysis_readonly`, which uses its own curated allowlist.
 
 - `execution_ledger_fill_events_list_recent(after_id=None, market=None, side=None, source="websocket", broker=None, account_mode=None, limit=50)`
   - Read-only. Returns recent fills from `execution_ledger` rows newer than
@@ -735,76 +461,6 @@ profiles). Not on `analysis_readonly`, which uses its own curated allowlist.
 - `source="invalid"` (or any string outside `websocket`/`reconciler`/`manual_import`/`None`)
   → `{"success": False, "error": "invalid_source"}` immediately, no DB call.
 
-### Alpaca paper order preview
-
-ROB-70 adds `alpaca_paper_preview_order`: a side-effect-free validator + echo tool.
-ROB-74 extends preview to a narrow Alpaca paper crypto shape without adding any
-broker side effects: `asset_class="crypto"` supports only `BTC/USD`, `ETH/USD`,
-and `SOL/USD`, is buy/sell and limit-only, defaults omitted `time_in_force` to
-`gtc`, rejects crypto `day`/`fok`, and is capped at $50 notional or estimated
-cost.
-
-**Signature:**
-```
-alpaca_paper_preview_order(
-    symbol,          # US equity ticker or allowlisted crypto pair (uppercased)
-    side,            # "buy" | "sell" (crypto: buy/sell limit-only)
-    type,            # "market" | "limit"  (crypto: limit only)
-    qty=None,        # Decimal quantity (xor notional)
-    notional=None,   # Decimal notional USD (xor qty; crypto limit allowed)
-    time_in_force=None,    # omitted => day for us_equity, gtc for crypto; crypto allows only "gtc" | "ioc"
-    limit_price=None,      # required for limit orders, forbidden for equity market
-    stop_price=None,       # always rejected (deferred)
-    client_order_id=None,  # optional, 1-48 chars
-    asset_class="us_equity",  # "us_equity" or ROB-74 "crypto"
-    account_mode="alpaca_paper",  # or isolated US-equity-only "alpaca_paper_lab"
-)
-```
-
-**Validation rules (enforced before any service call):**
-- `symbol`: non-empty after strip; uppercased; 1–10 chars
-- `side`: `"buy"` or `"sell"`; case-insensitive
-- `type`: `"market"` or `"limit"`; stop/stop_limit deferred
-- `qty` xor `notional`: exactly one required
-- `limit_price`: required for limit orders, forbidden for US-equity market orders, must be > 0
-- `stop_price`: always rejected with explicit error
-- `asset_class`: `"us_equity"` or `"crypto"`; other values rejected
-- `time_in_force`: omitted/blank defaults to `"day"` for US equities and `"gtc"` for crypto; US equities allow `"day"`, `"gtc"`, `"ioc"`, `"fok"`; crypto allows only `"gtc"` or `"ioc"`
-- For `asset_class="us_equity"`, `notional + type="limit"` is rejected (Alpaca only supports equity notional for market orders in this surface)
-- For `asset_class="crypto"`, only `BTC/USD`, `ETH/USD`, and `SOL/USD` are supported; orders are buy/sell, limit-only, require `limit_price`, permit `notional + limit_price`, and cap notional or `qty * limit_price` at $50
-
-**Return shape:**
-```json
-{
-  "success": true,
-  "account_mode": "alpaca_paper",
-  "source": "alpaca_paper",
-  "preview": true,
-  "submitted": false,
-  "order_request": { "symbol": "AAPL", "side": "buy", "type": "market", ... },
-  "estimated_cost": "360" | null,
-  "account_context": { "cash": "...", "buying_power": "..." } | null,
-  "would_exceed_buying_power": false | null,
-  "warnings": []
-}
-```
-
-**Safety boundary:** Preview is a pure validator + echo. It does NOT call
-POST `/v2/orders`. The only Alpaca paper side-effect tools are the explicit
-confirm-gated `alpaca_paper_submit_order` and `alpaca_paper_cancel_order`
-handlers. There is still no generic/live-capable `place_order`, `cancel_order`,
-`modify_order`, `replace_order`, bulk cancel, or endpoint-switching tool for
-Alpaca paper.
-
-Account context (cash/buying_power) is fetched via read-only `GET /v2/account`
-and fails soft: if unavailable, `account_context` is `null` and
-`"context_unavailable"` is added to `warnings`. The preview still returns
-`success: true` with the normalized `order_request` echo.
-
-The endpoint guard applies: if `ALPACA_PAPER_BASE_URL` is ever set to the live
-endpoint, the service constructor rejects it and the tool raises
-`AlpacaPaperEndpointError` (fail closed).
-
 ### Order proposal approval tools (ROB-816)
 
 When `ORDER_PROPOSALS_ENABLED=true`, the default and
@@ -817,7 +473,7 @@ order mutation.
     accepts `kr` and `us` aliases and normalizes them before validation,
     payload hashing, and persistence.
   - Supported place combinations are `toss_live` with
-    `equity_kr`/`equity_us`, and `upbit` with `crypto`.
+    `equity_kr`/`equity_us`. Crypto proposal execution is not operational.
   - `action="place"` is the default and `target_broker_order_id=None` is the
     default.
   - `place`: `target_broker_order_id` must be absent; one or more proposal
@@ -830,16 +486,16 @@ order mutation.
   - `cancel`: `target_broker_order_id` is required; exactly one rung must be
     an exact snapshot of the target order (side, remaining quantity, and limit
     price). It performs no new-order submit.
-  - Target-action tuples are supported only for
-    `toss_live/equity_kr`, `toss_live/equity_us`, and `upbit/crypto`.
+  - Target actions are supported only for `toss_live/equity_kr` and
+    `toss_live/equity_us`.
   - When `valid_until` is omitted, it defaults to the next `00:00 KST`.
   - Before an approval card/nonce is published, dispatch enforces
     timezone-aware `valid_until` and the proposal's broker/market submission
     session. Missing, naive, malformed, or expired validity fails closed.
-    US DAY proposals are regular-session only and use the existing XNYS or
-    Toss broker calendar; KR keeps KRX regular plus positively confirmed,
-    fresh NXT eligibility; Upbit crypto remains 24/7. Unknown calendar or
-    capability evidence also fails closed. A proposal with a non-null
+    US DAY proposals are regular-session only and use the XNYS or Toss broker
+    calendar; KR keeps KRX regular plus positively confirmed, fresh NXT
+    eligibility. Unknown calendar or capability evidence also fails closed. A
+    proposal with a non-null
     `exit_intent` is a protective exit and bypasses only session/calendar
     resolution and approval-window policy-stamp binding, so calendar
     uncertainty cannot preempt its confirmation flow. Its `valid_until`
@@ -963,16 +619,14 @@ order mutation.
     `max(valid_until, updated_at) + 24h`; the broker scan covers the union of
     those windows' KST dates. Provider errors, timeouts, malformed potential
     matches, invalid pagination, and CLOSED page-cap exhaustion make the scan
-    incomplete and fail closed instead of proving absence. KIS and Upbit
-    operator-void behavior is unchanged, including inconclusive KIS US empty
-    history when the shared adapter cannot prove every exchange inquiry finished.
+    incomplete and fail closed instead of proving absence.
   - After a successful void, the recorded Telegram approval message is edited
     without an inline keyboard so stale approval buttons no longer remain live.
 
 Telegram approval rechecks the persisted dispatch policy stamp, proposal
 validity, and authoritative market session before consuming a nonce, then
 repeats the same window policy inside revalidation and through a pre-send hook
-at the final Toss or Upbit HTTP boundary for submit and cancel. The
+at the final Toss HTTP boundary for submit and cancel. The
 session evidence includes the allowed interval end, so a close crossed while
 an awaited check is running is rejected at the transport boundary. A missing
 or mismatched policy stamp and unknown/stale evidence fail closed. An expired
@@ -987,8 +641,8 @@ the callback restores the rung, lease, and durable proposal nonce instead of
 stranding a consumed approval.
 Batch approval locks and verifies the exact ordered proposal/nonce-snapshot
 membership before consuming its own nonce; one missing, changed, expired, or
-closed member blocks the whole displayed batch. Toss/Upbit then rerun their
-applicable ROB-800 checks through the broker-specific submit boundary.
+closed member blocks the whole displayed batch. Toss then reruns its applicable
+ROB-800 checks through the broker-specific submit boundary.
 Successful automatic submissions retain `approved_by_telegram_user_id=NULL`
 and write policy/version/eligibility evidence under
 `source_asof.auto_approved`. Their Telegram summary carries a single-use
@@ -1003,10 +657,9 @@ Operators must set it explicitly and add the exact same trimmed identity to
 identity, so `loss_cut` validation fails closed. Do not use a hardcoded UUID as
 a fallback for this setting.
 
-Loss-cut proposal binding supports `toss_live` equities
-(`equity_kr`/`equity_us`) plus `upbit`/`crypto`. Toss proposals route through
-`toss_preview_order` and `toss_place_order`; an already-approved KIS intent is
-never reinterpreted or rerouted to Toss.
+Loss-cut proposal binding supports only `toss_live` equities
+(`equity_kr`/`equity_us`). Historical KIS and Upbit proposal rows retain their
+original provenance but are never resubmitted or rerouted to Toss.
 `toss_preview_order` owns the wire price/quantity used for revalidation, including KR tick normalization, and
 provides its read-only warning, price/cost, NXT-context, and advisory sector
 concentration checks. For `loss_cut`, preview and submit both reuse the shared
@@ -1044,7 +697,8 @@ MCP account-facing tools use an explicit `account_mode`:
   Reads require Toss configuration; mutation POSTs additionally require
   `TOSS_LIVE_ORDER_MUTATIONS_ENABLED=true`. Live sells retain the fresh
   broker-authoritative sellable-quantity preflight.
-- `account_mode="upbit"`: Upbit crypto account and order path.
+- `account_mode="upbit"`: historical provenance selector only; operational
+  account and order dispatch reject it because Upbit is not operational.
 - `account_mode="db_simulated"`: DB-backed paper trading only. Existing
   `paper`/`simulated` aliases remain simulation-only and never become live.
 - `account_mode="kis_live"` and `account_mode="kis_mock"`: historical selectors
@@ -1053,25 +707,6 @@ MCP account-facing tools use an explicit `account_mode`:
 - `account_mode="real"` and `account_mode="live"` are ambiguous and rejected;
   callers must name `toss_live`.
 
-NH PLUG is outside live account routing. It supplies only KR mock read-only
-account/balance/position/quote evidence and cannot place, modify, cancel, or
-reconcile an order. No KIS environment or profile activation is supported.
-
-### Position-intake retrospective (ROB-1285)
-
-`save_position_intake_retrospective` is a narrowly scoped historical-review
-write surface for a pre-cutover KR holding whose provenance is already
-`kis_live`. It does not make KIS provider calls, create an order intent, or
-authorize current KIS activity. The original `kis_live/equity_kr` identity is
-preserved solely so historical review rows are not mislabeled as Toss.
-
-Before writing `review.trade_retrospectives`, the tool locks and scans the
-same-symbol historical `review.kis_live_order_ledger` rows and applies its
-existing terminal guard. The row stores
-`evidence_snapshot.retrospective_type="intake"`, observed acquisition evidence,
-and the zero-match guard receipt. Intake rows remain excluded from aggregate
-and setup-tag learning consumers. This surface never creates a proposal or
-calls a broker.
 
 ### Toss Live Order MCP Tools
 
@@ -1115,38 +750,26 @@ Operator activation and the one-share live smoke are documented in
 
 ### `get_orderbook` spec
 Parameters:
-- `symbol`: KR equity symbol/code or Upbit market code (required)
-- `market`: defaults to `"kr"`; supports KR aliases (`"kr"`, `"kospi"`, `"kosdaq"`, `"korea"`, `"equity_kr"`) plus crypto aliases (`"crypto"`, `"upbit"`)
-- `venue`: optional, KR equity only. Non-blank values are rejected for crypto. Defaults to `"krx"`.
-
-Venue boundary (KR equity only):
-| `venue` input | Result |
-|---|---|
-| `null`, `""`, `"krx"`, `"regular"`, `"j"` | NH PLUG mock KRX snapshot |
-| `"nxt"`, `"ntx"`, `"nx"`, `"afterhours"`, `"extended"` | `provider_unsupported` |
-| `"unified"`, `"combined"`, `"integrated"`, `"all"`, `"un"`, `"통합"`, `"통합시장"` | `provider_unsupported` |
-| any other value | argument error |
+- `symbol`: Upbit market code such as `KRW-BTC` (required)
+- `market`: must be a crypto alias (`"crypto"`, `"upbit"`); every other market,
+  including the KR/US equity aliases, is rejected because no equity orderbook
+  provider remains
+- `venue`: rejected when non-blank
 
 Behavior:
-- KR requests follow the existing KR quote normalization path, including zero-padding numeric codes such as `5930 -> 005930`
-- KR orderbook data is read-only and comes only from the NH PLUG mock snapshot store for `market="KRX"`; NH PLUG does not provide NXT or unified orderbooks
-- NXT and unified venue requests return an in-band error payload whose error is explicitly `provider_unsupported`; they are never synthesized from KRX data
+- These unsigned public-data calls require no Upbit access or secret key.
 - Crypto orderbook requests require explicit `market="crypto"` (or `"upbit"`) and a raw `KRW-*` symbol such as `KRW-BTC`; plain coins (`BTC`) and non-KRW crypto pairs (`USDT-BTC`) raise an argument error
-- Providing a non-blank `venue` with `market="crypto"` raises an argument error
-- Successful KR responses use `source: "nhplug"`, `instrument_type: "equity_kr"`, `venue: "krx"`, and `venue_label: "KRX"`
-- NH PLUG mock store의 `asOf`는 transport 수신 시각이므로 provider freshness 증거로 사용하거나 합성하지 않으며, KR 응답은 `as_of`와 `price_as_of_source`를 제공하지 않는다
-- Successful crypto responses use `source: "upbit"`, `instrument_type: "crypto"`, and may return non-empty wall arrays
+- Providing a non-blank `venue` raises an argument error
+- Successful responses use `source: "upbit"`, `instrument_type: "crypto"`, and may return non-empty wall arrays
 - Successful responses always include MCP-only derived fields: `pressure`, `pressure_desc`, `spread`, `spread_pct`, `bid_walls`, and `ask_walls`
-- Successful KR responses return `bid_walls: []`, `ask_walls: []`; wall detection remains crypto-only
 - Invalid input raises; upstream failures for otherwise valid requests return an in-band error payload via the shared MCP error contract. When the underlying exception is a `DomainServiceError`, the payload may also include `error_type`
-- `venue` does not affect order routing or trading venue defaults; this is market-data only
 
-Response format (KR equity):
+Response format:
 ```json
 {
-  "symbol": "005930",
-  "instrument_type": "equity_kr",
-  "source": "nhplug",
+  "symbol": "KRW-BTC",
+  "instrument_type": "crypto",
+  "source": "upbit",
   "asks": [{"price": 70100.0, "quantity": 123.0}],
   "bids": [{"price": 70000.0, "quantity": 321.0}],
   "total_ask_qty": 1000.0,
@@ -1157,20 +780,9 @@ Response format (KR equity):
   "spread": 100.0,
   "spread_pct": 0.143,
   "bid_walls": [],
-  "ask_walls": [],
-  "venue": "krx",
-  "venue_label": "KRX",
-  "is_empty_book": false,
-  "requires_final_recheck": false
+  "ask_walls": []
 }
 ```
-
-KR-only diagnostic fields:
-- `venue`: always `"krx"` for a successful NH PLUG response
-- `venue_label`: always `"KRX"` for a successful NH PLUG response
-- `is_empty_book`: `true` when the snapshot is not ready or either side has no levels
-- `requires_final_recheck`: `true` for an empty KR book
-- `empty_reason`: `"empty_nh_orderbook"` when `is_empty_book` is `true`; absent when the book is non-empty
 
 Derived fields:
 - `pressure` is derived from `bid_ask_ratio` using fixed inclusive boundaries:
@@ -1183,22 +795,8 @@ Derived fields:
 - If `bid_ask_ratio` is `null`, both `pressure` and `pressure_desc` are `null`
 - `spread` is `asks[0].price - bids[0].price` when both best levels exist; otherwise it is `null` (integer-valued for KR, fractional-capable for crypto)
 - `spread_pct` is `(spread / bids[0].price) * 100`, rounded to 3 decimal places, and becomes `null` when the best bid is missing or `<= 0`
-- `bid_walls` / `ask_walls` are MCP-only convenience fields. They are calculated only for crypto orderbooks by taking each side's `value_krw = round(price * quantity)`, using the side median as the baseline, selecting levels where `value_krw >= baseline * 2`, sorting by `value_krw` descending, and returning up to 3 entries shaped as `{price, size, value_krw}`
+- `bid_walls` / `ask_walls` are MCP-only convenience fields. They are calculated by taking each side's `value_krw = round(price * quantity)`, using the side median as the baseline, selecting levels where `value_krw >= baseline * 2`, sorting by `value_krw` descending, and returning up to 3 entries shaped as `{price, size, value_krw}`
 
-### Crypto sell orderable validation
-- Crypto `place_order(..., side="sell")` uses **orderable balance only** (`balance` from Upbit `/v1/accounts`), not total holdings (`balance + locked`).
-- `locked` coins are already committed to pending orders and cannot be sold.
-- `quantity=None` (full sell) defaults to the orderable balance.
-- If `quantity > orderable balance`, the tool returns `success: false` with an error containing `requested`, `orderable`, and `locked` values instead of forwarding to Upbit.
-
-### Crypto stop-loss cooldown (Phase 2 strategy)
-- `place_order(..., side="buy", market="crypto")` may reject buys while a stop-loss cooldown is active; returns `success: false` with cooldown message
-- `place_order(..., side="sell", market="crypto")` automatically records an 8-day stop-loss cooldown after a non-dry-run sell when `current_price <= avg_buy_price * (1 - 0.045)` (4.5% stop-loss)
-- Dry-run sells do not record cooldown; profitable sells (above stop-loss threshold) do not record cooldown
-
-### KR order routing
-- Domestic order tools (`place_order`, `modify_order`, `cancel_order` with `market="kr"`) use the new KIS TR IDs (`TTTC0012U/TTTC0011U/TTTC0013U`, mock: `VTTC0012U/VTTC0011U/VTTC0013U`).
-- Domestic order requests (`order-cash`, `order-rvsecncl`) route with `EXCG_ID_DVSN_CD="SOR"`.
 
 ### US symbol/exchange resolution
 - US symbol search and order routing resolve from DB table `us_symbol_universe` only.
@@ -1217,7 +815,6 @@ Derived fields:
 - Runtime does not call Upbit `/v1/market/all`; that endpoint is sync-path only.
 - If `upbit_symbol_universe` is empty/unavailable, tools fail fast with explicit sync hint.
 - If a coin/market lookup is missing or inactive in `upbit_symbol_universe`, MCP tools generally propagate explicit lookup errors (no silent fallback/default ticker).
-- `get_holdings` and `get_position` are exceptions: missing/inactive Upbit holdings coins are silently skipped at collection time, while universe-level fatal states (for example empty/unavailable) still fail fast.
 - `search_symbol` (crypto) uses DB-backed `search_upbit_symbols` only; in-memory map-based search is removed.
 - Upbit prerequisite: run `make sync-upbit-symbol-universe` (or `uv run python scripts/sync_upbit_symbol_universe.py`) right after migrations.
 - Scheduled sync task `symbols.upbit.universe.sync` runs daily at `06:15` KST (`cron: 15 6 * * *`, `cron_offset: Asia/Seoul`).
@@ -1373,8 +970,8 @@ Watch execution context fields:
 
 The legacy Redis-backed `manage_watch_alerts` MCP tool was removed by
 ROB-265 along with the `watch_alerts` / `watch_scanner` Redis surface.
-`review.watch_order_intent_ledger` is not part of that legacy surface: ROB-1109
-restored it as the active audit ledger for the mock-only auto-execution path.
+`review.watch_order_intent_ledger` is retained for historical rows only: its
+writer service was removed with the mock-only auto-execution path.
 Report-scoped watches now flow through
 `investment_report_activate_watch` (which copies an approved watch
 item into `investment_watch_alerts` as an immutable activation
@@ -1839,19 +1436,18 @@ Error response format (unexpected internal failure):
 
 ### `get_cash_balance` spec
 Parameters:
-- `account`: optional operational account filter (`upbit`, `toss`)
+- `account`: optional operational account filter (`toss`, `paper`, or
+  `paper:<name>`). `upbit` and KIS selectors fail closed.
 - `account_mode`: defaults to `toss_live`; `kis_live`/`kis_mock` reject with
   `provider kis is not operational`
 
-Broker-specific contract:
-- **Upbit (`account="upbit"`)**
-  - `balance`: total KRW (`balance + locked`)
-  - `orderable`: orderable KRW (`balance`)
-  - `formatted`: formatted total KRW string
+Supported contracts:
 - **Toss (`account="toss"`)**
   - Returns supported KRW/USD cash and orderable evidence from Toss.
-  - An explicit Toss read failure fails closed rather than returning a KIS or
+  - An explicit Toss read failure fails closed rather than returning a
     synthetic fallback.
+- **PAPER (`account="paper"` or `paper:<name>`)**
+  - Returns cash from the selected DB-backed paper account.
 
 Response shape:
 - `accounts`: per-account cash entries
@@ -1861,35 +1457,39 @@ Response shape:
 
 ### `get_available_capital` spec
 Parameters:
-- `account`: optional operational account filter (`upbit`, `toss`)
+- `account`: optional operational account filter (`toss`, `paper`, or
+  `paper:<name>`)
 - `include_manual`: whether to include owner-scoped manual cash (default: `true`)
 
 Behavior:
-- Aggregates orderable cash only from operational Toss/Upbit sources.
+- Aggregates orderable cash from operational Toss or DB-backed PAPER accounts.
 - Converts supported USD orderable amounts to KRW equivalents using the current
   exchange rate.
 - Marks manual cash as stale when older than 3 days.
-- KIS account selectors are non-operational and never trigger provider I/O.
+- Upbit and KIS account selectors are non-operational and never trigger
+  provider I/O.
 
 ### `get_holdings` spec
 Parameters:
-- `account`: optional operational account filter (`upbit`, `toss`,
-  `samsung_pension`, `isa`)
+- `account`: optional persisted account filter (`upbit`, `toss`,
+  `samsung_pension`, `isa`, `paper`, or `paper:<name>`)
 - `market`: optional market filter (`kr`, `us`, `crypto`)
 - `include_current_price`: if `True`, resolves supported current prices and PnL
 - `minimum_value`: optional numeric threshold; when omitted, KRW/crypto uses
   5000 and USD uses 10
 
 Filtering rules:
-- Toss is the KR/US equity account source; Upbit is the crypto source.
-- `account_mode="kis_live"` and `"kis_mock"` are historical selectors only and
-  fail closed for operational holdings collection.
+- Toss is the KR/US live account source. Persisted Upbit-provenance holdings
+  remain readable, but no private Upbit account provider or order routing is
+  available. KIS selectors remain historical and fail closed for operational
+  holdings collection.
 - If `include_current_price=False`, `minimum_value` filtering is skipped.
 - Current equity prices use the Toss market-data boundary. Provider failure is
   explicit and no KIS/Yahoo value is synthesized as Toss evidence.
 - Manual holdings remain owner-scoped and do not acquire broker sellability.
-- Upbit crypto current prices are fetched via batch ticker request (`/v1/ticker?markets=...`)
-- During Upbit holdings collection, coins that raise `UpbitSymbolNotRegisteredError` or `UpbitSymbolInactiveError` on name lookup are silently skipped (not added to `errors`).
+- Persisted crypto holdings may refresh prices through the unsigned public
+  Upbit batch ticker endpoint (`/v1/ticker?markets=...`); no credential is used.
+- During persisted crypto holdings name resolution, coins that raise `UpbitSymbolNotRegisteredError` or `UpbitSymbolInactiveError` are silently skipped (not added to `errors`).
 - Before batch ticker request, tradable markets are loaded from `upbit_symbol_universe` and only valid holdings symbols are included in the batch
 - Non-tradable symbols (delisted/unsupported) are excluded from ticker request and treated as 0 value for `minimum_value` filtering (counted in `filtered_count`)
 - Value is primarily based on `evaluation_amount`
@@ -1907,8 +1507,8 @@ Response contract additions:
   reading as current.
 - `filters.minimum_value`: when `minimum_value=None` in the request, this field contains the per-currency threshold dict that was applied
 - When `TOSS_API_ENABLED=true`, Toss Open API holdings are emitted with `broker="toss"`, `source="toss_api"`. `order_routable` (and `get_cash_balance` `orderable`, `/invest` home `isTradeable`) remain gated on `TOSS_LIVE_ORDER_MUTATIONS_ENABLED` (ROB-549). General holdings/home/briefing reads omit `sellable_quantity` or return `sellableQuantity=null`; `need_sellable=false` paths skip Toss sellable reads entirely, and they never fan out to Toss `/api/v1/sellable-quantity`. Toss live order tools revalidate sellability directly at the broker immediately before a live sell mutation. Every live sell placement requires an explicit, finite, positive `quantity`: an orderAmount-only live sell is rejected with `error_code="sell_quantity_required"` before any broker mutation, because Toss's orderAmount shape carries no broker-authoritative quantity and one is never synthesized from holdings, snapshots, or sellable caches. Successful live sell place/modify responses publish the authorizing evidence as `fresh_sellable_quantity` and `sellable_quantity_source="toss_broker_preflight"`.
-- The composed Upbit/manual/Toss portfolio read model used by general holdings, home, briefing, and calendar held-key reads uses a short-lived process-shared Redis snapshot with a Redis distributed singleflight (ROB-1310). A live owner renews its lock lease; corrupt entries re-enter the same singleflight recovery path, while Redis outages/owner death retain bounded direct read-only recovery and never fabricate sellable data. Calendar held-key reads never fall back to full live readers: a cold/invalid snapshot returns an explicit `portfolio_snapshot_unavailable` 503 with availability metadata.
-- The Home-to-MCP snapshot projection preserves the MCP contract: Upbit/Toss/manual account IDs use canonical groups, crypto symbols use the `KRW-` market prefix, US P/L remains in native currency, and Home ratio fields are exposed as percentage points. Snapshot serialization excludes sellable and pending-sell quantities.
+- The composed persisted-Upbit/manual/Toss portfolio read model used by general holdings, home, briefing, and calendar held-key reads uses a short-lived process-shared Redis snapshot with a Redis distributed singleflight (ROB-1310). A live owner renews its lock lease; corrupt entries re-enter the same singleflight recovery path, while Redis outages/owner death retain bounded direct read-only recovery and never fabricate sellable data. Calendar held-key reads never fall back to full live readers: a cold/invalid snapshot returns an explicit `portfolio_snapshot_unavailable` 503 with availability metadata.
+- The Home-to-MCP snapshot projection preserves the read contract: persisted Upbit/Toss/manual account IDs use canonical groups, crypto symbols use the `KRW-` market prefix, US P/L remains in native currency, and Home ratio fields are exposed as percentage points. Snapshot serialization excludes sellable and pending-sell quantities.
 - When Toss API holdings succeed, duplicate Toss `manual_holdings` rows for the same market/symbol are hidden from normal output.
 - When Toss API holdings fail, existing Toss `manual_holdings` rows remain visible as fallback and the response includes a partial `source="toss_api"` error.
 
@@ -1920,7 +1520,7 @@ Market routing:
 ### `get_portfolio_allocation` spec
 
 Parameters:
-- `account`: optional account filter matching `get_holdings` and `get_cash_balance` (`upbit`, `toss`, `samsung_pension`, `isa`, `paper`, `paper:<name>`)
+- `account`: optional persisted account filter matching `get_holdings` and `get_cash_balance` (`upbit`, `toss`, `samsung_pension`, `isa`, `paper`, `paper:<name>`)
 - `market`: optional holdings market filter (`kr`, `us`, `crypto`); cash is still included when `include_cash=true` unless `account` excludes the cash account
 - `include_cash`: include cash balances in the allocation denominator, default `true`
 - `include_positions`: include per-position normalized rows, default `false`
@@ -1931,7 +1531,8 @@ Parameters:
 Behavior:
 - Read-only only. The tool performs no order preview, order placement, mutation, reconciliation, or live approval action.
 - Converts USD holdings and USD cash to KRW using the same exchange-rate service used by portfolio cash tools.
-- Aggregates direct US equity as `us_equity`, KR equity as `kr_equity`, Upbit holdings as `crypto`, and cash as `cash`.
+- Aggregates direct US equity as `us_equity`, KR equity as `kr_equity`,
+  persisted Upbit-provenance holdings as `crypto`, and cash as `cash`.
 - Looks through KR-listed ETFs when KRX ETF metadata is available. KR ETFs classified as `미국주식` by `app.services.krx.classify_etf_category()` are counted as effective `us_equity`, while their surface account remains KR/Toss.
 - Non-US foreign, commodity, bond, and unclear ETF categories are counted as `other` rather than Korean equity.
 - If KRX ETF metadata lookup fails, the tool records a degraded `krx_etf` error and keeps KR ETF positions in their surface `kr_equity` bucket.
@@ -2035,24 +1636,14 @@ explicit mutation taxonomy or CI fails.
   `blocked_actions_basis="static_fail_closed"`. It never substitutes
   `ALL_KNOWN_TOOLS`.
 
-**Account cleanup exception (ROB-1209):** only
-`route_request(intent="profit_taking", market="us"|"crypto",
-purpose="account_cleanup")` has a separate maintenance sequence:
-`alpaca_paper_list_positions` → `alpaca_paper_list_orders` →
-`alpaca_paper_execution_preflight_check` → `alpaca_paper_submit_order`. It
-allows exactly that Alpaca submit tool and keeps every other direct broker
-mutation in `blocked_actions`. If any required read/preflight/submit tool is
-absent, the route fails closed and does not expose submit as an allowed or
-sequenced shortcut. A buy intent with this purpose returns
-`purpose_not_supported_for_intent`. This remains advisory: the actual submit
-continues to require its trusted quote, live position/reservation checks, and
-`confirm=True`; the preflight itself must receive the exact bounded sell to
-recognize it as reduce-only.
+Any non-blank `purpose` is rejected with `success=false` and
+`error="unknown_purpose"`. No `account_cleanup` route or separate maintenance
+submit sequence exists.
 
-**Discovery non-regression:** discovery is outside ROB-1045 and retains its
-existing `toss_place_order` step and ROB-658 crypto/US generic `place_order`
-injection. Aligning discovery with proposal-led approval requires a separate
-issue. Bootstrap remains read-only.
+**Discovery non-regression:** discovery remains outside ROB-1045 and may retain
+registered generic/Toss order steps. Route inclusion does not widen provider
+admission: crypto execution still fails closed at the order tool boundary, and
+bootstrap remains read-only.
 
 
 ### User Settings Tools
@@ -2271,13 +1862,6 @@ Environment variables:
 - `MCP_USER_ID` : `1` (manual holdings 조회에 사용할 기본 사용자 ID)
 - `MCP_CALLER_AGENT_ID` : DEV/stdio only — MUST NOT be set in production HTTP deployments (re-opens caller spoofing vector)
 
-For `streamable-http` and `sse`, startup fails before FastMCP construction when
-`MCP_PROFILE=kiwoom` or `MCP_PROFILE=kiwoom_kr` has no non-empty
-`MCP_AUTH_TOKEN`. The same fail-closed
-rule applies to the default profile when `KIWOOM_MOCK_US_ENABLED=true` exposes
-the Kiwoom US mutation tools. An explicitly selected local `stdio` development
-transport may remain tokenless; changing that process to a network transport
-re-runs the auth check and cannot bypass this boundary.
 
 Example:
 ```bash
@@ -2296,68 +1880,14 @@ The `MCP_PROFILE` env var selects which tool subset is registered at startup.
 
 | Profile | Value | Order surface |
 |---|---|---|
-| Default | `default` (or unset) | Toss KR/US equity and Upbit crypto surfaces; typed `kis_live_*`/`kis_mock_*` tools are absent. Typed `kiwoom_mock_*` remains controlled by its existing gate. |
-| Crypto | `crypto` | Read-only/research plus Upbit crypto order/history/reconcile tools; no equity or KIS order surface. |
-| US paper | `us-paper` | Read-only/research plus Alpaca paper tools; no live equity order surface. |
-| DB paper simulator | `db-paper` | Read-only/research plus internal `paper.paper_*` simulator, analytics, and journal bridge tools. |
-| Kiwoom mock | `kiwoom` | Read-only/research plus both typed Kiwoom mock namespaces. Prefer `kiwoom_kr` for a KR-only session. |
-| Kiwoom mock KR-only | `kiwoom_kr` | Read-only/research plus exactly the eight KR `kiwoom_mock_*` tools; US and KIS namespaces are absent. |
-| Analysis readonly | `analysis_readonly` | Codex/headless read/analysis allowlist only; no order, preview, reconcile, or KIS provider tool. |
-| Account read | `account_read` | TradingCodex account adapter allowlist for Toss plus separately gated Kiwoom mock reads; no KIS provider read. |
-| TradingCodex execution | `tradingcodex_execution` | Reviewed Toss/Upbit execution and gated Kiwoom mock allowlist. Requires dedicated auth and approval-hash modes; no KIS tools. |
-| Canonical paper execution | `paper_execution` | ROB-845 façade + ROB-848 validation + ROB-849 operator kill switch. Default-off and auth-required; no generic, venue-native, or live tools. |
-
-Generic `live_reconcile_orders` is the Upbit crypto evidence-first settlement
-tool. US/KIS inputs fail closed. For Upbit, `none` returns
-`noop_no_evidence` with `requires_manual_review=true` and leaves the ledger open.
-Only explicit broker cancellation evidence returns `cancelled`; its dry-run
-action is `would_mark_cancelled`, while an applied reconcile reports
-`marked_cancelled`.
-
-### Profile: `paper_execution` (ROB-845)
-
-This isolated profile is the canonical experiment-to-paper-broker boundary. It
-must be enabled explicitly with all of:
-
-- `MCP_PROFILE=paper_execution`
-- `PAPER_EXECUTION_ENABLED=true`
-- a non-empty `MCP_AUTH_TOKEN`
-
-The process fails before FastMCP registration when either the feature flag or
-authentication is missing. A direct registry call with the feature flag off
-registers zero tools.
-
-Exact tool allowlist:
-
-- `paper_execution_get_capabilities`
-- `paper_execution_preview_order`
-- `paper_execution_submit_order`
-- `paper_execution_cancel_order`
-- `paper_execution_get_order`
-- `paper_execution_reconcile`
-- `paper_cohort_kill_switch` (server-bound operator/system identity only)
-
-The request DTO contains the claimed experiment/run/cohort/strategy identity,
-canonical snapshot evidence, and order intent. It does not accept caller-owned
-`origin`, `idempotency_key`, broker `client_order_id`, or native order ID. Those
-identities are derived and verified server-side.
-
-V1 capability scope is deliberately narrow:
-
-- Binance Spot Demo: `BTCUSDT`/`ETHUSDT`, BUY MARKET, notional sizing; the
-  guarded native executor performs one open/close round trip. External cancel
-  and reconcile are unsupported.
-- Alpaca Crypto Paper: `BTC/USD`/`ETH/USD`, BUY/SELL LIMIT, quantity sizing,
-  GTC/IOC, through the approval-packet/coordinator boundary.
-
-No KIS, Kiwoom, Toss, Upbit, live broker, legacy order, or venue-native mutation
-tool is registered. Broker-native ledgers remain the lifecycle/fill/P&L source;
-the façade adds no common order ledger or migration.
-
-ROB-849 will provide the concrete immutable cohort/snapshot provenance verifier.
-Until that composition is installed, capability reads work but every experiment
-operation fails closed with `provenance_verifier_unavailable` before adapter,
-native-ledger, client, or broker activity.
+| Default | `default` (or unset) | Toss KR/US equity orders plus all side-effect-free research and read-only portfolio tools. Non-equity markets are rejected because PAPER and Toss are the only operational providers. |
+| Crypto | `crypto` | Default research/read-only surface plus the generic order tools. Crypto *execution* is registered on no profile — no crypto broker is operational. |
+| DB paper simulator | `db-paper` | Default research/read-only surface plus the internal DB paper simulator tools. |
+| Shadow replay | `shadow-replay` | Frozen-context replay only: exactly `investment_report_get_hermes_context`, `get_trading_policy`, and `route_request`. No live-fetch, mutation, or order tool. |
+| Analysis readonly | `analysis_readonly` | Codex/headless read/analysis allowlist only; no order, preview, reconcile, settings, or watch-mutation tool. |
+| Account read | `account_read` | TradingCodex account-read allowlist: holdings, cash, and read-only order history only. |
+| TradingCodex execution | `tradingcodex_execution` | Reviewed Toss/PAPER execution allowlist. Requires dedicated auth and approval-hash modes. |
+| Watch repricing | `watch_repricing` | Proposal-only allowlist: a spawned repricing session can create a proposal and can reach no broker order tool. |
 
 
 ### Profile: `analysis_readonly` (ROB-745)
@@ -2390,9 +1920,6 @@ Allowed tools:
 
 Forbidden by physical non-registration:
 - order placement, cancel, modify, history, reconcile, and preview tools
-- KIS live/mock order variants
-- Kiwoom order variants
-- Alpaca/DB paper order surfaces
 - Toss place/modify/cancel/history/orderable-cash/reconcile/preview
 - manual holdings mutation
 - user settings tools
@@ -2429,15 +1956,9 @@ Allowed tools:
 - `toss_get_orderable_cash`
 - `get_order_history`
 - `toss_get_order_history`
-- `kiwoom_mock_get_positions`
-- `kiwoom_mock_get_orderable_cash`
-- `kiwoom_mock_get_order_history`
 
 Forbidden by physical non-registration:
 - order placement, cancel, modify, preview, and reconcile tools
-- KIS mock order variants
-- Kiwoom mock preview/place/cancel/modify variants
-- Alpaca/DB paper order surfaces
 - manual holdings mutation
 - user settings tools
 - watch/admin/report-writing surfaces
@@ -2467,9 +1988,6 @@ Allowed read/advisory tools:
 - `toss_get_orderable_cash`
 - `get_order_history`
 - `toss_get_order_history`
-- `kiwoom_mock_get_positions`
-- `kiwoom_mock_get_orderable_cash`
-- `kiwoom_mock_get_order_history`
 - `get_fx_rate`
 - `route_request`
 - `get_trading_policy`
@@ -2487,103 +2005,9 @@ Allowed write/order tools:
 - `toss_cancel_order`
 - `sell_ladder_fill_preview`
 - `buy_ladder_fill_preview`
-- `kiwoom_mock_preview_order`
-- `kiwoom_mock_place_order`
-- `kiwoom_mock_cancel_order`
-- `kiwoom_mock_modify_order`
 - `forecast_save`
 - `save_trade_retrospective`
 - `investment_watch_create`
-
-Kiwoom safety boundaries are unchanged on both restricted profiles:
-
-- `KIWOOM_MOCK_ENABLED` remains default-off. While disabled, the typed tools
-  fail closed and name the missing configuration keys without returning values.
-- If Kiwoom mock is enabled, restricted-profile startup requires all mock
-  credentials and the exact `https://mockapi.kiwoom.com` base URL.
-- Kiwoom mock tools remain KRX-only. A broker mutation still requires both
-  `dry_run=false` and `confirm=true`.
-- Caller-supplied Kiwoom symbols are canonicalized after trimming and must be
-  exactly six ASCII digits (for example, `005930`). Provider evidence may use
-  the documented `A`/`J`/`Q` prefix, which read normalization removes; callers
-  cannot use those provider-only aliases for mutations.
-- No `kiwoom_live_*`, generic `kiwoom_*`, or live-host routing is registered.
-
-#### Kiwoom mock order preflight (ROB-893)
-
-`kiwoom_mock_preview_order` and `kiwoom_mock_place_order` share the same
-fail-closed preflight. A confirmed place builds **one** request-scoped
-`KiwoomMockClient` and reuses it across the **single** preflight (run
-immediately before the broker POST) and the POST itself, so preflight and
-dispatch share one auth client and mint at most one cold-cache token. Preview
-and dry-run paths run the preflight once and never call the order mutation
-client.
-
-The preflight requires a fresh KR quote, a KRX-valid `get_tick_size_kr` price,
-and an order price within 30% of the quote (the 30% boundary is inclusive).
-Sell orders use the kt00018 `rmnd_qty` position evidence; buys use the kt00010
-`ord_alowa` result for the requested symbol, side, and price. Account evidence
-is accepted only with canonical broker success (`0` or `"0"`); missing,
-malformed, boolean, floating-point, or nonzero return codes fail closed.
-
-Responses expose `preflight_checks`, `estimated_evidence`, and
-`preflight_warnings`. No reviewed Kiwoom cost profile is configured, so fee and
-tax are explicitly `null` with `status="unavailable"` and
-`review_required=true`; the preflight never invents a rate. Sell P&L based on
-the candidate order price is labelled `estimated_gross_pnl`, while net P&L is
-also unavailable. Successful preflights surface `estimated_costs_unavailable`;
-a gross-before-cost loss additionally emits `estimated_loss_sell` without
-universally blocking the sell. Broker payloads remain recursively redacted.
-
-A failure that provably occurs before HTTP dispatch (token resolution,
-pre-dispatch hook, request build, or host validation) raises a structured
-`KiwoomPreDispatchError` carrying redacted fields only — `stage`, `api_id`
-(the TR code), and `cause_type` (the exception class name); the chained
-`__cause__` is retained for internal tracebacks only and never surfaces in the
-response. Both the preflight account-evidence read and the order POST propagate
-this error, and the confirmed-place / preview responses render it as
-`status="not_submitted"`, `dispatch_started=false`, and
-`reconcile_required=false` (the request provably never reached the broker, so
-no order HTTP dispatch occurs and no reconciliation is needed). A generic
-post-dispatch failure (the request may already have been transmitted) is the
-distinct `status="acceptance_uncertain"`, `reconcile_required=true`,
-`retry_allowed=false` outcome.
-
-#### Kiwoom mock stable read envelopes (ROB-824)
-
-`kiwoom_mock_get_positions` adds a normalized `positions` list whose rows have
-exactly `symbol`, `quantity`, `average_price`, and `currency`. The source is the
-official kt00018 `acnt_evlt_remn_indv_tot` array; KR symbols such as `A005930`
-are returned as `005930`, numeric fields are JSON integers, and currency is
-`KRW`.
-
-`kiwoom_mock_get_order_history` adds a normalized `orders` list whose rows have
-exactly `order_id`, `symbol`, `status`, `ordered_price`, `filled_quantity`,
-`average_price`, and `remaining_quantity`. The source is the official kt00009
-`acnt_ord_cntr_prst_array` array. Status is normalized to `open`,
-`partially_filled`, `filled`, or `cancelled` from the broker cancellation marker
-and ordered/filled quantities. `ord_no` must be an all-digit broker string;
-length is not fixed because the official seven-digit contract and existing
-ten-digit broker fixtures both occur in this repository.
-
-All three account reads add fixed `provenance` for broker `kiwoom`, environment
-`mock`, account mode `kiwoom_mock`, host `mockapi.kiwoom.com`, and their expected
-API ID. Cash uses kt00010 when `symbol` is provided and kt00001 otherwise, and
-validates raw provenance before deriving broker success or returning cash.
-Only a canonical integer `0` or exact string `"0"` broker return code is
-successful. Missing, malformed, boolean, or floating-point return codes fail
-closed. Successful broker evidence without a parseable non-negative cash field
-also fails closed with `cash=null` and a stable `*_unavailable` source.
-
-The responses retain the broker payload as `broker_response`. Recursive
-redaction covers authorization/token/cookie/credential/password/approval,
-API/app key and secret, and account-identifier key aliases across case and
-separator variations. Top-level passthrough fields are copied only from this
-redacted payload. Missing/malformed fields or explicit non-mock provenance
-changes the response to `success=false`; cash becomes `null`, and positions or
-orders become `[]`. Config, transport, broker, provenance, and normalization
-failures use stable `kiwoom_mock_*` error codes while retaining canonical mock
-provenance.
 
 Write provenance requirements:
 - pass `created_by="tradingcodex"` to `forecast_save`
@@ -2593,9 +2017,6 @@ Write provenance requirements:
 
 Forbidden by physical non-registration:
 - modify and reconcile tools
-- KIS mock order variants
-- Kiwoom live/general unscoped order variants
-- Alpaca/DB paper order surfaces
 - manual holdings mutation
 - user settings tools
 - analysis artifact and session context persistence
@@ -2641,136 +2062,7 @@ and the ROB-1041/1042/1043 split.
 No deployed MCP profile registers `kis_live_*`, `kis_mock_*`, KIS reconcile, or
 KIS mirror tools. `account_mode="kis_live"` and `"kis_mock"` are retained only
 where historical ledger rows require their original provenance; operational
-dispatch fails closed and never falls back to Toss. Dormant transport adapters
-may remain importable for historical compatibility, but operators must not
-configure or activate them in production.
+dispatch fails closed and never falls back to Toss. The provider transport,
+client, and service modules were removed; only the ledger models and their
+historical `account_mode` values remain.
 
-### Binance Demo scalping auto-order lane (removed, ROB-1147)
-
-The LLM decision-injection MCP tool (registered only when
-`settings.binance_demo_scalping_enabled` is true, ROB-841) and the
-scheduler tick / WS daemon / daily review automation it shared a feature
-flag with were removed. The read-only
-`binance_demo_ledger_status` tool (ROB-907) is unaffected and remains
-registered under the same `settings.binance_demo_scalping_enabled` flag. The
-underlying `DemoScalpingExecutor` (and its `demo_scalping`/`demo_scalping_exec`
-support modules) were kept — they are reused directly by the ROB-845
-`BinanceSpotDemoPaperAdapter` in the production paper-execution registry.
-
-### Kiwoom mock US-equity order tools (ROB-867)
-
-Seven typed MCP tools for the dedicated `kiwoom_mock_us` account mode. These are
-**US-only** (NASDAQ/NYSE/AMEX) and completely independent from the KR
-`kiwoom_mock` namespace — separate app key, app secret, and account number. The
-US namespace never reads or falls back to `KIWOOM_MOCK_APP_KEY` /
-`KIWOOM_MOCK_APP_SECRET` / `KIWOOM_MOCK_ACCOUNT_NO`.
-
-Tool names (all under `account_mode="kiwoom_mock_us"`):
-
-- `kiwoom_mock_us_preview_order` — DB-resolved request body + requested-notional preview (no broker POST)
-- `kiwoom_mock_us_place_order` — submit buy/sell limit or market order (`dry_run` default)
-- `kiwoom_mock_us_cancel_order` — cancel by order id
-- `kiwoom_mock_us_modify_order` — modify original order number + new price
-- `kiwoom_mock_us_get_order_history(scope="open"|"today")` — open (default) or today's orders/fills
-- `kiwoom_mock_us_get_positions` — US positions (`ust21070`)
-- `kiwoom_mock_us_get_orderable_cash` — USD deposit detail (`ust21160`)
-
-Every mutation defaults to `dry_run=true`. Broker I/O requires both
-`dry_run=false` and `confirm=true`. Mock host is fixed to
-`https://mockapi.kiwoom.com` (transport-layer fail-closed); the live host cannot
-be selected.
-
-A confirmed place or modify is `status="submitted"` only when the broker
-response has a strict success code (`return_code` is integer `0` or string
-`"0"`) and a single non-conflicting canonical 1-18 digit order ID across the
-documented ID fields. Missing, invalid, or conflicting ID evidence returns
-`success=false`, `status="accepted_untracked"`,
-`reconcile_required=true`, and `retry_allowed=false`, while retaining redacted
-broker evidence. Callers must reconcile broker history and must not retry the
-tracked mutation automatically. A well-formed, non-zero broker code is the distinct
-`status="rejected"` case. Missing or malformed acceptance evidence returns
-`status="acceptance_uncertain"`, `reconcile_required=true`, and
-`retry_allowed=false`; it must not be treated as an explicit rejection or
-retried automatically. An uncertain modify may have created an unknown
-replacement ID, so smoke cleanup remains failed until an operator reconciles
-broker history. Client/configuration, OAuth, or other failure proven to occur
-before HTTP dispatch is the distinct `status="not_submitted"`,
-`reconcile_required=false` outcome. Trusted
-local validation failures retain actionable messages; provider exception text
-is withheld. Read and cancel response shaping is otherwise unchanged. All seven tools
-registered in one MCP process share one mock-host-pinned client and its locked
-OAuth token cache; bounded pagination and cleanup polling therefore do not
-issue a token request per page. That shared client enforces Kiwoom's stricter
-mock-account limit of one dispatch per `api-id` per second while allowing
-different TRs to proceed independently. The limiter is process-local; operators
-must not run another MCP or smoke process against the same mock US account.
-
-#### Exchange mapping
-
-MCP resolves active symbols through `us_symbol_universe` before any network call
-and maps the universe exchange to the Kiwoom `stex_tp` code:
-
-| Universe exchange | Kiwoom `stex_tp` |
-|---|---|
-| `NASDAQ` or `NASD` | `ND` |
-| `NYSE` | `NY` |
-| `AMEX` | `NA` |
-
-Missing, inactive, or unsupported exchanges fail closed. The DB-standard dot
-symbol is passed to Kiwoom unchanged initially. Class-share symbols such as
-`BRK.B` are marked **unverified** in the runbook until smoke evidence exists.
-
-#### trde_tp allowlist (order types)
-
-MCP exposes only the initial consumer-required order types. Broker support is
-recorded separately by the smoke runbook; documentation alone is not proof.
-All other codes are rejected **before symbol lookup, client construction, or
-network I/O** with a stable envelope:
-
-| MCP order type | `trde_tp` | Price rule |
-|---|---:|---|
-| `limit` | `00` | Positive price required; USD decimal string |
-| `market` | `03` | Price omitted; sent as empty string |
-
-Unsupported-code rejection:
-```json
-{
-  "success": false,
-  "error_code": "unsupported_trde_tp",
-  "rejected_trde_tp": "<code>",
-  "supported_trde_tp": ["00", "03"]
-}
-```
-
-Known mock capability refusal (`return_code=20` + `RC9000`) is classified as
-`error_code="capability_unsupported"` and never converted to success.
-
-#### Deposit cash semantics
-
-`kiwoom_mock_us_get_orderable_cash` does **not** call the documented
-`ust31490` orderable-quantity TR, which returned `RC9000` (mock-unsupported) on
-the 2026-07-13 read-only smoke. Instead it parses `ust21160.d0_usd_fx_entr` as a
-decimal USD deposit and returns:
-
-- `cash`: normalized decimal value, or `null` when parsing is not proven
-- `currency="USD"`
-- `cash_source="ust21160.d0_usd_fx_entr"` or an explicit `*_unparsed` source
-- `cash_semantics="deposit_not_broker_orderable"`
-- `orderable_quantity_supported=false`
-
-Preview calculates only the requested notional. It does not synthesize margin,
-orderable quantity, or a success claim based on the deposit value.
-
-#### KR `kiwoom_mock` vs US `kiwoom_mock_us`
-
-| | KR (`kiwoom_mock`) | US (`kiwoom_mock_us`) |
-|---|---|---|
-| Market | KRX only | NASDAQ/NYSE/AMEX |
-| Credentials | `KIWOOM_MOCK_*` | `KIWOOM_MOCK_US_*` (no fallback) |
-| Account mode | `kiwoom_mock` | `kiwoom_mock_us` |
-| Tick | KRX price-banded table | decimal USD (no tick table) |
-| Order history TR | `kt00009`/`kt00007` | `ust21050`/`ust21510` |
-| Orderable cash | `kt00010`/`kt00001` | `ust21160` deposit (ust31490 unsupported) |
-
-Operator smoke runbook: [`docs/runbooks/kiwoom-mock-us-smoke.md`](../../docs/runbooks/kiwoom-mock-us-smoke.md)
-Smoke CLI: `scripts/kiwoom_mock_us_smoke.py` (preflight / preview / full / probe modes)

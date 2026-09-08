@@ -137,11 +137,9 @@ def test_the_profile_cannot_reach_any_submit_or_approve_tool() -> None:
         "order_proposal_redispatch",
         "order_proposal_void",
         "place_order",
-        "kis_live_place_order",
         "toss_place_order",
         "upbit_place_order",
         "live_reconcile_orders",
-        "kis_live_reconcile_orders",
     ):
         assert beyond not in PROPOSAL_ONLY_TOOLS
 
@@ -159,21 +157,3 @@ def test_loss_cut_stays_human_approved() -> None:
     assert "loss_cut" in auto_approve
     package = REPO_ROOT / "app" / "services" / "watch_trigger_repricing"
     assert all("loss_cut" not in p.read_text() for p in package.glob("*.py"))
-
-
-# ---------------------------------------------------------------------------
-# The honest gap
-# ---------------------------------------------------------------------------
-def test_no_launcher_in_this_repo_can_start_the_profile() -> None:
-    """Recorded as a gap, not hidden.
-
-    ``scripts/mock_session_mcp.py`` is the repo's only session launcher seam,
-    and its ``SAFE_MOCK_PROFILES`` allowlist does not contain
-    ``watch_repricing``. So nothing in this repo can start a live repricing
-    session today -- which is consistent with there being no live spawner --
-    and wiring one is a separate, reviewable change to that allowlist rather
-    than something this PR quietly enabled.
-    """
-    from scripts.mock_session_mcp import SAFE_MOCK_PROFILES
-
-    assert "watch_repricing" not in SAFE_MOCK_PROFILES

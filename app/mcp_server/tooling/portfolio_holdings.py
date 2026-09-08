@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -118,11 +117,8 @@ from app.services.toss_portfolio_service import (
 )
 from app.services.toss_sellable_cache import get_shared_sellable_cache
 from app.services.upbit_symbol_universe_service import (
-    UpbitSymbolInactiveError,
-    UpbitSymbolNotRegisteredError,
     UpbitSymbolUniverseLookupError,
     get_active_upbit_markets,
-    get_upbit_korean_name_by_coin,
 )
 
 if TYPE_CHECKING:
@@ -322,66 +318,6 @@ async def _compute_crypto_signals_for_position(
     voting = voting_evaluator.evaluate(df)
 
     return rsi, voting
-
-
-async def _collect_upbit_positions(
-    market_filter: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if market_filter not in (None, "crypto"):
-        return [], []
-
-    positions: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-
-    try:
-        coins = await upbit_service.fetch_my_coins()
-        for coin in coins:
-            currency = str(coin.get("currency", "")).upper().strip()
-            if not currency or currency == "KRW":
-                continue
-
-            quantity = _to_float(coin.get("balance")) + _to_float(coin.get("locked"))
-            if quantity <= 0:
-                continue
-
-            unit_currency = str(coin.get("unit_currency", "KRW")).upper().strip()
-            quote_currency = unit_currency or "KRW"
-            symbol = _normalize_position_symbol(
-                f"{quote_currency}-{currency}",
-                "crypto",
-            )
-            try:
-                korean_name = await get_upbit_korean_name_by_coin(
-                    currency,
-                    quote_currency=quote_currency,
-                )
-            except (UpbitSymbolNotRegisteredError, UpbitSymbolInactiveError):
-                continue
-
-            positions.append(
-                {
-                    "account": "upbit",
-                    "account_name": "기본 계좌",
-                    "broker": "upbit",
-                    "source": "upbit_api",
-                    "instrument_type": "crypto",
-                    "market": "crypto",
-                    "symbol": symbol,
-                    "name": korean_name,
-                    "quantity": quantity,
-                    "avg_buy_price": _to_float(coin.get("avg_buy_price")),
-                    "current_price": None,
-                    "evaluation_amount": None,
-                    "profit_loss": None,
-                    "profit_rate": None,
-                }
-            )
-    except UpbitSymbolUniverseLookupError:
-        raise
-    except Exception as exc:
-        errors.append({"source": "upbit", "market": "crypto", "error": str(exc)})
-
-    return positions, errors
 
 
 async def _collect_manual_positions(
@@ -905,26 +841,12 @@ async def _collect_portfolio_positions(
         whole_snapshot_used = True
 
     if not whole_snapshot_used:
-        tasks: list[Any] = []
-        if market_filter in (None, "crypto"):
-            tasks.append(_collect_upbit_positions(market_filter))
-        tasks.append(
-            _collect_manual_positions(user_id=user_id, market_filter=market_filter)
+        manual_positions, manual_errors = await _collect_manual_positions(
+            user_id=user_id,
+            market_filter=market_filter,
         )
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException):
-                if isinstance(result, UpbitSymbolUniverseLookupError):
-                    raise result
-                errors.append({"source": "holdings", "error": str(result)})
-                continue
-            source_positions, source_errors = cast(
-                tuple[list[dict[str, Any]], list[dict[str, Any]]],
-                result,
-            )
-            positions.extend(source_positions)
-            errors.extend(source_errors)
+        positions.extend(manual_positions)
+        errors.extend(manual_errors)
 
     toss_api_positions: list[dict[str, Any]] = []
     toss_api_succeeded = False

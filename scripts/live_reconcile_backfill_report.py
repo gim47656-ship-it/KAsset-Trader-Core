@@ -23,7 +23,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
+from app.core.db import AsyncSessionLocal
 from app.models.review import KISLiveOrderLedger, LiveOrderLedger
 from app.services.live_reconcile_metrics import OPEN_STATUSES, _row_timestamp
 
@@ -42,7 +42,7 @@ async def generate_backfill_report(market_filter: str = "all") -> dict[str, Any]
     now_ref = datetime.now(UTC)
     items: list[dict[str, Any]] = []
 
-    async with _order_session_factory()() as db:
+    async with AsyncSessionLocal() as db:
         if market_filter in ("all", "us", "crypto"):
             stmt = select(LiveOrderLedger).where(
                 LiveOrderLedger.reconciled_at.is_(None),

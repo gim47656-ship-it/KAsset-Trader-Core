@@ -49,9 +49,7 @@ services:
         GITHUB_SHA: ${VCS_REF:-unknown}
     env_file:
       - *kasset-runtime-env-file
-      - .env.nhplug-mock.native
     volumes:
-      - /opt/kasset-nhplug:/home/appuser/.nhplug
       - /usr/local/bin/codex:/usr/local/bin/codex:ro
       - /usr/local/bin/codex-code-mode-host:/usr/local/bin/codex-code-mode-host:ro
       - /opt/kasset-codex:/var/lib/kasset-codex
@@ -167,7 +165,6 @@ services:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - *kasset-runtime-env-file
-      - .env.nhplug-mock.native
     command: ["/app/.venv/bin/taskiq", "worker", "app.core.taskiq_broker:broker", "app.tasks.kasset_market_events_tasks", "app.tasks.news_summary_tasks", "app.tasks.toss_minute_candles_tasks", "app.tasks.truth_social_tasks", "--workers", "1"]
     depends_on:
       db:
@@ -184,7 +181,6 @@ services:
     image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
     env_file:
       - *kasset-runtime-env-file
-      - .env.nhplug-mock.native
     command: ["/app/.venv/bin/taskiq", "scheduler", "app.core.scheduler:sched", "app.tasks.kasset_market_events_tasks", "app.tasks.news_summary_tasks", "app.tasks.toss_minute_candles_tasks", "app.tasks.truth_social_tasks"]
     depends_on:
       redis:

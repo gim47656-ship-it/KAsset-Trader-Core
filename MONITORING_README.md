@@ -41,17 +41,13 @@ uv run celery -A app.core.celery_app.celery_app worker --loglevel=info
 
 # MCP
 uv run python -m app.mcp_server.main
-
-# 실행 체결 WebSocket은 Upbit 전용
-uv run python websocket_monitor.py --mode upbit
 ```
 
 주식 체결은 WebSocket이 아니라 worker의
 `toss_live.poll_fills_periodic`으로 확인합니다. Toss 실주문 운영 시
 `TOSS_FILL_POLL_ENABLED=true`, `TOSS_FILL_POLL_CRON=*/2 * * * *`로 최대
 2분 간격을 유지하고, worker 로그에서 주기 실행과 오류 부재를 확인합니다.
-NH PLUG는 국내주식 모의계좌 조회 전용이므로 체결 모니터링 대상이 아닙니다.
-KIS WebSocket과 KIS 서비스는 운영 대상이 아닙니다.
+KIS·Upbit WebSocket 모니터 프로세스와 KIS 서비스는 운영 대상이 아니며 레포에도 없습니다.
 
 ## 운영 확인
 
@@ -59,7 +55,6 @@ KIS WebSocket과 KIS 서비스는 운영 대상이 아닙니다.
 docker compose -f docker-compose.prod.yml logs -f api
 docker compose -f docker-compose.prod.yml logs -f worker
 docker compose -f docker-compose.prod.yml logs -f mcp
-docker compose -f docker-compose.prod.yml logs -f upbit_websocket
 ```
 
 Sentry UI 확인 항목:

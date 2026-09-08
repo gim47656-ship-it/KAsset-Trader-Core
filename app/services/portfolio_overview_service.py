@@ -114,11 +114,6 @@ class PortfolioOverviewService:
                 self._collector._collect_toss_components,
             ),
             self._collector._run_collection_task(
-                self._collector._collect_upbit_components,
-                active_upbit_markets=active_upbit_markets,
-                enforce_upbit_universe=enforce_upbit_universe,
-            ),
-            self._collector._run_collection_task(
                 self._collector._collect_manual_components,
                 user_id,
                 active_upbit_markets=active_upbit_markets,

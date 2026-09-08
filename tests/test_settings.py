@@ -30,9 +30,8 @@ def mock_external_services():
     with (
         patch("app.services.brokers.upbit.client.httpx.AsyncClient") as mock_upbit,
         patch("app.services.brokers.yahoo.client.yfinance.Ticker") as mock_yahoo,
-        patch("app.services.brokers.kis.client.httpx.AsyncClient") as mock_kis,
     ):
-        yield {"upbit": mock_upbit, "yahoo": mock_yahoo, "kis": mock_kis}
+        yield {"upbit": mock_upbit, "yahoo": mock_yahoo}
 
 
 @pytest.fixture

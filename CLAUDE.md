@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 AI 기반 자동 거래 분석 시스템으로, 다양한 금융 데이터를 수집하고 out-of-process MCP consumer(claude 세션 등)를 통해 투자 분석을 제공합니다.
 
 **주요 특징:**
-- 다중 시장 지원: 국내주식(KIS), 해외주식(KIS/Yahoo Finance), 암호화폐(Upbit)
+- 다중 시장 지원: 국내·해외주식(Toss / Yahoo Finance), 암호화폐(Upbit)
 - 다중 시간대 분석: 일봉 200개 + 분봉(60분/5분/1분)
 - AI 분석: out-of-process MCP consumer(claude 세션 등)가 담당 (런타임은 in-process LLM provider 미탑재 — ROB-501 가드)
 
@@ -81,9 +81,6 @@ uv run alembic current
 ### 개발 도구
 ```bash
 python manage_users.py list                 # 사용자 권한/상태 확인
-python websocket_monitor.py --mode both     # 통합 WebSocket 모니터링
-python kis_websocket_monitor.py             # KIS WebSocket 모니터링
-python upbit_websocket_monitor.py           # Upbit WebSocket 모니터링
 ```
 
 ## 아키텍처
@@ -104,104 +101,22 @@ scans `app/**/*.py` for forbidden provider imports and deleted provider files.
 - `max_action`: structured execution-plan JSON for watch items. `account_mode` is required when `max_action` is present; it also requires `side` and exactly one of `quantity` or `notional`; optional keys include `amount_krw`, `limit_price`, `limit_price_hint`, and `ladder_level`.
 - Do not send `planned_action` as an item key. Hermes payloads derive `planned_action` from `max_action`.
 
-### Alpaca Paper 실행 레저 (ROB-84)
-
-`review.alpaca_paper_order_ledger` — Alpaca Paper 주문 라이프사이클 레코드 (previewed → canceled/filled/unexpected).
-
-- **ORM 모델**: `app/models/review.AlpacaPaperOrderLedger`
-- **서비스**: `app/services/alpaca_paper_ledger_service.AlpacaPaperLedgerService` — 모든 쓰기는 이 서비스를 통해서만 허용
-- **라우터**: `app/routers/alpaca_paper_ledger.py` — GET 전용 (`/trading/api/alpaca-paper/ledger/...`)
-- **MCP 도구**: `alpaca_paper_ledger_list_recent`, `alpaca_paper_ledger_get` (read-only)
-- **런북**: `docs/runbooks/alpaca-paper-ledger.md`
-
-**주의**: 서비스는 브로커 mutation 없음. 직접 SQL INSERT/UPDATE/DELETE 금지.
-
-### Binance Demo Order Ledger (ROB-298)
-
-`binance_demo_order_ledger` — unified Demo execution lifecycle ledger. Keyed by `product` discriminator (`spot` in PR 1; `usdm_futures` reserved for PR 2). All writes via service layer.
-
-- **ORM 모델**: `app/models/binance_demo_order_ledger.BinanceDemoOrderLedger`
-- **서비스**: `app/services/brokers/binance/demo/ledger/service.BinanceDemoLedgerService` — 모든 쓰기는 이 서비스를 통해서만 (8개 `record_*` 메서드)
-- **리포지토리**: `app/services/brokers/binance/demo/ledger/repository.BinanceDemoLedgerRepository` — 서비스 내부 전용 (AST guard로 외부 import 금지)
-- **상태 머신**: `BinanceDemoInvalidStateTransition` — `planned → previewed → validated → submitted → filled → closed → reconciled` + `cancelled`/`anomaly` branches
-- **Spot 실행 어댑터**: `app/services/brokers/binance/spot_demo/execution_client.BinanceSpotDemoExecutionClient` — `demo-api.binance.com` only; mutation은 `submit_order(..., confirm=True)` 만
-- **CLI**: `scripts/binance_spot_demo_smoke.py` (default-disabled, 5 modes)
-- **런북**: `docs/runbooks/binance-spot-demo-smoke.md`
-
-**안전 경계**:
-- **Demo 전용 호스트**: Spot Demo는 `demo-api.binance.com`만 허용 (`assert_spot_demo_host`); live/mainnet/testnet host는 transport 레이어에서 fail-closed (`_DEPRECATED_TESTNET_HOSTS` deny-list 유지)
-- **Default-disabled**: `BINANCE_SPOT_DEMO_ENABLED=true` 미설정 시 `BinanceSpotDemoDisabled`
-- **Per-call operator gate**: `submit_order(..., confirm=True)` 매 호출마다 명시되어야 실 HTTP 발생; default는 `SpotDemoDryRunResult`
-- **TESTNET env vars do nothing**: `BINANCE_TESTNET_*`는 Demo trading을 활성화 못함 (테스트로 증명)
-- **Sizing**: LOT_SIZE.stepSize floor, MIN_NOTIONAL guard, round-up 금지 — cap 초과면 blocked
-- **선물 path**: PR 2에서 별도 `futures_demo/` backend로 추가 (아래 참고)
-- **스케줄러 활성화 없음**: TaskIQ/cron/Prefect 연결 없음. CLI에서만 호출
-- **프로덕션 cutover gate**: alembic 마이그레이션은 PR에 포함되지만 operator가 별도로 `alembic upgrade head` 실행
-
-**USD-M Futures Demo (ROB-298 PR 2)**:
-- **실행 어댑터**: `app/services/brokers/binance/futures_demo/execution_client.BinanceFuturesDemoExecutionClient` — `demo-fapi.binance.com` only; mutation은 `submit_order(..., confirm=True)`만; close 주문에는 `reduce_only=True` 필수
-- **호스트 분리**: `FUTURES_DEMO_HOSTS = {demo-fapi.binance.com}`, Spot Demo (`demo-api.binance.com`)와 disjoint; live/testnet futures (`fapi.binance.com`, `testnet.binancefuture.com`) 차단
-- **env namespace**: `BINANCE_FUTURES_DEMO_*` 전용 (Spot Demo와 비공유)
-- **Leverage**: `1x` 강제 (`set_leverage` echo로 검증; mismatch → `BinanceFuturesDemoLeverageMismatch`)
-- **Position mode**: One-way only (Hedge → `BinanceFuturesDemoHedgeModeBlocked`)
-- **Symbol allowlist**: `XRPUSDT` (default), `DOGEUSDT`, `SOLUSDT` (fallback). `BTCUSDT` 제외 (MIN_NOTIONAL=50 > cap=10). operator `--allow-symbol` override 시도해도 excluded list 우선
-- **Reconcile gate**: 클로즈 후 open orders empty AND position flat 둘 다 만족해야 `reconciled`. 둘 중 하나라도 dirty면 `anomaly` 기록
-- **`status=NEW` reconcile (ROB-305 §4)**: MARKET submit이 `NEW`를 반환해도 즉시 성공/실패로 단정하지 않음. `submitted → closed` 직행 금지(상태머신이 차단). fill 증거는 submit status → bounded `GET /fapi/v1/order` poll(`_FILL_RECONCILE_MAX_POLLS`, 무한 루프 없음) → non-flat positionRisk 순으로 확인 후에만 `filled` 기록. fill 증명 불가인데 account가 flat + open orders 0이면 close row를 `anomaly`로 기록하고 exit 2 (clean success로 위장 금지). 단일주문 status 조회는 `BinanceFuturesDemoExecutionClient.get_order`
-- **계정 전체 조회 (ROB-993 R3 추가)**: `get_all_positions()`/`get_all_open_orders()` — `symbol` 파라미터 생략 시 Binance가 전종목 데이터 반환하는 것을 그대로 노출(additive, 기존 `get_position(symbol=...)`/`get_open_orders(symbol=...)` 동작 불변). 공유 Demo 계정에서 신호 symbol이 아닌 다른 symbol의 기존 포지션/미체결도 감지해야 하는 소비자(ROB-993 strategy loop)용
-- **CLI**: `scripts/binance_futures_demo_smoke.py` (default-disabled, 5 modes)
-- **런북**: `docs/runbooks/binance-futures-demo-smoke.md`
-
-### Binance Demo 라이브 실행 루프 — 전략 플러그형 (ROB-993)
-
-실시간 1m→4h bar 집계(H1 오프라인 builder `research/nautilus_scalping/rob974_features.py`의
-`build_complete_4h`를 그대로 재사용 — UTC 경계·결측=NO_SIGNAL·forward-fill 금지 동일 시맨틱) +
-플러그형 전략 인터페이스(`evaluate(bars_4h_multi_symbol) -> Signal|None`) + kill switch +
-`BinanceFuturesDemoExecutionClient`(ROB-298) 배선. 전략 무관 인프라 — S3 신호엔진 어댑터(ROB-980)는
-별도 커밋(미포함), 기본 플러그인 `NullStrategy`는 항상 `None`.
-
-- **패키지**: `app/services/brokers/binance/demo_strategy_loop/` — `bars.py`(H1 재사용 + 1m fetch),
-  `strategy.py`(`Signal`/`StrategyPlugin`/`NullStrategy`), `kill_switch.py`(최대동시포지션1 +
-  연속 SL/UTC일), `sizing.py`, `execution.py`(open MARKET + reduceOnly close round-trip, ROB-298
-  smoke CLI와 동일 lifecycle), `correlation.py`, `orchestrator.py`(`run_tick`)
-- **CLI**: `scripts/binance_demo_strategy_loop.py` (default-disabled, `--once`/`--loop`/
-  `--paper-signal`/`--readiness`) — `--paper-signal`이 ROB-993 e2e 스모크 경로(주문 1건 데모 왕복)
-- **env**: `BINANCE_DEMO_STRATEGY_LOOP_ENABLED`(기본 false) — 기존 `BINANCE_FUTURES_DEMO_*`
-  자격증명/호스트 allowlist 그대로 상속, 신규 자격증명 표면 없음
-- **kill switch**: env 게이트 + 동시 포지션 1 상한(`count_open_lifecycles` 재사용) + 연속 SL 2회/UTC일
-  정지(자체 `strategy_loop_tag`로 스코프, closed root의 `extra_metadata.exit_reason` 워크)
-- **하드 인바리언트(R2/R3 적대검증 경화)**: leg notional `[6,10]` USDT·동시포지션 1·연속SL 2는 CLI로
-  덮어쓸 수 없는 상수(`sizing.LEG_NOTIONAL_CAP_*`/`kill_switch.LOCKED_LIMITS`), `run_tick`이 네트워크/DB
-  전에 자체 검증 — **R3**: cap 입력값뿐 아니라 LOT_SIZE floor 이후 **실현 notional**도 재검증(캡 안이어도
-  floor로 $6 밑으로 내려갈 수 있음, 키우지 않고 `sizing_blocked`). `execute_signal_round_trip`은
-  reservation 직후 broker-flat pre-submit gate(공유 Demo 계정) + 자기 fill delta 귀속 close 수량 +
-  submit/poll 응답 전부 symbol/side/qty/reduceOnly echo 검증(`BrokerEchoMismatch`) + open root를
-  reconcile 전부 통과 전까지 `filled`(blocking) 유지(조기 `closed` 전이 금지) 적용 — **R3**: flat gate가
-  신호 symbol 하나가 아니라 **계정 전체**(`BinanceFuturesDemoExecutionClient.get_all_positions`/
-  `get_all_open_orders`, symbol 파라미터 생략 시 전종목 반환 — 신규 추가)를 보고, reservation 직후 +
-  order-test 이후 submit 직전 **두 번** 재확인(완전한 TOCTOU 제거는 아님, 런북 §5). multi-symbol
-  decision bucket도 전종목 동일 `close_ts` 아니면 전략 미호출. 상세=런북 §8(R2)·§9(R3)
-- **학습루프 척추**: `correlation_id`(`binance-demo-strategy-loop:<tag>:<hash>`) → ledger → `forecast_save`
-- **런북**: `docs/runbooks/binance-demo-strategy-loop.md` (§5 — 공유 Demo 계정 간섭 주의: 프로덕션
-  demo-scalping 봇과 동일 자격증명 공유 시 계정단 상태 충돌 가능)
-- **스케줄러 등록 없음** — CLI 수동 가동만, `--loop`도 operator 소유 foreground 프로세스
-
 ### KIS cutover와 역사 ledger 보존
 
 KIS live/mock 주문, 계좌, 시장데이터, WebSocket, reconcile, probe, smoke 실행
-표면은 운영에서 제거되었다. 기존 `scripts/kis_*`와 관련 직접 실행 도구는
-`scripts/_archive_kis/`의 fail-closed 묘비로 이동했으며 재활성화하지 않는다.
+표면은 운영에서 제거되었다. `scripts/kis_*`와 관련 직접 실행 도구, provider
+transport·client·service 모듈은 삭제되었으며 재활성화하지 않는다.
 
 - `KISLiveOrderLedger`, `KISMockOrderLedger`, signal/provenance 모델과 과거 행은
   감사·조회 목적으로 보존한다.
 - 과거 KIS intent를 Toss로 자동 변환하거나 기존 approval hash/idempotency
   namespace를 재사용하지 않는다.
 - equity 계좌·주문·시장데이터 provider는 Toss다.
-- NH PLUG는 KR mock read-only이며 US 또는 주문 기능을 제공하지 않는다.
 - production WebSocket monitor는 Upbit 전용이다.
 - Toss accepted 주문의 fill evidence는 최대 2분 간격의
   `toss_live.poll_fills_periodic` 또는 주문 직후 대상 reconcile로 수집한다.
-- dormant KIS adapter 구현은 active registrar/task/router/script/deployment에서
-  참조하지 않는다.
+- KIS provider 구현은 레포에 남아 있지 않다. ledger 모델과 과거
+  `account_mode` 값만 조회용으로 남는다.
 
 
 ### Crypto Live Order Fill-Evidence Gate (ROB-407)
@@ -223,60 +138,6 @@ KR Naver 업종과 US Yahoo Finance Industry/Sector를 `symbol_sectors` 테이�
 - **서비스**: `app/services/symbol_sectors_service.py` (쓰기 전용), `app/services/us_sector_korean_map.py` (US 한글 매핑)
 - **적용 로더**: `investor_flow`, `consecutive_gainers`, `double_buy`, `fundamentals` 등 주요 스크리너 로더에 JOIN 배선 완료.
 - **표시 규칙**: `SymbolSector.name_kr` ?? `SymbolSector.name_en` ?? "-" (US는 한글 매핑 우선).
-
-### Kiwoom Mock Account Lifecycle (ROB-97 / ROB-319)
-
-Kiwoom **모의투자** 전용 MCP order/account lifecycle. KR 7개 도구는 `account_mode="kiwoom_mock"`(KRX). **US는 ROB-867로 확장** — `kiwoom_mock_us_*` 변형(account_mode="kiwoom_mock_us", US 전용 앱키 4종 env, order-id 9자리 — 07-20 full 스모크 실측 확정).
-
-- **MCP 도구**: `app/mcp_server/tooling/orders_kiwoom_variants.py` — `kiwoom_mock_preview_order`, `kiwoom_mock_place_order`, `kiwoom_mock_modify_order`, `kiwoom_mock_cancel_order`, `kiwoom_mock_get_order_history`, `kiwoom_mock_get_positions`, `kiwoom_mock_get_orderable_cash`
-- **클라이언트**: `app/services/brokers/kiwoom/` — `client.KiwoomMockClient` (transport, host allowlist), `domestic_orders.KiwoomDomesticOrderClient` (buy/sell/modify/cancel), `domestic_account.KiwoomDomesticAccountClient` (orderable-amount/balance/order-status/order-detail)
-- **스모크 CLI**: `scripts/kiwoom_mock_smoke.py` (default-disabled, 3 modes: preflight/preview/full)
-- **런북**: `docs/runbooks/kiwoom-mock-smoke.md`
-
-**ROB-319에서 완성된 것**:
-- account-read 도구(`get_orderable_cash`/`get_positions`/`get_order_history`)는 stub-success가 아니라 `KiwoomDomesticAccountClient` 실 호출 결과를 반환. `success`는 broker `return_code`에서 파생(`_derive_broker_success`), raw `broker_response` 첨부.
-- `get_orderable_cash`: symbol 있으면 `get_orderable_amount`, 없으면 `get_balance`. cash를 확정 파싱 못하면 `cash: null` + `cash_source: "*_unparsed"` (fake 금지).
-- confirmed `modify_order`/`cancel_order`는 `KiwoomDomesticOrderClient`로 연결. modify는 `new_price`+`new_quantity` 둘 다, cancel은 `symbol`+`cancel_quantity` 필수. 비-zero `return_code`는 fake success 아닌 broker-evidence 실패로 표면화.
-
-**안전 경계**:
-- **Mock 호스트 only**: `mockapi.kiwoom.com`만 허용 (`KiwoomMockClient` base-URL 거부 + build 후 host 재검증); live `api.kiwoom.com`은 선택 불가 방어 상수
-- **Default-disabled**: `KIWOOM_MOCK_ENABLED=true` + `KIWOOM_MOCK_APP_KEY/APP_SECRET/ACCOUNT_NO` 미설정 시 fail-closed
-- **`dry_run=False` requires `confirm=True`**: 모든 주문 mutation 도구
-- **KR 도구는 KRX only**: `NXT`/`SOR`/비-KRX 거부 (네트워크 호출 전). US 도구는 별도 `kiwoom_mock_us_*` 경로만 사용
-- **No secrets printed**: CLI는 missing env key **이름만** 보고, 값 출력 없음
-- **Cancel-before-submit**: `full` 모드는 cancel이 wired이기에만 실주문 제출; finally-block에서 항상 cancel 시도 후 reconcile
-
-### Kiwoom Live Read-Only Market Data (Stage 1)
-
-🔴 **레포에서 주문 가능한 live 호스트 `https://api.kiwoom.com` 에 붙는 유일한 클라이언트.** 차트만 읽으며 그 외에는 아무것도 못 한다.
-
-- **클라이언트**: `app/services/brokers/kiwoom/live_market_data.KiwoomLiveReadOnlyClient` (+ 전용 `KiwoomLiveReadOnlyAuthClient`). 🔴 `KiwoomMockClient`/`auth.KiwoomAuthClient` 를 **확장·수정하지 않으며 import 하지도 않는다** — mock 단언은 그대로다
-- **비교 하니스**: `app/services/brokers/kiwoom/chart_compare.py` — mock/live 필드 대조 + KIS 프로즌 샘플 3자 판정
-- **CLI**: `scripts/kiwoom_live_readonly_compare.py` (default-disabled, `--confirm-live-read` 필수)
-- **런북**: `docs/runbooks/kiwoom-live-readonly-marketdata.md`
-
-**안전 경계 (4층)**:
-- **Default-disabled**: `KIWOOM_LIVE_MARKETDATA_ENABLED=false` 기본. 🔴 게이트는 **생성자가 아니라 dispatch 시점** 검사 — `from_app_settings` 우회 직접 생성도 전송 불가
-- **allowlist**: api-id `ka10080/81/82/83` (차트 4종) + path `/api/dostk/chart` 만. 🔴 토큰 해석·소켓 오픈 **이전** 검사. 주문 TR(kt10000~kt10003)·계좌 TR 전부 거부
-- **호스트/경로 고정 + 전송 직전 재검증**: build 후 `send` 직전 `request.url.host`·`request.url.path` **둘 다** 재확인. 🔴 `follow_redirects=False` 를 OAuth·chart 양쪽에 **명시 고정**(httpx 기본값 의존 금지 — 3xx 는 검증 통과 요청이 다른 호스트로 갈 유일한 경로)
-- **계좌번호 부재 (3중)**: ① Settings live 표면은 `app_key`/`app_secret`/`base_url` **3개뿐**, `kiwoom_account_no` 없음 ② AST 가드가 신규 live 모듈에서 주문 상수·주문 모듈 import·`kiwoom_account_no`/`KIWOOM_ACCOUNT_NO` 참조를 **문자열 우회 포함** 금지 ③ 전용 env 파일에 `KIWOOM_ACCOUNT_NO` 를 넣지 않아 **프로세스 환경에 값이 아예 없음**
-- 🔴 **보장 강도 = "우발 방지 + 정적 검출"**. **"구조적 불가능"이 아니다** — 계좌번호는 배포 env 파일에 여전히 존재하고 Settings 한 줄이면 도달 가능해진다. AST 가드는 **그 한 줄을 빌드 실패로 만드는 장치**다
-- **자격증명**: 전용 최소 파일 `.env.kiwoom-readonly.native`(4키, ACCOUNT_NO·DATABASE_URL 없음). 🔴 `ENV_FILE=.env.prod` 금지(CLI가 파일명 `prod` 거부)
-- **Redis 격리**: OAuth 토큰 캐시는 `--redis-url` 로 일회용 인스턴스 지정 — 배포 공유 캐시에 쓰지 않는다
-- **Rate limit 실측(2026-08-03, mock)**: 2.0s/1.0s/0.5s OK · 0.2s/0.05s `HTTPStatusError` → 임계는 0.5~0.2초 사이, 운영 기본 **2.0초**
-- **스케줄러 등록 없음** — CLI 수동 실행만. 🔴 **Stage 2(대량 수집·DB 저장)는 별도 승인**
-
-**동일성 실측(2026-08-03, 20종목 × 일봉 600 + 5분봉 900)**: 행 커버리지 40/40 동일, 비교 셀 252,000 중 불일치 36(99.9857%) — 🔴 **전부 형성 중인 최신 봉**(장중 2초 시차)이며 **최신 봉 제외 시 100.000000%**. 상폐 `051170` 은 live 에서 1행 반환. KIS 3자 대조에서 068270 은 2026-06-03 경계로 223건 어긋나지만 **live·mock 결과가 동일**하며 원인은 수정주가 역산 **반올림 규칙 차이**(약 0.004%) — 어느 쪽이 옳은지는 `UNDETERMINED`. 함의: **Kiwoom↔KIS 과거 수정주가 완전일치 대조는 실패하므로 허용오차 필요**
-
-### NHPLUG Mock Read-Only Foundation (Stage 1)
-
-`app/services/brokers/nhplug/` and `scripts/nhplug_mock_smoke.py` expose a bounded read-only foundation only: account discovery (`/n2/acctinfo`) and KR balance/positions. Equity quotes use Toss and NH PLUG has no quote, order, MCP order, ledger, reconcile, or scheduler surface.
-
-- **Data host × account-type double discriminator**: data requests use only `https://moapi.nhplug.com:8443`; the scheme, host, and port are checked again on the built request immediately before `send`. `/n2/acctinfo` establishes an allowlist containing only `acct_type="03"`; `01`/`02` are denied, and a number with conflicting returned types rejects the account response. `NHPLUG_MOCK_ACCOUNT_NO` is untrusted until it appears in that broker response, and account-scoped reads recheck it again immediately before send.
-- **Exceptional OAuth physical separation**: token issue/revoke must reach `https://api.nhplug.com:8443`, but only `nhplug/auth.py` may name that host and it allowlists exactly `POST /oauth2/token` and `POST /oauth2/revoke`. The data client does not import it and has no production-host constant. Both clients apply the master gate at dispatch and explicitly use `follow_redirects=False`; this also protects APP KEY/SECRET custom headers from cross-origin redirect forwarding.
-- **Default-disabled**: `NHPLUG_MOCK_ENABLED=true` is required at every OAuth and data dispatch; unset is fail-closed. The smoke CLI requires an operator-created `.env.nhplug-mock.native`-style file with exactly `NHPLUG_APP_KEY`, `NHPLUG_APP_SECRET`, and `NHPLUG_MOCK_ACCOUNT_NO`; it rejects `prod` file names/`ENV_FILE` and any extra key (including `DATABASE_URL`). It prints key names and safe response shape only, never values.
-- **No vendor fail-open configuration**: do not import the vendor `nhplug` SDK and never read `NHPLUG_BASE_URL` / `NHPLUG_AUTH_URL`. Host constants are local and static guards reject SDK imports, production-host literals outside auth, override-env strings (including constant concatenation), and known order endpoints/TRs.
-- **Guarantee strength**: this is **"accidental prevention + static detection," not structural impossibility**. The same APP KEY can access operating accounts, OAuth tokens are issued on the operating host, and `/n2/acctinfo` necessarily returns operating accounts alongside mock accounts. The `03` allowlist is our check, not a vendor-enforced isolation boundary. See `docs/runbooks/nhplug-mock-smoke.md`.
 
 ### 토스증권 Open API (ROB-529)
 
@@ -496,9 +357,9 @@ set-difference upsert하고 DB 상태로 응답한다 (excluded만 제외, pendi
 매수 후보 rank 2 랭킹).
 
 - **판정기**: `app/services/halt_detection.py` (순수·stdlib, DB/네트워크/시계 없음)
-- **소비자 3곳**: `analyze_stock_impl::_apply_halt_suspect`(indicators·support_resistance
+- **소비자 2곳**: `analyze_stock_impl::_apply_halt_suspect`(indicators·support_resistance
   = None, quote/top-level 양쪽 data_state 덮어씀) · `screening/halt_filter.py`
-  (`screen_stocks_unified` 단일 깔때기) · `scripts/policy_table/adapters/{kr,us,crypto}.py`
+  (`screen_stocks_unified` 단일 깔때기)
 - **런북**: `docs/runbooks/halted-suspect-data-state.md`
 
 **주의**:
@@ -511,7 +372,7 @@ set-difference upsert하고 DB 상태로 응답한다 (excluded만 제외, pendi
   잡히지 않는다 — 0-변동 조건의 "직전 close 동일" 절을 제거하지 말 것.
 - 봉 이력 조회 실패는 **fail-open**(행 유지 + warning). DB 장애는 정지의 증거가 아니다.
 - 🔴 스크리너는 **최신봉 거래량 > 0 이면 이력 조회를 건너뛴다**(장중 일봉 캐시 우회 →
-  100행 스크린이 KIS 라이브 100회를 때리는 것 방지). 감수하는 구멍 = 거래량 있는
+  100행 스크린이 브로커 라이브 조회 100회를 때리는 것 방지). 감수하는 구멍 = 거래량 있는
   0-변동 구간. analyze/정책표는 이력을 무조건 읽으므로 그쪽에서 잡힌다.
 
 ### analyze quick fast projection (ROB-1311)
@@ -738,11 +599,8 @@ app/core/symbol.py              # 심볼 변환 유틸리티
 ```
 
 **적용된 파일:**
-- `app/services/brokers/kis/` - KIS API 호출 시 자동 변환
 - `app/services/brokers/yahoo/client.py` - Yahoo Finance 호출 시 자동 변환
 - `app/jobs/` - 심볼 비교 시 정규화 (주요 브로커/job 호출부에 배선)
-- `app/services/kis_holdings_service.py` - 보유주식 조회 시 정규화
-- `app/services/kis_trading_service.py` - 매도 주문 시 정규화
 
 **DB 테이블 (해외주식 심볼 저장):**
 | 테이블 | 컬럼 | 설명 |
@@ -767,18 +625,15 @@ uv run pytest tests/test_symbol_conversion.py -v
 
 ```
 app/services/brokers/
-├── upbit/       # Upbit API (암호화폐) — client.py, orders.py, public_trades.py
+├── upbit/       # Upbit API (암호화폐) — client.py, public_trades.py
 ├── yahoo/       # Yahoo Finance API — client.py
-├── kis/         # 한국투자증권 API — client.py, account.py, domestic/overseas_orders.py, market_data 등 (파일 분할)
-└── toss/ · kiwoom/ · alpaca/ · binance/   # 기타 브로커
-app/services/
-├── upbit_websocket.py       # Upbit 실시간 시세
-└── redis_token_manager.py   # Redis 기반 토큰 관리
+├── binance/     # Binance 공개 시세·수집 — rest_client.py, ws_client.py, ingest.py 등
+└── toss/        # 토스증권 Open API — KR/US live 브로커 + 데이터 소스
 ```
 
 **주의사항:**
-- KIS 분봉 API는 `time_unit` 파라미터가 제대로 작동하지 않는 알려진 이슈 있음
-- Upbit은 실시간 WebSocket과 REST API 모두 지원
+- Upbit·Binance 어댑터는 인증 없는 공개 시세·수집 경로다.
+- 실계좌 주문 경로는 Toss 하나이며, 그 밖의 주문 표면은 KAsset PAPER 모의 원장뿐이다.
 
 ### 데이터 구조
 
@@ -911,11 +766,10 @@ uv run alembic downgrade -1
 **필수 환경 변수 (.env 파일):**
 
 ```bash
-# KIS credential은 운영하지 않으며 환경 파일에 추가하지 않는다.
+# 제거된 provider(KIS 등)의 credential은 운영하지 않으며 환경 파일에 추가하지 않는다.
+# Upbit은 인증 없는 공개 시세만 쓰므로 액세스/시크릿 키를 설정하지 않는다.
 
 # Upbit
-UPBIT_ACCESS_KEY=xxx
-UPBIT_SECRET_KEY=xxx
 UPBIT_BUY_AMOUNT=100000               # 분할 매수 금액 (기본 10만원)
 UPBIT_MIN_KRW_BALANCE=105000          # 최소 KRW 잔고
 
@@ -991,7 +845,7 @@ pytest tests/ -v -m "not slow"               # 느린 테스트 제외
 
 ### Equity provider 문제
 - Toss provider 오류는 snapshot으로 성공처럼 합성하지 않고 명시 오류로 처리한다.
-- NH PLUG는 KR mock read-only 범위 밖의 US·주문 기능으로 대체하지 않는다.
+- 제거된 provider의 US·주문 기능을 Toss 밖에서 되살리지 않는다.
 
 ### Redis 연결 실패
 - Docker Compose로 Redis 실행: `docker compose up -d redis`

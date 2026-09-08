@@ -33,7 +33,6 @@ import pandas as pd
 
 from app.core.timezone import KST, now_kst
 from app.services.daily_candles.repository import DailyCandleRow
-from app.services.kis_ohlcv_cache import KRX_DAILY_CACHE_CUTOFF
 from app.services.market_events.session_calendar import (
     is_trading_session,
     previous_trading_session,
@@ -41,6 +40,11 @@ from app.services.market_events.session_calendar import (
 )
 
 logger = logging.getLogger(__name__)
+
+# KRX 일봉 확정 기준 시각. 삭제된 ``app.services.kis_ohlcv_cache``가 갖고 있던
+# 값과 의미를 그대로 옮겨왔다(15:35 KST = 정규장 마감 + 정산 여유). 공급자와
+# 무관한 시장 상수이므로 일봉 읽기 경계가 직접 보유한다.
+KRX_DAILY_CACHE_CUTOFF = datetime.time(15, 35)
 
 # Canonical OHLCV column ordering produced by ``rows_to_frame``. Kept here so
 # consumers (``market_data_indicators`` and ``get_ohlcv``) share one source of
@@ -107,8 +111,8 @@ def kr_daily_bar_may_be_forming(now: datetime.datetime | None = None) -> bool:
     """True while today's KRX daily bar may still be forming.
 
     That is: today (KST) is an XKRX session day AND the current KST time is
-    before the shared ``KRX_DAILY_CACHE_CUTOFF`` (15:35 — session close plus
-    settling buffer, same semantics as ``kis_ohlcv_cache``).
+    before ``KRX_DAILY_CACHE_CUTOFF`` (15:35 — session close plus settling
+    buffer).
     """
     current = _coerce_kst(now)
     return (

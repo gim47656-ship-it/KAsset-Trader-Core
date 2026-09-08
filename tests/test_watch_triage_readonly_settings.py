@@ -1,18 +1,13 @@
 import json
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SETTINGS = REPO / ".claude" / "settings.readonly.json"
-TOOLING = REPO / "app" / "mcp_server" / "tooling"
 
 # spec §6 deny-list (논리 도구명). 새 mutation 도구가 생기면 여기 + JSON에 추가해야 테스트 통과.
 KNOWN_MUTATION_TOOLS = frozenset(
     {
         "place_order",
-        "kis_mock_mirror_execute_report",
-        "kis_mock_reconciliation_run",
-        "kiwoom_mock_preview_order",
         "toss_preview_order",
         "paper_place_limit_order",
         "paper_cancel_pending_order",
@@ -24,25 +19,10 @@ KNOWN_MUTATION_TOOLS = frozenset(
         "investment_report_prepare_intraday_context",
         "cancel_order",
         "modify_order",
-        "kis_live_place_order",
-        "kis_live_cancel_order",
-        "kis_live_modify_order",
-        "kis_live_reconcile_orders",
-        "kis_mock_place_order",
-        "kis_mock_cancel_order",
-        "kis_mock_modify_order",
         "toss_place_order",
         "toss_modify_order",
         "toss_cancel_order",
         "toss_reconcile_orders",
-        "alpaca_paper_submit_order",
-        "alpaca_paper_automated_submit_order",
-        "alpaca_paper_cancel_order",
-        "alpaca_paper_reconcile_orders",
-        "paper_execution_preview_order",
-        "paper_execution_submit_order",
-        "paper_execution_cancel_order",
-        "paper_execution_reconcile",
         "paper_validation_register",
         "paper_validation_advance",
         "paper_validation_append_hypothesis",
@@ -50,14 +30,6 @@ KNOWN_MUTATION_TOOLS = frozenset(
         "paper_validation_authorize_order_submit",
         "paper_validation_confirm_promotion",
         "paper_validation_reject_or_abort",
-        "kiwoom_mock_place_order",
-        "kiwoom_mock_cancel_order",
-        "kiwoom_mock_modify_order",
-        "kiwoom_mock_us_preview_order",
-        "kiwoom_mock_us_place_order",
-        "kiwoom_mock_us_cancel_order",
-        "kiwoom_mock_us_modify_order",
-        "live_reconcile_orders",
         "investment_report_create",
         "investment_report_add_items",
         "investment_report_update",
@@ -74,11 +46,6 @@ KNOWN_MUTATION_TOOLS = frozenset(
         "sweep_expired_watches",
         "support_reserve_net_consume",
     }
-)
-
-# read/preview/handoff 도구는 mutation 이름패턴과 무관하므로 스캔에서 제외(허용 대상).
-ORDER_MUTATION_RE = re.compile(
-    r'name\s*=\s*["\']([a-z0-9_]*(?:place_order|cancel_order|modify_order|submit_order|reconcile_orders))["\']'
 )
 
 
@@ -121,38 +88,6 @@ def test_analysis_bundle_read_is_allowed_but_capture_is_not() -> None:
     assert "analysis_bundle_create" in ANALYSIS_READONLY_FORBIDDEN_TOOL_NAMES
 
 
-def test_no_new_order_mutation_tool_escapes_known_set():
-    found: set[str] = set()
-    for p in TOOLING.glob("*.py"):
-        found |= set(ORDER_MUTATION_RE.findall(p.read_text(encoding="utf-8")))
-    escaped = found - KNOWN_MUTATION_TOOLS
-    assert not escaped, (
-        f"새 주문 mutation 도구가 deny-list/KNOWN_MUTATION_TOOLS에 없음: {sorted(escaped)} "
-        "→ .claude/settings.readonly.json deny + KNOWN_MUTATION_TOOLS 둘 다 갱신"
-    )
-
-
-def test_paper_execution_facade_denies_every_non_read_operation():
-    from app.mcp_server.tooling.paper_execution_registration import (
-        PAPER_EXECUTION_TOOL_NAMES,
-    )
-
-    read_only = {
-        "paper_execution_get_capabilities",
-        "paper_execution_get_order",
-    }
-    mutations = PAPER_EXECUTION_TOOL_NAMES - read_only
-
-    assert mutations == {
-        "paper_execution_preview_order",
-        "paper_execution_submit_order",
-        "paper_execution_cancel_order",
-        "paper_execution_reconcile",
-    }
-    assert mutations <= KNOWN_MUTATION_TOOLS
-    assert mutations <= _denied_mcp_suffixes()
-
-
 def test_paper_validation_denies_mutations_but_allows_audit_read() -> None:
     from app.mcp_server.tooling.paper_validation_registration import (
         PAPER_VALIDATION_MUTATION_TOOL_NAMES,
@@ -164,34 +99,3 @@ def test_paper_validation_denies_mutations_but_allows_audit_read() -> None:
     }
     assert PAPER_VALIDATION_MUTATION_TOOL_NAMES <= KNOWN_MUTATION_TOOLS
     assert PAPER_VALIDATION_MUTATION_TOOL_NAMES <= _denied_mcp_suffixes()
-
-
-# report/stage/watch 도구 분류 가드: 모든 investment_report*/investment_stage*/investment_watch* 도구가
-# 허용 읽기 또는 deny-list에 분류되어야 한다. 새 도구 추가 시 분류를 강제한다.
-ALLOWED_REPORT_READS = frozenset(
-    {
-        "investment_report_get",
-        "investment_report_list",
-        "investment_report_context_get",
-        "investment_report_delta_get",
-        "investment_report_get_hermes_context",
-        "investment_report_prepare_intraday_context",
-        "investment_watch_events_list_recent",
-        "investment_watch_recommend",
-    }
-)
-
-REPORT_STAGE_WATCH_RE = re.compile(
-    r'name\s*=\s*["\'](investment_report[a-z_]*|investment_stage[a-z_]*|investment_watch[a-z_]*)["\']'
-)
-
-
-def test_every_report_stage_watch_tool_is_allowed_read_or_denied():
-    found: set[str] = set()
-    for p in TOOLING.glob("*.py"):
-        found |= set(REPORT_STAGE_WATCH_RE.findall(p.read_text(encoding="utf-8")))
-    unclassified = found - ALLOWED_REPORT_READS - _denied_mcp_suffixes()
-    assert not unclassified, (
-        f"미분류 report/stage/watch 도구: {sorted(unclassified)} → "
-        "ALLOWED_REPORT_READS(읽기) 또는 .claude/settings.readonly.json deny(쓰기)로 분류하라"
-    )

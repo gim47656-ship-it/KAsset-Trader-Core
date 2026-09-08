@@ -477,26 +477,21 @@ class TestFetchFilledOrdersWithIndicators:
 
         mock_orders = [
             {
-                "symbol": "BTC",
-                "raw_symbol": "KRW-BTC",
-                "instrument_type": "crypto",
+                "symbol": "005930",
+                "raw_symbol": "005930",
+                "instrument_type": "equity_kr",
                 "side": "buy",
-                "price": 100_000_000,
-                "total_amount": 1_000_000,
+                "price": 70_000,
+                "total_amount": 70_000,
                 "filled_at": "2026-03-22T10:00:00+09:00",
             },
         ]
 
         with (
             patch(
-                "app.services.filled_orders_service._fetch_upbit_filled",
-                new_callable=AsyncMock,
-                return_value=(mock_orders, []),
-            ),
-            patch(
                 "app.services.filled_orders_service._fetch_toss_filled",
                 new_callable=AsyncMock,
-                return_value=([], []),
+                return_value=(mock_orders, []),
             ),
             patch(
                 "app.services.filled_orders_service._enrich_with_current_prices",
@@ -510,31 +505,26 @@ class TestFetchFilledOrdersWithIndicators:
 
     @pytest.mark.asyncio
     async def test_include_indicators_true_calls_enrichment(self):
-        """Verify service passes orders with both stripped symbol and raw_symbol."""
+        """Verify service passes orders through to the indicator enrichment."""
         from app.services.filled_orders_service import fetch_filled_orders
 
         mock_orders = [
             {
-                "symbol": "APT",
-                "raw_symbol": "KRW-APT",
-                "instrument_type": "crypto",
+                "symbol": "005930",
+                "raw_symbol": "005930",
+                "instrument_type": "equity_kr",
                 "side": "buy",
-                "price": 100_000,
-                "total_amount": 100_000,
+                "price": 70_000,
+                "total_amount": 70_000,
                 "filled_at": "2026-03-22T10:00:00+09:00",
             },
         ]
 
         with (
             patch(
-                "app.services.filled_orders_service._fetch_upbit_filled",
-                new_callable=AsyncMock,
-                return_value=(mock_orders, []),
-            ),
-            patch(
                 "app.services.filled_orders_service._fetch_toss_filled",
                 new_callable=AsyncMock,
-                return_value=([], []),
+                return_value=(mock_orders, []),
             ),
             patch(
                 "app.services.filled_orders_service._enrich_with_current_prices",
@@ -550,6 +540,4 @@ class TestFetchFilledOrdersWithIndicators:
             result = await fetch_filled_orders(days=1, include_indicators=True)
 
         mock_enrich.assert_called_once()
-        # Verify order shape includes both stripped symbol and raw_symbol for lookup
-        assert result["orders"][0]["raw_symbol"] == "KRW-APT"
-        assert result["orders"][0]["symbol"] == "APT"
+        assert result["orders"][0]["symbol"] == "005930"

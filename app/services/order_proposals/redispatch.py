@@ -20,7 +20,6 @@ from app.services.order_proposals.revalidation import (
     PlaceOrderFn,
     _default_place_order_fn,
     _norm,
-    _proposal_client_order_id,
     _toss_proposal_client_order_id,
 )
 
@@ -84,7 +83,9 @@ async def validate_proposal_redispatch(
             account_mode=group.account_mode,
             error="provider kis is not operational",
         )
-    if group.account_mode not in {"toss_live", "upbit"}:
+    # Upbit 제출 어댑터가 제거되어 재배포 가능한 계정은 Toss뿐이다. 이미 저장된
+    # 과거 Upbit 제안은 여기서 전송 없이 차단된다(과거 행 읽기는 그대로 유지).
+    if group.account_mode != "toss_live":
         return _blocked(
             "redispatch_account_mode_not_supported",
             account_mode=group.account_mode,
@@ -146,8 +147,6 @@ async def validate_proposal_redispatch(
         proposal_client_order_id = (
             _toss_proposal_client_order_id(group.proposal_id, rung.rung_index)
             if group.account_mode == "toss_live"
-            else _proposal_client_order_id(group.proposal_id, rung.rung_index)
-            if group.account_mode == "upbit"
             else None
         )
         try:

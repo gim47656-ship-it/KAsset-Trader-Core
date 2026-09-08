@@ -51,12 +51,6 @@ while IFS= read -r line; do
             "REDIS_URL")
                 echo "REDIS_URL=redis://localhost:6379/0" >> "$OUTPUT_TARGET"
                 ;;
-            "KIS_APP_KEY")
-                echo "KIS_APP_KEY=DUMMY_KIS_APP_KEY" >> "$OUTPUT_TARGET"
-                ;;
-            "KIS_APP_SECRET")
-                echo "KIS_APP_SECRET=DUMMY_KIS_APP_SECRET" >> "$OUTPUT_TARGET"
-                ;;
             "TELEGRAM_TOKEN")
                 echo "TELEGRAM_TOKEN=DUMMY_TELEGRAM_TOKEN" >> "$OUTPUT_TARGET"
                 ;;
@@ -66,12 +60,6 @@ while IFS= read -r line; do
 
             "OPENDART_API_KEY")
                 echo "OPENDART_API_KEY=DUMMY_OPENDART_API_KEY" >> "$OUTPUT_TARGET"
-                ;;
-            "UPBIT_ACCESS_KEY")
-                echo "UPBIT_ACCESS_KEY=DUMMY_UPBIT_ACCESS_KEY" >> "$OUTPUT_TARGET"
-                ;;
-            "UPBIT_SECRET_KEY")
-                echo "UPBIT_SECRET_KEY=DUMMY_UPBIT_SECRET_KEY" >> "$OUTPUT_TARGET"
                 ;;
             "UPBIT_BUY_AMOUNT")
                 echo "UPBIT_BUY_AMOUNT=100000" >> "$OUTPUT_TARGET"

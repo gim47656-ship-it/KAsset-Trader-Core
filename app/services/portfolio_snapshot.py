@@ -344,10 +344,8 @@ async def fetch_uncached_portfolio_snapshot_payload(
 
     from app.core.db import AsyncSessionLocal
     from app.services.invest_home_readers import (
-        AlpacaPaperHomeReader,
         ManualHomeReader,
         TossApiHomeReader,
-        UpbitHomeReader,
     )
     from app.services.invest_home_service import InvestHomeService
     from app.services.invest_quote_service import InvestQuoteService
@@ -355,10 +353,8 @@ async def fetch_uncached_portfolio_snapshot_payload(
     async with AsyncSessionLocal() as db:
         quote_service = InvestQuoteService(db)
         service = InvestHomeService(
-            upbit_reader=UpbitHomeReader(db),
             manual_reader=ManualHomeReader(db, quote_service=quote_service),
             toss_api_reader=TossApiHomeReader(),
-            paper_readers=[AlpacaPaperHomeReader()],
         )
         response = await service._get_home_uncached(
             user_id=user_id,

@@ -1,6 +1,6 @@
 """Safety: invest_api router and invest_home_service must not import mutation paths.
 
-Toss/Upbit/manual read-only holdings are allowed; KIS and mutation modules are forbidden.
+Toss/manual read-only holdings are allowed; mutation modules are forbidden.
 """
 
 from __future__ import annotations
@@ -14,21 +14,9 @@ from pathlib import Path
 import pytest
 
 FORBIDDEN_MUTATION_MODULES = [
-    "app.services.order_service",
     "app.services.fill_notification",
     "app.services.execution_event",
-    "app.services.kis_trading_service",
-    "app.services.kis_trading_contracts",
-    "app.services.kis_websocket",
-    "app.services.kis_websocket_internal",
-    "app.services.upbit_websocket",
-    "app.services.alpaca_paper_ledger_service",
     "app.tasks",
-]
-
-FORBIDDEN_KIS_RUNTIME_MODULES = [
-    "app.services.brokers.kis",
-    "app.services.kis",
 ]
 
 ROUTER_FORBIDDEN_DIRECT = [
@@ -63,9 +51,7 @@ def test_invest_api_router_no_mutation_imports() -> None:
     loaded = _loaded("app.routers.invest_api", root)
     v = _violations(
         loaded,
-        FORBIDDEN_MUTATION_MODULES
-        + FORBIDDEN_KIS_RUNTIME_MODULES
-        + ROUTER_FORBIDDEN_DIRECT,
+        FORBIDDEN_MUTATION_MODULES + ROUTER_FORBIDDEN_DIRECT,
     )
     if v:
         pytest.fail(f"Forbidden imports in invest_api: {v}")
@@ -75,7 +61,7 @@ def test_invest_api_router_no_mutation_imports() -> None:
 def test_invest_home_service_no_mutation_imports() -> None:
     root = Path(__file__).resolve().parent.parent
     loaded = _loaded("app.services.invest_home_service", root)
-    v = _violations(loaded, FORBIDDEN_MUTATION_MODULES + FORBIDDEN_KIS_RUNTIME_MODULES)
+    v = _violations(loaded, FORBIDDEN_MUTATION_MODULES)
     if v:
         pytest.fail(f"Forbidden imports in invest_home_service: {v}")
 
@@ -111,9 +97,7 @@ def test_buy_plan_router_no_mutation_imports() -> None:
     loaded = _loaded("app.routers.invest_buy_plan", root)
     v = _violations(
         loaded,
-        FORBIDDEN_MUTATION_MODULES
-        + FORBIDDEN_KIS_RUNTIME_MODULES
-        + ROUTER_FORBIDDEN_DIRECT,
+        FORBIDDEN_MUTATION_MODULES + ROUTER_FORBIDDEN_DIRECT,
     )
     if v:
         pytest.fail(f"Forbidden imports in invest_buy_plan: {v}")

@@ -9,15 +9,9 @@ from pathlib import Path
 import pytest
 
 FORBIDDEN_MUTATION_PREFIXES = [
-    "app.services.kis_trading_service",
-    "app.services.kis_trading_contracts",
     "app.services.fill_notification",
     "app.services.execution_event",
-    "app.services.kis_websocket",
-    "app.services.kis_websocket_internal",
-    "app.services.upbit_websocket",
     "app.mcp_server.tooling.orders_registration",
-    "app.mcp_server.tooling.orders_modify_cancel",
     "app.mcp_server.tooling.paper_order_handler",
     "app.tasks",
 ]

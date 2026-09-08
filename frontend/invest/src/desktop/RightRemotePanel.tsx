@@ -8,7 +8,6 @@ import type { PillTone } from "../ds";
 import { fetchSignals } from "../api/signals";
 import type { SignalCard } from "../types/signals";
 import { buildScopedPortfolioPanel, type AccountFilterKey } from "./scopeHoldings";
-import { accountSourceMeta } from "./AccountSourceMeta";
 import type { GroupedHolding, WatchSymbol } from "../types/invest";
 import { formatRelativeTime } from "../format/relativeTime";
 import { stockDetailPath, stockDetailRouteSymbol } from "../stockDetailPath";
@@ -17,17 +16,6 @@ type RightPanelTab = "portfolio" | "watchlist" | "recent" | "realtime";
 type RealtimeSubTab = "kr" | "us" | "crypto";
 type MarketKey = "kr" | "us" | "crypto";
 type NavigateToSymbol = (path: string, sym: RecentInvestSymbol) => void;
-
-const PAPER_SOURCES: ReadonlySet<string> = new Set([
-  "kis_mock",
-  "kiwoom_mock",
-  "alpaca_paper",
-  "db_simulated",
-]);
-
-function isPaperSource(source: string | undefined): boolean {
-  return source !== undefined && PAPER_SOURCES.has(source);
-}
 
 const TABS: { key: RightPanelTab; label: string }[] = [
   { key: "portfolio", label: "내 투자" },
@@ -208,14 +196,14 @@ function TabBar({
 }
 
 function PortfolioPanel({ onNavigate }: Readonly<{ onNavigate: NavigateToSymbol }>) {
-  const { data, error, loading, refreshing, reload, load, loadedPaperSources } = useAccountPanel();
+  const { data, error, loading, refreshing, reload, load } = useAccountPanel();
   const [selectedAccountKey, setSelectedAccountKey] = useState<AccountFilterKey>("all");
 
   // Lazy load on first mount of the portfolio tab. Skip if data is already
   // loaded (e.g., the user switched away and came back).
   useEffect(() => {
     if (data === undefined && !loading && !error) {
-      load({ includePaper: false });
+      load();
     }
   }, [data, loading, error, load]);
 
@@ -269,12 +257,9 @@ function PortfolioPanel({ onNavigate }: Readonly<{ onNavigate: NavigateToSymbol 
   };
 
   const sectionLabel = `${scoped.selected.label} 보유종목`;
-  const selectedSourceMeta = scoped.selected.source ? accountSourceMeta(scoped.selected.source) : null;
   const emptyText = selectedKey === "all"
     ? "보유 종목이 없습니다."
-    : selectedSourceMeta?.tone === "paper"
-      ? `${scoped.selected.label} 계좌는 표시할 모의/Paper 보유종목이 없습니다.`
-      : "선택한 계좌에 표시할 보유종목이 없습니다.";
+    : "선택한 계좌에 표시할 보유종목이 없습니다.";
   const hasCash = scoped.cashBalances.krw != null || scoped.cashBalances.usd != null;
 
   return (
@@ -308,19 +293,7 @@ function PortfolioPanel({ onNavigate }: Readonly<{ onNavigate: NavigateToSymbol 
               key={option.key}
               type="button"
               aria-pressed={isActive}
-              onClick={() => {
-                setSelectedAccountKey(option.key);
-                const src = option.source;
-                if (isPaperSource(src) && src !== undefined) {
-                  // Only fetch if this paper source isn't already in the loaded set.
-                  if (!loadedPaperSources.includes(src)) {
-                    load({ includePaper: true, paperSources: [src] });
-                  }
-                } else if (loadedPaperSources.length > 0) {
-                  // User picked a non-paper option after paper data was loaded — drop paper.
-                  load({ includePaper: false });
-                }
-              }}
+              onClick={() => setSelectedAccountKey(option.key)}
               style={{
                 padding: "5px 10px",
                 borderRadius: 999,
@@ -439,7 +412,7 @@ function WatchlistPanel({ onNavigate }: Readonly<{ onNavigate: NavigateToSymbol 
 
   useEffect(() => {
     if (data === undefined && !loading && !error) {
-      load({ includePaper: false });
+      load();
     }
   }, [data, loading, error, load]);
 

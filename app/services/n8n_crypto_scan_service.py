@@ -17,7 +17,6 @@ from app.jobs.daily_scan import DailyScanner
 from app.mcp_server.tooling.market_data_indicators import _calculate_rsi, _calculate_sma
 from app.services.brokers.upbit.client import (
     fetch_multiple_tickers,
-    fetch_my_coins,
     fetch_ohlcv,
     fetch_top_traded_coins,
 )
@@ -28,11 +27,6 @@ logger = logging.getLogger(__name__)
 
 # Concurrent OHLCV fetch limit (Upbit rate limit aware)
 _OHLCV_SEMAPHORE_LIMIT = 5
-
-
-async def _empty_coins_task() -> list[dict]:
-    """Return empty list for when holdings are disabled."""
-    return []
 
 
 def _to_float(value: object) -> float | None:
@@ -190,7 +184,7 @@ async def _build_coin_data(
 
     # Crash detection
     if include_crash and change_rate_24h is not None:
-        threshold = DailyScanner._crash_threshold_for_candidate(rank, is_holding)
+        threshold = DailyScanner._crash_threshold_for_rank(rank)
         crash = {
             "change_rate_24h": change_rate_24h,
             "threshold": threshold,
@@ -217,7 +211,6 @@ async def _build_coin_data(
 async def fetch_crypto_scan(
     *,
     top_n: int = 30,
-    include_holdings: bool = True,
     include_crash: bool = True,
     include_sma_cross: bool = True,
     include_fear_greed: bool = True,
@@ -230,14 +223,9 @@ async def fetch_crypto_scan(
     """
     errors: list[dict] = []
 
-    # 1. Fetch top traded coins and holdings in parallel
-    top_coins_task = fetch_top_traded_coins("KRW")
-    my_coins_task = fetch_my_coins() if include_holdings else _empty_coins_task()
-
+    # 1. Fetch the public traded-coin universe.
     try:
-        top_coins, my_coins = await asyncio.gather(
-            top_coins_task, my_coins_task, return_exceptions=False
-        )
+        top_coins = await fetch_top_traded_coins("KRW")
     except Exception as exc:
         logger.error("Failed to fetch coin universe: %s", exc)
         return {
@@ -253,36 +241,10 @@ async def fetch_crypto_scan(
             "errors": [{"source": "universe", "error": str(exc)}],
         }
 
-    # 2. Build rank map and determine scan universe
+    # 2. Build the public top-N scan universe.
     rank_by_market = DailyScanner._build_rank_by_market(top_coins)
-    tradable_markets = set(rank_by_market.keys())
-
-    # Top N markets
-    top_n_markets: set[str] = set()
-    for market, rank in rank_by_market.items():
-        if rank <= top_n:
-            top_n_markets.add(market)
-
-    holding_markets: set[str] = set()
-    skipped_markets: list[str] = []
-    if include_holdings:
-        for coin in my_coins:
-            currency = str(coin.get("currency") or "").upper()
-            if not currency or currency == "KRW":
-                continue
-            market = f"KRW-{currency}"
-            if market in tradable_markets:
-                holding_markets.add(market)
-            else:
-                skipped_markets.append(market)
-        if skipped_markets:
-            logger.info(
-                "Skipping non-tradable holding markets in crypto scan: %s",
-                ", ".join(sorted(skipped_markets)),
-            )
-
-    holdings_added = len(holding_markets - top_n_markets)
-    all_markets = sorted(top_n_markets | holding_markets)
+    top_n_markets = {market for market, rank in rank_by_market.items() if rank <= top_n}
+    all_markets = sorted(top_n_markets)
 
     # 3. Fetch tickers, BTC context, and F&G in parallel
     fg_task = fetch_fear_greed() if include_fear_greed else None
@@ -311,9 +273,8 @@ async def fetch_crypto_scan(
     coin_tasks = []
     for market in all_markets:
         rank = rank_by_market.get(market)
-        is_holding = market in holding_markets
-        # rank is None for holding-only coins not in top N
-        display_rank = rank if market in top_n_markets else None
+        is_holding = False
+        display_rank = rank
 
         coin_tasks.append(
             _build_coin_data(
@@ -381,7 +342,7 @@ async def fetch_crypto_scan(
         "summary": {
             "total_scanned": len(coins),
             "top_n_count": len(top_n_markets),
-            "holdings_added": holdings_added,
+            "holdings_added": 0,
             "oversold_count": oversold_count,
             "overbought_count": overbought_count,
             "crash_triggered_count": crash_triggered_count,

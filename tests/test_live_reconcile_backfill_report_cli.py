@@ -57,9 +57,9 @@ async def test_generate_backfill_report_runs_read_only():
     mock_db.execute.side_effect = [res_live, res_kis]
 
     with patch(
-        "scripts.live_reconcile_backfill_report._order_session_factory"
+        "scripts.live_reconcile_backfill_report.AsyncSessionLocal"
     ) as mock_factory:
-        mock_factory.return_value.return_value.__aenter__.return_value = mock_db
+        mock_factory.return_value.__aenter__.return_value = mock_db
         report = await generate_backfill_report("all")
 
     assert report["total_backlog"] == 2

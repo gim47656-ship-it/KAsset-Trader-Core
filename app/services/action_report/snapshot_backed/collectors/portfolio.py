@@ -1,11 +1,12 @@
-"""Toss/Upbit 및 사용자 수동 보유분의 read-only 포트폴리오 스냅샷.
+"""Toss 및 사용자 수동 보유분의 read-only 포트폴리오 스냅샷.
 
 KR/US ``toss_live``는 Toss 일반 포트폴리오 스냅샷을 primary source로
 사용한다. 이 경로의 수량은 매도가능 근거가 아니므로 sellable 조회와
 ``sellable_summary``를 사용하지 않는다. 수동 보유분은 reference로만
 노출하며 primary NAV에 합산하지 않는다.
 
-``crypto + upbit_live``와 비-live 수동 primary 계약은 그대로 유지한다.
+``upbit_live``는 운영 provider가 없어 ``unavailable``로 닫는다. 비-live
+수동 primary 계약은 그대로 유지한다.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.manual_holdings import BrokerAccount, ManualHolding, MarketType
-from app.schemas.invest_home import Holding
 from app.services.action_report.snapshot_backed.collectors._base import (
     build_result,
     unavailable_result,
@@ -69,61 +69,6 @@ def _manual_row_to_dict(row: Any) -> dict[str, Any]:
         "display_name": row.display_name,
         "updated_at": row.updated_at,
         "source": "manual",
-    }
-
-
-def _classify_fetch_status(
-    holdings_dicts: list[dict[str, Any]],
-    account: Any | None,
-    fetch_warnings: list[str],
-) -> str:
-    """Classify a live read-only fetch as ``ok`` / ``partial`` / ``failed``.
-
-    Shared by live account readers so status semantics stay consistent:
-
-    * ``failed`` — nothing usable returned (no holdings AND no account), or
-      warnings present with no holdings (data-quality gate).
-    * ``partial`` — holdings present but the reader flagged a warning.
-    * ``ok`` — holdings (and/or account) present with no warnings.
-    """
-    if not holdings_dicts and account is None:
-        return "failed"
-    if fetch_warnings and not holdings_dicts:
-        return "failed"
-    if fetch_warnings:
-        return "partial"
-    return "ok"
-
-
-def _krw_or_zero(value: float | None) -> float:
-    """Coerce an Upbit KRW figure to an explicit float.
-
-    Upbit에서 KRW row 부재는 실제 0 KRW를 뜻한다. 명시적 ``0.0``을
-    내보내 portfolio stage의 ``$.buying_power.krw`` citation이 null을
-    가리키지 않게 한다.
-    """
-    return float(value) if value is not None else 0.0
-
-
-def _reader_holding_to_dict(h: Holding) -> dict[str, Any]:
-    """Upbit read-only Holding을 snapshot dict shape으로 변환한다."""
-    return {
-        "ticker": h.symbol,
-        "market": h.market,
-        "asset_type": h.assetType,
-        "asset_category": h.assetCategory,
-        "quantity": h.quantity,
-        "avg_price": h.averageCost,
-        "cost_basis": h.costBasis,
-        "currency": h.currency,
-        "display_name": h.displayName,
-        "value_native": h.valueNative,
-        "value_krw": h.valueKrw,
-        "pnl_krw": h.pnlKrw,
-        "pnl_rate": h.pnlRate,
-        "sellable_quantity": h.sellableQuantity,
-        "pending_sell_quantity": h.pendingSellQuantity,
-        "source": h.source,
     }
 
 
@@ -182,7 +127,7 @@ def _apply_kr_name_fallback(
 
 
 class PortfolioSnapshotCollector:
-    """Toss/Upbit live와 수동 reference를 합성하는 portfolio collector."""
+    """Toss live와 수동 reference를 합성하는 portfolio collector."""
 
     snapshot_kind: str = "portfolio"
 
@@ -191,21 +136,11 @@ class PortfolioSnapshotCollector:
         session: AsyncSession,
         *,
         toss_snapshot_fetcher: Any | None = None,
-        upbit_reader: Any | None = None,
     ) -> None:
         self._session = session
         self._toss_snapshot_fetcher = (
             toss_snapshot_fetcher or fetch_toss_portfolio_snapshot
         )
-        self._upbit_reader = upbit_reader
-
-    def _get_upbit_reader(self) -> Any:
-        if self._upbit_reader is not None:
-            return self._upbit_reader
-        from app.services.invest_home_readers import UpbitHomeReader
-
-        self._upbit_reader = UpbitHomeReader(self._session)
-        return self._upbit_reader
 
     async def collect(self, request: CollectorRequest) -> list[SnapshotCollectResult]:
         market_types = _MARKET_TO_TYPES.get(request.market)
@@ -238,11 +173,17 @@ class PortfolioSnapshotCollector:
             "us",
         ):
             return await self._collect_toss_live(request, market_types, now=now)
-        # ROB-369 E9 — crypto + upbit_live reads the live Upbit account so the
-        # portfolio stage gets real NAV / cash / orderable instead of the
-        # manual-primary empty payload that produced "NAV=0".
-        if request.account_scope == "upbit_live" and request.market == "crypto":
-            return await self._collect_upbit_live(request, market_types, now=now)
+        if request.account_scope == "upbit_live":
+            return [
+                unavailable_result(
+                    snapshot_kind=self.snapshot_kind,
+                    market=request.market,
+                    account_scope=request.account_scope,
+                    origin="auto_trader_db",
+                    reason="provider upbit is not operational",
+                    as_of=now,
+                )
+            ]
         return await self._collect_manual_primary(request, market_types, now=now)
 
     async def _collect_manual_primary(
@@ -470,143 +411,6 @@ class PortfolioSnapshotCollector:
                     errors={
                         "reason_code": "toss_fetch_failed",
                         "reason": "Toss live portfolio fetch failed",
-                        "warnings": fetch_warnings,
-                        "errors": fetch_errors,
-                    },
-                )
-            ]
-
-        return [
-            build_result(
-                snapshot_kind=self.snapshot_kind,
-                market=request.market,
-                account_scope=request.account_scope,
-                payload=payload,
-                origin="auto_trader_db",
-                as_of=now,
-                freshness_status=freshness,
-                coverage=coverage,
-            )
-        ]
-
-    async def _collect_upbit_live(
-        self,
-        request: CollectorRequest,
-        market_types: tuple[MarketType, ...],
-        *,
-        now: dt.datetime,
-    ) -> list[SnapshotCollectResult]:
-        """``crypto + upbit_live``의 live read-only 경로.
-
-        Upbit holdings와 KRW cash/orderable은 ``primary_source="upbit"``로,
-        수동 ``CRYPTO`` rows는 ``reference_holdings``로만 노출한다. 실패는
-        수동 값을 primary로 승격하지 않고 ``freshness="unavailable"``로
-        반환한다. Upbit 계정은 사용자별 provider credential이 아니므로
-        ``user_id``가 없으면 reader에는 ``0``을 넘긴다. Crypto에는
-        sellable/pending-sell 개념이 없어 ``sellable_summary=None``이다.
-        """
-        manual_rows = await self._read_manual_rows(
-            market_types, user_id=request.user_id
-        )
-        reference_holdings = [_manual_row_to_dict(r) for r in manual_rows]
-
-        reader = self._get_upbit_reader()
-        fetch_warnings: list[str] = []
-        fetch_errors: list[str] = []
-        upbit_result: Any = None
-        try:
-            upbit_result = await reader.fetch(user_id=request.user_id or 0)
-        except Exception as exc:  # noqa: BLE001 — collector must never crash
-            logger.warning("Upbit read-only fetch failed: %s", exc, exc_info=True)
-            fetch_errors.append(f"{type(exc).__name__}: {exc}")
-
-        upbit_holdings_dicts: list[dict[str, Any]] = []
-        cash_payload: dict[str, Any] | None = None
-        buying_power_payload: dict[str, Any] | None = None
-        upbit_fetch_status: str
-        if upbit_result is None:
-            upbit_fetch_status = "failed"
-        else:
-            holdings = list(upbit_result.holdings or [])
-            upbit_holdings_dicts = [_reader_holding_to_dict(h) for h in holdings]
-            if upbit_result.warning is not None:
-                fetch_warnings.append(
-                    f"{upbit_result.warning.source}: {upbit_result.warning.message}"
-                )
-            account = next(iter(upbit_result.accounts or []), None)
-            if account is not None:
-                # Upbit는 KRW-only 계정이며 consumer shape 일관성을 위해
-                # 두 currency key를 낸다. None은 명시적 0 KRW로 정규화한다.
-                cash_payload = {
-                    "krw": _krw_or_zero(account.cashBalances.krw),
-                    "usd": account.cashBalances.usd,
-                }
-                buying_power_payload = {
-                    "krw": _krw_or_zero(account.buyingPower.krw),
-                    "usd": account.buyingPower.usd,
-                }
-            upbit_fetch_status = _classify_fetch_status(
-                upbit_holdings_dicts, account, fetch_warnings
-            )
-
-        if upbit_fetch_status == "failed":
-            primary_source = "none"
-            holdings_out: list[dict[str, Any]] = []
-            cash_payload = None
-            buying_power_payload = None
-            freshness = "unavailable"
-        else:
-            primary_source = "upbit"
-            holdings_out = upbit_holdings_dicts
-            freshness = "fresh" if upbit_fetch_status == "ok" else "partial"
-
-        payload: dict[str, Any] = {
-            "holdings": holdings_out,
-            "count": len(holdings_out),
-            "market": request.market,
-            "primary_source": primary_source,
-            "reference_holdings": reference_holdings,
-            "cash": cash_payload,
-            "buying_power": buying_power_payload,
-            "sellable_summary": None,
-            "provenance": {
-                "upbit_fetch_status": upbit_fetch_status,
-                "account_scope": request.account_scope,
-                "fetched_at": _iso(now),
-                "warnings": fetch_warnings,
-                "errors": fetch_errors,
-            },
-        }
-
-        coverage = {
-            "holdings_count": len(holdings_out),
-            "reference_count": len(reference_holdings),
-            "upbit_fetch_status": upbit_fetch_status,
-        }
-        # Surface the reader's dust (<5000 KRW) / inactive filtering so the
-        # snapshot NAV's divergence from the raw Upbit eval is auditable rather
-        # than a silent drop.
-        hidden_counts = getattr(upbit_result, "hidden_counts", None)
-        if hidden_counts is not None:
-            coverage["hidden_dust_count"] = getattr(hidden_counts, "upbitDust", 0)
-            coverage["hidden_inactive_count"] = getattr(
-                hidden_counts, "upbitInactive", 0
-            )
-
-        if freshness == "unavailable":
-            return [
-                build_result(
-                    snapshot_kind=self.snapshot_kind,
-                    market=request.market,
-                    account_scope=request.account_scope,
-                    payload=payload,
-                    origin="auto_trader_db",
-                    as_of=now,
-                    freshness_status="unavailable",
-                    coverage=coverage,
-                    errors={
-                        "reason_code": "upbit_fetch_failed",
-                        "reason": "Upbit live portfolio fetch failed",
                         "warnings": fetch_warnings,
                         "errors": fetch_errors,
                     },

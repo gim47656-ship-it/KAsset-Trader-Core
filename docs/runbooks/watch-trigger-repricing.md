@@ -337,10 +337,10 @@ subset 은 제안 못 하는 세션(=분석-온리 산출)이라 **둘 다 거�
 **문자열로도 언급하지 않는다**(`test_this_package_relaxes_none_of_the_approval_gates`,
 `test_loss_cut_stays_human_approved`). loss_cut 은 여전히 사람 승인이다.
 
-🔴 **정직한 공백**: 이 레포의 유일한 세션 런처 seam
-(`scripts/mock_session_mcp.py`)의 `SAFE_MOCK_PROFILES` 에 `watch_repricing` 이
-**없다.** 즉 이 레포만으로는 live 세션을 띄울 수 없고, 띄우려면 그 allowlist 를
-고치는 별도 리뷰가 필요하다. 테스트로 박제했다
+🔴 **정직한 공백**: 이 레포에는 `watch_repricing` 프로필로 세션을 띄울 수 있는
+런처 seam이 없다(과거 유일한 seam이던 `scripts/mock_session_mcp.py`는 제거됨).
+즉 이 레포만으로는 live 세션을 띄울 수 없고, 띄우려면 런처와 그 allowlist를
+새로 도입하는 별도 리뷰가 필요하다. 테스트로 박제했다
 (`test_no_launcher_in_this_repo_can_start_the_profile`).
 
 ### 8.1 스텁이 아니라 실 서버로 증명 (ROB-1290 r3 후속)

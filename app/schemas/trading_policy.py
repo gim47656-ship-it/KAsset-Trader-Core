@@ -973,8 +973,8 @@ class SingleShareExitDecisionRule(BaseModel):
     ``sell.trim_preplace`` includes one-share positions for a full-exit advisory
     review, while this path classifies the narrower KR Toss far-resistance
     cohort with ``proposal_enabled`` pinned false. Retired KIS accounts may
-    appear only as non-routable historical replay evidence; NH PLUG is not an
-    account broker. Candidate metadata remains manual-approval-only for a
+    appear only as non-routable historical replay evidence; no other broker is
+    an account route. Candidate metadata remains manual-approval-only for a
     separately authorized future activation; this schema never enables an order.
     """
 

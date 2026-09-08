@@ -2,12 +2,11 @@
 
 These constants govern how many bars per symbol the daily candle batch
 ingest job and the initial backfill CLI are permitted to request from
-the external API. They are intentionally separate from the wrapper-level
-safety clamp `app.services.brokers.kis.constants.DEFAULT_CANDLES`, which
-protects ad-hoc MCP/API display calls (`get_ohlcv(count)` style) from
-accidentally requesting huge windows.
+the external API. They are intentionally separate from any wrapper-level
+display clamp that protects ad-hoc MCP/API calls (`get_ohlcv(count)`
+style) from accidentally requesting huge windows.
 
-Raising these values does not raise the display clamp; the two knobs
+Raising these values does not raise a display clamp; the two knobs
 remain independent on purpose.
 """
 

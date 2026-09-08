@@ -20,7 +20,6 @@ from app.models.rung_reason_vocabulary import (
     sql_in_list,
     validate_rung_void_reason_group,
 )
-from app.services.brokers.kis import order_throttle
 from app.services.order_proposals import OrderProposalsService
 from app.services.order_proposals.rung_reason import classify_rung_void_reason
 from app.services.order_proposals.service import RungInput
@@ -89,10 +88,14 @@ def test_additive_migration_derives_same_check_and_has_no_backfill() -> None:
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
+        # Documented gateway throttle codes classify on their own, without the
+        # Korean "초당 ... 초과" sentence.
+        ("EGW00201", "provider_throttle"),
         (
             "EGW00201 초당 거래건수를 초과하였습니다.",
             "provider_throttle",
         ),
+        ("EGW00215", "provider_throttle"),
         (
             "동일 주문이 오늘 이미 전송되어 중복 전송을 차단했습니다 "
             "(duplicate order intent).",
@@ -110,32 +113,6 @@ def test_additive_migration_derives_same_check_and_has_no_backfill() -> None:
 )
 def test_known_reason_groups_and_unknown_fallback(reason: str, expected: str) -> None:
     assert classify_rung_void_reason(reason) == expected
-
-
-@pytest.mark.unit
-def test_throttle_group_delegates_to_existing_provider_predicate(monkeypatch) -> None:
-    calls: list[tuple[object, object]] = []
-
-    def fake_is_provider_throttle_reject(msg_cd: object, msg1: object) -> bool:
-        calls.append((msg_cd, msg1))
-        return True
-
-    monkeypatch.setattr(
-        order_throttle,
-        "is_provider_throttle_reject",
-        fake_is_provider_throttle_reject,
-    )
-    # The classifier imported the same function object at module load. Patch
-    # that binding too, so this test proves the call boundary, not a duplicate
-    # local implementation.
-    import app.services.order_proposals.rung_reason as rung_reason
-
-    monkeypatch.setattr(
-        rung_reason, "is_provider_throttle_reject", fake_is_provider_throttle_reject
-    )
-
-    assert classify_rung_void_reason("EGW00201") == "provider_throttle"
-    assert calls == [("EGW00201", "egw00201")]
 
 
 @pytest.mark.unit

@@ -9,33 +9,15 @@ PACKAGE_ROOT = APP_ROOT / "services" / "execution_outcomes"
 PACKAGE_IMPORT = "app.services.execution_outcomes"
 
 # Compact AST snapshots preserve every active mutation parameter, order, and
-# default without importing any runtime tool module. Generic Toss/Upbit routing
-# and provider-specific mutation surfaces retain their dry_run/confirm gates.
+# default without importing any runtime tool module. Generic routing and the
+# Toss mutation surfaces retain their dry_run/confirm gates.
 EXPECTED_SIGNATURES = {
     "app/mcp_server/tooling/orders_registration.py::place_order": "symbol,side,order_type='limit',quantity=None,price=None,amount=None,dry_run=True,confirm=False,confirm_high_value_order=False,reason='',exit_reason=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,defensive_trim=False,approval_issue_id=None,exit_intent=None,retrospective_id=None,account_mode=None,account_type=None,paper_account=None,report_item_uuid=None,approval_hash=None,rung=None",
     "app/mcp_server/tooling/orders_registration.py::cancel_order": "order_id,symbol=None,market=None,dry_run=True,confirm=False,account_mode=None,account_type=None",
     "app/mcp_server/tooling/orders_registration.py::modify_order": "order_id,symbol,market=None,new_price=None,new_quantity=None,dry_run=True,confirm=False,confirm_high_value_order=False,reason='',account_mode=None,account_type=None",
-    "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_place_order": "symbol,side,quantity,price,market='kr',exchange='KRX',dry_run=True,confirm=False",
-    "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_cancel_order": "order_id,symbol=None,cancel_quantity=None,dry_run=True,confirm=False",
-    "app/mcp_server/tooling/orders_kiwoom_variants.py::kiwoom_mock_modify_order": "order_id,symbol,new_price=None,new_quantity=None,dry_run=True,confirm=False",
     "app/mcp_server/tooling/orders_toss_variants.py::toss_place_order": "symbol,side,order_type='limit',quantity=None,price=None,order_amount=None,market=None,time_in_force='DAY',dry_run=True,confirm=False,confirm_high_value_order=False,reason=None,exit_intent=None,exit_reason=None,retrospective_id=None,approval_issue_id=None,thesis=None,strategy=None,target_price=None,stop_loss=None,min_hold_days=None,notes=None,indicators_snapshot=None,report_item_uuid=None,account_mode=None,account_type=None,approval_hash=None,rung=None",
     "app/mcp_server/tooling/orders_toss_variants.py::toss_modify_order": "order_id,new_price=None,new_quantity=None,market=None,dry_run=True,confirm=False,confirm_high_value_order=False,account_mode=None,account_type=None",
     "app/mcp_server/tooling/orders_toss_variants.py::toss_cancel_order": "order_id,dry_run=True,confirm=False,account_mode=None,account_type=None",
-    "app/mcp_server/tooling/alpaca_paper_orders.py::alpaca_paper_submit_order": "symbol,side,type,quote_snapshot_id=None,qty=None,notional=None,time_in_force=None,limit_price=None,asset_class='us_equity',confirm=False,account_mode=ALPACA_PAPER_ACCOUNT_MODE",
-    "app/mcp_server/tooling/alpaca_paper_orders.py::alpaca_paper_cancel_order": "order_id,confirm=False,account_mode=ALPACA_PAPER_ACCOUNT_MODE",
-    "app/services/brokers/binance/spot_demo/execution_client.py::submit_order": "self,*symbol,*side,*order_type,*qty,*client_order_id=None,*price=None,*time_in_force=None,*confirm=False",
-    "app/services/brokers/binance/spot_demo/execution_client.py::cancel_order": "self,*symbol,*client_order_id,*confirm=False",
-    # ROB-1288 — deliberately widened, once. D2 contract v2 §4.3 requires a
-    # Futures close to state its `positionSide` explicitly and forbids
-    # recovering it from the quantity sign, so the submit surface has to carry
-    # it; the approving issue is ROB-1288. The widening is `position_side`
-    # alone, it is keyword-only and defaults to None, and every other frozen
-    # signature below (including Spot's `submit_order` and this file's
-    # `cancel_order`) is byte-identical to what it was. Anything beyond that
-    # single parameter is a separate approval, which is what this exact
-    # comparison exists to force.
-    "app/services/brokers/binance/futures_demo/execution_client.py::submit_order": "self,*symbol,*side,*order_type,*qty,*client_order_id=None,*price=None,*time_in_force=None,*reduce_only=False,*position_side=None,*confirm=False",
-    "app/services/brokers/binance/futures_demo/execution_client.py::cancel_order": "self,*symbol,*client_order_id",
 }
 
 EXPECTED_MUTATION_TOOL_NAMES = {
@@ -44,19 +26,10 @@ EXPECTED_MUTATION_TOOL_NAMES = {
         "cancel_order",
         "modify_order",
     },
-    "app/mcp_server/tooling/orders_kiwoom_variants.py": {
-        "kiwoom_mock_place_order",
-        "kiwoom_mock_cancel_order",
-        "kiwoom_mock_modify_order",
-    },
     "app/mcp_server/tooling/orders_toss_variants.py": {
         "toss_place_order",
         "toss_modify_order",
         "toss_cancel_order",
-    },
-    "app/mcp_server/tooling/alpaca_paper_orders.py": {
-        "alpaca_paper_submit_order",
-        "alpaca_paper_cancel_order",
     },
 }
 

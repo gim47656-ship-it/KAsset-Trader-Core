@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.core.timezone import KST, trade_day_kst
@@ -421,3 +421,35 @@ def to_execution_ledger_upsert(
         source_run_id=source_run_id,
         raw_payload_json=normalized.get("raw_payload_json"),
     )
+
+
+def derive_mock_shadow_fill(row: Any, ordered_qty: float) -> tuple[float, float, str]:
+    """Derive (filled_qty, remaining_qty, status) consistent with lifecycle_state.
+
+    삭제된 ``app.mcp_server.tooling.kis_mock_ledger``에서 규칙 그대로 옮겨온 순수
+    파생 함수다. 새 주문을 만들지 않고 이미 저장된 ``review.kis_mock_order_ledger``
+    행만 해석한다: ``fill`` 행은 절대 pending/0으로 보고되지 않으며,
+    ``attributed_fill_qty``(ROB-400)가 있으면 그 값을, 없는 과거 행은 전량 체결로
+    본다. 분수 체결이 float 반올림으로 partial로 오분류되지 않도록 Decimal로
+    비교한다.
+    """
+    if getattr(row, "lifecycle_state", None) != "fill":
+        return 0.0, ordered_qty, "pending"
+
+    ordered_dec = Decimal(str(ordered_qty))
+    detail = getattr(row, "last_reconcile_detail", None) or {}
+    raw = detail.get("attributed_fill_qty")
+    if raw is None:
+        filled_dec = ordered_dec
+    else:
+        try:
+            filled_dec = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            filled_dec = ordered_dec
+        if filled_dec < 0:
+            filled_dec = Decimal("0")
+        elif filled_dec > ordered_dec:
+            filled_dec = ordered_dec
+    remaining_dec = ordered_dec - filled_dec
+    status = "filled" if filled_dec >= ordered_dec else "partial"
+    return float(filled_dec), float(remaining_dec), status

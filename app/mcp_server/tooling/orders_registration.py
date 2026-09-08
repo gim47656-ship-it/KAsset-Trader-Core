@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from app.mcp_server.tooling import order_execution, orders_history, orders_toss_variants
+from app.mcp_server.tooling import orders_history, orders_toss_variants
 from app.mcp_server.tooling.account_modes import (
     AccountRouting,
     apply_account_routing_metadata,
     normalize_account_mode,
-)
-from app.mcp_server.tooling.orders_modify_cancel import (
-    cancel_order_impl,
-    modify_order_impl,
 )
 from app.mcp_server.tooling.paper_order_handler import (
     _get_paper_order_history,
@@ -44,11 +40,10 @@ ORDER_TOOL_NAMES: set[str] = {
 _KIS_NOT_OPERATIONAL = "provider kis is not operational"
 
 
-def _selector_was_explicit(
-    account_mode: str | None,
-    account_type: str | None,
-) -> bool:
-    return account_mode is not None or account_type is not None
+_CRYPTO_NOT_OPERATIONAL = (
+    "crypto orders are not supported: PAPER (account_mode='db_simulated') and "
+    "Toss KR/US equity are the only operational order providers"
+)
 
 
 def _kis_not_operational_response(
@@ -63,29 +58,16 @@ def _kis_not_operational_response(
     }
 
 
-def _toss_crypto_mismatch_response(**context: Any) -> dict[str, Any]:
+def _crypto_not_operational_response(
+    routing: AccountRouting,
+    **context: Any,
+) -> dict[str, Any]:
     return {
         "success": False,
-        "error": "account_mode='toss_live' does not support crypto; omit the selector for Upbit",
-        "account_mode": "toss_live",
+        "error": _CRYPTO_NOT_OPERATIONAL,
+        "account_mode": routing.account_mode,
         **context,
     }
-
-
-def _routing_for_implicit_crypto(
-    *,
-    routing: AccountRouting,
-    account_mode: str | None,
-    account_type: str | None,
-) -> AccountRouting | None:
-    if _selector_was_explicit(account_mode, account_type):
-        return None
-    return AccountRouting(account_mode="upbit")
-
-
-def _looks_like_upbit_order_id(order_id: str) -> bool:
-    value = str(order_id or "").strip()
-    return len(value) == 36 and value.count("-") == 4
 
 
 def _ladder_fill_preview_response(
@@ -149,9 +131,9 @@ def register_order_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="get_order_history",
         description=(
-            "주문 이력을 조회합니다. 주식은 Toss, 암호화폐는 Upbit를 사용하며 "
+            "주문 이력을 조회합니다. 주식은 Toss를 사용하며 "
             "account_mode='db_simulated'는 가상계좌 이력을 조회합니다. "
-            "KIS account_mode는 운영 경로가 아니므로 명시적으로 거부합니다."
+            "암호화폐와 KIS account_mode는 운영 경로가 아니므로 명시적으로 거부합니다."
         ),
     )
     async def get_order_history(
@@ -204,14 +186,7 @@ def register_order_tools(mcp: FastMCP) -> None:
                     "account_mode": routing.account_mode,
                 }
         if normalized_market == "crypto":
-            crypto_routing = _routing_for_implicit_crypto(
-                routing=routing,
-                account_mode=account_mode,
-                account_type=account_type,
-            )
-            if crypto_routing is None:
-                return _toss_crypto_mismatch_response(order_id=order_id)
-            routing = crypto_routing
+            return _crypto_not_operational_response(routing, order_id=order_id)
 
         return apply_account_routing_metadata(
             await orders_history.get_order_history_impl(
@@ -229,12 +204,13 @@ def register_order_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="place_order",
         description=(
-            "LIMIT 주문을 미리보기 또는 제출합니다. 주식은 Toss, 암호화폐는 "
-            "Upbit를 사용합니다. dry_run=True가 기본이며 Toss 실주문은 "
-            "confirm=True와 승인 해시 등 기존 Toss 안전 경계를 그대로 적용합니다. "
-            "defensive_trim=True는 live direct order 경로가 아니며 "
-            "order_proposal_create를 사용해야 합니다. KIS account_mode는 운영 "
-            "경로가 아니므로 명시적으로 거부합니다."
+            "LIMIT 주문을 미리보기 또는 제출합니다. 주식은 Toss를 사용하고 "
+            "account_mode='db_simulated'는 가상계좌 원장에 기록합니다. "
+            "dry_run=True가 기본이며 Toss 실주문은 confirm=True와 승인 해시 등 "
+            "기존 Toss 안전 경계를 그대로 적용합니다. defensive_trim=True는 "
+            "live direct order 경로가 아니며 order_proposal_create를 사용해야 "
+            "합니다. 암호화폐와 KIS account_mode는 운영 경로가 아니므로 "
+            "명시적으로 거부합니다."
         ),
     )
     async def place_order(
@@ -337,42 +313,7 @@ def register_order_tools(mcp: FastMCP) -> None:
         if market_type == "equity_us":
             normalized_symbol = normalized_symbol.upper()
         if market_type == "crypto":
-            crypto_routing = _routing_for_implicit_crypto(
-                routing=routing,
-                account_mode=account_mode,
-                account_type=account_type,
-            )
-            if crypto_routing is None:
-                return _toss_crypto_mismatch_response(symbol=normalized_symbol)
-            return apply_account_routing_metadata(
-                await order_execution._place_order_impl(
-                    symbol=normalized_symbol,
-                    side=side,
-                    order_type=order_type,
-                    quantity=quantity,
-                    price=price,
-                    amount=amount,
-                    dry_run=dry_run,
-                    reason=reason,
-                    exit_reason=exit_reason,
-                    thesis=thesis,
-                    strategy=strategy,
-                    target_price=target_price,
-                    stop_loss=stop_loss,
-                    min_hold_days=min_hold_days,
-                    notes=notes,
-                    indicators_snapshot=indicators_snapshot,
-                    defensive_trim=defensive_trim,
-                    approval_issue_id=approval_issue_id,
-                    exit_intent=exit_intent,
-                    retrospective_id=retrospective_id,
-                    is_mock=False,
-                    report_item_uuid=report_item_uuid,
-                    approval_hash=approval_hash,
-                    rung=rung,
-                ),
-                crypto_routing,
-            )
+            return _crypto_not_operational_response(routing, symbol=normalized_symbol)
 
         toss_market: Literal["kr", "us"] = "kr" if market_type == "equity_kr" else "us"
         if dry_run:
@@ -504,9 +445,9 @@ def register_order_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="cancel_order",
         description=(
-            "대기 주문을 취소하거나 취소 미리보기를 반환합니다. 주식은 Toss, "
-            "암호화폐는 Upbit를 사용합니다. Toss 취소는 dry_run=True가 기본이며 "
-            "실제 취소에는 confirm=True가 필요합니다."
+            "대기 주문을 취소하거나 취소 미리보기를 반환합니다. 주식은 Toss를 "
+            "사용하며 Toss 취소는 dry_run=True가 기본이고 실제 취소에는 "
+            "confirm=True가 필요합니다. 암호화폐는 운영 경로가 아니므로 거부합니다."
         ),
     )
     async def cancel_order(
@@ -552,28 +493,8 @@ def register_order_tools(mcp: FastMCP) -> None:
                     "account_mode": routing.account_mode,
                     "order_id": order_id,
                 }
-        is_crypto = market_type == "crypto" or (
-            market_type is None
-            and symbol is None
-            and _looks_like_upbit_order_id(order_id)
-        )
-        if is_crypto:
-            crypto_routing = _routing_for_implicit_crypto(
-                routing=routing,
-                account_mode=account_mode,
-                account_type=account_type,
-            )
-            if crypto_routing is None:
-                return _toss_crypto_mismatch_response(order_id=order_id)
-            return apply_account_routing_metadata(
-                await cancel_order_impl(
-                    order_id=order_id,
-                    symbol=symbol,
-                    market=market,
-                    is_mock=False,
-                ),
-                crypto_routing,
-            )
+        if market_type == "crypto":
+            return _crypto_not_operational_response(routing, order_id=order_id)
 
         return apply_account_routing_metadata(
             await orders_toss_variants.toss_cancel_order(
@@ -588,9 +509,9 @@ def register_order_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="modify_order",
         description=(
-            "대기 주문의 가격 또는 수량을 변경합니다. 주식은 Toss, 암호화폐는 "
-            "Upbit를 사용합니다. Toss 변경은 dry_run=True가 기본이며 실제 변경에는 "
-            "confirm=True가 필요합니다."
+            "대기 주문의 가격 또는 수량을 변경합니다. 주식은 Toss를 사용하며 "
+            "Toss 변경은 dry_run=True가 기본이고 실제 변경에는 confirm=True가 "
+            "필요합니다. 암호화폐는 운영 경로가 아니므로 거부합니다."
         ),
     )
     async def modify_order(
@@ -638,27 +559,10 @@ def register_order_tools(mcp: FastMCP) -> None:
                 "symbol": symbol,
             }
         if market_type == "crypto":
-            crypto_routing = _routing_for_implicit_crypto(
-                routing=routing,
-                account_mode=account_mode,
-                account_type=account_type,
-            )
-            if crypto_routing is None:
-                return _toss_crypto_mismatch_response(
-                    order_id=order_id,
-                    symbol=normalized_symbol,
-                )
-            return apply_account_routing_metadata(
-                await modify_order_impl(
-                    order_id=order_id,
-                    symbol=normalized_symbol,
-                    market=market,
-                    new_price=new_price,
-                    new_quantity=new_quantity,
-                    dry_run=dry_run,
-                    is_mock=False,
-                ),
-                crypto_routing,
+            return _crypto_not_operational_response(
+                routing,
+                order_id=order_id,
+                symbol=normalized_symbol,
             )
 
         toss_market: Literal["kr", "us"] = "kr" if market_type == "equity_kr" else "us"

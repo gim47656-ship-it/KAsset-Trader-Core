@@ -20,7 +20,7 @@ def test_candidate_metadata_shape() -> None:
 
 
 def test_pure_signal_is_deterministic_via_registry() -> None:
-    from app.services.brokers.binance.demo_scalping.signal import Candle
+    from scalping_signal import Candle
 
     c = get_candidate("meanrev_zscore_fade")
     candles = [

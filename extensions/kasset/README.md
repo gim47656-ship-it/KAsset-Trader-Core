@@ -9,7 +9,7 @@ extensions/kasset/
 ├─ api/          # Android-facing API facade
 ├─ agent/        # KAsset agent runner / skill registry integration
 ├─ ai/           # Cloudflare relay client integration
-├─ brokers/      # KAsset-added broker adapters, starting with NH PLUG
+├─ brokers/      # KAsset-added broker adapters
 └─ config/       # KAsset extension configuration
 ```
 

@@ -78,7 +78,6 @@ class QuoteKind(StrEnum):
 
 class QuoteSource(StrEnum):
     TOSS_BROKER = "toss_broker"
-    NHPLUG_MARKET_DATA = "nhplug_market_data"
     NXT_EXPECTED_MODEL = "nxt_expected_model"
     PREVIOUS_CLOSE = "previous_close"
     INDICATIVE_MODEL = "indicative_model"

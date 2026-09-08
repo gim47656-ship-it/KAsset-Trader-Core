@@ -1,11 +1,33 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-07 (PAPER 자동 손절 -3% 바닥 — 운영 반영 완료·Main FINAL PASS, 다음 정규장 실손절 관측은 미완 / 장중 보호 청산·손절 후 매수 후보 유지, 배포 완료)
+갱신: 2026-09-08 (PAPER/Toss 외 broker 표면 제거 — `cleanup/remove-nhplug` 소스 정리·검증 증거 기록, 독립 checker closure PASS·Main ACCEPTED·미병합·미배포 / 2026-09-07 PAPER 자동 손절 -3% 바닥은 운영 반영 완료·Main FINAL PASS)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
 - 운영은 `9fefab61e80a6ade8466669e75e06cdc975a95fb`(자동 손절 -3% 바닥). 2026-09-07 10:40:51 UTC(19:40:51 KST) API·worker·scheduler·MCP·AI MCP 5개 image·build SHA 일치, restart 0. 직전 운영은 `e3680671bb19c323f62d5fcac18efdcb0c91c7b7`(PR #60)였다. alembic 변경 때문에 자동배포는 `exit 2`로 막혔고, 사용자 승인 아래 수동 단계 배포로 반영했다. 이후 구버전 이미지 롤백은 금지된다(아래 롤백 주의).
 - 기존 기본 checkout은 `main`/`e4b6043`와 사용자 `HANDOFF.md` 미커밋 변경을 그대로 보존했다. 중단된 새 worktree checkout만 복구했다.
+
+## 2026-09-08 — PAPER/Toss 외 broker 표면 제거 (`cleanup/remove-nhplug` 소스 정리·검증 기록, 미병합·미배포)
+### 범위와 결과
+- 대상은 PAPER/Toss가 아닌 모든 주문 provider 표면이다: NH PLUG, KIS(live·mock·WebSocket·reconcile), Kiwoom(KR·US mock), Alpaca paper(+paper-cohort·paper-evaluation·us-dual-paper), Binance Spot/Futures/Demo scalping. client·transport·service·job·task·router·MCP tool·script·smoke·runbook을 삭제했고, 남은 주문 실행 표면은 Toss live와 KAsset PAPER 모의뿐이다.
+- 작업 위치는 base `60f725373446ec9cd01f7d4e5a33f9e307db6e6c`에서 분리한 branch `cleanup/remove-nhplug`, worktree `.worktrees/cleanup-remove-nhplug`다.
+- **기본 checkout(`main`/`e4b6043`)은 수정하지 않았고 기존 사용자 `HANDOFF.md` 미커밋 변경을 그대로 보존했다.** 이 문서 갱신도 worktree 쪽에만 했고, 두 HANDOFF 병합은 Main이 판단한다.
+
+### 보존 예외 (지우지 않은 것)
+- **역사 데이터·모델·스키마**: `kasset_broker_credentials`, `symbol_master`, KIS/Kiwoom/Alpaca/Binance ledger DB 모델·테이블·행, 모든 Alembic revision, `account_mode`/source enum 값은 그대로다. 과거 원장은 원래 provenance로 계속 읽힌다. migration 변경은 0건이다.
+- **역사 문서**: `docs/plans/`, `docs/superpowers/`, `docs/archive/`, `blog/`, `docs/contracts/`의 과거 기록은 이름이 남아 있어도 고치지 않았다(예: `docs/contracts/rob-1271-upbit-futures-boundary.md`의 서명 서술은 당시 증거 인용이라 보존). 현재 운영 문서만 실행 가능한 removed-provider 절차를 갖지 않도록 정리했다. 이미 있던 5줄 "운영 종료" 묘비 runbook은 저장소 규약이므로 유지하고, 삭제된 `scripts/_archive_kis/` 언급만 정정했다.
+- **공개 시세 경로**: 인증·서명 없는 Upbit/Binance public market-data와 historical data 경로는 유지했다. private broker credential·주문 실행 표면만 제거 대상이다. Upbit 공개 클라이언트는 서명하지 않으므로(`app/services/brokers/upbit/client.py`에 jwt/Authorization 참조 0건) Main 승인 아래 `Settings.upbit_access_key`/`upbit_secret_key`와 private rate-limit 엔트리(`GET /v1/accounts`, `/v1/order`, `/v1/orders/closed`)만 제거하고 public `GET /v1/ticker` rate와 `UPBIT_BUY_AMOUNT`/`UPBIT_MIN_KRW_BALANCE`/`UPBIT_RATE_LIMIT_*`는 남겼다.
+- 살아 있는 gate와 정책 계약은 손대지 않았다: `PAPER_EXECUTION_*`, `PAPER_VALIDATION_*`, `WATCH_AUTO_EXECUTE_MOCK_ENABLED`, `order_approval_hash_mode`, `TOSS_*`(API·live mutation·auto-reconcile·fill poll), `EXECUTION_LEDGER_COMMIT_ENABLED`, `config/trading_policy.yaml`의 content_hash 대상 내용.
+
+### 설정·부트스트랩
+- 예시·부트스트랩은 삭제된 provider의 가짜 credential을 더 이상 설정하지 않는다(`env.example`, `env.prod.example`, `deploy/kasset/env.example`, `deploy/kasset/compose.yaml`, `docker-compose.prod.yml`, `scripts/setup-test-env.sh`).
+- **Settings 필수 env는 3개로 줄었다**: `SECRET_KEY`(32자+대소문자+숫자 검증), `DATABASE_URL`, `OPENDART_API_KEY`. 나머지는 모두 default가 있고 live mutation gate는 전부 default off다.
+
+### 검증 상태 (독립 checker closure 포함)
+- Android: `gradlew.bat :app:testDebugUnitTest :app:assembleDebug --console=plain`은 390 tests·failure/error/skip 0, `assembleDebug` 성공이다(`artifact://140`). 사용자 승인 후 SM-S926N(`192.168.0.148:37707`)에 기존 data를 유지한 채 `com.kasset.trader.debug` versionCode 10000/versionName `0.1-qa`를 `adb install -r`로 설치했고 `Success`를 확인했다(`artifact://679`). `MainActivity`는 `Status: ok`, cold start 522ms였으며 기존 로그인·AI픽·PAPER 자동 운용 화면이 표시됐다. 앱 PID는 유지됐고 해당 PID의 `AndroidRuntime:E`는 없었다. 설정·자산·종목·호가 실기기 경로는 확인하지 않았고 주문·설정 변경도 하지 않았다.
+- Frontend: 최초 전체 687 tests, 최종 account selector 집중 32 tests, type-check·build가 통과했다. 로컬 브라우저에서 실제 인증 후 현재 account selector와 삭제 route 동작을 확인했다.
+- Core: Windows contract subset 1429 tests가 failure/error/skip 없이 통과했고 Linux POSIX 전용 152 tests도 통과했다. 전체 최초 Windows 실행은 17282 passed / 400 failed / 65 errors / 29 skipped로 clean run이 아니며, 후속 실행들은 서로 겹치므로 합산 총계를 만들지 않는다. OS 실패 범위에 남은 4건은 base `60f72537`에서도 같은 test name과 같은 uv wrapper `CalledProcessError`로 재현된 baseline/environment 문제다. 아래 검증 기록에 원본 XML·후속 범위·제약을 적었다.
+- 이 제거 branch는 `main`에 merge하거나 운영에 deploy하지 않았다. 운영은 위 `9fefab61` 배포 상태 그대로이며, 실주문·실 Toss 주문·운영 DB 접근/변경은 없었다. 독립 checker 1회와 동일 review의 3개 findings closure는 PASS였고, Main은 세 finding을 모두 ACCEPTED로 종결했다.
 
 ## 2026-09-07 — PAPER 자동 손절 -3% 바닥 (구현·로컬 검증 완료, CI·운영 미반영)
 ### 승인 범위
@@ -151,7 +173,37 @@
 - 저장소가 public이라 fork PR 워크플로는 외부 기여자 전원 승인 필수로 설정했다. 사용자가 fork network 이탈 후 private 전환 예정(Free 플랜에서는 branch protection·environment 승인이 비활성화되지만 위 자동배포 모델은 그것에 의존하지 않는다).
 
 ## 프로젝트 개요와 사용자가 원하는 방향
-KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 broker 범위는 KR/US 실계좌·주문·체결의 Toss와 KR mock read-only 조회의 NH PLUG이며, KIS 미설정은 의도된 상태다. 역사 KIS ledger/read model은 보존하되 production runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+KAsset-Trader-Core는 Android KAsset Trader의 조회·추천·PAPER 거래·자동화 백엔드다. 운영 배포는 위 `9fefab61` 상태이며, 이번 제거 소스는 base `60f72537`의 별도 `cleanup/remove-nhplug` branch에만 있고 아직 merge·deploy하지 않았다. 이 branch에서 활성 private execution 계약은 Toss와 KAsset PAPER 모의 원장만 남고 Android 주문은 PAPER 전용이다. 역사 KIS/Upbit/Alpaca ledger·read model·migration과 인증·서명 없는 Upbit/Binance public data는 보존하되 removed provider의 private runtime에는 연결하지 않는다. owner scope, PAPER 고정, Kill Switch, Hard Risk, 승인 hash, 주문 idempotency, accepted-only ledger와 broker evidence fill을 보존하고 검증 목적으로 주문을 만들지 않는다.
+
+## 2026-09-08 — 비Toss/비PAPER broker 전면 제거 (branch 소스 정리·검증 기록, 독립 checker closure PASS)
+### 승인 범위
+- 사용자 승인으로 Core 전체에서 활성 broker provider를 `PAPER`(KAsset DB 모의 원장)와 `TOSS`만 남긴다. NH PLUG를 포함한 나머지 broker 구현·등록·job·API·config·credential·smoke·문서·테스트를 제거한다.
+- 기존 DB 테이블/행(`kasset_broker_credentials`, `symbol_master`, KIS/Upbit/Alpaca ledger 등)과 Alembic history는 보존한다. 파괴적 migration은 만들지 않는다.
+
+### 이번 슬라이스에서 실제로 한 것 (CoreRemoval 소유: NH 전면 + shared registry/schema/settings/docs)
+- 삭제: `app/services/brokers/nhplug/**`, `app/extensions/kasset/api/{nh_adapter,orderbook_store,credential_vault}.py`, `app/services/nhplug_symbol_master_service.py`, `app/jobs/nhplug_symbol_master.py`, `app/tasks/nhplug_symbol_master_tasks.py`, `scripts/{sync_nhplug_symbol_master,nhplug_mock_smoke}.py`, 대응 테스트 4종과 `tests/extensions/kasset/api/test_orderbook.py`, `docs/runbooks/{nhplug-mock-smoke,kasset-android-nh-mock-readonly}.md`.
+- Android facade: broker 카탈로그는 `PAPER` + `TOSS`(`LIVE_READ_ONLY`, 주문 capability 없음, 앱 credential 등록 없음)뿐이다. `/brokers/{provider}/credential(s)`·`/verify`·`GET /market/orderbook` 라우트와 `CredentialRequest`/`BrokerVerifyResponse`/`OrderbookResponse`/`OrderbookLevel` 스키마, `paths.py` allowlist 항목을 제거했다. 주문·정정·취소는 PAPER 전용이며 TOSS는 409 `BROKER_READ_ONLY`, 그 외 provider는 기존 fail-closed 그대로다. `Broker`/`SystemBrokerStatus`에서 credential 필드를 제거했다.
+- 시세/호가: `market_data.get_orderbook`과 MCP `get_orderbook`은 KRW crypto 전용으로 축소했고 KR equity 호가는 provider 부재로 거부한다. `stock_detail_orderbook_provider`는 crypto 외 market에서 `None`을 반환한다. Toss `/api/v1/market/stream` 호가는 그대로다.
+- config/배포: `CREDENTIAL_MASTER_KEY` 설정과 `NHPLUG_MOCK_ENABLED`, `.env.nhplug-mock.native` mount, `/opt/kasset-nhplug` 볼륨을 env 예제·compose에서 제거했다.
+
+### 유지된 제약
+- PAPER 주문/체결/포지션/reconcile, AUTO_PAPER, 장중 청산, -3% 손절 바닥, 손절이 다음 후보를 막지 않는 계약, Android 인증, KR/US 시세·유니버스는 변경하지 않았다.
+- live 실행을 새로 열지 않았고 risk/approval/kill-switch 가드를 약화하지 않았다.
+- `symbol_master` 테이블·모델·소비자와 Toss producer, KRX/NXT 유니버스는 유지했다. NH producer만 끊었다.
+
+### enum·과거 데이터 판정 (2026-09-08 Main 확정)
+- `AccountSource`/`AccountScope`/`AccountMode`/`CurrentOrderBroker` 같은 과거 원장 READ DTO discriminator와 관련 DB 모델·Alembic history는 기존 저장 행 해석용이므로 보존한다. 활성 broker 등록·주문 요청 검증·capability 카탈로그만 PAPER/TOSS로 좁힌다. 과거 행의 provider 문자열을 PAPER/TOSS로 치환하지 않는다(데이터 왜곡 금지).
+
+### 검증 기록 (독립 checker closure 포함)
+- 근거 정본은 `.tmp-verify/verification-summary.json`과 그 파일이 가리키는 XML/raw artifact다. 검증 대상은 base `60f725373446ec9cd01f7d4e5a33f9e307db6e6c`에서 분리한 `cleanup/remove-nhplug` worktree의 현재 소스다. `main` merge, 운영 deploy, production 접근·변경, 실주문은 하지 않았다.
+- Windows Core contract subset은 **1429 tests / 0 failures / 0 errors / 0 skipped**다. 최초 전체 Windows XML은 **17282 passed / 400 failed / 65 errors / 29 skipped**로 clean run이 아니다(`.tmp-verify/core-full.xml`, `artifact://587`). 실제 cutover repair 범위는 **713 passed / 7 failed**, 그 7건 수정 뒤 집중 재검증은 **99 passed / 0 failed**다. dead helper/test 정리 후 `test_revalidation.py` 집중 재검증은 **87 passed**였고 해당 delta의 Ruff와 format check도 통과했다. 이 실행들은 범위가 겹치므로 서로 더해 전체 통과 수로 주장하지 않는다.
+- Linux POSIX 전용 10파일은 Windows manifest에서 의도적으로 제외하며 실제 Linux 실행에서 **152 passed / 0 failed**다(`.tmp-verify/linux-posix-tests.log`). OS 실패 범위는 처음 **1146 tests / 1138 passed / 5 failed / 3 skipped**, 최종 환경 재확인은 **120 tests / 115 passed / 4 failed / 1 skipped**다.
+- 남은 4건은 base `60f72537` guard에서도 같은 test name과 같은 uv wrapper `CalledProcessError`로 **4 failed**였다(`.tmp-verify/baseline-guard.xml`). 따라서 이 4건은 baseline/environment 문제이며 이번 제거에서 새로 생긴 회귀가 아니다. 전체 suite가 green이라고 주장하지 않는다.
+- 현재 수집 근거는 Windows **17740** nodes와 POSIX-only **152** nodes다. Main의 `.tmp-verify/final-collected-nodes.txt`는 둘을 합친 **17892** nodes이며 다음 exact-cover 확인 입력이다. `ci_shards/weights.json`은 audit-only라 재생성하지 않았고 required jobs·gate도 바꾸지 않았다.
+- 최근 migration roundtrip은 **2 passed**다(`artifact://555`). fresh base→head 검증은 Timescale extension을 사용할 수 없어 실행하지 못했다. 우회하지 않았고 이 제거에서 migration은 변경하지 않았다.
+- Android는 **390 tests / failure 0 / error 0 / skip 0**와 `assembleDebug` 성공이다(`artifact://140`). SM-S926N에 기존 data를 유지한 `adb install -r` 설치와 `MainActivity` cold start, 기존 로그인·AI픽·PAPER 자동 운용 첫 화면 표시, 앱 PID 유지 및 해당 PID `AndroidRuntime:E` 없음까지 확인했다(`artifact://679`). 다른 앱이 foreground로 전환된 뒤 오조작 방지를 위해 추가 터치를 중단했으므로 설정·자산·종목·호가 실기기 경로는 미확인이다. Frontend는 최초 전체 **687 tests**, 최종 account selector 집중 **32 tests**, type-check·build 통과다. 로컬 브라우저에서 실제 인증 후 현재 selector와 삭제 route를 확인했다.
+- 테스트는 격리 DB와 로컬 계정만 썼다. 실기기 확인에서도 주문·설정을 변경하지 않았고, production·live Toss 주문은 검증하지 않았다. 활성 private broker execution 계약은 PAPER/TOSS만 남고 Android execution은 PAPER 전용이다. 역사 DB 모델·행·READ enum·Alembic revision과 인증·서명 없는 Upbit/Binance public data는 의도적으로 유지했다.
+- 독립 checker 1회에서 제기한 3개 findings는 문서·env와 dead helper/test 정리 후 동일 review의 closure PASS를 받았다. 최종 집중 `test_revalidation.py`는 **87 passed / 0 failures / 0 errors**였고 Ruff와 format check도 통과했으며, Main은 세 finding을 모두 ACCEPTED로 종결했다.
 
 ## 2026-09-06 — 주말 과거 시세 급등락 재알림
 - 운영 원인: SOXL `+9.2468%`의 원 시세는 KST `2026-09-05 08:59:59`인데, 미국 날짜가 바뀌는 9/5·9/6 13:00 KST에 각각 새 이벤트와 `sent` 푸시가 생성됐다. 가격 감시는 주말에도 10분마다 실행되며, 기존 코드는 시세 날짜와 무관하게 요청 시각의 시장 날짜로 이벤트·중복 키를 만들었다.

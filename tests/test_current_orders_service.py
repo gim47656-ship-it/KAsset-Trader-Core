@@ -61,64 +61,26 @@ def test_open_orders_schema_serializes_decimal_rows() -> None:
     assert dumped["sources"][0]["broker"] == "toss"
 
 
-def test_current_orders_has_no_kis_runtime_surface() -> None:
+def test_current_orders_exposes_only_toss_runtime_surface() -> None:
     import inspect
 
     from app.services import current_orders_service as service_module
     from app.services.current_orders_service import CurrentOrdersService
 
-    assert (
-        "kis_client_factory" not in inspect.signature(CurrentOrdersService).parameters
-    )
+    parameters = inspect.signature(CurrentOrdersService).parameters
+    assert "kis_client_factory" not in parameters
+    assert "upbit_client" not in parameters
     assert not hasattr(service_module, "normalize_kis_order")
+    assert not hasattr(service_module, "normalize_upbit_order")
     assert not hasattr(CurrentOrdersService, "_collect_kis")
-
-
-def test_normalize_upbit_order_maps_wait_order_shape() -> None:
-    from app.services.current_orders_service import normalize_upbit_order
-
-    row = normalize_upbit_order(
-        {
-            "uuid": "UP1",
-            "market": "KRW-BTC",
-            "side": "bid",
-            "ord_type": "limit",
-            "price": "96000000",
-            "volume": "0.01",
-            "remaining_volume": "0.006",
-            "executed_volume": "0.004",
-            "state": "wait",
-            "created_at": "2026-06-15T00:01:00+00:00",
-        }
-    )
-
-    assert row.broker == "upbit"
-    assert row.market == "crypto"
-    assert row.symbol == "KRW-BTC"
-    assert row.side == "buy"
-    assert row.order_type == "limit"
-    assert row.price == Decimal("96000000")
-    assert row.quantity == Decimal("0.01")
-    assert row.remaining_qty == Decimal("0.006")
-    assert row.filled_qty == Decimal("0.004")
-    assert row.status == "pending"
-    assert row.raw_status == "wait"
-    assert row.exchange == "UPBIT"
-    assert row.currency == "KRW"
+    assert not hasattr(CurrentOrdersService, "_collect_upbit")
 
 
 @pytest.mark.asyncio
-async def test_current_orders_unavailable_when_requested_sources_all_fail() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
+async def test_current_orders_crypto_source_fails_closed_as_unsupported() -> None:
     from app.services.current_orders_service import CurrentOrdersService
 
-    fake_upbit = SimpleNamespace(
-        fetch_open_orders=AsyncMock(side_effect=RuntimeError("upbit down"))
-    )
     service = CurrentOrdersService(
-        upbit_client=fake_upbit,
         toss_client_factory=None,
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
     )
@@ -128,8 +90,10 @@ async def test_current_orders_unavailable_when_requested_sources_all_fail() -> N
     assert response.data_state == "unavailable"
     assert response.items == []
     assert response.empty_reason == "all requested broker sources are unavailable"
-    assert response.sources[0].broker == "upbit"
-    assert response.sources[0].status == "unavailable"
+    assert [
+        (source.broker, source.market, source.status, source.message)
+        for source in response.sources
+    ] == [("upbit", "crypto", "unavailable", "upbit_order_read_unsupported")]
 
 
 @pytest.mark.asyncio
@@ -188,7 +152,6 @@ async def test_current_orders_toss_pages_and_splits_kr_us() -> None:
         ]
     )
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: fake_toss,
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
     )
@@ -261,7 +224,6 @@ async def test_current_orders_toss_kr_filter_keeps_only_kr_orders() -> None:
         ]
     )
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: fake_toss,
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
     )
@@ -301,7 +263,6 @@ async def test_current_orders_toss_disabled_fails_open() -> None:
 
     fake_toss = _FakeTossClient(exc=RuntimeError("TOSS_API_ENABLED"))
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: fake_toss,
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
     )
@@ -317,26 +278,22 @@ async def test_current_orders_toss_disabled_fails_open() -> None:
 
 @pytest.mark.asyncio
 async def test_current_orders_empty_reason_reports_partial_source_unavailable() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
+    from app.services.brokers.toss.dto import TossOrdersPage
     from app.services.current_orders_service import CurrentOrdersService
 
-    fake_upbit = SimpleNamespace(fetch_open_orders=AsyncMock(return_value=[]))
-
-    class _DisabledToss:
+    class _EmptyToss:
         async def list_orders(self, **kwargs):
-            raise RuntimeError("TOSS_API_ENABLED")
+            return TossOrdersPage(orders=[], next_cursor=None, has_next=False)
 
         async def aclose(self) -> None:
             return None
 
     service = CurrentOrdersService(
-        upbit_client=fake_upbit,
-        toss_client_factory=lambda: _DisabledToss(),
+        toss_client_factory=lambda: _EmptyToss(),
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
     )
 
+    # Toss kr/us는 정상 빈 응답, crypto는 지원 공급자 없음 → degraded.
     response = await service.list_open_orders(market="all")
 
     assert response.data_state == "degraded"
@@ -385,7 +342,6 @@ async def test_toss_close_failure_does_not_500_endpoint() -> None:
             raise RuntimeError("close boom")
 
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: _CloseRaisingToss(),
         clock=lambda: dt.datetime(2026, 6, 15, tzinfo=dt.UTC),
     )
@@ -402,19 +358,21 @@ async def test_collector_unexpected_raise_degrades_not_500() -> None:
     from app.services.current_orders_service import CurrentOrdersService
 
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=None,
         clock=lambda: dt.datetime(2026, 6, 15, tzinfo=dt.UTC),
     )
 
-    async def _boom() -> tuple:
+    async def _boom(**kwargs) -> tuple:
         raise RuntimeError("unexpected")
 
-    service._collect_upbit = _boom  # type: ignore[method-assign]
-    response = await service.list_open_orders(market="crypto")
+    service._collect_toss_equities = _boom  # type: ignore[method-assign]
+    response = await service.list_open_orders(market="kr")
     assert response.data_state == "unavailable"
     assert any(
-        s.broker == "upbit" and s.status == "unavailable" for s in response.sources
+        source.broker == "toss"
+        and source.status == "unavailable"
+        and source.message == "collector_error"
+        for source in response.sources
     )
 
 
@@ -433,7 +391,6 @@ async def test_source_message_omits_exception_detail() -> None:
             return None
 
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: _RaisingToss(),
         clock=lambda: dt.datetime(2026, 6, 15, tzinfo=dt.UTC),
     )
@@ -464,7 +421,6 @@ async def test_toss_pagination_stuck_cursor_terminates() -> None:
 
     fake = _StuckToss()
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: fake,
         clock=lambda: dt.datetime(2026, 6, 15, tzinfo=dt.UTC),
     )
@@ -475,7 +431,7 @@ async def test_toss_pagination_stuck_cursor_terminates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_current_orders_enriches_missing_toss_and_upbit_names(
+async def test_current_orders_enriches_missing_toss_names(
     monkeypatch,
 ) -> None:
     from app.services import current_orders_service as cos
@@ -492,14 +448,8 @@ async def test_current_orders_enriches_missing_toss_and_upbit_names(
         assert db == "db-session"
         return {"AAPL": "Apple"}
 
-    async def fake_crypto_names(markets, db):
-        assert markets == ["KRW-BTC"]
-        assert db == "db-session"
-        return {"KRW-BTC": {"korean_name": "비트코인", "english_name": "Bitcoin"}}
-
     monkeypatch.setattr(cos, "get_kr_names_by_symbols", fake_kr_names)
     monkeypatch.setattr(cos, "get_us_names_by_symbols", fake_us_names)
-    monkeypatch.setattr(cos, "get_upbit_market_display_names", fake_crypto_names)
 
     class _FakeToss:
         async def list_orders(self, **kwargs):
@@ -543,22 +493,7 @@ async def test_current_orders_enriches_missing_toss_and_upbit_names(
         async def aclose(self) -> None:
             return None
 
-    class _FakeUpbit:
-        async def fetch_open_orders(self, market=None):
-            return [
-                {
-                    "uuid": "UP1",
-                    "market": "KRW-BTC",
-                    "side": "bid",
-                    "ord_type": "limit",
-                    "price": "96000000",
-                    "volume": "0.01",
-                    "remaining_volume": "0.01",
-                }
-            ]
-
     service = CurrentOrdersService(
-        upbit_client=_FakeUpbit(),
         toss_client_factory=lambda: _FakeToss(),
         db="db-session",  # type: ignore[arg-type]
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),
@@ -571,7 +506,6 @@ async def test_current_orders_enriches_missing_toss_and_upbit_names(
     }
     assert names[("toss", "kr", "005930")] == "삼성전자"
     assert names[("toss", "us", "AAPL")] == "Apple"
-    assert names[("upbit", "crypto", "KRW-BTC")] == "비트코인"
 
 
 @pytest.mark.asyncio
@@ -592,7 +526,6 @@ async def test_current_orders_name_lookup_failure_fails_open(monkeypatch) -> Non
             return None
 
     service = CurrentOrdersService(
-        upbit_client=None,
         toss_client_factory=lambda: _FakeToss(),
         db="db-session",  # type: ignore[arg-type]
         clock=lambda: dt.datetime(2026, 6, 15, 0, 0, tzinfo=dt.UTC),

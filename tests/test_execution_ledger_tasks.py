@@ -100,7 +100,7 @@ def test_reconciliation_task_rejects_kis_before_opening_session(
 
 
 @pytest.mark.unit
-def test_recurring_reconciliation_uses_toss_and_upbit(
+def test_recurring_reconciliation_uses_toss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.tasks import execution_ledger as mod
@@ -120,9 +120,8 @@ def test_recurring_reconciliation_uses_toss_and_upbit(
 
     assert result == {
         "toss": {"broker": "toss"},
-        "upbit": {"broker": "upbit"},
     }
-    assert calls == [("toss", 12), ("upbit", 12)]
+    assert calls == [("toss", 12)]
 
 
 @pytest.mark.unit
@@ -166,11 +165,9 @@ def test_reconciliation_task_commits_dry_run_audit_when_reconciler_raises(
     monkeypatch.setattr(mod, "ExecutionLedgerRepository", FakeRepository)
 
     with pytest.raises(RuntimeError, match="filled-orders fetch returned errors"):
-        asyncio.run(
-            mod.reconcile_execution_ledger_smoke(broker="upbit", window_hours=6)
-        )
+        asyncio.run(mod.reconcile_execution_ledger_smoke(broker="toss", window_hours=6))
 
-    assert captured["broker"] == "upbit"
+    assert captured["broker"] == "toss"
     assert captured["window_hours"] == 6
     assert captured["dry_run"] is True
     assert captured["committed"] is True

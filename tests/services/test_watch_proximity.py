@@ -123,10 +123,7 @@ def test_watch_proximity_module_has_no_order_or_watch_registration_imports() -> 
     module = importlib.import_module("app.services.watch_proximity")
 
     forbidden = {
-        "kis_trading_service",
-        "order_execution",
         "orders_registration",
-        "watch_alerts_registration",
         "paper_order_handler",
     }
     assert forbidden.isdisjoint(set(module.__dict__))

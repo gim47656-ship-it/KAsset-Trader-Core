@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.mcp_server.tooling.kis_live_ledger import _order_session_factory
+from app.core.db import AsyncSessionLocal
 from app.models.review import KISLiveOrderLedger, LiveOrderLedger
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ async def get_unreconciled_live_order_metrics(
     if db is not None:
         return await _compute_metrics(db, ref_time)
 
-    async with _order_session_factory()() as session:
+    async with AsyncSessionLocal() as session:
         return await _compute_metrics(session, ref_time)
 
 

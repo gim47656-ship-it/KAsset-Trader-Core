@@ -17,16 +17,11 @@ from app.services.nxt_preflight import NxtTradability
 async def test_kis_mock_cash_fails_closed_without_querying_live_sources(
     monkeypatch,
 ):
-    upbit_read = AsyncMock(side_effect=AssertionError("upbit_live must be isolated"))
     toss_read = AsyncMock(side_effect=AssertionError("toss_api must be isolated"))
-    monkeypatch.setattr(
-        portfolio_cash.upbit_service, "fetch_krw_cash_summary", upbit_read
-    )
     monkeypatch.setattr(portfolio_cash, "fetch_toss_cash_snapshot", toss_read)
 
     result = await portfolio_cash.get_cash_balance_impl(is_mock=True)
 
-    upbit_read.assert_not_awaited()
     toss_read.assert_not_awaited()
     assert result == {
         "success": False,
@@ -72,10 +67,8 @@ async def test_kis_mock_available_capital_fails_before_cash_sources(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_kis_mock_holdings_fail_before_live_or_manual_sources(monkeypatch):
-    upbit_read = AsyncMock(side_effect=AssertionError("upbit_live must be isolated"))
     manual_read = AsyncMock(side_effect=AssertionError("manual must be isolated"))
     toss_read = AsyncMock(side_effect=AssertionError("toss_api must be isolated"))
-    monkeypatch.setattr(portfolio_holdings, "_collect_upbit_positions", upbit_read)
     monkeypatch.setattr(portfolio_holdings, "_collect_manual_positions", manual_read)
     monkeypatch.setattr(portfolio_holdings, "_collect_toss_api_positions", toss_read)
 
@@ -87,7 +80,6 @@ async def test_kis_mock_holdings_fail_before_live_or_manual_sources(monkeypatch)
             is_mock=True,
         )
 
-    upbit_read.assert_not_awaited()
     manual_read.assert_not_awaited()
     toss_read.assert_not_awaited()
 

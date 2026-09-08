@@ -29,19 +29,10 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import NotFoundError
 
-from app.mcp_server.tooling.live_reconcile_registration import (
-    LIVE_RECONCILE_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kis_variants import (
-    KIS_LIVE_ORDER_TOOL_NAMES,
-    KIS_MOCK_ORDER_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_us_variants import KIWOOM_MOCK_US_TOOL_NAMES
-from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import TOSS_LIVE_ORDER_TOOL_NAMES
-from app.mcp_server.tooling.paper_execution_registration import (
-    PAPER_EXECUTION_TOOL_NAMES,
+from app.mcp_server.tooling.paper_limit_order_handler import (
+    PAPER_LIMIT_ORDER_TOOL_NAMES,
 )
 from app.mcp_server.tooling.watch_repricing_registration import (
     WATCH_REPRICING_TOOL_NAMES,
@@ -65,25 +56,16 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 # the one that gets the full client -> server -> raw-payload treatment.
 SUBMIT_TOOLS = (
     "place_order",
-    "kis_live_place_order",
-    "kis_mock_place_order",
     "toss_place_order",
-    "kiwoom_mock_place_order",
-    "kiwoom_mock_us_place_order",
-    "paper_execution_submit_order",
+    "paper_place_limit_order",
 )
 
 # Every name any order registry registers, so a tool added to one of them
 # next quarter is swept without this file being edited.
 ORDER_REGISTRY_NAMES = frozenset(
     set(ORDER_TOOL_NAMES)
-    | set(KIS_LIVE_ORDER_TOOL_NAMES)
-    | set(KIS_MOCK_ORDER_TOOL_NAMES)
-    | set(LIVE_RECONCILE_TOOL_NAMES)
-    | set(KIWOOM_MOCK_TOOL_NAMES)
-    | set(KIWOOM_MOCK_US_TOOL_NAMES)
     | set(TOSS_LIVE_ORDER_TOOL_NAMES)
-    | set(PAPER_EXECUTION_TOOL_NAMES)
+    | set(PAPER_LIMIT_ORDER_TOOL_NAMES)
 )
 
 
@@ -197,7 +179,7 @@ async def test_no_order_registry_name_can_be_called() -> None:
     """Sweep every name the repo's order registries define, not a curated few."""
     server = build_watch_repricing_server()
     # A registry rename that emptied this set would make the sweep vacuous.
-    assert len(ORDER_REGISTRY_NAMES) >= 30
+    assert len(ORDER_REGISTRY_NAMES) >= 15
     assert ORDER_REGISTRY_NAMES & PROPOSAL_ONLY_TOOLS == frozenset()
 
     for name in sorted(ORDER_REGISTRY_NAMES):
