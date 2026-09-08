@@ -3,14 +3,11 @@ import importlib
 import logging
 import random
 import time
-import uuid
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
-import jwt
 import pandas as pd
 
 from app.core.async_rate_limiter import RateLimitExceededError, get_limiter
@@ -18,7 +15,6 @@ from app.core.config import settings
 from app.services.upbit_symbol_universe_service import get_active_upbit_markets
 
 logger = logging.getLogger(__name__)
-PreSendHook = Callable[[], Awaitable[None]]
 
 UPBIT_REST = "https://api.upbit.com/v1"
 UPBIT_CANDLES_RATE_LIMIT_KEY = "GET /v1/candles/*"
@@ -102,8 +98,6 @@ async def _retry_with_backoff(
     url: str,
     max_retries: int | None = None,
     base_delay: float | None = None,
-    retry_request_errors: bool = True,
-    pre_send_hook: PreSendHook | None = None,
 ) -> Any:
     """Common retry-with-backoff loop for Upbit API requests.
 
@@ -118,14 +112,6 @@ async def _retry_with_backoff(
     max_retries / base_delay
         Override ``settings.api_rate_limit_retry_429_max`` /
         ``settings.api_rate_limit_retry_429_base_delay``.
-    retry_request_errors
-        Whether to retry on ``httpx.RequestError`` (timeouts/network). ROB-645:
-        order-creation POSTs pass ``False`` so a timed-out order is never re-sent
-        (ROB-837 also gives order creation a zero retry budget, including 429).
-    pre_send_hook
-        Optional live-mutation policy recheck. It runs after each rate-limiter
-        admission and immediately before that attempt's HTTP send, including
-        retries.
     """
     if max_retries is None:
         max_retries = settings.api_rate_limit_retry_429_max
@@ -140,8 +126,6 @@ async def _retry_with_backoff(
         )
 
         try:
-            if pre_send_hook is not None:
-                await pre_send_hook()
             response = await send_fn()
 
             if response.status_code == 429:
@@ -180,7 +164,7 @@ async def _retry_with_backoff(
                 continue
             raise
         except httpx.RequestError as e:
-            if retry_request_errors and attempt < max_retries:
+            if attempt < max_retries:
                 wait_time = base_delay * (2**attempt) + random.uniform(0, 0.1)
                 logger.warning(
                     "[upbit] Request error: %s, attempt %d/%d, retrying in %.3fs (url=%s)",
@@ -213,66 +197,6 @@ async def _request_json(
             return await cli.get(url, params=params)
 
     return await _retry_with_backoff(limiter, send, url=url)
-
-
-async def fetch_my_coins() -> list[dict[str, Any]]:
-    return await _request_with_auth("GET", f"{UPBIT_REST}/accounts")
-
-
-def parse_upbit_account_row(account: dict[str, Any]) -> dict[str, float | bool]:
-    """Parse a single ``/v1/accounts`` row → ``balance, locked, total_quantity, orderable_quantity, avg_buy_price, avg_buy_price_modified``."""
-    balance = float(account.get("balance", 0) or 0)
-    locked = float(account.get("locked", 0) or 0)
-    avg_buy_price = float(account.get("avg_buy_price", 0) or 0)
-    avg_buy_price_modified = str(
-        account.get("avg_buy_price_modified", "false")
-    ).lower() in {"true", "1", "yes"}
-    return {
-        "balance": balance,
-        "locked": locked,
-        "total_quantity": balance + locked,
-        "orderable_quantity": balance,
-        "avg_buy_price": avg_buy_price,
-        "avg_buy_price_modified": avg_buy_price_modified,
-    }
-
-
-async def fetch_krw_cash_summary() -> dict[str, float]:
-    accounts = await fetch_my_coins()
-
-    for account in accounts:
-        if account.get("currency") == "KRW":
-            parsed = parse_upbit_account_row(account)
-            return {
-                "balance": parsed["total_quantity"],
-                "orderable": parsed["orderable_quantity"],
-            }
-
-    return {"balance": 0.0, "orderable": 0.0}
-
-
-async def fetch_krw_orderable_balance() -> float:
-    summary = await fetch_krw_cash_summary()
-    return float(summary["orderable"])
-
-
-async def check_krw_balance_sufficient(required_amount: float) -> tuple[bool, float]:
-    """KRW 잔고가 충분한지 확인
-
-    Parameters
-    ----------
-    required_amount : float
-        필요한 금액
-
-    Returns
-    -------
-    tuple[bool, float]
-        (충분 여부, 현재 KRW 잔고)
-    """
-    current_balance = await fetch_krw_orderable_balance()
-    is_sufficient = current_balance >= required_amount
-
-    return is_sufficient, current_balance
 
 
 def _normalize_upbit_interval(period: str) -> str:
@@ -842,122 +766,3 @@ async def fetch_multiple_current_prices_cached(
             result[market_code] = cached_prices[market_code]
 
     return result
-
-
-async def _request_with_auth(
-    method: str,
-    url: str,
-    query_params: dict[str, Any] | None = None,
-    body_params: dict[str, Any] | None = None,
-    *,
-    pre_send_hook: PreSendHook | None = None,
-) -> Any:
-    import hashlib
-    from urllib.parse import unquote, urlencode, urlparse
-
-    parsed_url = urlparse(url)
-    api_path = parsed_url.path or "/unknown"
-    api_key = f"{method.upper()} {api_path}"
-
-    rate, period = _get_upbit_rate_limit(api_key)
-    limiter = await get_limiter("upbit", api_key, rate=rate, period=period)
-
-    payload: dict[str, Any] = {
-        "access_key": settings.upbit_access_key,
-        "nonce": str(uuid.uuid4()),
-    }
-
-    if method.upper() in ["GET", "DELETE"] and query_params:
-        query_string = unquote(urlencode(query_params, doseq=True))
-        payload["query_hash"] = hashlib.sha512(query_string.encode()).hexdigest()
-        payload["query_hash_alg"] = "SHA512"
-    elif method.upper() == "POST" and body_params:
-        query_string = unquote(urlencode(body_params, doseq=True))
-        payload["query_hash"] = hashlib.sha512(query_string.encode()).hexdigest()
-        payload["query_hash_alg"] = "SHA512"
-
-    jwt_token = jwt.encode(payload, settings.upbit_secret_key)
-    authorize_token = f"Bearer {jwt_token}"
-    headers: dict[str, str] = {"Authorization": authorize_token}
-
-    if method.upper() == "POST":
-        headers["Content-Type"] = "application/json"
-
-    async def send() -> httpx.Response:
-        async with httpx.AsyncClient(timeout=10) as cli:
-            if method.upper() == "GET":
-                return await cli.get(url, headers=headers, params=query_params)
-            elif method.upper() == "POST":
-                return await cli.post(url, headers=headers, json=body_params)
-            elif method.upper() == "DELETE":
-                return await cli.delete(url, headers=headers, params=query_params)
-            else:
-                raise ValueError(f"지원하지 않는 HTTP 메서드: {method}")
-
-    # Live order mutations must not retry transport errors or 429 responses.
-    # A POST may have created an order and a DELETE may have cancelled one even
-    # when the response is lost; retrying also makes a later approval-window
-    # hook unable to distinguish HTTP=0 from an earlier ambiguous attempt.
-    # Read paths keep the existing retry behavior.
-    #
-    # ROB-659 constraint note: mutation detection is deliberately limited to
-    # POST /v1/orders (create) and DELETE /v1/order (cancel). If Upbit adds
-    # another endpoint with either suffix, revisit this predicate.
-    normalized_path = api_path.rstrip("/")
-    is_order_mutation = (
-        method.upper() == "POST" and normalized_path.endswith("/orders")
-    ) or (method.upper() == "DELETE" and normalized_path.endswith("/order"))
-    return await _retry_with_backoff(
-        limiter,
-        send,
-        url=url,
-        max_retries=0 if is_order_mutation else None,
-        retry_request_errors=not is_order_mutation,
-        pre_send_hook=pre_send_hook,
-    )
-
-
-# Re-export order functions for backward compatibility using lazy loading to avoid circular imports.
-def __getattr__(name: str) -> Any:
-    reexported = {
-        "adjust_price_to_upbit_unit",
-        "cancel_and_reorder",
-        "cancel_orders",
-        "fetch_closed_orders",
-        "fetch_open_orders",
-        "fetch_order_by_identifier",
-        "fetch_order_detail",
-        "place_buy_order",
-        "place_market_buy_order",
-        "place_market_sell_order",
-        "place_sell_order",
-    }
-    if name in reexported:
-        from app.services.brokers.upbit import orders
-
-        return getattr(orders, name)
-    raise AttributeError(f"module {__name__} has no attribute {name}")
-
-
-# --- 작은 데모 스크립트 (직접 실행 시) ----------------------------------------
-if __name__ == "__main__":
-    import asyncio
-    import pprint
-
-    async def demo():
-        # # 기존 데모 코드
-        # df = await fetch_ohlcv("KRW-BTC", 5)
-        # pprint.pp(df)
-        # now = await fetch_price("KRW-BTC")
-        # print(now.T)
-        try:
-            print("--- 내 보유 자산 ---")
-            my_coins = await fetch_my_coins()
-            pprint.pp(my_coins)
-        except httpx.HTTPStatusError as e:
-            print(f"API 호출에 실패했습니다: {e.response.status_code}")
-            print(f"응답 내용: {e.response.text}")
-        except Exception as e:
-            print(f"오류 발생: {e}")
-
-    asyncio.run(demo())

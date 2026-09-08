@@ -55,17 +55,6 @@ _DATABASE_FIXTURE_NAMES = frozenset(
 )
 _SCHEMA_METRICS_KEY = pytest.StashKey[list[dict[str, object]]]()
 _EXTERNAL_HTTP_KEY = pytest.StashKey["Counter[str]"]()
-_KIS_DEFAULT_SCOPE_PARTS = (
-    "/brokers/kis/",
-    "/services/brokers/kis/",
-    "/services/order_proposals/",
-    "/test_kis",
-    "/test_mcp_order",
-    "/test_mcp_place_order",
-    "/test_nxt",
-    "/test_order",
-    "/test_services_kis",
-)
 _AUTH_DB_SCOPE_PARTS = (
     "/routers/",
     "/test_admin",
@@ -83,10 +72,8 @@ _WINDOWS_POSIX_ONLY_TEST_DIRS = frozenset({Path("scripts/b0x")})
 _WINDOWS_POSIX_ONLY_TEST_FILES = frozenset(
     {
         Path("research/toss_phase2/test_load.py"),
-        Path("scripts/test_mock_session_mcp.py"),
         Path("scripts/test_r4_p0_manifest_cli.py"),
         Path("scripts/test_r4_p0_readiness.py"),
-        Path("services/mock_integration/test_kiwoom_coordination_adapter.py"),
         Path("services/test_krb1_p0_journal.py"),
         Path("services/test_market_events_dart_helpers.py"),
         Path("test_binance_r4_p0_backfill.py"),
@@ -145,15 +132,9 @@ def _ensure_test_env() -> None:
         _load_env_file(env_test_path)
 
     default_env_values = {
-        "KIS_APP_KEY": "DUMMY_KIS_APP_KEY",
-        "KIS_APP_SECRET": "DUMMY_KIS_APP_SECRET",
-        "KIS_ACCESS_TOKEN": "",
-        "KIS_ACCOUNT_NO": "00000000-00",
         "TELEGRAM_TOKEN": "DUMMY_TELEGRAM_TOKEN",
         "TELEGRAM_CHAT_IDS": "123456789,987654321",
         "OPENDART_API_KEY": "DUMMY_OPENDART_API_KEY",
-        "UPBIT_ACCESS_KEY": "DUMMY_UPBIT_ACCESS_KEY",
-        "UPBIT_SECRET_KEY": "DUMMY_UPBIT_SECRET_KEY",
         "UPBIT_BUY_AMOUNT": "100000",
         "UPBIT_MIN_KRW_BALANCE": "100000",
         "TOP_N": "30",
@@ -272,42 +253,13 @@ def mock_external_services():
         patch("app.services.brokers.upbit.client.httpx.AsyncClient") as mock_upbit,
         patch("app.services.brokers.yahoo.client.yf.download") as mock_yahoo_download,
         patch("app.services.brokers.yahoo.client.yf.Ticker") as mock_yahoo_ticker,
-        patch("app.services.brokers.kis.client.httpx.AsyncClient") as mock_kis,
     ):
         # Configure mock responses
         yield {
             "upbit": mock_upbit,
             "yahoo_download": mock_yahoo_download,
             "yahoo_ticker": mock_yahoo_ticker,
-            "kis": mock_kis,
         }
-
-
-@pytest.fixture
-def mock_kis_service():
-    """Mock KIS service responses."""
-    mock_kis = AsyncMock()
-
-    # Mock access token response
-    mock_kis.post.return_value = AsyncMock(
-        status_code=200,
-        json=AsyncMock(
-            return_value={"access_token": "test_kis_token", "expires_in": 3600}
-        ),
-    )
-
-    # Mock stock price response
-    mock_kis.get.return_value = AsyncMock(
-        status_code=200,
-        json=AsyncMock(
-            return_value={
-                "rt_cd": "0",
-                "output": {"stck_prpr": 50000, "prdy_vrss": 1000, "prdy_ctrt": 2.0},
-            }
-        ),
-    )
-
-    return mock_kis
 
 
 @pytest.fixture
@@ -351,20 +303,6 @@ def mock_redis_service():
 
 
 @pytest.fixture
-def _mock_nxt_eligible(monkeypatch):
-    """Default NXT eligible to True for tests that expect 'SOR' (legacy compatibility).
-
-    Existing tests (like TestKISFailureLogging) were written assuming 'SOR' is always used.
-    By defaulting to True, we maintain compatibility with those tests while allowing
-    new tests to explicitly override this if needed.
-    """
-    monkeypatch.setattr(
-        "app.services.brokers.kis.domestic_orders.is_nxt_eligible",
-        AsyncMock(return_value=True),
-    )
-
-
-@pytest.fixture
 def _serialize_alpaca_paper_db_suites(request):
     """Serialize Alpaca-paper suites that mutate shared DB tables across workers.
 
@@ -402,21 +340,6 @@ def _serialize_alpaca_paper_db_suites(request):
         return
     with _alpaca_paper_db_suite_lock():
         yield
-
-
-@pytest.fixture
-def _isolate_kis_circuit_breaker(monkeypatch):
-    # ROB-699: the KIS circuit breaker is a per-process singleton, enabled by
-    # default. Force it OFF + reset it for every test so the existing KIS suite
-    # is byte-identical passthrough and no connect/read errors leak across tests.
-    # Breaker tests inject their own enabled breaker (settings_obj / cb._breaker),
-    # which ignores this global flag.
-    from app.services.brokers.kis import circuit_breaker as _cb
-
-    monkeypatch.setattr(settings, "kis_circuit_breaker_enabled", False, raising=False)
-    _cb.reset_kis_circuit_breaker()
-    yield
-    _cb.reset_kis_circuit_breaker()
 
 
 @pytest.fixture
@@ -574,47 +497,6 @@ def _block_external_http_boundary(request, monkeypatch):
             "request",
             external_http_boundary.build_curl_request_blocker(session_class),
         )
-
-
-@pytest.fixture
-def allow_kis_daily_candle_fetch():
-    """Opt out of the default KIS daily-candle boundary block."""
-
-
-@pytest.fixture(autouse=True)
-def _block_kis_daily_candle_boundary(request, monkeypatch):
-    """ROB-1296: keep the daily-candle cache-miss fallback off the network.
-
-    ``_cache_first_kr`` (and the daily-candle sync service) fall back to
-    ``fetch_kr_daily_unclamped`` -> KIS whenever the DB cache is cold, which it
-    always is in a fresh test database. Callers treat that fetch as best-effort
-    and fall back to whatever rows they already had, so the failure never
-    surfaced — it just cost a real request to openapi.koreainvestment.com from
-    tests that only care about names, freshness flags, or price targets.
-
-    Raising the same class of error the fallback already handles keeps observable
-    behaviour identical while removing the socket. A test that genuinely covers
-    the KIS fetch path requests ``allow_kis_daily_candle_fetch`` (and supplies
-    its own stub).
-    """
-    if "allow_kis_daily_candle_fetch" in request.fixturenames:
-        return
-    if request.node.get_closest_marker("live") and request.config.getoption(
-        "--run-live"
-    ):
-        return
-
-    async def _blocked(*_args, **_kwargs):
-        raise RuntimeError(
-            "KIS daily-candle fetch is disabled during pytest; stub "
-            "fetch_kr_daily_unclamped or request allow_kis_daily_candle_fetch "
-            "for boundary/live tests."
-        )
-
-    monkeypatch.setattr(
-        "app.services.daily_candles.kis_daily_fetcher.fetch_kr_daily_unclamped",
-        _blocked,
-    )
 
 
 @pytest.fixture
@@ -843,9 +725,6 @@ def _scoped_test_defaults(request: pytest.FixtureRequest) -> None:
     """Activate compatibility defaults only for their owning test areas."""
 
     path = str(getattr(request.node, "path", "") or "")
-    if any(part in path for part in _KIS_DEFAULT_SCOPE_PARTS):
-        request.getfixturevalue("_mock_nxt_eligible")
-        request.getfixturevalue("_isolate_kis_circuit_breaker")
     if any(part in path for part in _AUTH_DB_SCOPE_PARTS):
         request.getfixturevalue("mock_auth_middleware_db")
     if uses_shared_test_database() and (

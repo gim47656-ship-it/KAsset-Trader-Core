@@ -1,8 +1,10 @@
-"""Known-symbol KIS lifecycle and corporate-action evidence collection.
+"""KR 종목 lifecycle·기업행위 증거 행의 구성과 영속화.
 
-The service never enumerates delisted instruments. It operates only on symbols
-explicitly present in ``kr_symbol_universe`` or on the current active/common
-subset selected from that table.
+과거에 KIS OpenAPI로 수집하던 경로(클라이언트 프로토콜과 sync 드라이버)는
+공급자 제거와 함께 삭제됐다. 남은 것은 이미 저장된 증거·커버리지 행과 동일한
+규칙으로 행을 만들고 멱등 upsert 하는 순수/영속화 계층이며, 새 브로커 수집은
+일어나지 않는다. 이 서비스는 delisted 종목을 열거하지 않고 ``kr_symbol_universe``에
+명시된 심볼만 다룬다.
 """
 
 from __future__ import annotations
@@ -12,11 +14,10 @@ import json
 import re
 import uuid
 from calendar import monthrange
-from collections.abc import Callable, Sequence
-from contextlib import AbstractAsyncContextManager
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, date, datetime, timedelta
-from typing import Any, Protocol
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -28,18 +29,21 @@ from app.models.kr_lifecycle_actions import (
     KRStockLifecycleObservation,
 )
 from app.models.kr_symbol_universe import KRSymbolUniverse
-from app.services.brokers.kis.corporate_actions import (
-    BONUS_ISSUE_ENDPOINT,
-    BONUS_ISSUE_TR,
-    DIVIDEND_ENDPOINT,
-    DIVIDEND_TR,
-    PAIDIN_CAPIN_ENDPOINT,
-    PAIDIN_CAPIN_TR,
-    REV_SPLIT_ENDPOINT,
-    REV_SPLIT_TR,
-    SEARCH_STOCK_INFO_ENDPOINT,
-    SEARCH_STOCK_INFO_TR,
-)
+
+# 삭제된 ``app.services.brokers.kis.corporate_actions``의 endpoint/TR 식별자를
+# 값 그대로 옮겨왔다. 이 값들은 이미 저장된 증거·커버리지 행의
+# ``provider_endpoint``/``provider_tr_id`` 컬럼에 그대로 들어 있으므로 과거 행을
+# 해석하고 재계산하려면 동일한 문자열이 유지돼야 한다. 새 수집 경로는 없다.
+SEARCH_STOCK_INFO_ENDPOINT = "/uapi/domestic-stock/v1/quotations/search-stock-info"
+SEARCH_STOCK_INFO_TR = "CTPF1002R"
+REV_SPLIT_ENDPOINT = "/uapi/domestic-stock/v1/ksdinfo/rev-split"
+REV_SPLIT_TR = "HHKDB669105C0"
+PAIDIN_CAPIN_ENDPOINT = "/uapi/domestic-stock/v1/ksdinfo/paidin-capin"
+PAIDIN_CAPIN_TR = "HHKDB669100C0"
+BONUS_ISSUE_ENDPOINT = "/uapi/domestic-stock/v1/ksdinfo/bonus-issue"
+BONUS_ISSUE_TR = "HHKDB669101C0"
+DIVIDEND_ENDPOINT = "/uapi/domestic-stock/v1/ksdinfo/dividend"
+DIVIDEND_TR = "HHKDB669102C0"
 
 _SOURCE = "kis_openapi"
 _PROVIDER = "KIS"
@@ -50,47 +54,6 @@ class KRLifecycleActionError(RuntimeError):
     pass
 
 
-class KRLifecycleActionClient(Protocol):
-    async def search_stock_info(
-        self, pdno: str, *, prdt_type_cd: str = "300"
-    ) -> list[dict[str, Any]]: ...
-
-    async def ksdinfo_rev_split(
-        self,
-        sht_cd: str,
-        from_date: date | str,
-        to_date: date | str,
-        *,
-        market_gb: str = "0",
-    ) -> list[dict[str, Any]]: ...
-
-    async def ksdinfo_paidin_capin(
-        self,
-        sht_cd: str,
-        from_date: date | str,
-        to_date: date | str,
-        *,
-        gb1: str = "2",
-    ) -> list[dict[str, Any]]: ...
-
-    async def ksdinfo_bonus_issue(
-        self, sht_cd: str, from_date: date | str, to_date: date | str
-    ) -> list[dict[str, Any]]: ...
-
-    async def ksdinfo_dividend(
-        self,
-        sht_cd: str,
-        from_date: date | str,
-        to_date: date | str,
-        *,
-        gb1: str = "0",
-        high_gb: str = "",
-    ) -> list[dict[str, Any]]: ...
-
-
-SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
-
-
 @dataclass(frozen=True)
 class MonthlyWindow:
     from_date: date
@@ -99,7 +62,6 @@ class MonthlyWindow:
 
 @dataclass(frozen=True)
 class _ActionSpec:
-    method_name: str
     evidence_kind: str
     endpoint: str
     tr_id: str
@@ -110,21 +72,18 @@ class _ActionSpec:
 
 _ACTION_SPECS = (
     _ActionSpec(
-        method_name="ksdinfo_rev_split",
         evidence_kind="face_value_change",
         endpoint=REV_SPLIT_ENDPOINT,
         tr_id=REV_SPLIT_TR,
         list_date_keys=("list_dt",),
     ),
     _ActionSpec(
-        method_name="ksdinfo_paidin_capin",
         evidence_kind="paid_in_capital_increase",
         endpoint=PAIDIN_CAPIN_ENDPOINT,
         tr_id=PAIDIN_CAPIN_TR,
         list_date_keys=("list_date",),
     ),
     _ActionSpec(
-        method_name="ksdinfo_bonus_issue",
         evidence_kind="bonus_issue",
         endpoint=BONUS_ISSUE_ENDPOINT,
         tr_id=BONUS_ISSUE_TR,
@@ -132,7 +91,6 @@ _ACTION_SPECS = (
         payment_date_keys=("odd_pay_dt",),
     ),
     _ActionSpec(
-        method_name="ksdinfo_dividend",
         evidence_kind="dividend",
         endpoint=DIVIDEND_ENDPOINT,
         tr_id=DIVIDEND_TR,
@@ -141,38 +99,6 @@ _ACTION_SPECS = (
         action_type_keys=("action_type", "event_type", "ca_type", "divi_kind"),
     ),
 )
-
-
-@dataclass
-class KRLifecycleActionSyncReport:
-    mode: str
-    fetch_run_id: str
-    symbols: list[str]
-    date_from: str
-    date_to: str
-    symbols_succeeded: int = 0
-    symbols_failed: int = 0
-    lifecycle_requests: int = 0
-    windows_attempted: int = 0
-    windows_succeeded: int = 0
-    windows_failed: int = 0
-    lifecycle_rows: int = 0
-    corporate_action_rows: int = 0
-    rows_prepared: int = 0
-    rows_inserted: int = 0
-    duplicate_rows: int = 0
-    coverage_rows_prepared: int = 0
-    coverage_rows_inserted: int = 0
-    coverage_duplicate_rows: int = 0
-    failures: list[dict[str, Any]] = field(default_factory=list)
-    historical_delisted_enumeration_available: bool = False
-    historical_delisted_enumeration_note: str = (
-        "KIS point lookups for known symbols do not enumerate all historical "
-        "delisted symbols."
-    )
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 def normalize_kr_symbol(value: object) -> str:
@@ -563,246 +489,3 @@ async def upsert_fetch_coverage(
     )
     result = await db.execute(statement)
     return len(result.scalars().all())
-
-
-async def _persist_lifecycle(
-    session_factory: SessionFactory,
-    *,
-    symbol: str,
-    evidence_rows: Sequence[dict[str, Any]],
-) -> int:
-    metadata = _merged_lifecycle_metadata(evidence_rows)
-    if not evidence_rows and not metadata:
-        return 0
-    async with session_factory() as db:
-        async with db.begin():
-            universe = (
-                await db.execute(
-                    select(KRSymbolUniverse)
-                    .where(KRSymbolUniverse.symbol == symbol)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if universe is None:
-                raise KRLifecycleActionError(
-                    f"Known symbol disappeared from kr_symbol_universe: {symbol}"
-                )
-            inserted = await upsert_lifecycle_evidence(db, evidence_rows)
-            # These fields are promoted only from the persisted provider response
-            # above. In particular, a direct delist_date is intended to make the
-            # symbol immediately ineligible for active-universe readers; absence
-            # of that field never infers a delisting.
-            for field_name, value in metadata.items():
-                setattr(universe, field_name, value)
-            return inserted
-
-
-async def _persist_action_window(
-    session_factory: SessionFactory,
-    event_rows: Sequence[dict[str, Any]],
-    coverage_rows: Sequence[dict[str, Any]],
-) -> tuple[int, int]:
-    if not event_rows and not coverage_rows:
-        return 0, 0
-    async with session_factory() as db:
-        async with db.begin():
-            event_count = await upsert_action_evidence(db, event_rows)
-            coverage_count = await upsert_fetch_coverage(db, coverage_rows)
-            return event_count, coverage_count
-
-
-def _failure(
-    *,
-    symbol: str,
-    stage: str,
-    exc: Exception,
-    window: MonthlyWindow | None = None,
-    endpoint: str | None = None,
-    tr_id: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "symbol": symbol,
-        "stage": stage,
-        "from_date": window.from_date.isoformat() if window else None,
-        "to_date": window.to_date.isoformat() if window else None,
-        "provider_endpoint": endpoint,
-        "provider_tr_id": tr_id,
-        "error_type": type(exc).__name__,
-        "message": str(exc)[:500],
-    }
-
-
-async def run_kr_lifecycle_action_sync(
-    *,
-    client: KRLifecycleActionClient,
-    session_factory: SessionFactory,
-    symbols: Sequence[str],
-    from_date: date,
-    to_date: date,
-    commit: bool = False,
-    observed_at: datetime | None = None,
-    fetch_run_id: uuid.UUID | None = None,
-) -> KRLifecycleActionSyncReport:
-    normalized_symbols = [normalize_kr_symbol(symbol) for symbol in symbols]
-    if len(set(normalized_symbols)) != len(normalized_symbols):
-        raise ValueError("symbols must not contain duplicates")
-    windows = monthly_windows(from_date, to_date)
-    observation_time = observed_at or datetime.now(UTC)
-    if observation_time.tzinfo is None or observation_time.utcoffset() is None:
-        raise ValueError("observed_at must be timezone-aware")
-    run_id = fetch_run_id or uuid.uuid4()
-    report = KRLifecycleActionSyncReport(
-        mode="commit" if commit else "dry-run",
-        fetch_run_id=str(run_id),
-        symbols=list(normalized_symbols),
-        date_from=from_date.isoformat(),
-        date_to=to_date.isoformat(),
-    )
-    failed_symbols: set[str] = set()
-
-    for symbol in normalized_symbols:
-        report.lifecycle_requests += 1
-        try:
-            raw_lifecycle_rows = await client.search_stock_info(symbol)
-            lifecycle_rows = [
-                build_lifecycle_evidence(
-                    symbol=symbol,
-                    row=row,
-                    observed_at=observation_time,
-                    fetch_run_id=run_id,
-                )
-                for row in raw_lifecycle_rows
-            ]
-            report.lifecycle_rows += len(lifecycle_rows)
-            report.rows_prepared += len(lifecycle_rows)
-            if commit:
-                inserted = await _persist_lifecycle(
-                    session_factory,
-                    symbol=symbol,
-                    evidence_rows=lifecycle_rows,
-                )
-                report.rows_inserted += inserted
-                report.duplicate_rows += len(lifecycle_rows) - inserted
-        except Exception as exc:  # noqa: BLE001 - isolate one symbol and report it
-            failed_symbols.add(symbol)
-            report.failures.append(_failure(symbol=symbol, stage="lifecycle", exc=exc))
-
-        for window in windows:
-            report.windows_attempted += 1
-            prepared_window: list[dict[str, Any]] = []
-            coverage_window: list[dict[str, Any]] = []
-            window_failure: tuple[_ActionSpec, Exception] | None = None
-            for spec in _ACTION_SPECS:
-                raw_action_rows: list[dict[str, Any]] | None = None
-                try:
-                    method = getattr(client, spec.method_name)
-                    raw_action_rows = await method(
-                        symbol,
-                        window.from_date,
-                        window.to_date,
-                    )
-                    report.corporate_action_rows += len(raw_action_rows)
-                    spec_evidence_rows = [
-                        build_action_evidence(
-                            symbol=symbol,
-                            row=row,
-                            spec=spec,
-                            window=window,
-                            observed_at=observation_time,
-                            fetch_run_id=run_id,
-                        )
-                        for row in raw_action_rows
-                    ]
-                    prepared_window.extend(spec_evidence_rows)
-                    coverage_window.append(
-                        build_fetch_coverage(
-                            symbol=symbol,
-                            spec=spec,
-                            window=window,
-                            fetch_run_id=run_id,
-                            status="success",
-                            row_count=len(raw_action_rows),
-                            page_count=int(getattr(raw_action_rows, "page_count", 1)),
-                            last_cursor=getattr(raw_action_rows, "last_cursor", None),
-                            completed_at=datetime.now(UTC),
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001 - isolate symbol/window
-                    failed_symbols.add(symbol)
-                    window_failure = (spec, exc)
-                    coverage_window.append(
-                        build_fetch_coverage(
-                            symbol=symbol,
-                            spec=spec,
-                            window=window,
-                            fetch_run_id=run_id,
-                            status="failed",
-                            row_count=(
-                                len(raw_action_rows)
-                                if raw_action_rows is not None
-                                else 0
-                            ),
-                            page_count=int(
-                                getattr(
-                                    exc,
-                                    "page_count",
-                                    getattr(raw_action_rows, "page_count", 0),
-                                )
-                            ),
-                            last_cursor=getattr(
-                                exc,
-                                "last_cursor",
-                                getattr(raw_action_rows, "last_cursor", None),
-                            ),
-                            completed_at=datetime.now(UTC),
-                            error=exc,
-                        )
-                    )
-                    report.failures.append(
-                        _failure(
-                            symbol=symbol,
-                            stage="corporate_action_window",
-                            exc=exc,
-                            window=window,
-                            endpoint=spec.endpoint,
-                            tr_id=spec.tr_id,
-                        )
-                    )
-                    break
-
-            report.rows_prepared += len(prepared_window)
-            report.coverage_rows_prepared += len(coverage_window)
-            if commit:
-                try:
-                    inserted, coverage_inserted = await _persist_action_window(
-                        session_factory,
-                        prepared_window,
-                        coverage_window,
-                    )
-                    report.rows_inserted += inserted
-                    report.duplicate_rows += len(prepared_window) - inserted
-                    report.coverage_rows_inserted += coverage_inserted
-                    report.coverage_duplicate_rows += (
-                        len(coverage_window) - coverage_inserted
-                    )
-                except Exception as exc:  # noqa: BLE001 - isolate symbol/window
-                    failed_symbols.add(symbol)
-                    if window_failure is None:
-                        window_failure = (_ACTION_SPECS[0], exc)
-                    report.failures.append(
-                        _failure(
-                            symbol=symbol,
-                            stage="corporate_action_persist",
-                            exc=exc,
-                            window=window,
-                        )
-                    )
-
-            if window_failure is not None:
-                report.windows_failed += 1
-            else:
-                report.windows_succeeded += 1
-
-    report.symbols_failed = len(failed_symbols)
-    report.symbols_succeeded = len(normalized_symbols) - report.symbols_failed
-    return report

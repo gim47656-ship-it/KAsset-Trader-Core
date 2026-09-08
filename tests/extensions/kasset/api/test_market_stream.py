@@ -1210,9 +1210,7 @@ async def test_stream_refreshes_quote_baseline_when_calendar_session_changes() -
     assert quote["sessionChangeRate"] == "-0.26"
 
 
-def test_stream_orderbook_keeps_existing_payload_while_rest_adds_availability() -> None:
-    from app.extensions.kasset.api.schemas import OrderbookResponse
-
+def test_stream_orderbook_payload_keeps_its_wire_fields() -> None:
     book = contract.orderbook_from_frame(
         parse_topic("orderbook:KRX:005930"),
         asks=[(Decimal("72100"), Decimal("8500"))],
@@ -1222,10 +1220,17 @@ def test_stream_orderbook_keeps_existing_payload_while_rest_adds_availability() 
     )
     payload = book.model_dump(by_alias=True)
 
-    rest_fields = {
-        field.alias or name for name, field in OrderbookResponse.model_fields.items()
+    assert set(payload) == {
+        "symbol",
+        "market",
+        "ready",
+        "asOf",
+        "source",
+        "asks",
+        "bids",
+        "totalAskVolume",
+        "totalBidVolume",
     }
-    assert set(payload) == rest_fields - {"availability", "reason", "message"}
     assert payload["totalAskVolume"] == "8500"
     assert payload["totalBidVolume"] == "1200"
     assert payload["ready"] is True

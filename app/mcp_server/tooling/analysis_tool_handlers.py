@@ -123,7 +123,7 @@ async def get_top_stocks_impl(
         return {
             "success": False,
             "error": "provider_unsupported",
-            "detail": "KR rankings are unavailable from Toss/NH PLUG",
+            "detail": "KR rankings are unavailable from the retained providers",
             "source": "unsupported",
             "query": f"market={market}, ranking_type={ranking_type}",
         }

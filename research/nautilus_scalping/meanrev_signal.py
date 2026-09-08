@@ -20,8 +20,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from ict_signal import atr_bps  # pure, reused (DRY)
-
-from app.services.brokers.binance.demo_scalping.signal import Candle, SignalDecision
+from scalping_signal import Candle, SignalDecision
 
 _BPS = Decimal("10000")
 

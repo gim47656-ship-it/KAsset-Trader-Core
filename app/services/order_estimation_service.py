@@ -234,31 +234,3 @@ async def fetch_pending_overseas_buy_cost(
     return await _fetch_pending_equity_buy_cost(
         market="us", toss_client_factory=toss_client_factory
     )
-
-
-async def fetch_pending_crypto_buy_cost() -> float:
-    """미체결 암호화폐 매수 주문 총액 조회
-
-    Upbit API를 호출하여 미체결 매수 주문의 총 금액을 반환.
-    시장가(price) 주문: price가 주문 금액.
-    지정가(limit) 주문: price * remaining_volume.
-    실패 시 0.0 반환 (warning 로그).
-    """
-    import app.services.brokers.upbit.client as upbit
-
-    try:
-        pending_orders = await upbit.fetch_open_orders()
-        cost = 0.0
-        for order in pending_orders:
-            if order.get("side") == "bid":
-                ord_type = order.get("ord_type", "")
-                if ord_type == "price":
-                    cost += float(order.get("price", 0))
-                else:
-                    price_val = float(order.get("price", 0))
-                    remaining = float(order.get("remaining_volume", 0))
-                    cost += price_val * remaining
-        return cost
-    except Exception as e:
-        logger.warning(f"Upbit 미체결 주문 조회 실패 (계속 진행): {e}")
-        return 0.0

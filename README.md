@@ -2,7 +2,7 @@
 
 **LLM 에이전트가 시장 분석부터 주문 실행, 체결 확정, 매매 회고까지 수행하는 AI 자동매매 시스템.**
 
-런타임은 결정론적인 데이터·주문·안전 레이어만 담당하고, 판단(LLM)은 MCP(Model Context Protocol)로 연결된 **프로세스 밖의 에이전트**가 수행합니다. 국내주식·미국주식은 Toss, 암호화폐는 Upbit 실계좌 경로로 운용하며, NH PLUG는 국내주식 모의계좌 조회 전용입니다. KIS 어댑터는 과거 레저 조회 호환성을 위해 비활성 상태로만 남습니다.
+런타임은 결정론적인 데이터·주문·안전 레이어만 담당하고, 판단(LLM)은 MCP(Model Context Protocol)로 연결된 **프로세스 밖의 에이전트**가 수행합니다. 실계좌 주문 경로는 국내주식·미국주식의 Toss 하나이며, 그 밖의 주문 표면은 KAsset PAPER 모의 원장뿐입니다. 제거된 provider(KIS 등)는 과거 레저 행을 원래 provenance로 읽기 위한 데이터 모델만 남습니다.
 
 이 저장소를 관통하는 질문은 하나입니다 — **"AI에게 계좌를 맡기려면 무엇이 필요한가?"** 아래 설계 원칙들은 그 답으로 하나씩 쌓아온 안전장치입니다.
 
@@ -26,9 +26,9 @@ flowchart LR
         LOOP["학습 루프<br/>forecast · 매매 회고 · decision history"]
     end
 
-    subgraph Brokers["브로커 / 거래소"]
-        B1["Toss · Upbit (live)"]
-        B2["NH PLUG 조회 전용 · Kiwoom 모의 · Alpaca Paper · Binance Demo"]
+    subgraph Brokers["브로커"]
+        B1["Toss (live)"]
+        B2["KAsset PAPER (모의 원장)"]
     end
 
     A1 & A2 --> MCP
@@ -58,7 +58,7 @@ flowchart LR
 
 ### 3. 체결은 증거로만 (fill-evidence gate)
 
-주문 전송 시점에는 **accepted-only**만 기록합니다. 체결·손익 장부는 브로커의 order-id 키 체결 증거를 확인한 reconcile을 통해서만 확정됩니다. "보냈으니 체결됐겠지"를 시스템 차원에서 금지한 것으로, KR/US/crypto 전 시장의 라이브 주문 경로에 동일하게 적용되어 있습니다.
+주문 전송 시점에는 **accepted-only**만 기록합니다. 체결·손익 장부는 브로커의 order-id 키 체결 증거를 확인한 reconcile을 통해서만 확정됩니다. "보냈으니 체결됐겠지"를 시스템 차원에서 금지한 것으로, KR/US 라이브 주문 경로에 동일하게 적용되어 있습니다.
 
 ### 4. 매매는 학습 루프로
 
@@ -68,9 +68,8 @@ flowchart LR
 
 | 시장 | 데이터 | 실주문 | 모의 |
 |---|---|---|---|
-| 국내주식 (KRX/NXT) | Toss · Naver · KRX · NH PLUG Mock | Toss | Kiwoom 모의 · KAsset PAPER · NH PLUG Mock(Read-Only) |
-| 미국주식 | Toss · Yahoo · Finnhub · TradingView | Toss | Alpaca Paper |
-| 암호화폐 | Upbit (REST + WebSocket) | Upbit | Upbit shadow-sim · Binance Spot/Futures Demo |
+| 국내주식 (KRX/NXT) | Toss · Naver · KRX | Toss | KAsset PAPER |
+| 미국주식 | Toss · Yahoo · Finnhub · TradingView | Toss | KAsset PAPER |
 
 보조 데이터: DART 공시, Finnhub 실적 캘린더, 네이버/Finnhub 뉴스(관련성 판정 파이프라인), 투자자 수급(외인/기관), 증권사 리서치 리포트 인제스트, 환율.
 
@@ -120,18 +119,15 @@ docker compose up -d          # PostgreSQL / Redis / Adminer
 **주요 환경 변수** (전체는 `env.example` 참고):
 
 - `DATABASE_URL`, `REDIS_URL` — 필수 인프라
-- `TOSS_API_CLIENT_ID/SECRET`, `UPBIT_ACCESS_KEY/SECRET_KEY` — 운영 브로커 자격증명
-- 실주문·모의주문 게이트(`TOSS_LIVE_ORDER_MUTATIONS_ENABLED`, `KIWOOM_MOCK_ENABLED`, `BINANCE_SPOT_DEMO_ENABLED` 등)는 **모두 기본 off**
+- `TOSS_API_CLIENT_ID/SECRET` — 운영 브로커 자격증명
+- 실주문 게이트(`TOSS_LIVE_ORDER_MUTATIONS_ENABLED` 등)는 **모두 기본 off**
 
 ## KAsset Android 호환 API
 
 `app/extensions/kasset/api/`가 KAsset Trader Android 앱의 pairing, broker, account,
-market, PAPER order 계약을 제공한다. `PAPER`는 주문 가능하고, `NH`는
-`NHPLUG_MOCK_ENABLED=true`에서 계좌 확인·잔고·보유·국내주식 현재가만 제공한다.
-NH 주문·정정·취소는 서버에서 `409 BROKER_READ_ONLY`로 다시 차단한다.
-
-설치, 환경 변수, Android 연결, Credential Vault와 NH read-only smoke 절차:
-[`docs/runbooks/kasset-android-nh-mock-readonly.md`](docs/runbooks/kasset-android-nh-mock-readonly.md)
+market, PAPER order 계약을 제공한다. 주문·정정·취소는 `PAPER` 전용이고, `TOSS`는
+조회 전용(`LIVE_READ_ONLY`) 카탈로그 항목으로만 노출되어 앱 주문 요청은 서버에서
+`409 BROKER_READ_ONLY`로 차단된다.
 
 ## 테스트
 

@@ -47,23 +47,6 @@ an empty DataFrame. The `source` column on the inserted rows is set to
 
 ---
 
-## Wrapper safety clamp vs batch horizon
-
-The wrapper-level safety clamp at
-`app/services/brokers/kis/domestic_market_data.py::normalize_daily_chart_lookback`
-(currently 200) protects ad-hoc display/MCP calls. Batch horizon is governed
-separately by `app/services/daily_candles/constants.py::DAILY_CANDLE_BACKFILL_BARS_*`
-(currently 400). These two are independent on purpose; raising one does not
-raise the other. The 200-bar value is a wrapper default, **not** a KIS upstream
-cap.
-
-| Path                                | Horizon control                             | Current value |
-|-------------------------------------|---------------------------------------------|---------------|
-| Ad-hoc display / MCP calls          | `normalize_daily_chart_lookback` clamp      | 200 bars      |
-| Batch ingest / backfill CLI         | `DAILY_CANDLE_BACKFILL_BARS_{KR,US,CRYPTO}` | 400 bars each |
-
----
-
 ## Initial backfill
 
 After applying the three migrations and before enabling cron jobs, run a
@@ -153,7 +136,7 @@ LIMIT 50;
 ```
 
 A large number of stale symbols on a weekday indicates the KR sync job failed.
-Check TaskIQ logs and KIS token health (`app/services/redis_token_manager.py`).
+Check TaskIQ logs and the provider quota/latency for the KR daily fetcher.
 
 ---
 

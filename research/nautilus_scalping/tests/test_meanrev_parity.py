@@ -14,8 +14,7 @@ from decimal import Decimal
 
 import pytest
 from meanrev_signal import MeanRevConfig, evaluate_meanrev, required_bars
-
-from app.services.brokers.binance.demo_scalping.signal import Candle
+from scalping_signal import Candle
 
 nautilus = pytest.importorskip("nautilus_trader", reason="research venv not installed")
 from nautilus_trader.model.data import Bar, BarType  # noqa: E402

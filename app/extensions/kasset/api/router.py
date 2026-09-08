@@ -32,19 +32,11 @@ from app.extensions.kasset.api.auth import (
     mobile_auth,
 )
 from app.extensions.kasset.api.broker_registry import broker_registry
-from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.daily_routine_schemas import (
     DailyRoutineResponse,
     DailyRoutineUpdateRequest,
 )
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.nh_adapter import nh_adapter
-from app.extensions.kasset.api.orderbook_store import (
-    NHOrderbookSnapshotStore,
-    get_orderbook_store,
-    nh_orderbook_store,
-    normalize_orderbook_key,
-)
 from app.extensions.kasset.api.paper import decimal_text, iso_z, paper_account_adapter
 from app.extensions.kasset.api.paper_orders import paper_orders
 from app.extensions.kasset.api.paper_schemas import (
@@ -69,11 +61,8 @@ from app.extensions.kasset.api.paper_schemas import (
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.api.schemas import (
     AiAvailabilityStatus,
-    Broker,
     BrokersResponse,
-    BrokerVerifyResponse,
     CandleRange,
-    CredentialRequest,
     CurrentUserResponse,
     DailyCandle,
     DailyCandlesResponse,
@@ -92,7 +81,6 @@ from app.extensions.kasset.api.schemas import (
     MarketOverviewResponse,
     MarketSummaryResponse,
     NicknameUpdateRequest,
-    OrderbookResponse,
     PushTokenRequest,
     RefreshRequest,
     RegisterRequest,
@@ -156,7 +144,6 @@ async def _kasset_api_lifespan(_app: FastAPI) -> AsyncIterator[None]:
             warmup.cancel()
             with suppress(asyncio.CancelledError):
                 await warmup
-        await nh_orderbook_store.close()
         # 토스 공용 시세 클라이언트는 프로세스에서 재사용하므로 여기서만 닫는다.
         await toss_market_data.aclose()
 
@@ -397,59 +384,6 @@ async def brokers(
     )
 
 
-@router.post("/brokers/{provider}/credential", response_model=Broker)
-@router.post("/brokers/{provider}/credentials", response_model=Broker)
-async def register_broker_credential(
-    provider: str,
-    request: CredentialRequest,
-    session: Annotated[MobileSession, Depends(get_mobile_session)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> Broker:
-    _require_trader(session)
-    _require_nh(provider)
-    credential = await credential_vault.store_nh(
-        db,
-        session.user.id,
-        app_key=request.app_key,
-        app_secret=request.app_secret,
-        account_no=request.account_no,
-    )
-    await nh_adapter.invalidate_auth_cache(credential.id)
-    return await broker_registry.get_broker(db, session.user.id, "NH")
-
-
-@router.delete("/brokers/{provider}/credential", status_code=status.HTTP_204_NO_CONTENT)
-@router.delete(
-    "/brokers/{provider}/credentials", status_code=status.HTTP_204_NO_CONTENT
-)
-async def delete_broker_credential(
-    provider: str,
-    session: Annotated[MobileSession, Depends(get_mobile_session)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> Response:
-    _require_trader(session)
-    _require_nh(provider)
-    credential_id = await credential_vault.delete_nh(db, session.user.id)
-    await nh_adapter.invalidate_auth_cache(credential_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post("/brokers/{provider}/verify", response_model=BrokerVerifyResponse)
-async def verify_broker(
-    provider: str,
-    session: Annotated[MobileSession, Depends(get_mobile_session)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> BrokerVerifyResponse:
-    _require_trader(session)
-    _require_nh(provider)
-    checked_at = await nh_adapter.verify(db, session.user.id)
-    return BrokerVerifyResponse(
-        connected=True,
-        checked_at=checked_at.isoformat().replace("+00:00", "Z"),
-        message="NH PLUG 모의투자 계좌 연결을 확인했습니다.",
-    )
-
-
 @router.get("/system/status", response_model=SystemStatus)
 async def system_status(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
@@ -521,11 +455,7 @@ async def _build_system_status(
             global_state.kill_switch_enabled or state.kill_switch_enabled
         ),
         brokers=[
-            SystemBrokerStatus(
-                provider=broker.provider,
-                connected=broker.connected,
-                last_verified_at=broker.last_verified_at,
-            )
+            SystemBrokerStatus(provider=broker.provider, connected=broker.connected)
             for broker in registered
         ],
         ai=await _ai_availability_status(db),
@@ -637,8 +567,6 @@ async def account_balance(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Balance:
-    if broker.strip().upper() == "NH":
-        return await nh_adapter.balance(db, session.user.id)
     _require_paper(broker)
     return await paper_account_adapter.balance(db, session.user.id)
 
@@ -649,8 +577,6 @@ async def positions(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PositionsResponse:
-    if broker.strip().upper() == "NH":
-        return await nh_adapter.positions(db, session.user.id)
     _require_paper(broker)
     return await paper_account_adapter.positions(db, session.user.id)
 
@@ -664,7 +590,7 @@ async def closed_trades(
 ) -> ClosedTradesResponse:
     """청산이 끝난 PAPER 매매의 확정 수익률.
 
-    PAPER 원장만 라운드트립을 완결해 기록하므로 NH 조회 계좌에는 없다.
+    PAPER 원장만 라운드트립을 완결해 기록한다.
     """
     _require_paper(broker)
     return await paper_account_adapter.closed_trades(db, session.user.id, limit=limit)
@@ -720,10 +646,10 @@ async def market_quote(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Quote:
-    # Quotes are account-independent public market data. ``broker=NH`` remains
-    # accepted for Android compatibility, but it no longer selects NH PLUG;
-    # every equity quote uses the shared Toss -> persisted-candle path.
-    if broker.strip().upper() != "NH":
+    # Quotes are account-independent public market data. ``broker=TOSS`` is
+    # accepted because Toss is the shared quote source, and every equity quote
+    # uses the same Toss -> persisted-candle path regardless of the caller.
+    if broker.strip().upper() != "TOSS":
         _require_paper(broker)
     return await krx_quotes.quote_for_market(db, market=market, symbol=symbol)
 
@@ -744,39 +670,6 @@ async def market_quotes(
             symbols=normalized_symbols,
         )
     )
-
-
-@router.get("/market/orderbook", response_model=OrderbookResponse)
-async def market_orderbook(
-    market: str,
-    symbol: str,
-    _session: Annotated[MobileSession, Depends(get_mobile_session)],
-    store: Annotated[NHOrderbookSnapshotStore, Depends(get_orderbook_store)],
-) -> OrderbookResponse:
-    normalized_market, normalized_symbol = normalize_orderbook_key(
-        market=market,
-        symbol=symbol,
-    )
-    if normalized_market == "US":
-        return OrderbookResponse(
-            symbol=normalized_symbol,
-            market="US",
-            ready=False,
-            availability="UNAVAILABLE",
-            reason="US_DEPTH_NOT_PROVIDED",
-            message="미국 종목은 실시간 호가를 제공하지 않아요",
-            as_of=None,
-            source=None,
-            asks=[],
-            bids=[],
-            total_ask_volume=None,
-            total_bid_volume=None,
-        )
-    snapshot = await store.get_snapshot(
-        market=normalized_market,
-        symbol=normalized_symbol,
-    )
-    return OrderbookResponse.model_validate(snapshot)
 
 
 @router.get("/market/candles", response_model=DailyCandlesResponse)
@@ -981,8 +874,6 @@ async def list_orders(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> OrdersResponse:
-    if broker.strip().upper() == "NH":
-        return OrdersResponse(orders=[])
     _require_paper(broker)
     statuses = (
         {item.strip().upper() for item in status_filter.split(",") if item.strip()}
@@ -1037,8 +928,6 @@ async def fills(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> FillsResponse:
-    if broker.strip().upper() == "NH":
-        return FillsResponse(fills=[])
     _require_paper(broker)
     return await paper_orders.list_fills(db, session.user.id, limit=limit)
 
@@ -1296,15 +1185,8 @@ def _require_paper(provider: str) -> None:
 
 
 def _require_order_capable(provider: str) -> None:
-    if provider.strip().upper() == "NH":
+    if provider.strip().upper() == "TOSS":
         raise MobileApiError(
-            409, "BROKER_READ_ONLY", "NH PLUG는 현재 모의 Read-Only 단계입니다."
+            409, "BROKER_READ_ONLY", "토스증권은 앱에서 조회 전용입니다."
         )
     _require_paper(provider)
-
-
-def _require_nh(provider: str) -> None:
-    if provider.strip().upper() != "NH":
-        raise MobileApiError(
-            501, "BROKER_NOT_IMPLEMENTED", "해당 브로커 연결은 아직 지원하지 않습니다."
-        )

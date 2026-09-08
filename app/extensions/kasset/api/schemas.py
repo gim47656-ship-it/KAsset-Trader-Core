@@ -259,26 +259,6 @@ class MarketOverviewResponse(AndroidWireModel):
     errors: list[MarketOverviewError]
 
 
-class OrderbookLevel(AndroidWireModel):
-    price: str = Field(pattern=r"^\d+(?:\.\d+)?$")
-    volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
-
-
-class OrderbookResponse(AndroidWireModel):
-    symbol: str = Field(pattern=r"^(?:\d{6}|[A-Z][A-Z0-9.\-]{0,14})$")
-    market: Literal["KRX", "US"]
-    ready: bool
-    availability: Literal["READY", "LOADING", "UNAVAILABLE"]
-    reason: str | None = None
-    message: str | None = None
-    as_of: str | None
-    source: Literal["NH_PLUG_WS"] | None
-    asks: list[OrderbookLevel] = Field(max_length=10)
-    bids: list[OrderbookLevel] = Field(max_length=10)
-    total_ask_volume: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
-    total_bid_volume: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
-
-
 class RegisterRequest(AndroidWireModel):
     username: str = Field(min_length=1, max_length=50)
     email: EmailStr
@@ -335,12 +315,6 @@ class PushTokenRequest(AndroidWireModel):
         return stripped
 
 
-class CredentialRequest(AndroidWireModel):
-    app_key: str = Field(min_length=1, max_length=2048, repr=False)
-    app_secret: str = Field(min_length=1, max_length=2048, repr=False)
-    account_no: str = Field(min_length=1, max_length=2048, repr=False)
-
-
 class SessionTokens(AndroidWireModel):
     access_token: str = Field(alias="accessToken", repr=False)
     refresh_token: str = Field(alias="refreshToken", repr=False)
@@ -370,10 +344,6 @@ class Broker(AndroidWireModel):
     provider: str
     display_name: str
     connected: bool
-    credential_id: str | None = None
-    app_key_masked: str | None = None
-    account_no_masked: str | None = None
-    last_verified_at: str | None = None
     supported_modes: list[str]
     requires_credential: bool
     implemented: bool
@@ -385,12 +355,6 @@ class BrokersResponse(AndroidWireModel):
     brokers: list[Broker]
 
 
-class BrokerVerifyResponse(AndroidWireModel):
-    connected: bool
-    checked_at: str
-    message: str
-
-
 class DatabaseStatus(AndroidWireModel):
     status: str
     migration_revision: str | None = None
@@ -399,7 +363,6 @@ class DatabaseStatus(AndroidWireModel):
 class SystemBrokerStatus(AndroidWireModel):
     provider: str
     connected: bool
-    last_verified_at: str | None = None
 
 
 class AiAvailabilityStatus(AndroidWireModel):

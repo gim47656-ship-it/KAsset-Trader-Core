@@ -39,10 +39,9 @@ def _format_fetch_errors(errors: list[Any]) -> str:
 
 
 def _require_operational_broker(broker: str) -> ReconcileRunBroker:
-    if broker == "kis":
-        raise ValueError("provider kis is not operational")
-    if broker not in {"toss", "upbit"}:
-        raise ValueError("broker must be toss or upbit")
+    if broker != "toss":
+        # 저장된 KIS/Upbit 원장 행은 계속 읽지만 live 대조 대상은 Toss뿐이다.
+        raise ValueError(f"provider {broker} is not operational")
     return cast(ReconcileRunBroker, broker)
 
 
@@ -154,7 +153,7 @@ class ExecutionLedgerReconciler:
         source_run_id: uuid.UUID,
     ) -> list[ExecutionLedgerUpsert]:
         days = max(1, int(((end_at - start_at).total_seconds() + 86399) / 86400))
-        markets = {"toss": "kr,us", "upbit": "crypto"}[broker]
+        markets = "kr,us"
         result = await self.fetcher(
             days=days,
             markets=markets,

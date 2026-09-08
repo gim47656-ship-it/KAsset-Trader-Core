@@ -16,8 +16,7 @@ from ict_signal import (
     has_bullish_fvg,
     swept_low_reclaim,
 )
-
-from app.services.brokers.binance.demo_scalping.signal import Candle
+from scalping_signal import Candle
 
 _HOUR_MS = 3_600_000
 

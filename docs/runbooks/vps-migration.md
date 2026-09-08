@@ -42,8 +42,7 @@ host network에서 실제 peer를 검사하고 API의 `127.0.0.1:8000` publish�
 
 | 경로 | 내용 | 비밀 |
 |---|---|---|
-| `/opt/kasset-trader-core` | 이 저장소 clone + `.env.kasset`(모든 API키/비밀번호) + `.env.nhplug-mock.native` | env 2개만 비밀 |
-| `/root/.nhplug/` | NH PLUG 토큰 캐시 | O |
+| `/opt/kasset-trader-core` | 이 저장소 clone + `.env.kasset`(모든 API키/비밀번호) | env 1개만 비밀 |
 | `/opt/kasset-codex/` | 컨테이너용 Codex CLI auth(ChatGPT 구독) | O |
 | `/root/.codex/`, `/root/.codex/env.sh` | 호스트 Codex + MCP 토큰 | O |
 | `/usr/local/bin/codex`, `codex-code-mode-host` | Codex 바이너리(재다운로드 가능) | X |
@@ -59,12 +58,11 @@ DB·Redis 데이터는 named volume(`postgres_data`, `redis_data`)로 영속화�
 
 1. **Toss Open API 허용 IP** — 현재 `175.45.201.51` 등록. 새 VPS 공인 IP로 재등록해야
    캔들 수집이 동작한다.
-2. **NH PLUG(모의)** — 발급 시 IP 제한을 걸었다면 동일하게 갱신.
-3. **Cloudflare Tunnel** — 커넥터 위치와 무관하게 `api.hsps-portal.xyz`가 따라온다.
+2. **Cloudflare Tunnel** — 커넥터 위치와 무관하게 `api.hsps-portal.xyz`가 따라온다.
    DNS·인증서 작업 0. (`TUNNEL_TOKEN`은 `.env.kasset`에 있음. 토큰 회전 시
    Cloudflare One > 네트워크 > 커넥터 > kasset-trader에서 재발급.)
-4. **Tailscale** — 새 VPS에 설치·로그인하면 SSH 경로 유지. 기존 노드는 tailnet에서 제거.
-5. **기존 HANSE_ERP 터널은 별개다. 건드리지 않는다.**
+3. **Tailscale** — 새 VPS에 설치·로그인하면 SSH 경로 유지. 기존 노드는 tailnet에서 제거.
+4. **기존 HANSE_ERP 터널은 별개다. 건드리지 않는다.**
 
 ## 4. VPS 이전 절차 (다운타임 ≈ 복원 시간 몇 분)
 
@@ -78,8 +76,6 @@ curl -fsSL https://tailscale.com/install.sh | sh && tailscale up
 # 2) 코드와 상태 복사 (기존 서버에서)
 git clone <repo> /opt/kasset-trader-core
 scp old:/opt/kasset-trader-core/.env.kasset /opt/kasset-trader-core/
-scp old:/opt/kasset-trader-core/.env.nhplug-mock.native /opt/kasset-trader-core/
-scp -r old:/root/.nhplug /root/.nhplug
 scp -r old:/opt/kasset-codex /opt/kasset-codex   # 구독 CLI 유지 시
 scp -r old:/root/.codex /root/.codex             # 호스트 codex 유지 시
 install -m700 deploy/kasset-db-backup.sh /usr/local/sbin/

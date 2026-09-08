@@ -427,7 +427,7 @@ def test_single_krx_quote_uses_toss(
     assert body["asOf"] == "2026-08-28T09:44:26Z"
 
 
-def test_legacy_nh_quote_request_uses_shared_toss_provider(
+def test_toss_broker_quote_request_uses_shared_toss_provider(
     monkeypatch: pytest.MonkeyPatch, toss_enabled: None
 ) -> None:
     toss = _StubTossClient({"005930": _toss_price("005930", price="256500")})
@@ -440,7 +440,9 @@ def test_legacy_nh_quote_request_uses_shared_toss_provider(
     )
 
     with _client(db) as client:
-        response = client.get("/api/v1/market/quote?broker=NH&market=KRX&symbol=005930")
+        response = client.get(
+            "/api/v1/market/quote?broker=TOSS&market=KRX&symbol=005930"
+        )
 
     assert response.status_code == 200
     assert response.json()["source"] == "TOSS_API_PRICES"

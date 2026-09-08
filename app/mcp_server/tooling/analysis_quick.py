@@ -386,7 +386,9 @@ async def _load_decision_history_batch(
     # One query either way — never both — so this stays within the DB budget.
     fill_rows: list[tuple[str, Any, float | None, str | None]] = []
     if account_mode == "kis_mock":
-        from app.mcp_server.tooling.kis_mock_ledger import _derive_shadow_fill
+        from app.services.execution_ledger.normalizers import (
+            derive_mock_shadow_fill as _derive_shadow_fill,
+        )
 
         mock_rows = (
             (

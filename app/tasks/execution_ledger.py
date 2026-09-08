@@ -51,10 +51,8 @@ async def _run_reconciliation(broker: ReconcileRunBroker, window_hours: int) -> 
 @taskiq_broker.task(task_name="execution_ledger.reconcile_execution_ledger_smoke")
 async def reconcile_execution_ledger_smoke(broker: str, window_hours: int = 24) -> dict:
     """수동 실행 진입점. 커밋 게이트가 꺼져 있으면 dry-run이다."""
-    if broker == "kis":
-        raise ValueError("provider kis is not operational")
-    if broker not in {"toss", "upbit"}:
-        raise ValueError("broker must be toss or upbit")
+    if broker != "toss":
+        raise ValueError(f"provider {broker} is not operational")
     return await _run_reconciliation(
         broker,  # type: ignore[arg-type]
         window_hours=window_hours,
@@ -66,7 +64,7 @@ async def reconcile_execution_ledger_smoke(broker: str, window_hours: int = 24) 
     schedule=_scheduled_reconcile_labels(),
 )
 async def reconcile_execution_ledger_recurring() -> dict[str, dict]:
-    """Toss와 Upbit 체결 원장을 주기적으로 대조한다.
+    """Toss 체결 원장을 주기적으로 대조한다.
 
     스케줄은 기본 비활성이고, 명시적으로 켜도 별도 커밋 게이트가
     활성화되지 않으면 dry-run으로 실행된다.
@@ -74,5 +72,4 @@ async def reconcile_execution_ledger_recurring() -> dict[str, dict]:
     window_hours = settings.execution_ledger_reconcile_scheduler_window_hours
     return {
         "toss": await _run_reconciliation("toss", window_hours=window_hours),
-        "upbit": await _run_reconciliation("upbit", window_hours=window_hours),
     }

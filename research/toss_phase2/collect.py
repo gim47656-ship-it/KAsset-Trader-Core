@@ -54,13 +54,9 @@ SUMMARY_UPDATE_INTERVAL_SECONDS = 60.0
 CALL_BUDGET_ACCOUNTING = "cumulative_staging_scope"
 DEFAULT_SHARED_REDIS_URL = "redis://127.0.0.1:6379/0"
 _SETTINGS_PLACEHOLDERS = {
-    "KIS_APP_KEY": "toss-phase2-unused",
-    "KIS_APP_SECRET": "toss-phase2-unused",
     "OPENDART_API_KEY": "toss-phase2-unused",
     # A deliberately invalid port ensures an accidental database path fails.
     "DATABASE_URL": "postgresql+asyncpg://tossphase2:tossphase2@127.0.0.1:1/unused",
-    "UPBIT_ACCESS_KEY": "toss-phase2-unused",
-    "UPBIT_SECRET_KEY": "toss-phase2-unused",
     "SECRET_KEY": "TossPhase2UnusedConfig_20260804_A1b2C3d4E5f6G7h8I9j0KLMNOP",
 }
 

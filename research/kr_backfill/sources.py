@@ -1,7 +1,7 @@
-"""Normalised 1-minute bar fetchers for the three backfill sources.
+"""Normalised 1-minute bar fetchers for the Toss backfill source.
 
-Every source returns the same shape so the equality gate and the collector can
-treat them interchangeably:
+Every source returns the same shape so the collector can treat sources
+interchangeably:
 
     {minute_kst_naive: {"open","high","low","close","volume","value"}}
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from typing import Any
 
@@ -33,16 +33,12 @@ FREEZE_END = dtime(20, 0)
 
 #: What each source's `value` field actually is. Discovered during Stage A prep.
 VALUE_SEMANTICS: dict[str, str] = {
-    # ka10080 minute rows omit traded value; derive the stable proxy explicitly.
-    "kiwoom": "synthesised_close_times_volume",
-    "kis": "broker_reported_acml_tr_pbmn",
     # NOT broker-reported: app/services/brokers/toss/candles.py computes
-    # value = close * volume. Comparing it against the others measures the
-    # repo's own arithmetic, not source agreement.
+    # value = close * volume, so this is the repo's own arithmetic.
     "toss": "synthesised_close_times_volume",
 }
 
-PACE_SECONDS: dict[str, float] = {"toss": 0.3, "kiwoom": 2.0, "kis": 0.5}
+PACE_SECONDS: dict[str, float] = {"toss": 0.3}
 ROWS_RETURNED = "ROWS_RETURNED"
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
 EMPTY_RESPONSE_PLACEHOLDER = "EMPTY_RESPONSE_PLACEHOLDER"
@@ -118,150 +114,9 @@ class Pacer:
         }
 
 
-def _to_float(raw: Any) -> float:
-    # Kiwoom prefixes price/volume with a direction sign ("-78800"); the
-    # magnitude is the value, the sign is 전일대비 direction.
-    if raw is None:
-        return 0.0
-    normalized = str(raw).strip().replace(",", "")
-    if not normalized or normalized.lower() == "none":
-        return 0.0
-    return abs(float(normalized))
-
-
 def in_regular_session(ts: datetime) -> bool:
     """Regular-session bars only; 15:30 closing bar included, NXT discarded."""
     return SESSION_OPEN <= ts.time() <= SESSION_CLOSE
-
-
-# --------------------------------------------------------------------------
-# Kiwoom (mock host) — ka10080, tic_scope=1
-# --------------------------------------------------------------------------
-
-
-async def fetch_kiwoom_minutes(
-    *,
-    client: Any,
-    symbol: str,
-    pacer: Pacer,
-    max_pages: int = 1,
-    base_dt: str | None = None,
-) -> tuple[dict[datetime, dict[str, float]], dict[str, Any]]:
-    from app.services.brokers.kiwoom.constants import CHART_PATH
-
-    assert_fetch_window_open()
-    out: dict[datetime, dict[str, float]] = {}
-    meta: dict[str, Any] = {
-        "pages": 0,
-        "rows_raw": 0,
-        "next_key_seen": False,
-        "outcome_code": None,
-    }
-
-    cont_yn: str | None = None
-    next_key: str | None = None
-    for _ in range(max_pages):
-        body: dict[str, Any] = {
-            "stk_cd": symbol,
-            "tic_scope": "1",
-            "upd_stkpc_tp": "1",
-        }
-        if base_dt:
-            body["base_dt"] = base_dt
-        await pacer.wait()
-        payload = await client.post_api(
-            api_id="ka10080",
-            path=CHART_PATH,
-            body=body,
-            **({"cont_yn": cont_yn, "next_key": next_key} if cont_yn else {}),
-        )
-        raw_return_code = payload.get("return_code")
-        try:
-            return_code = int(raw_return_code)
-        except (TypeError, ValueError) as exc:
-            raise BackfillSourceResponseError(
-                reason_code=MALFORMED_RESPONSE,
-                source="kiwoom",
-                retry_disposition="STOP_NO_RETRY",
-            ) from exc
-        if return_code != 0:
-            raise BackfillSourceResponseError(
-                reason_code=PROVIDER_REJECTED,
-                source="kiwoom",
-                retry_disposition="STOP_NO_RETRY",
-                provider_code=return_code,
-            )
-        if "stk_min_pole_chart_qry" not in payload:
-            raise BackfillSourceResponseError(
-                reason_code=MALFORMED_RESPONSE,
-                source="kiwoom",
-                retry_disposition="STOP_NO_RETRY",
-            )
-        rows = payload["stk_min_pole_chart_qry"]
-        if not isinstance(rows, list):
-            raise BackfillSourceResponseError(
-                reason_code=MALFORMED_RESPONSE,
-                source="kiwoom",
-                retry_disposition="STOP_NO_RETRY",
-            )
-        meta["pages"] += 1
-        meta["rows_raw"] += len(rows)
-        if not rows:
-            if meta["outcome_code"] is None:
-                meta["outcome_code"] = EMPTY_RESPONSE
-            break
-        blank_placeholders = 0
-        for r in rows:
-            raw_ts = str(r.get("cntr_tm", "")).strip()
-            if len(raw_ts) < 12:
-                if all(value is None or not str(value).strip() for value in r.values()):
-                    blank_placeholders += 1
-                    continue
-                raise BackfillSourceResponseError(
-                    reason_code=MALFORMED_RESPONSE,
-                    source="kiwoom",
-                    retry_disposition="STOP_NO_RETRY",
-                )
-            try:
-                ts = datetime.strptime(raw_ts[:12], "%Y%m%d%H%M")
-                close = _to_float(r.get("cur_prc"))
-                volume = _to_float(r.get("trde_qty"))
-                open_price = _to_float(r.get("open_pric"))
-                high_price = _to_float(r.get("high_pric"))
-                low_price = _to_float(r.get("low_pric"))
-            except (TypeError, ValueError) as exc:
-                raise BackfillSourceResponseError(
-                    reason_code=MALFORMED_RESPONSE,
-                    source="kiwoom",
-                    retry_disposition="STOP_NO_RETRY",
-                ) from exc
-            out[ts] = {
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close,
-                "volume": volume,
-                "value": close * volume,
-            }
-        if blank_placeholders:
-            if blank_placeholders != len(rows) or out:
-                raise BackfillSourceResponseError(
-                    reason_code=MALFORMED_RESPONSE,
-                    source="kiwoom",
-                    retry_disposition="STOP_NO_RETRY",
-                )
-            meta["outcome_code"] = EMPTY_RESPONSE_PLACEHOLDER
-            break
-        meta["outcome_code"] = ROWS_RETURNED
-        # post_api merges the cont-yn / next-key response headers into payload.
-        more = str(payload.get("cont_yn", "")).strip().upper() == "Y"
-        nk = str(payload.get("next_key", "")).strip() or None
-        if not (more and nk):
-            break
-        meta["next_key_seen"] = True
-        cont_yn, next_key = "Y", nk
-
-    return out, meta
 
 
 # --------------------------------------------------------------------------
@@ -317,56 +172,5 @@ async def fetch_toss_minutes(
         meta["next_before"] = cursor
         if not cursor or len(out) >= count:
             break
-
-    return out, meta
-
-
-# --------------------------------------------------------------------------
-# KIS (mock host) — FHKST03010230
-# --------------------------------------------------------------------------
-
-
-async def fetch_kis_minutes(
-    *,
-    client: Any,
-    symbol: str,
-    pacer: Pacer,
-    session_date: date,
-    end_time: str = "153000",
-    max_pages: int = 4,
-) -> tuple[dict[datetime, dict[str, float]], dict[str, Any]]:
-    assert_fetch_window_open()
-    out: dict[datetime, dict[str, float]] = {}
-    meta: dict[str, Any] = {"pages": 0, "rows_raw": 0, "outcome_code": None}
-
-    cursor = end_time
-    for _ in range(max_pages):
-        await pacer.wait()
-        frame = await client.inquire_time_dailychartprice(
-            symbol, n=120, end_date=session_date, end_time=cursor
-        )
-        meta["pages"] += 1
-        meta["rows_raw"] += len(frame)
-        if frame.empty:
-            meta["outcome_code"] = EMPTY_RESPONSE
-            break
-        meta["outcome_code"] = ROWS_RETURNED
-        for _idx, r in frame.iterrows():
-            ts = r["datetime"]
-            ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-            if ts.tzinfo is not None:
-                ts = ts.astimezone(KST).replace(tzinfo=None)
-            out[ts.replace(second=0, microsecond=0)] = {
-                "open": float(r["open"]),
-                "high": float(r["high"]),
-                "low": float(r["low"]),
-                "close": float(r["close"]),
-                "volume": float(r["volume"]),
-                "value": float(r["value"]),
-            }
-        earliest = min(out)
-        if earliest.time() <= SESSION_OPEN:
-            break
-        cursor = (earliest - timedelta(minutes=1)).strftime("%H%M%S")
 
     return out, meta

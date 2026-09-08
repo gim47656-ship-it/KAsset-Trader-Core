@@ -105,29 +105,6 @@ export function scopeGroupedToSource(
   return out;
 }
 
-const PAPER_FILTER_SOURCES: ReadonlySet<AccountSource> = new Set([
-  "kis_mock",
-  "kiwoom_mock",
-  "alpaca_paper",
-  "db_simulated",
-]);
-
-// Paper/mock readers are intentionally excluded from the initial account-panel
-// fetch. Still render their filter chips from sourceVisuals so the user has a
-// visible entry-point that can trigger the source-specific lazy fetch.
-function isPaperFilterSource(source: AccountSource): boolean {
-  return PAPER_FILTER_SOURCES.has(source);
-}
-
-function sourceLabel(response: AccountPanelResponse, source: AccountSource): string {
-  const meta = accountSourceMeta(source);
-  const account = response.accounts.find((a) => a.source === source);
-  if (account?.displayName && (source === "alpaca_paper" || source === "db_simulated" || source === "kiwoom_mock")) {
-    if (account.displayName === meta.label || account.displayName === meta.shortLabel) return account.displayName;
-  }
-  return meta.label;
-}
-
 function sumCash(accounts: AccountPanelResponse["accounts"]): CashAmounts {
   let krw: number | null = null;
   let usd: number | null = null;
@@ -197,12 +174,16 @@ function optionFor(response: AccountPanelResponse, key: AccountFilterKey): Accou
   return {
     key,
     source: key,
-    label: sourceLabel(response, key),
+    label: accountSourceMeta(key).label,
     cashBalances: sumCash(response.accounts.filter((a) => a.source === key)),
     ...summary,
   };
 }
 
+// Account filter chips are derived strictly from the accounts and holdings the
+// current account-panel read actually returned. `sourceVisuals` is a static
+// label/tone lookup for whatever source a row carries (including historical
+// ones) — it must never be used to advertise a selectable account.
 export function buildAccountFilterOptions(response: AccountPanelResponse): AccountFilterOption[] {
   const sources = new Set<AccountSource>();
   for (const account of response.accounts) {
@@ -211,11 +192,6 @@ export function buildAccountFilterOptions(response: AccountPanelResponse): Accou
   for (const holding of response.groupedHoldings) {
     for (const source of holding.includedSources) {
       sources.add(source);
-    }
-  }
-  for (const visual of response.sourceVisuals) {
-    if (isPaperFilterSource(visual.source)) {
-      sources.add(visual.source);
     }
   }
 

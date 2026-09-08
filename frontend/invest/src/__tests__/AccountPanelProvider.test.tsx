@@ -77,7 +77,7 @@ test("reload() is a no-op when not yet loaded", async () => {
   expect(spy).not.toHaveBeenCalled();
 });
 
-test("reload() re-fetches with last params after load", async () => {
+test("reload() re-fetches after load", async () => {
   const spy = vi
     .spyOn(panelApi, "fetchAccountPanel")
     .mockResolvedValue(MOCK_RESP);
@@ -85,7 +85,7 @@ test("reload() re-fetches with last params after load", async () => {
     const ctx = useAccountPanelContext();
     return (
       <>
-        <button onClick={() => ctx.load({ includePaper: true, paperSources: ["kis_mock"] })}>load-kis-mock</button>
+        <button onClick={() => ctx.load()}>load</button>
         <button onClick={ctx.reload}>reload</button>
       </>
     );
@@ -95,16 +95,10 @@ test("reload() re-fetches with last params after load", async () => {
       <Controls />
     </AccountPanelProvider>,
   );
-  screen.getByText("load-kis-mock").click();
+  screen.getByText("load").click();
   await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
-  expect(spy).toHaveBeenLastCalledWith(
-    expect.objectContaining({ includePaper: true, paperSources: ["kis_mock"] }),
-  );
   screen.getByText("reload").click();
   await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
-  expect(spy).toHaveBeenLastCalledWith(
-    expect.objectContaining({ includePaper: true, paperSources: ["kis_mock"] }),
-  );
 });
 
 test("shows error state when fetch fails", async () => {

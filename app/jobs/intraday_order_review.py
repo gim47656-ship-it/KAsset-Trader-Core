@@ -47,34 +47,6 @@ def is_us_trading_hours(dt_value: datetime) -> bool:
     return bounds is not None and _within_utc_bounds(local, bounds)
 
 
-async def run_crypto_order_review() -> dict[str, object]:
-    """Review pending crypto orders at scheduled intraday checkpoints."""
-    as_of = now_kst()
-    logger.info("Starting intraday crypto order review at %s", as_of)
-    result = await fetch_pending_orders(
-        market="crypto",
-        include_current_price=True,
-        include_indicators=True,
-        as_of=as_of,
-    )
-    order_count = result.get("summary", {}).get("total", 0)
-    logger.info("Crypto intraday review complete: %s pending orders", order_count)
-    return {
-        "market": "crypto",
-        "as_of": as_of.isoformat(),
-        "order_count": order_count,
-        "orders": [
-            {
-                "symbol": order.get("symbol"),
-                "side": order.get("side"),
-                "gap_pct": order.get("gap_pct"),
-                "indicators": order.get("indicators"),
-            }
-            for order in result.get("orders", [])
-        ],
-    }
-
-
 async def run_kr_order_review() -> dict[str, object]:
     """Review pending KR stock orders at scheduled intraday checkpoints."""
     as_of = now_kst()

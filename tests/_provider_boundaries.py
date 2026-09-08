@@ -56,7 +56,7 @@ SEAM_TARGETS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     # USD/KRW rate: Toss primary, open.er-api.com fallback.
     ("_fetch_toss_usd_krw_quote", ("app.services.exchange_rate_service",)),
     ("_fetch_open_er_api_usd_krw_quote", ("app.services.exchange_rate_service",)),
-    # Upbit: every public and private REST call funnels through these two.
+    # Upbit: the remaining public REST calls all funnel through this one.
     (
         "_request_json",
         (
@@ -64,7 +64,6 @@ SEAM_TARGETS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
             "app.services.brokers.upbit.public_trades",
         ),
     ),
-    ("_request_with_auth", ("app.services.brokers.upbit.client",)),
     (
         "fetch_orderbook",
         ("app.services.market_data.service", "app.services.upbit_orderbook"),
@@ -286,27 +285,6 @@ def install(monkeypatch) -> Callable[[], None]:
         owner = getattr(module, class_name, None)
         if owner is not None and hasattr(owner, method):
             monkeypatch.setattr(owner, method, _async_blocked(f"{class_name}.{method}"))
-
-    # KIS exposes an injectable client factory, so give it a MockTransport that
-    # fails the way an unreachable host does. Patching the factory also flips
-    # ``_current_http_client_builder_token``, which invalidates any shared client
-    # a previous test cached instead of leaving a real one in place.
-    kis_base = importlib.import_module("app.services.brokers.kis.base")
-    kis_client_class = getattr(kis_base, "BaseKISClient", None)
-    if kis_client_class is not None:
-
-        def _kis_transport(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError(f"{MESSAGE} [{request.url.host}]", request=request)
-
-        def _build_offline_kis_client(self, timeout: float) -> object:
-            _ = self
-            return httpx.AsyncClient(
-                timeout=timeout, transport=httpx.MockTransport(_kis_transport)
-            )
-
-        monkeypatch.setattr(
-            kis_client_class, "_build_http_client", _build_offline_kis_client
-        )
 
     for module_path, attribute in FINNHUB_CLIENT_FACTORIES:
         module = importlib.import_module(module_path)

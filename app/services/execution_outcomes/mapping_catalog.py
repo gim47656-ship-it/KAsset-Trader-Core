@@ -2,7 +2,9 @@
 
 The catalog documents existing semantics; it is not an executable response
 adapter and no current caller imports it.  Source locators identify the legacy
-implementation that each contract fixture freezes.
+implementation that each contract fixture freezes, so a surface whose
+implementation no longer exists carries no documentable semantics: only the
+generic order path and Toss remain.
 """
 
 from __future__ import annotations
@@ -20,11 +22,7 @@ from app.services.execution_outcomes.contract import (
 
 class BrokerSurface(StrEnum):
     GENERIC = "generic"
-    KIS = "kis"
-    KIWOOM = "kiwoom"
     TOSS = "toss"
-    ALPACA = "alpaca"
-    BINANCE = "binance"
 
 
 class LegacySuccessMeaning(StrEnum):
@@ -85,51 +83,6 @@ def _outcome(
         local_recorded=local_recorded,
         reconcile_required=reconcile_required,
         terminal_evidence=evidence,
-    )
-
-
-def _alpaca_cancel_mapping(
-    *,
-    mapping_id: str,
-    read_back_status: str,
-    order_status: str,
-    lifecycle_synced: bool,
-    evidence: TerminalEvidence,
-    reconcile_required: bool,
-    cancelled: bool = False,
-    note: str,
-) -> LegacyResponseMapping:
-    """Build one concrete Alpaca cancel/read-back marker combination."""
-
-    success_meaning = (
-        LegacySuccessMeaning.BROKER_ACCEPTED_AND_LOCAL_RECORDED
-        if lifecycle_synced
-        else LegacySuccessMeaning.BROKER_ACCEPTED
-    )
-    return LegacyResponseMapping(
-        mapping_id=mapping_id,
-        surface=BrokerSurface.ALPACA,
-        source_locator=(
-            "app/mcp_server/tooling/alpaca_paper_orders.py::alpaca_paper_cancel_order"
-        ),
-        legacy_response_markers=(
-            "success=true",
-            "cancel_requested=true",
-            f"cancelled={str(cancelled).lower()}",
-            f"read_back_status={read_back_status}",
-            f"order_status={order_status}",
-            f"lifecycle_synced={str(lifecycle_synced).lower()}",
-        ),
-        legacy_success_meaning=success_meaning,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=lifecycle_synced,
-            reconcile_required=reconcile_required,
-            evidence=evidence,
-        ),
-        note=note,
     )
 
 
@@ -216,97 +169,6 @@ CURRENT_RESPONSE_MAPPINGS = (
         note="Accepted without a broker order id is recorded but untracked.",
     ),
     LegacyResponseMapping(
-        mapping_id="kis.live_accepted_pending_fill",
-        surface=BrokerSurface.KIS,
-        source_locator="app/mcp_server/tooling/kis_live_ledger.py::_record_kis_live_order",
-        legacy_response_markers=(
-            "success=true",
-            "broker_status=accepted",
-            "fill_recorded=false",
-            "order_id=present",
-        ),
-        legacy_success_meaning=(
-            LegacySuccessMeaning.BROKER_ACCEPTED_AND_LOCAL_RECORDED
-        ),
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=True,
-            reconcile_required=True,
-        ),
-        note="KIS send records accepted-only; reconcile owns fill truth.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="kiwoom.submitted_tracked",
-        surface=BrokerSurface.KIWOOM,
-        source_locator=(
-            "app/mcp_server/tooling/orders_kiwoom_shared.py::"
-            "finalize_place_broker_response"
-        ),
-        legacy_response_markers=(
-            "success=true",
-            "status=submitted",
-            "reconcile_required=false",
-            "order_id=present",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.BROKER_ACCEPTED,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=False,
-            reconcile_required=False,
-        ),
-        note="Submitted is tracked broker acceptance, not terminal execution.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="kiwoom.accepted_untracked",
-        surface=BrokerSurface.KIWOOM,
-        source_locator=(
-            "app/mcp_server/tooling/orders_kiwoom_shared.py::"
-            "finalize_place_broker_response"
-        ),
-        legacy_response_markers=(
-            "success=false",
-            "status=accepted_untracked",
-            "reconcile_required=true",
-            "retry_allowed=false",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.BROKER_ACCEPTED,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.UNTRACKED,
-            local_recorded=False,
-            reconcile_required=True,
-        ),
-        note="Broker acceptance without one valid order id remains untracked.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="kiwoom.acceptance_uncertain",
-        surface=BrokerSurface.KIWOOM,
-        source_locator=(
-            "app/mcp_server/tooling/orders_kiwoom_variants.py::"
-            "_dispatch_unknown_response"
-        ),
-        legacy_response_markers=(
-            "success=false",
-            "status=acceptance_uncertain",
-            "reconcile_required=true",
-            "retry_allowed=false",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.FAILURE_WITH_UNKNOWN_ACCEPTANCE,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.UNKNOWN,
-            tracking=TrackingState.UNKNOWN,
-            local_recorded=False,
-            reconcile_required=True,
-        ),
-        note="Post-dispatch ambiguity cannot be converted into a safe retry.",
-    ),
-    LegacyResponseMapping(
         mapping_id="toss.accepted_recorded",
         surface=BrokerSurface.TOSS,
         source_locator="app/mcp_server/tooling/orders_toss_variants.py::execute_order",
@@ -371,184 +233,6 @@ CURRENT_RESPONSE_MAPPINGS = (
             reconcile_required=True,
         ),
         note="A transport exception after dispatch is ambiguous, not rejected.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="alpaca.confirmation_preview",
-        surface=BrokerSurface.ALPACA,
-        source_locator=(
-            "app/mcp_server/tooling/alpaca_paper_orders.py::alpaca_paper_submit_order"
-        ),
-        legacy_response_markers=(
-            "success=true",
-            "submitted=false",
-            "blocked_reason=confirmation_required",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.REQUEST_HANDLED,
-        outcome=_outcome(
-            mutation_sent=False,
-            acceptance=BrokerAcceptance.NOT_SENT,
-            tracking=TrackingState.NOT_APPLICABLE,
-            local_recorded=False,
-            reconcile_required=False,
-        ),
-        note="Handler success with confirm=false is not broker acceptance.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_readback_unavailable",
-        read_back_status="unavailable",
-        order_status="absent",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.NONE,
-        reconcile_required=True,
-        note="DELETE was accepted, but unavailable read-back must reconcile.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_open_synced",
-        read_back_status="ok",
-        order_status="pending_cancel",
-        lifecycle_synced=True,
-        evidence=TerminalEvidence.NONE,
-        reconcile_required=True,
-        note="Known open target truth is recorded and remains non-terminal.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_open_unsynced",
-        read_back_status="ok",
-        order_status="pending_cancel",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.NONE,
-        reconcile_required=True,
-        note="Known open target truth not recorded locally must reconcile.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_partial_synced",
-        read_back_status="ok",
-        order_status="partially_filled",
-        lifecycle_synced=True,
-        evidence=TerminalEvidence.PARTIAL_FILL,
-        reconcile_required=True,
-        note="Recorded partial fill is non-terminal and keeps its reservation.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_partial_unsynced",
-        read_back_status="ok",
-        order_status="partially_filled",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.PARTIAL_FILL,
-        reconcile_required=True,
-        note="Unrecorded partial fill must reconcile without claiming cancel.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_filled_synced",
-        read_back_status="ok",
-        order_status="filled",
-        lifecycle_synced=True,
-        evidence=TerminalEvidence.FILLED,
-        reconcile_required=True,
-        note="Fill truth is recorded; position reflection still must reconcile.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_filled_unsynced",
-        read_back_status="ok",
-        order_status="filled",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.FILLED,
-        reconcile_required=True,
-        note="Broker fill evidence not recorded locally must reconcile.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_unknown_unsynced",
-        read_back_status="ok",
-        order_status="unrecognized",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.NONE,
-        reconcile_required=True,
-        note="Unknown read-back status preserves the target and fails closed.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_confirmed",
-        read_back_status="ok",
-        order_status="canceled",
-        lifecycle_synced=True,
-        evidence=TerminalEvidence.CANCELLED,
-        reconcile_required=False,
-        cancelled=True,
-        note="Only broker read-back status=canceled proves terminal cancellation.",
-    ),
-    _alpaca_cancel_mapping(
-        mapping_id="alpaca.cancel_confirmed_unsynced",
-        read_back_status="ok",
-        order_status="canceled",
-        lifecycle_synced=False,
-        evidence=TerminalEvidence.CANCELLED,
-        reconcile_required=True,
-        cancelled=True,
-        note="Confirmed cancellation not recorded locally must reconcile.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="binance.submit_new",
-        surface=BrokerSurface.BINANCE,
-        source_locator=(
-            "app/services/brokers/binance/*_demo/execution_client.py::submit_order"
-        ),
-        legacy_response_markers=(
-            "result=OrderSubmitResult",
-            "broker_order_id=present",
-            "status=NEW",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.NO_SUCCESS_FIELD,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=False,
-            reconcile_required=True,
-        ),
-        note="A NEW submit result is accepted/tracked but not filled.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="binance.submit_partial_fill",
-        surface=BrokerSurface.BINANCE,
-        source_locator=(
-            "app/services/brokers/binance/*_demo/dto.py::OrderSubmitResult.status"
-        ),
-        legacy_response_markers=(
-            "result=OrderSubmitResult",
-            "status=PARTIALLY_FILLED",
-            "executed_qty>0",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.NO_SUCCESS_FIELD,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=False,
-            reconcile_required=True,
-            evidence=TerminalEvidence.PARTIAL_FILL,
-        ),
-        note="Partial fill is non-terminal; tracking/reconciliation must continue.",
-    ),
-    LegacyResponseMapping(
-        mapping_id="binance.submit_filled_unrecorded",
-        surface=BrokerSurface.BINANCE,
-        source_locator=(
-            "app/services/brokers/binance/*_demo/dto.py::OrderSubmitResult.status"
-        ),
-        legacy_response_markers=(
-            "result=OrderSubmitResult",
-            "status=FILLED",
-            "local_ledger_write=not_part_of_dto",
-        ),
-        legacy_success_meaning=LegacySuccessMeaning.NO_SUCCESS_FIELD,
-        outcome=_outcome(
-            mutation_sent=True,
-            acceptance=BrokerAcceptance.ACCEPTED,
-            tracking=TrackingState.TRACKED,
-            local_recorded=False,
-            reconcile_required=True,
-            evidence=TerminalEvidence.FILLED,
-        ),
-        note="FILLED is terminal broker evidence but still needs local recording.",
     ),
 )
 

@@ -145,13 +145,14 @@ async def load_opening_lot_candidates(
     brokers: list[str],
 ) -> list[OpeningLotCandidate]:
     requested = {str(broker).strip().lower() for broker in brokers}
-    if "kis" in requested:
-        raise ValueError("provider kis is not operational")
+    unsupported = sorted(requested - {"toss"})
+    if unsupported:
+        # Toss만 운영 provider다. 저장된 KIS/Upbit 원장 행은 계속 읽지만
+        # 새 opening lot seed는 만들지 않는다.
+        raise ValueError(f"provider {unsupported[0]} is not operational")
     candidates: list[OpeningLotCandidate] = []
     if "toss" in requested:
         candidates.extend(await load_toss_opening_lot_candidates())
-    if "upbit" in requested:
-        candidates.extend(await load_upbit_opening_lot_candidates())
     return candidates
 
 
@@ -186,44 +187,6 @@ async def load_toss_opening_lot_candidates() -> list[OpeningLotCandidate]:
                 currency=currency,
                 current_qty=Decimal(str(position.quantity)),
                 avg_price=Decimal(str(position.avg_buy_price)),
-            )
-        )
-    return candidates
-
-
-async def load_upbit_opening_lot_candidates() -> list[OpeningLotCandidate]:
-    from app.services.brokers.upbit.client import (
-        fetch_my_coins,
-        parse_upbit_account_row,
-    )
-
-    rows = await fetch_my_coins()
-    candidates: list[OpeningLotCandidate] = []
-    for row in rows:
-        currency = str(row.get("currency") or "").strip().upper()
-        if not currency or currency == "KRW":
-            continue
-        unit_currency = str(row.get("unit_currency") or "KRW").strip().upper()
-        if unit_currency != "KRW":
-            # The ledger normalizer only ever writes venue='upbit_krw' with
-            # currency='KRW'; a BTC/USDT-market seed could never match a sell
-            # and its avg price is not KRW-denominated.
-            continue
-        parsed = parse_upbit_account_row(row)
-        current_qty = Decimal(str(parsed["total_quantity"]))
-        avg_price = Decimal(str(parsed["avg_buy_price"]))
-        candidates.append(
-            OpeningLotCandidate(
-                broker="upbit",
-                account_mode="live",
-                venue="upbit_krw",
-                instrument_type="crypto",
-                symbol=currency,
-                raw_symbol=f"KRW-{currency}",
-                currency="KRW",
-                current_qty=current_qty,
-                avg_price=avg_price,
-                avg_price_modified=bool(parsed["avg_buy_price_modified"]),
             )
         )
     return candidates

@@ -43,10 +43,9 @@ Do not develop KAsset features directly on `main` unless an upstream-sync decisi
    - Donchian breakout
    - ORB / Stocks-in-Play
 
-3. Broker expansion
-   - preserve existing KIS/Toss integrations
-   - add NH PLUG as a separate adapter, Read Only first
-   - do not enable NH live orders during initial integration
+3. Broker boundary
+   - Toss is the only live broker integration; removed provider adapters are gone and only their ledger models remain for historical reads
+   - do not add another live broker adapter without a separate approval
 
 4. KAsset Android integration
    - expose a narrow authenticated API facade for account, positions, orders, fills, system status, kill switch, and agent results
@@ -65,7 +64,7 @@ Do not develop KAsset features directly on `main` unless an upstream-sync decisi
 4. Connect one read-only analysis Skill end-to-end.
 5. Add deterministic backtest/paper validation for strategies.
 6. Add KAsset Android API facade.
-7. Add NH PLUG Read Only adapter.
+7. Keep the broker surface limited to Toss plus the KAsset PAPER ledger.
 8. Only after paper/mock validation, consider tightly gated live-order integration.
 
 ## Upstream sync rule

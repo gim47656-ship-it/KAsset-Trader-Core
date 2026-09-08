@@ -48,7 +48,6 @@ from app.services.order_proposals.approval_window import (
 )
 from app.services.order_proposals.broker_gateway import (
     cancel_target_order,
-    fetch_submit_evidence,
     fetch_target_order,
 )
 from app.services.order_proposals.buying_power import (
@@ -102,7 +101,6 @@ PlaceOrderFn = Callable[..., Any]
 CorrelationMint = Callable[..., Any]
 TargetFetchFn = Callable[..., Any]
 TargetCancelFn = Callable[..., Any]
-SubmitEvidenceFetchFn = Callable[..., Any]
 RetrospectiveLookupFn = Callable[[int], Any]
 EligibilityGate = Callable[..., Any]
 OppositePendingCheckFn = Callable[..., Any]
@@ -425,11 +423,6 @@ def _is_valid_toss_client_order_id(value: Any) -> bool:
     )
 
 
-def _proposal_client_order_id(proposal_id: uuid.UUID, rung_index: int) -> str:
-    digest = hashlib.sha256(f"{proposal_id}:{rung_index}".encode()).hexdigest()[:32]
-    return f"oprop-{digest}"
-
-
 def _truncate_submit_diagnostic(value: object) -> str:
     compact = " ".join(str(value).split())
     if len(compact) > _SUBMIT_DIAGNOSTIC_MAX_LENGTH:
@@ -556,35 +549,6 @@ def _adapt_toss_submit_response(
     return adapted
 
 
-def _adapt_live_submit_response(
-    submit: dict[str, Any], *, order_type: str
-) -> dict[str, Any]:
-    """Upbit accepted-only 응답을 제안 제출 결과 형식으로 변환한다.
-
-    브로커 접수는 체결이 아니므로 여기서는 acked/resting 상태만 기록하며 실제
-    체결은 이후 브로커 증거 기반 reconcile에서 반영한다.
-    """
-    broker_status = submit.get("broker_status")
-    if broker_status == "rejected":
-        adapted = dict(submit)
-        adapted["success"] = False
-        adapted["error"] = (
-            submit.get("response_message") or submit.get("message") or "broker_rejected"
-        )
-        return adapted
-    if broker_status == "accepted":
-        adapted = dict(submit)
-        adapted["broker_order_id"] = submit.get("order_id")
-        adapted["status"] = "acked" if order_type == "market" else "resting"
-        return adapted
-    # Defensive: unknown/missing broker_status shouldn't happen given
-    # `_derive_live_send_status` only ever returns "accepted"/"rejected", but
-    # leave the response untouched rather than raise — `_classify_submit`'s
-    # existing ambiguous-response fallback (`record_unverified`) still
-    # applies to whatever shape falls through here.
-    return submit
-
-
 async def _default_place_order_fn(**kwargs: Any) -> dict[str, Any]:
     """Production binding — delegates to the real order-execution impl.
 
@@ -593,10 +557,6 @@ async def _default_place_order_fn(**kwargs: Any) -> dict[str, Any]:
     per the ROB-816 global constraints). The dry-run preview response is
     passed through unchanged — ``_revalidate_rung`` already reads its real
     top-level keys (``price``/``quantity``/``success``/``approval_hash``).
-    The live-submit (``dry_run=False``) response is translated via
-    ``_adapt_live_submit_response`` before being handed to
-    ``_classify_submit`` — see that helper's docstring and Task 13 report
-    Finding 1 for why the raw response can't be classified directly.
     """
     account_mode = kwargs.pop("account_mode", None)
     proposal_client_order_id = kwargs.pop("proposal_client_order_id", None)
@@ -672,33 +632,15 @@ async def _default_place_order_fn(**kwargs: Any) -> dict[str, Any]:
             "account_mode": account_mode,
             "error": "provider kis is not operational",
         }
-    if account_mode != "upbit":
-        return {
-            "success": False,
-            "mutation_sent": False,
-            "account_mode": account_mode,
-            "error": f"unsupported proposal account_mode: {account_mode}",
-        }
-
-    from app.mcp_server.tooling.order_execution import _place_order_impl
-
-    # The proposal ledger stores quantity/limit_price as Decimal, but
-    # `_place_order_impl`'s numeric paths assume the MCP tool layer's
-    # float/int inputs — e.g. `_preview_buy` computes the fee as
-    # `estimated_value * 0.0005`, which raises TypeError on Decimal and
-    # surfaced to the operator as a bogus "guard_blocked" (2026-07-11
-    # activation smoke, KRW-BTC canary). Normalize at this caller boundary;
-    # the impl's float contract stays unchanged for every other caller.
-    kwargs = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in kwargs.items()}
-    if proposal_client_order_id is not None:
-        kwargs["client_order_id"] = str(proposal_client_order_id)
-
-    submit = await _place_order_impl(**kwargs, proposal_flow=True)
-    if kwargs.get("dry_run") is False:
-        return _adapt_live_submit_response(
-            submit, order_type=str(kwargs.get("order_type"))
-        )
-    return submit
+    # Upbit 주문 전송 경로가 제거되면서 Toss 외 제출 어댑터가 남아 있지 않다.
+    # 신규 제안은 생성 단계에서 이미 차단되지만, 이미 저장된 과거 Upbit 제안이
+    # 승인/재배포로 다시 들어와도 여기서 전송 없이 닫혀야 한다.
+    return {
+        "success": False,
+        "mutation_sent": False,
+        "account_mode": account_mode,
+        "error": f"unsupported proposal account_mode: {account_mode}",
+    }
 
 
 async def _default_retrospective_lookup(retrospective_id: int) -> Any:
@@ -732,8 +674,6 @@ async def preview_loss_cut_confirmation(
         proposal_client_order_id = (
             _toss_proposal_client_order_id(proposal_id, rung.rung_index)
             if group.account_mode == "toss_live"
-            else _proposal_client_order_id(proposal_id, rung.rung_index)
-            if group.account_mode == "upbit"
             else None
         )
         preview = await _maybe_await(
@@ -853,7 +793,6 @@ async def revalidate_and_submit(
     correlation_mint: CorrelationMint = _default_correlation_mint,
     fetch_target_fn: TargetFetchFn = fetch_target_order,
     cancel_target_fn: TargetCancelFn = cancel_target_order,
-    fetch_submit_evidence_fn: SubmitEvidenceFetchFn = fetch_submit_evidence,
     buying_power_claimer: BuyingPowerClaimer = default_buying_power_claimer,
     buying_power_releaser: BuyingPowerReleaser = default_buying_power_releaser,
     eligibility_gate: EligibilityGate | None = None,
@@ -935,7 +874,6 @@ async def revalidate_and_submit(
                 fetch_target_fn=fetch_target_fn,
                 cancel_target_fn=cancel_target_fn,
                 correlation_mint=correlation_mint,
-                fetch_submit_evidence_fn=fetch_submit_evidence_fn,
                 eligibility_gate=eligibility_gate,
                 window_evaluator=evaluate_window,
                 expected_policy_stamp=active_policy_stamp,
@@ -963,7 +901,6 @@ async def revalidate_and_submit(
                 now=now,
                 place_order_fn=place_order_fn,
                 correlation_mint=correlation_mint,
-                fetch_submit_evidence_fn=fetch_submit_evidence_fn,
                 buying_power_claimer=buying_power_claimer,
                 buying_power_releaser=buying_power_releaser,
                 eligibility_gate=eligibility_gate,
@@ -1057,7 +994,6 @@ async def _revalidate_place_rung(
     now: datetime,
     place_order_fn: PlaceOrderFn,
     correlation_mint: CorrelationMint,
-    fetch_submit_evidence_fn: SubmitEvidenceFetchFn,
     buying_power_claimer: BuyingPowerClaimer,
     buying_power_releaser: BuyingPowerReleaser,
     eligibility_gate: EligibilityGate | None,
@@ -1070,8 +1006,6 @@ async def _revalidate_place_rung(
     proposal_client_order_id = (
         _toss_proposal_client_order_id(proposal_id, rung_index)
         if group.account_mode == "toss_live"
-        else _proposal_client_order_id(proposal_id, rung_index)
-        if group.account_mode == "upbit"
         else None
     )
 
@@ -1350,31 +1284,15 @@ async def _revalidate_place_rung(
                 now=transport_gate.blocked_decision.observed_at,
                 restore_pre_send_state=True,
             )
-        if group.account_mode == "upbit":
-            outcome = await _classify_submit(
-                service=service,
-                proposal_id=proposal_id,
-                rung_index=rung_index,
-                preview=preview,
-                submit={"success": False, "error": str(exc)},
-                corr=corr,
-                now=now,
-                account_mode=group.account_mode,
-                market=group.market,
-                identifier=proposal_client_order_id,
-                fetch_submit_evidence_fn=fetch_submit_evidence_fn,
-            )
-        else:
-            await service.record_unverified(
-                proposal_id,
-                rung_index,
-                reason=f"submit_exception:{exc}",
-                now=now,
-                correlation_id=corr,
-                idempotency_key=preview.get("idempotency_key"),
-            )
-            outcome = RungOutcome(rung_index, "unverified", {"error": str(exc)})
-        return outcome
+        await service.record_unverified(
+            proposal_id,
+            rung_index,
+            reason=f"submit_exception:{exc}",
+            now=now,
+            correlation_id=corr,
+            idempotency_key=preview.get("idempotency_key"),
+        )
+        return RungOutcome(rung_index, "unverified", {"error": str(exc)})
 
     if transport_gate.blocked_decision is not None:
         await _release_after_rejection(
@@ -1399,10 +1317,7 @@ async def _revalidate_place_rung(
         submit=submit,
         corr=corr,
         now=now,
-        account_mode=group.account_mode,
-        market=group.market,
         identifier=proposal_client_order_id,
-        fetch_submit_evidence_fn=fetch_submit_evidence_fn,
     )
     if outcome.result == "error":
         await _release_after_rejection(
@@ -1757,7 +1672,6 @@ async def _revalidate_replace_rung(
     fetch_target_fn: TargetFetchFn,
     cancel_target_fn: TargetCancelFn,
     correlation_mint: CorrelationMint,
-    fetch_submit_evidence_fn: SubmitEvidenceFetchFn,
     eligibility_gate: EligibilityGate | None = None,
     window_evaluator: WindowEvaluator,
     expected_policy_stamp: str,
@@ -1767,8 +1681,6 @@ async def _revalidate_replace_rung(
     proposal_client_order_id = (
         _toss_proposal_client_order_id(group.proposal_id, rung.rung_index)
         if group.account_mode == "toss_live"
-        else _proposal_client_order_id(group.proposal_id, rung.rung_index)
-        if group.account_mode == "upbit"
         else None
     )
     window_outcome = await _pre_mutation_window_gate(
@@ -1953,20 +1865,6 @@ async def _revalidate_replace_rung(
                 rung=rung,
                 decision=transport_gate.blocked_decision,
             )
-        if group.account_mode == "upbit":
-            return await _classify_submit(
-                service=service,
-                proposal_id=proposal_id,
-                rung_index=rung_index,
-                preview=preview,
-                submit={"success": False, "error": str(exc)},
-                corr=corr,
-                now=now,
-                account_mode=group.account_mode,
-                market=group.market,
-                identifier=proposal_client_order_id,
-                fetch_submit_evidence_fn=fetch_submit_evidence_fn,
-            )
         await service.record_unverified(
             proposal_id,
             rung_index,
@@ -1991,10 +1889,7 @@ async def _revalidate_replace_rung(
         submit=submit,
         corr=corr,
         now=now,
-        account_mode=group.account_mode,
-        market=group.market,
         identifier=proposal_client_order_id,
-        fetch_submit_evidence_fn=fetch_submit_evidence_fn,
     )
 
 
@@ -2101,65 +1996,12 @@ async def _classify_submit(
     submit: dict[str, Any],
     corr: str,
     now: datetime,
-    account_mode: str,
-    market: str,
     identifier: str | None,
-    fetch_submit_evidence_fn: SubmitEvidenceFetchFn,
 ) -> RungOutcome:
     success = submit.get("success")
 
     if success is False:
         original_error = str(submit.get("error") or "submit_rejected")
-        if account_mode == "upbit" and identifier is not None:
-            evidence = await _maybe_await(
-                fetch_submit_evidence_fn(
-                    identifier=identifier,
-                    account_mode=account_mode,
-                    market=market,
-                )
-            )
-            if evidence.outcome == "found":
-                status = (
-                    "resting" if evidence.broker_state in {"wait", "watch"} else "acked"
-                )
-                record_fn = (
-                    service.record_resting
-                    if status == "resting"
-                    else service.record_ack
-                )
-                await record_fn(
-                    proposal_id,
-                    rung_index,
-                    broker_order_id=evidence.broker_order_id,
-                    correlation_id=corr,
-                    idempotency_key=identifier,
-                    approval_hash_digest=preview.get("approval_hash"),
-                    now=now,
-                )
-                result: RungOutcomeResult = (
-                    "submitted_resting" if status == "resting" else "submitted_acked"
-                )
-                return RungOutcome(
-                    rung_index,
-                    result,
-                    {"submit": submit, "submit_evidence": evidence},
-                )
-            if evidence.outcome == "unknown":
-                await service.record_unverified(
-                    proposal_id,
-                    rung_index,
-                    reason=(
-                        f"submit_evidence_unknown:{evidence.reason or original_error}"
-                    ),
-                    now=now,
-                    correlation_id=corr,
-                    idempotency_key=identifier,
-                )
-                return RungOutcome(
-                    rung_index,
-                    "unverified",
-                    {"error": original_error, "submit_evidence": evidence},
-                )
         # Explicit broker/guard rejection — not ambiguous, safe to terminalize.
         await service.record_rejected(
             proposal_id,

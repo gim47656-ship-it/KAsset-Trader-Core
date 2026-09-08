@@ -18,17 +18,10 @@ from app.mcp_server.tooling.analysis_bundle_handlers import (
 from app.mcp_server.tooling.analysis_registration import register_analysis_tools
 from app.mcp_server.tooling.forecast_registration import register_forecast_tools
 from app.mcp_server.tooling.fundamentals_registration import register_fundamentals_tools
-from app.mcp_server.tooling.live_reconcile_registration import (
-    LIVE_RECONCILE_TOOL_NAMES,
-)
 from app.mcp_server.tooling.market_data_registration import register_market_data_tools
 from app.mcp_server.tooling.operating_briefing_registration import (
     register_operating_briefing_tools,
 )
-from app.mcp_server.tooling.orders_kiwoom_us_variants import (
-    KIWOOM_MOCK_US_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_variants import KIWOOM_MOCK_TOOL_NAMES
 from app.mcp_server.tooling.orders_registration import ORDER_TOOL_NAMES
 from app.mcp_server.tooling.orders_toss_variants import (
     TOSS_LIVE_ORDER_TOOL_NAMES,
@@ -103,9 +96,6 @@ ANALYSIS_READONLY_TOOL_NAMES: set[str] = {
 ANALYSIS_READONLY_FORBIDDEN_TOOL_NAMES: set[str] = (
     ORDER_TOOL_NAMES
     | _RETIRED_KIS_ORDER_TOOL_NAMES
-    | LIVE_RECONCILE_TOOL_NAMES
-    | KIWOOM_MOCK_TOOL_NAMES
-    | KIWOOM_MOCK_US_TOOL_NAMES
     | PAPER_LIMIT_ORDER_TOOL_NAMES
     | (TOSS_LIVE_ORDER_TOOL_NAMES - {"toss_get_positions"})
     | {

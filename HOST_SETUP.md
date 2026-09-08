@@ -79,9 +79,8 @@ REDIS_URL=redis://:password@localhost:6379/0
 # GitHub 저장소 (Docker 이미지용)
 GITHUB_REPOSITORY=your-username/auto_trader
 
-# API 키들
-KIS_APP_KEY=your_kis_key
-KIS_APP_SECRET=your_kis_secret
+# API 키들 — 필요한 항목은 env.example / env.prod.example을 기준으로 채웁니다.
+OPENDART_API_KEY=your_opendart_key
 # ... 기타 필요한 키들
 ```
 

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from app.services.brokers.binance.demo_scalping.signal import Candle, SignalDecision
+from scalping_signal import Candle, SignalDecision
 
 _BPS = Decimal("10000")
 _MS_PER_HOUR = 3_600_000

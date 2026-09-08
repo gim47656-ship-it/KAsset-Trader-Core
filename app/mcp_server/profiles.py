@@ -17,20 +17,11 @@ from enum import StrEnum
 class McpProfile(StrEnum):
     DEFAULT = "default"
     CRYPTO = "crypto"
-    US_PAPER = "us-paper"
     DB_PAPER = "db-paper"
-    KIWOOM = "kiwoom"
-    # ROB-1159 — least-privilege split of KIWOOM: KR namespace only, the whole
-    # kiwoom_mock_us_* namespace (4 mutations + 3 reads) physically absent.
-    KIWOOM_KR = "kiwoom_kr"
     SHADOW_REPLAY = "shadow-replay"
     ANALYSIS_READONLY = "analysis_readonly"
     ACCOUNT_READ = "account_read"
     TRADINGCODEX_EXECUTION = "tradingcodex_execution"
-    PAPER_EXECUTION = "paper_execution"
-    # Canonical physical-account routing surface. The name is a route label;
-    # strategy/universe admission is governed by separate contracts.
-    ALPACA_PAPER_CLEAN = "alpaca-paper-clean"
     # ROB-1286 — the surface a watch-fire repricing session is spawned with.
     # Closed world: exactly the proposal-only allowlist, so the session can
     # create a proposal and cannot reach any broker order tool.

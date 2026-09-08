@@ -1,7 +1,9 @@
 """Make the research package and the auto_trader repo root importable in tests.
 
-The research venv (3.13) does not install auto_trader; we only need the pure
-``signal.py`` module, whose import chain is stdlib-only (verified ROB-316).
+The research venv (3.13) does not install auto_trader; the pure scalping signal
+now lives in this package (``scalping_signal.py``, stdlib-only), and the repo
+root stays importable for the research modules that still read app-side pure
+contracts.
 """
 
 import sys

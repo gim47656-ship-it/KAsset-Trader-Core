@@ -10,6 +10,7 @@ Values are upserted by (event_id, metric_name, period).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -22,7 +23,61 @@ from app.models.market_events import (
     MarketEventIngestionPartition,
     MarketEventValue,
 )
-from app.services.alpaca_paper_ledger_service import _redact_sensitive_keys
+
+# 삭제된 ``app.services.alpaca_paper_ledger_service``에 있던 마스킹 규칙을 값과
+# 정규식 그대로 옮겨왔다. raw_payload_json은 외부 응답 원문이므로 영속화 전에
+# 반드시 이 규칙을 통과해야 한다(규칙 완화 금지).
+_SENSITIVE_KEY_RE = re.compile(
+    r"(api[_-]?key|secret|authorization|token|account[_-]?no|"
+    r"account[_-]?number|account[_-]?id|account[_-]?identifier|"
+    r"email|passwd|password|credential)",
+    re.IGNORECASE,
+)
+_SENSITIVE_TEXT_VALUE_RE = re.compile(
+    r"(?P<prefix>\b(api[_-]?key|secret|token|account[_-]?no|"
+    r"account[_-]?number|account[_-]?id|account[_-]?identifier|"
+    r"email|passwd|password|credential)\b\s*[:=]\s*)"
+    r"(?P<value>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_TEXT_VALUE_RE = re.compile(
+    r"(?P<prefix>\b(authorization|bearer)\b\s*[:=]?\s*)"
+    r"(?P<value>(?:bearer\s+)?\S+)",
+    re.IGNORECASE,
+)
+_JSON_SENSITIVE_RE = re.compile(
+    r"(?P<prefix>\"(?:api[_-]?key|secret|token|account[_-]?no|"
+    r"account[_-]?number|account[_-]?id|account[_-]?identifier|"
+    r"email|passwd|password|credential)\"\s*:\s*\")"
+    r"(?P<value>[^\"]*)"
+    r"(?P<suffix>\")",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_text(text: str | None) -> str | None:
+    """Redact key=value/key: value secrets from operator narrative text."""
+    if text is None:
+        return None
+    redacted = _AUTHORIZATION_TEXT_VALUE_RE.sub(r"\g<prefix>[REDACTED]", text)
+    redacted = _JSON_SENSITIVE_RE.sub(r"\g<prefix>[REDACTED]\g<suffix>", redacted)
+    return _SENSITIVE_TEXT_VALUE_RE.sub(r"\g<prefix>[REDACTED]", redacted)
+
+
+def _redact_sensitive_keys(payload: Any) -> Any:
+    """Recursively redact sensitive keys from dicts/lists before persistence."""
+    if isinstance(payload, dict):
+        return {
+            k: "[REDACTED]"
+            if _SENSITIVE_KEY_RE.search(str(k))
+            else _redact_sensitive_keys(v)
+            for k, v in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_redact_sensitive_keys(item) for item in payload]
+    if isinstance(payload, str):
+        return _redact_sensitive_text(payload)
+    return payload
 
 
 class MarketEventsRepository:

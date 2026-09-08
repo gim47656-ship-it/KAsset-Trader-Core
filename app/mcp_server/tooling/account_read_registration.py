@@ -9,15 +9,6 @@ from app.mcp_server.tooling.analysis_artifact_registration import (
 )
 from app.mcp_server.tooling.analysis_readonly_registration import _AllowlistedMCP
 from app.mcp_server.tooling.forecast_registration import FORECAST_TOOL_NAMES
-from app.mcp_server.tooling.orders_kiwoom_us_variants import (
-    KIWOOM_MOCK_US_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_variants import (
-    KIWOOM_MOCK_TOOL_NAMES,
-)
-from app.mcp_server.tooling.orders_kiwoom_variants import (
-    register as register_kiwoom_mock_tools,
-)
 from app.mcp_server.tooling.orders_registration import (
     ORDER_TOOL_NAMES,
     register_order_tools,
@@ -39,22 +30,6 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
 
-KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES: set[str] = {
-    "kiwoom_mock_get_positions",
-    "kiwoom_mock_get_orderable_cash",
-    "kiwoom_mock_get_order_history",
-    # ROB-1155 — kiwoom_mock_get_order_detail (kt00007) is deliberately NOT
-    # listed. It is a pure read, but this set is unioned into
-    # TRADINGCODEX_EXECUTION_TOOL_NAMES, so adding it here would silently widen
-    # that privileged profile too — exactly what the boundary comment in
-    # tradingcodex_execution_registration.py forbids. KR-B1 reaches the tool via
-    # the kiwoom-family profiles (MCP_PROFILE=kiwoom, or the ROB-1159 KR-only
-    # MCP_PROFILE=kiwoom_kr, which registers the same KR registrar without the
-    # kiwoom_mock_us_* namespace), so it is available where it is needed without
-    # touching either restricted profile. Widening these two is a separate,
-    # explicit decision.
-}
-
 ACCOUNT_READ_TOOL_NAMES: set[str] = {
     "get_holdings",
     "toss_get_positions",
@@ -62,12 +37,10 @@ ACCOUNT_READ_TOOL_NAMES: set[str] = {
     "toss_get_orderable_cash",
     "get_order_history",
     "toss_get_order_history",
-} | KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES
+}
 
 ACCOUNT_READ_FORBIDDEN_TOOL_NAMES: set[str] = (
     (ORDER_TOOL_NAMES - {"get_order_history"})
-    | (KIWOOM_MOCK_TOOL_NAMES - KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES)
-    | KIWOOM_MOCK_US_TOOL_NAMES
     | PAPER_LIMIT_ORDER_TOOL_NAMES
     | (
         TOSS_LIVE_ORDER_TOOL_NAMES
@@ -96,12 +69,10 @@ def register_account_read_tools(mcp: FastMCP) -> None:
     register_portfolio_tools(filtered)
     register_order_tools(filtered)
     register_toss_live_order_tools(filtered)
-    register_kiwoom_mock_tools(filtered)
 
 
 __all__ = [
     "ACCOUNT_READ_FORBIDDEN_TOOL_NAMES",
     "ACCOUNT_READ_TOOL_NAMES",
-    "KIWOOM_MOCK_ACCOUNT_READ_TOOL_NAMES",
     "register_account_read_tools",
 ]

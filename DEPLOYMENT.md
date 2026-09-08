@@ -97,16 +97,13 @@ curl http://localhost:8000/healthz
 - `api`
 - `worker`
 - `mcp`
-- `upbit_websocket`
 
 
 ### 주식 운영 경계와 체결 증거
 
 - KR/US 운영 계좌와 주문은 Toss만 사용합니다. KIS 자격증명, 서비스, WebSocket,
-  MCP 도구는 배포하지 않습니다. 남은 KIS 어댑터와 레저 모델은 과거 행 조회
-  호환성을 위한 비활성 코드입니다.
-- NH PLUG는 국내주식 모의계좌의 계좌·잔고·보유·현재가 조회만 지원합니다.
-  주문·정정·취소와 미국주식 지원을 가정하지 마세요.
+  MCP 도구, provider 구현은 배포하지 않으며 레포에도 없습니다. 남은 것은 과거
+  행 조회용 레저 모델뿐입니다.
 - Toss는 이 경로에서 체결 WebSocket을 사용하지 않습니다. 실주문을 허용하는
   프로덕션은 `TOSS_FILL_POLL_ENABLED=true`와
   `TOSS_FILL_POLL_CRON=*/2 * * * *`를 설정해
@@ -122,7 +119,6 @@ curl http://localhost:8000/healthz
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f api
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f worker
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f mcp
-docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f upbit_websocket
 ```
 
 ## 5. Sentry 확인
@@ -131,7 +127,6 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f upbit_web
   - `auto-trader-api`
   - `auto-trader-worker`
   - `auto-trader-mcp`
-  - `auto-trader-upbit-ws`
 - 에러/트랜잭션/프로파일 유입 확인
 
 ## 6. 업데이트 절차

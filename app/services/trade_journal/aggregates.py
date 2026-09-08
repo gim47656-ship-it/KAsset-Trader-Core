@@ -198,7 +198,9 @@ async def _load_mock_counterfactual_fills(
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> list[Fill]:
-    from app.mcp_server.tooling.kis_mock_ledger import _derive_shadow_fill
+    from app.services.execution_ledger.normalizers import (
+        derive_mock_shadow_fill as _derive_shadow_fill,
+    )
 
     stmt = (
         select(KISMockOrderLedger)

@@ -96,7 +96,9 @@ async def stock_detail_orderbook_provider(
     from app.services.market_data import service as market_data
 
     _ = db
-    if market == "us":
+    # 호가 스냅샷은 crypto 경로만 제공한다. KR equity 호가는 앱 Toss WebSocket
+    # 스트림 전용이라 이 read model에는 소스가 없다.
+    if market != "crypto":
         return None
     snapshot = await market_data.get_orderbook(symbol=symbol, market=market)
     if not snapshot.asks and not snapshot.bids:

@@ -3,7 +3,7 @@
 ## 0. 한 줄
 
 최근 **N=3 거래일 연속** 봉이 죽어 있으면(`volume=0` **또는** 0-변동) 그 종목은
-`data_state: "halted_suspect"` 로 표시되고, **지표는 null 이 되며**, 스크리너·정책표에서
+`data_state: "halted_suspect"` 로 표시되고, **지표는 null 이 되며**, 스크리너에서
 **제외**된다. 🔴 **이건 "의심"이지 확정 정지가 아니다.**
 
 ## 1. 왜 생겼나 (실사례)
@@ -58,15 +58,11 @@ RSI 35.40 · 지지/저항 · upside +84% 가 **전부 0-변동 캔들 위에서
 |---|---|
 | `analyze_stock_batch` / `analyze_stock` | `data_state` = `halted_suspect` (top-level + quote 양쪽). `indicators` · `support_resistance` = **null** (추정·보간 없음). 근거는 `halt_suspect` 블록. quick(`quick=True`)에도 `rsi_14`/`supports`/`resistances` null + `halt_suspect` 로 실린다 — 단 `recommendation` 필드는 ROB-1311 이후 `quick=False`(full) 전용이며, full 에서는 RSI 부재로 `hold`/`low` + `insufficient_inputs` 로 자동 하한 |
 | `screen_stocks` | 행 **제외**. 제외분은 `meta.halted_suspect_excluded` + `warnings` 로 보고. 🔴 봉 이력 조회 실패는 **제외하지 않고**(fail-open) warning 만 남긴다 — DB 장애는 정지의 증거가 아니다. 🔴 비용 게이트 = §4-1 |
-| `scripts/policy_table` (kr/us/crypto) | `rows` 에서 **제외**. `universe.halted_suspect` 에 심볼·근거 보존, KR/US 는 `universe.skipped` 에 `reason="halted_suspect"` 로도 계상. 요약 md 에 심볼이 그대로 찍힌다 |
-
-B0-X 는 `policy_table.v1` 의 `rows` 만 읽으므로 별도 변경 없이 오염이 차단된다
-(`universe.halted_suspect` 는 additive, `schema` 값 불변).
 
 ### 4-1. 스크리너 비용 게이트 (🔴 알려진 한계)
 
 봉 이력 조회는 cache-first 이지만 **KRX 장중에는 일봉 캐시를 일부러 우회**한다(오늘 봉이
-형성 중이라). 그대로 두면 100행 스크린이 장중에 **KIS 라이브 캔들 100회**를 때린다 —
+형성 중이라). 그대로 두면 100행 스크린이 장중에 **브로커 라이브 캔들 조회 100회**를 때린다 —
 운영 세션이 도는 바로 그 시간대에. 그래서 이력 조회는 **행 자신의 최신봉 거래량**으로
 먼저 거른다: 판정은 "최신봉에서 끝나는" 연속 구간을 요구하므로, 최신봉이 거래됐다면
 `zero_volume` 정지는 성립할 수 없다. `volume` 이 없거나 파싱 불가면 **거르지 않고
@@ -74,7 +70,7 @@ B0-X 는 `policy_table.v1` 의 `rows` 만 읽으므로 별도 변경 없이 오�
 
 🔴 **이 게이트가 감수하는 구멍**: 거래량은 있는데 **0-변동만으로** 얼어붙은 구간
 (3일 연속 장중 변동폭 0 + 종가 불변)은 스크리너에서 건너뛴다.
-`analyze_stock_batch` 와 정책표 빌더는 이력을 **무조건** 읽으므로 그쪽에서는 잡힌다 —
+`analyze_stock_batch` 는 이력을 **무조건** 읽으므로 그쪽에서는 잡힌다 —
 이 단축은 스크리너 행별 hot path 에만 있다.
 
 ## 5. 운영자 대응
@@ -91,8 +87,6 @@ B0-X 는 `policy_table.v1` 의 `rows` 만 읽으므로 별도 변경 없이 오�
 - analyze 배선: `app/mcp_server/tooling/analysis_analyze.py::_apply_halt_suspect`
 - 스크리너 게이트: `app/mcp_server/tooling/screening/halt_filter.py`
   (`screen_stocks_unified` 단일 깔때기에서 호출)
-- 정책표: `scripts/policy_table/adapters/{kr,us,crypto}.py::compute_policy_table`
 - 테스트: `tests/services/test_halt_detection.py`,
   `tests/mcp_server/test_analyze_halted_suspect.py`,
-  `tests/mcp_server/tooling/test_screen_stocks_halt_filter.py`,
-  `tests/scripts/test_policy_table_halt_suspect.py`
+  `tests/mcp_server/tooling/test_screen_stocks_halt_filter.py`

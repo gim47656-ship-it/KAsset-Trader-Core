@@ -7,14 +7,10 @@
 | Task | Location | Notes |
 |------|----------|-------|
 | Upbit REST + caching behavior | `app/services/upbit.py` | Price/OHLCV fetch paths and inflight/cache coordination |
-| KIS API integration | `app/services/kis.py` | Large integration surface; treat as high-risk file |
-| KIS order orchestration | `app/services/kis_trading_service.py` | Domestic/overseas buy/sell execution flow |
-| KIS holdings normalization | `app/services/kis_holdings_service.py` | Account positions and symbol normalization boundaries |
 | Portfolio merge logic | `app/services/merged_portfolio_service.py` | Multi-source holdings consolidation |
 | KR fundamentals/news enrichment | `app/services/naver_finance.py` | Valuation/news/sentiment enrichment |
 | Order history and execution events | `app/services/order_service.py`, `app/services/execution_event.py` | Order lifecycle and event payload handling |
 | Notification fanout | `app/services/fill_notification.py`, `app/services/toss_notification_service.py` | Fill and external notifier integrations |
-| Websocket service clients | `app/services/kis_websocket.py`, `app/services/upbit_websocket.py` | Stream-specific adapter logic |
 
 ## CONVENTIONS
 - Keep transport/domain behavior here; routers should orchestrate request/response only.

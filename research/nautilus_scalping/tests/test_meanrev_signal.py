@@ -10,8 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from meanrev_signal import MeanRevConfig, evaluate_meanrev, zscore
-
-from app.services.brokers.binance.demo_scalping.signal import Candle
+from scalping_signal import Candle
 
 
 def _c(close, high=None, low=None, *, ts=0) -> Candle:

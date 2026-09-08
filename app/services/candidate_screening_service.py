@@ -149,20 +149,6 @@ class CandidateScreeningService:
         except Exception:
             pass
 
-        if market in ("crypto", "all"):
-            try:
-                from app.core.symbol import to_upbit_symbol
-                from app.services.invest_home_readers import UpbitHomeReader
-
-                result = await UpbitHomeReader(self.db).fetch(user_id=user_id)
-                held.update(
-                    to_upbit_symbol(row.symbol)
-                    for row in result.holdings
-                    if row.quantity
-                )
-            except Exception:
-                pass
-
         return held
 
 

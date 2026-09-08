@@ -1,4 +1,4 @@
-"""Stage B collector — three independent source streams into research history.
+"""Stage B collector — the Toss source stream into research history.
 
 Destination is ``research.kr_candles_1m``. Production ``public.kr_candles_1m``
 is read only for latency probing and is never written.
@@ -17,10 +17,6 @@ Write discipline (all enforced here, not by convention):
 Abort conditions (stop the stream, report, do not "work around"):
 conflict ratio far from expectation · query latency regression vs baseline ·
 repeated 429s · any change to a witness table outside kr_candles_1m.
-
-The dual Kiwoom surfaces use these same guards; an abort is isolated to the
-failing surface. An overlap mismatch stops both participating surfaces because
-it invalidates the comparison itself.
 """
 
 from __future__ import annotations
@@ -40,52 +36,6 @@ from typing import Any
 import asyncpg
 
 try:
-    from .dual_surface import (
-        BACKOFF_PACE_SECONDS,
-        KiwoomSurfaceClient,
-        OverlapMismatch,
-        SurfaceAuthError,
-        SurfaceBackoffExhausted,
-        SurfaceContractError,
-        SurfaceManifest,
-        SurfacePacer,
-        assignment_sha256,
-        compare_overlap_exact,
-        http_status_from_exception,
-        read_assignment_csv,
-        validate_surface,
-        write_surface_manifest,
-    )
-except ImportError:  # pragma: no cover - direct CLI execution
-    from dual_surface import (
-        BACKOFF_PACE_SECONDS,
-        KiwoomSurfaceClient,
-        OverlapMismatch,
-        SurfaceAuthError,
-        SurfaceBackoffExhausted,
-        SurfaceContractError,
-        SurfaceManifest,
-        SurfacePacer,
-        assignment_sha256,
-        compare_overlap_exact,
-        http_status_from_exception,
-        read_assignment_csv,
-        validate_surface,
-        write_surface_manifest,
-    )
-try:
-    from .surface_runtime import (
-        build_kis_surface_client,
-        is_kis_live_immediate_stop,
-        source_for_surface,
-    )
-except ImportError:  # pragma: no cover - direct CLI execution
-    from surface_runtime import (
-        build_kis_surface_client,
-        is_kis_live_immediate_stop,
-        source_for_surface,
-    )
-try:
     from .sources import (  # noqa: E402
         AUTH_STALE_TOKEN,
         EMPTY_RESPONSE,
@@ -93,8 +43,6 @@ try:
         FetchWindowClosed,
         Pacer,
         assert_fetch_window_open,
-        fetch_kis_minutes,
-        fetch_kiwoom_minutes,
         fetch_toss_minutes,
         in_regular_session,
         now_kst,
@@ -107,8 +55,6 @@ except ImportError:  # pragma: no cover - direct CLI execution
         FetchWindowClosed,
         Pacer,
         assert_fetch_window_open,
-        fetch_kis_minutes,
-        fetch_kiwoom_minutes,
         fetch_toss_minutes,
         in_regular_session,
         now_kst,
@@ -167,22 +113,6 @@ class StreamStats:
     stopped_reason: str | None = None
 
 
-@dataclass
-class SurfaceStats:
-    surface: str
-    symbols_total: int = 0
-    symbols_done: int = 0
-    calls: int = 0
-    rows_fetched: int = 0
-    rows_kept: int = 0
-    rows_filtered_cursor_overlap: int = 0
-    rows_inserted: int = 0
-    rows_skipped_conflict: int = 0
-    rows_skipped_conflict_preseed: int = 0
-    errors: list[str] = field(default_factory=list)
-    stopped_reason: str | None = None
-
-
 class AbortStream(RuntimeError):
     pass
 
@@ -191,7 +121,7 @@ class HardRatioAbort(AbortStream):
     pass
 
 
-def enforce_hard_ratio_guards(stats: StreamStats | SurfaceStats) -> None:
+def enforce_hard_ratio_guards(stats: StreamStats) -> None:
     """Abort on contaminated inserts or a broken cursor within this collector batch."""
 
     guarded_conflicts = (
@@ -525,10 +455,8 @@ async def run_stream(
     start_date: date,
     end_date: date,
     batch_id: str,
-    *,
-    surface_id: str | None = None,
 ) -> StreamStats:
-    pipe_id = surface_id or source
+    pipe_id = source
     stats = StreamStats(source=pipe_id, symbols_total=len(symbols))
     pacer = Pacer(source)
     start_dt = datetime.combine(start_date, datetime.min.time())
@@ -578,33 +506,15 @@ async def run_stream(
                     return stats
 
                 try:
-                    if source == "kiwoom":
-                        bars, meta = await fetch_kiwoom_minutes(
-                            client=client,
-                            symbol=symbol,
-                            pacer=pacer,
-                            max_pages=1,
-                            base_dt=cursor_dt.strftime("%Y%m%d"),
-                        )
-                    elif source == "toss":
-                        bars, meta = await fetch_toss_minutes(
-                            client=client,
-                            symbol=symbol,
-                            pacer=pacer,
-                            count=200,
-                            before=toss_cursor,
-                            max_pages=1,
-                        )
-                        toss_cursor = meta.get("next_before")
-                    else:
-                        bars, meta = await fetch_kis_minutes(
-                            client=client,
-                            symbol=symbol,
-                            pacer=pacer,
-                            session_date=cursor_dt.date(),
-                            end_time=cursor_dt.strftime("%H%M%S"),
-                            max_pages=1,
-                        )
+                    bars, meta = await fetch_toss_minutes(
+                        client=client,
+                        symbol=symbol,
+                        pacer=pacer,
+                        count=200,
+                        before=toss_cursor,
+                        max_pages=1,
+                    )
+                    toss_cursor = meta.get("next_before")
                     guard.note_429(pipe_id, False)
                 except Exception as exc:  # noqa: BLE001
                     msg = f"{type(exc).__name__}: {exc}"
@@ -627,10 +537,6 @@ async def run_stream(
                             "pacer": pacer.snapshot(),
                         }
                     )
-                    if pipe_id == "kis_live" and is_kis_live_immediate_stop(exc):
-                        stats.stopped_reason = f"kis_live immediate stop: {reason_code}"
-                        ckpt.save()
-                        return stats
                     guard.note_429(pipe_id, is_429)
                     if reason_code == AUTH_STALE_TOKEN:
                         stats.stopped_reason = (
@@ -785,670 +691,6 @@ async def run_stream(
     return stats
 
 
-class OverlapVerifier:
-    """Run the deliberate two-surface sample at a fixed batch cadence."""
-
-    def __init__(
-        self,
-        *,
-        symbols: tuple[str, ...],
-        session_date: date,
-        clients: dict[str, KiwoomSurfaceClient],
-        pacers: dict[str, SurfacePacer],
-        log: ProgressLog,
-        stop_events: dict[str, asyncio.Event],
-        every_batches: int = 50,
-    ) -> None:
-        if not symbols:
-            raise SurfaceContractError("dual-surface run requires overlap symbols")
-        if len(symbols) > 2:
-            raise SurfaceContractError("overlap sample is capped at two symbols")
-        if every_batches <= 0:
-            raise SurfaceContractError("overlap cadence must be positive")
-        self.symbols = symbols
-        self.session_date = session_date
-        self.clients = clients
-        self.pacers = pacers
-        self.log = log
-        self.stop_events = stop_events
-        self.every_batches = every_batches
-        self.completed_batches = 0
-        self._last_verified_batch = 0
-        self._lock = asyncio.Lock()
-
-    async def after_batch(self) -> None:
-        async with self._lock:
-            self.completed_batches += 1
-            if self.completed_batches % self.every_batches:
-                return
-            if self._last_verified_batch == self.completed_batches:
-                return
-            self._last_verified_batch = self.completed_batches
-            try:
-                evidence = []
-                for symbol in self.symbols:
-                    data: dict[str, dict] = {}
-                    for surface in ("mock", "live"):
-                        try:
-                            rows, _meta = await fetch_kiwoom_minutes(
-                                client=self.clients[surface],
-                                symbol=symbol,
-                                pacer=self.pacers[surface],
-                                max_pages=1,
-                                base_dt=self.session_date.strftime("%Y%m%d"),
-                            )
-                            self.pacers[surface].note_status(None)
-                        except Exception as exc:  # noqa: BLE001
-                            self.pacers[surface].note_exception(exc)
-                            raise
-                        data[surface] = {
-                            timestamp: values
-                            for timestamp, values in rows.items()
-                            if in_regular_session(timestamp)
-                        }
-                    evidence.append(
-                        compare_overlap_exact(symbol, data["mock"], data["live"])
-                    )
-            except Exception:
-                for event in self.stop_events.values():
-                    event.set()
-                raise
-            self.log.write(
-                {
-                    "event": "overlap_check",
-                    "surface": "mock+live",
-                    "batch_number": self.completed_batches,
-                    "symbols": list(self.symbols),
-                    "evidence": evidence,
-                    "comparison": "exact integer equality including value",
-                    "mismatch_action": "stop_and_report",
-                }
-            )
-
-
-async def run_surface(
-    surface: str,
-    symbols: list[str],
-    client: KiwoomSurfaceClient,
-    pool: asyncpg.Pool,
-    ckpt: Checkpoint,
-    log: ProgressLog,
-    start_date: date,
-    end_date: date,
-    batch_id: str,
-    *,
-    pacer: SurfacePacer,
-    overlap: OverlapVerifier | None,
-    stop_event: asyncio.Event,
-    hard_stop_event: asyncio.Event,
-    guard: Guard | None = None,
-) -> SurfaceStats:
-    """Collect one immutable symbol partition for one Kiwoom surface."""
-
-    surface = validate_surface(surface)
-    surface_id = f"kiwoom_{surface}"
-    stats = SurfaceStats(surface=surface, symbols_total=len(symbols))
-    start_dt = datetime.combine(start_date, datetime.min.time())
-    collector_started_at = now_kst()
-    checkpoint_saved_at = (
-        datetime.fromtimestamp(ckpt.path.stat().st_mtime, tz=KST)
-        if ckpt.path.exists()
-        else None
-    )
-
-    for symbol in symbols:
-        if stop_event.is_set() or hard_stop_event.is_set():
-            stats.stopped_reason = (
-                "hard_ratio_guard_peer_stopped"
-                if hard_stop_event.is_set()
-                else "surface_stopped"
-            )
-            return stats
-        state = ckpt.get(symbol)
-        if state.get("done"):
-            stats.symbols_done += 1
-            continue
-        cursor_dt = (
-            datetime.fromisoformat(state["oldest_reached"])
-            if state.get("oldest_reached")
-            else datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
-        )
-        try:
-            while cursor_dt > start_dt:
-                if stop_event.is_set() or hard_stop_event.is_set():
-                    stats.stopped_reason = (
-                        "hard_ratio_guard_peer_stopped"
-                        if hard_stop_event.is_set()
-                        else "surface_stopped"
-                    )
-                    return stats
-                try:
-                    assert_fetch_window_open()
-                except FetchWindowClosed as exc:
-                    stats.stopped_reason = f"market_hours_freeze: {exc}"
-                    log.write(
-                        {
-                            "event": "paused_market_hours",
-                            "surface": surface,
-                            "symbol": symbol,
-                            "cursor": cursor_dt,
-                        }
-                    )
-                    ckpt.save()
-                    return stats
-
-                try:
-                    request_context = {
-                        "symbol": symbol,
-                        "api_id": "ka10080",
-                        "base_dt": cursor_dt.strftime("%Y%m%d"),
-                    }
-                    rows, meta = await fetch_kiwoom_minutes(
-                        client=client,
-                        symbol=symbol,
-                        pacer=pacer,
-                        max_pages=1,
-                        base_dt=cursor_dt.strftime("%Y%m%d"),
-                    )
-                    pacer.note_status(None)
-                except Exception as exc:  # noqa: BLE001
-                    status = http_status_from_exception(exc)
-                    reason_code = getattr(exc, "reason_code", None)
-                    if reason_code == AUTH_STALE_TOKEN:
-                        stop_event.set()
-                        stats.stopped_reason = (
-                            "AUTH_STALE_TOKEN after one read-only retry"
-                        )
-                        log.write(
-                            {
-                                "event": "abort",
-                                "surface": surface_id,
-                                "symbol": symbol,
-                                "reason": stats.stopped_reason,
-                                "reason_code": reason_code,
-                                "retry_disposition": getattr(
-                                    exc, "retry_disposition", "NONE"
-                                ),
-                                "last_request": request_context,
-                                "pacer": pacer.snapshot(),
-                            }
-                        )
-                        ckpt.save()
-                        return stats
-                    try:
-                        pacer.note_exception(exc)
-                    except (SurfaceAuthError, SurfaceBackoffExhausted) as fatal:
-                        stop_event.set()
-                        stats.stopped_reason = str(fatal)
-                        log.write(
-                            {
-                                "event": "abort",
-                                "surface": surface_id,
-                                "symbol": symbol,
-                                "reason": str(fatal),
-                                "http_status": status,
-                                "last_request": request_context,
-                                "pacer": pacer.snapshot(),
-                            }
-                        )
-                        return stats
-                    if status == 429:
-                        # Retry this same page after the surface-local pacing
-                        # interval.  A peer surface has its own pacer/event
-                        # state and continues independently.
-                        log.write(
-                            {
-                                "event": "backoff",
-                                "surface": surface_id,
-                                "symbol": symbol,
-                                "http_status": 429,
-                                "interval_seconds": pacer.interval,
-                                "backoff_level": pacer.backoff_level,
-                                "auto_recovery": False,
-                                "last_request": request_context,
-                                "pacer": pacer.snapshot(),
-                            }
-                        )
-                        continue
-                    stats.errors.append(f"{symbol}: {type(exc).__name__}: {exc}")
-                    log.write(
-                        {
-                            "event": "fetch_error",
-                            "surface": surface_id,
-                            "symbol": symbol,
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "last_request": request_context,
-                            "pacer": pacer.snapshot(),
-                        }
-                    )
-                    break
-
-                stats.calls = pacer.calls
-                if not rows:
-                    state["done"] = True
-                    break
-
-                oldest = min(rows)
-                range_candidates = filter_insert_domain(
-                    rows,
-                    start_dt,
-                    datetime.combine(end_date, datetime.max.time()),
-                )
-                keep, cursor_overlap = filter_page_to_cursor(
-                    range_candidates, cursor_dt
-                )
-                overlap_timestamps = [
-                    timestamp for timestamp in range_candidates if timestamp > cursor_dt
-                ]
-                cursor_overlap_verified = await count_existing_bars(
-                    pool, symbol, overlap_timestamps
-                )
-                if cursor_overlap_verified != cursor_overlap:
-                    raise AbortStream(
-                        "cursor overlap is not fully persisted: "
-                        f"surface=kiwoom_{surface} symbol={symbol} "
-                        f"filtered={cursor_overlap} "
-                        f"existing={cursor_overlap_verified}"
-                    )
-                first_page = stats.rows_fetched == 0
-                checkpoint_was_partial = (
-                    bool(state.get("oldest_reached"))
-                    and int(state.get("rows_inserted") or 0) > 0
-                )
-                stats.rows_fetched += len(rows)
-                stats.rows_kept += len(keep)
-                stats.rows_filtered_cursor_overlap += cursor_overlap
-                inserted, skipped = await insert_bars(
-                    pool,
-                    symbol,
-                    keep,
-                    source="kiwoom",
-                    batch_id=batch_id,
-                )
-                stats.rows_inserted += inserted
-                stats.rows_skipped_conflict += skipped
-                preseed_verified = 0
-                if (
-                    first_page
-                    and checkpoint_was_partial
-                    and checkpoint_saved_at is not None
-                    and len(keep) > 0
-                    and inserted == 0
-                    and skipped == len(keep)
-                ):
-                    preseed_verified = await count_resume_preseed_bars(
-                        pool,
-                        symbol,
-                        list(keep),
-                        checkpoint_saved_at=checkpoint_saved_at,
-                        collector_started_at=collector_started_at,
-                        current_batch_id=batch_id,
-                    )
-                preseed_conflicts = classify_resume_preseed_conflicts(
-                    first_page=first_page,
-                    checkpoint_was_partial=checkpoint_was_partial,
-                    rows_kept=len(keep),
-                    rows_inserted=inserted,
-                    rows_skipped_conflict=skipped,
-                    rows_verified_between_checkpoint_and_restart=preseed_verified,
-                )
-                stats.rows_skipped_conflict_preseed += preseed_conflicts
-                state["rows_inserted"] = state.get("rows_inserted", 0) + inserted
-                state["rows_skipped"] = state.get("rows_skipped", 0) + skipped
-                state["rows_skipped_preseed"] = (
-                    state.get("rows_skipped_preseed", 0) + preseed_conflicts
-                )
-                log.write(
-                    {
-                        "event": "page",
-                        "surface": surface_id,
-                        "symbol": symbol,
-                        "range": [oldest.isoformat(), max(rows).isoformat()],
-                        "rows_fetched": len(rows),
-                        "rows_kept": len(keep),
-                        "rows_filtered_cursor_overlap": cursor_overlap,
-                        "rows_filtered_cursor_overlap_verified": (
-                            cursor_overlap_verified
-                        ),
-                        "rows_inserted": inserted,
-                        "rows_skipped_conflict": skipped,
-                        "rows_skipped_conflict_preseed": preseed_conflicts,
-                        "rows_skipped_conflict_preseed_verified": preseed_verified,
-                        "calls_cumulative": pacer.calls,
-                        "batch_id": batch_id,
-                    }
-                )
-                if oldest >= cursor_dt:
-                    state["done"] = True
-                    ckpt.save()
-                    enforce_hard_ratio_guards(stats)
-                    break
-                cursor_dt = oldest - timedelta(minutes=1)
-                state["oldest_reached"] = cursor_dt.isoformat()
-                ckpt.save()
-                enforce_hard_ratio_guards(stats)
-                if overlap is not None:
-                    await overlap.after_batch()
-            else:
-                state["done"] = True
-        except (
-            AbortStream,
-            OverlapMismatch,
-            SurfaceAuthError,
-            SurfaceBackoffExhausted,
-        ) as exc:
-            stop_event.set()
-            if isinstance(exc, HardRatioAbort):
-                hard_stop_event.set()
-            stats.stopped_reason = str(exc)
-            log.write(
-                {
-                    "event": "abort",
-                    "surface": surface_id,
-                    "reason": str(exc),
-                    "last_request": {
-                        "symbol": symbol,
-                        "api_id": "ka10080",
-                        "base_dt": cursor_dt.strftime("%Y%m%d"),
-                    },
-                    "pacer": pacer.snapshot(),
-                }
-            )
-            ckpt.save()
-            return stats
-
-        if state.get("done"):
-            stats.symbols_done += 1
-        ckpt.save()
-        if guard is not None:
-            try:
-                await guard.check(surface_id)
-            except AbortStream as exc:
-                stop_event.set()
-                stats.stopped_reason = str(exc)
-                log.write(
-                    {
-                        "event": "abort",
-                        "surface": surface_id,
-                        "reason": str(exc),
-                        "last_request": {
-                            "symbol": symbol,
-                            "api_id": "ka10080",
-                            "base_dt": cursor_dt.strftime("%Y%m%d"),
-                        },
-                        "pacer": pacer.snapshot(),
-                    }
-                )
-                ckpt.save()
-                return stats
-    return stats
-
-
-def _load_env_file(
-    path: Path,
-    allowed_keys: set[str],
-    *,
-    aliases: dict[str, str] | None = None,
-) -> None:
-    """Load only surface keys; never print values or import a full env file."""
-
-    if not path.is_file():
-        raise FileNotFoundError(f"surface env file not found: {path}")
-    loaded: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key not in allowed_keys:
-            continue
-        value = value.strip().strip('"').strip("'")
-        loaded[key] = value
-    for key, value in loaded.items():
-        os.environ[key] = value
-    for source, target in (aliases or {}).items():
-        # A dedicated LIVE key wins when a future file provides both.  The
-        # legacy source name is accepted only from the operator-selected
-        # read-only env file; no ambient credential is copied.
-        if target not in loaded and source in loaded:
-            os.environ[target] = loaded[source]
-
-
-def _reject_production_env_file(path: Path) -> None:
-    if "prod" in str(path).lower():
-        raise SurfaceContractError(f"refusing to read a production env file: {path}")
-
-
-def _prepare_surface_env(
-    selected: tuple[str, ...], mock_env_file: Path | None, live_env_file: Path
-) -> None:
-    ambient_env_file = os.environ.get("ENV_FILE", "")
-    if ambient_env_file:
-        _reject_production_env_file(Path(ambient_env_file))
-    if "mock" in selected and mock_env_file is not None:
-        _reject_production_env_file(mock_env_file)
-        _load_env_file(
-            mock_env_file,
-            {
-                "KIWOOM_MOCK_ENABLED",
-                "KIWOOM_MOCK_APP_KEY",
-                "KIWOOM_MOCK_APP_SECRET",
-                "KIWOOM_MOCK_ACCOUNT_NO",
-                "KIWOOM_MOCK_BASE_URL",
-            },
-        )
-    if "live" in selected:
-        _reject_production_env_file(live_env_file)
-        _load_env_file(
-            live_env_file,
-            {
-                "KIWOOM_APP_KEY",
-                "KIWOOM_APP_SECRET",
-                "KIWOOM_LIVE_MARKETDATA_ENABLED",
-                "KIWOOM_LIVE_APP_KEY",
-                "KIWOOM_LIVE_APP_SECRET",
-                "KIWOOM_LIVE_BASE_URL",
-            },
-            aliases={
-                "KIWOOM_APP_KEY": "KIWOOM_LIVE_APP_KEY",
-                "KIWOOM_APP_SECRET": "KIWOOM_LIVE_APP_SECRET",
-            },
-        )
-    # pydantic-settings reads this file for non-secret defaults.  The explicit
-    # environment values above win over dotenv values, and the path itself is
-    # recorded only as an operator input, never with credential contents.
-    if selected == ("mock",) and mock_env_file is not None:
-        os.environ["ENV_FILE"] = str(mock_env_file)
-    elif "live" in selected:
-        os.environ["ENV_FILE"] = str(live_env_file)
-
-
-def _build_surface_runtime(
-    selected: tuple[str, ...],
-    *,
-    mock_factory: Any,
-    live_factory: Any,
-) -> tuple[dict[str, Any], dict[str, KiwoomSurfaceClient], dict[str, SurfacePacer]]:
-    """Build only selected clients and the exact pacers used by the run."""
-
-    factories = {"mock": mock_factory, "live": live_factory}
-    raw_clients = {surface: factories[surface]() for surface in selected}
-    clients = {
-        surface: KiwoomSurfaceClient(surface, raw_clients[surface])
-        for surface in selected
-    }
-    pacers = {surface: SurfacePacer(surface) for surface in selected}
-    return raw_clients, clients, pacers
-
-
-def _build_scoped_surface_runtime(
-    selected: tuple[str, ...],
-) -> tuple[dict[str, Any], dict[str, KiwoomSurfaceClient], dict[str, SurfacePacer]]:
-    """Build dual collectors without importing the application Settings singleton."""
-
-    from app.services.brokers.kiwoom.client import KiwoomMockClient
-    from app.services.brokers.kiwoom.constants import MOCK_BASE_URL
-    from app.services.brokers.kiwoom.live_market_data import (
-        KiwoomLiveReadOnlyClient,
-    )
-
-    def required_env(name: str) -> str:
-        value = str(os.getenv(name, "")).strip()
-        if not value:
-            raise SurfaceContractError(f"missing scoped env: {name}")
-        return value
-
-    return _build_surface_runtime(
-        selected,
-        mock_factory=lambda: KiwoomMockClient(
-            base_url=str(os.getenv("KIWOOM_MOCK_BASE_URL", MOCK_BASE_URL)),
-            app_key=required_env("KIWOOM_MOCK_APP_KEY"),
-            app_secret=required_env("KIWOOM_MOCK_APP_SECRET"),
-            # Chart TRs do not consume an account number.  Keeping it absent
-            # prevents the collector from gaining account reach.
-            account_no="",
-        ),
-        live_factory=KiwoomLiveReadOnlyClient.from_scoped_env,
-    )
-
-
-async def _run_dual_surface(args: argparse.Namespace) -> int:
-    rows = read_assignment_csv(args.split_csv)
-    by_surface: dict[str, list[str]] = {"mock": [], "live": []}
-    overlap_symbols: list[str] = []
-    by_symbol: dict[str, list[str]] = {}
-    for row in rows:
-        symbol = row["ticker"].strip()
-        surface = validate_surface(row["surface"].strip())
-        kind = row.get("assignment_kind", "bulk").strip() or "bulk"
-        by_symbol.setdefault(symbol, []).append(surface)
-        if kind == "bulk":
-            by_surface[surface].append(symbol)
-        elif symbol not in overlap_symbols:
-            overlap_symbols.append(symbol)
-    selected = [args.surface] if args.surface else ["mock", "live"]
-    for surface in selected:
-        validate_surface(surface)
-    if len(selected) == 2 and not overlap_symbols:
-        raise SurfaceContractError(
-            "dual surface run requires an explicit overlap sample"
-        )
-    if args.limit_symbols is not None:
-        by_surface = {
-            surface: values[: args.limit_symbols]
-            for surface, values in by_surface.items()
-        }
-
-    batch_id = f"kiwoom-dual-{now_kst():%Y%m%dT%H%M%S}"
-    job_events = args.job_dir / "events"
-    manifest = SurfaceManifest(
-        batch_id=batch_id,
-        assignment_path=str(args.split_csv),
-        assignment_sha256=assignment_sha256(args.split_csv),
-    )
-    manifest_path = job_events / "kiwoom_dual_surface_manifest.json"
-    write_surface_manifest(manifest_path, manifest)
-    summary = {
-        "status": "DRY_RUN_NO_WRITE" if not args.confirm_write else "READY_TO_RUN",
-        "batch_id": batch_id,
-        "assignment_path": str(args.split_csv),
-        "assignment_sha256": manifest.assignment_sha256,
-        "symbols_per_surface": {
-            surface: len(by_surface[surface]) for surface in selected
-        },
-        "overlap_symbols": overlap_symbols[:2],
-        "manifest_path": str(manifest_path),
-        "backoff_intervals": {
-            "mock": [2.0, *BACKOFF_PACE_SECONDS],
-            "live": [0.5, *BACKOFF_PACE_SECONDS],
-        },
-        "auto_recovery": False,
-    }
-    if not args.confirm_write:
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
-        return 0
-
-    # This is the only branch that creates clients.  No client is built by the
-    # dry-run path, so a planning invocation cannot accidentally call a host.
-    selected_tuple = tuple(selected)
-    raw_clients: dict[str, Any] = {}
-    pool: asyncpg.Pool | None = None
-    log: ProgressLog | None = None
-    try:
-        _prepare_surface_env(selected_tuple, args.mock_env_file, args.live_env_file)
-        raw_clients, clients, pacers = _build_scoped_surface_runtime(selected_tuple)
-        stop_events = {surface: asyncio.Event() for surface in selected}
-        hard_stop_event = asyncio.Event()
-        pool = await asyncpg.create_pool(dsn(), min_size=2, max_size=6)
-        log = ProgressLog(job_events / "progress.jsonl")
-        guard = Guard(pool, args.baseline_median_ms, log)
-        overlap = None
-        if len(selected) == 2:
-            overlap = OverlapVerifier(
-                symbols=tuple(overlap_symbols[:2]),
-                session_date=date.fromisoformat(args.end_date),
-                clients=clients,
-                pacers=pacers,
-                log=log,
-                stop_events=stop_events,
-            )
-        results = await asyncio.gather(
-            *[
-                run_surface(
-                    surface,
-                    by_surface[surface],
-                    clients[surface],
-                    pool,
-                    Checkpoint(job_events / f"checkpoint_{surface}.json"),
-                    log,
-                    date.fromisoformat(args.start_date),
-                    date.fromisoformat(args.end_date),
-                    batch_id,
-                    pacer=pacers[surface],
-                    overlap=overlap,
-                    stop_event=stop_events[surface],
-                    hard_stop_event=hard_stop_event,
-                    guard=guard,
-                )
-                for surface in selected
-            ]
-        )
-    finally:
-        if pool is not None:
-            await pool.close()
-        for raw_client in raw_clients.values():
-            close = getattr(raw_client, "aclose", None) or getattr(
-                raw_client, "close", None
-            )
-            if close:
-                result = close()
-                if asyncio.iscoroutine(result):
-                    await result
-        if log is not None:
-            log.close()
-    result_code = exit_code_for_surface_results(results)
-    summary["status"] = "COMPLETE" if result_code == EXIT_SUCCESS else "STOPPED"
-    summary["results"] = [result.__dict__ for result in results]
-    summary["calls_by_surface"] = {
-        surface: pacers[surface].calls for surface in selected
-    }
-    (job_events / "stage_b_dual_surface_summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False, default=str) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(summary, indent=2, ensure_ascii=False, default=str))
-    return result_code
-
-
-def exit_code_for_surface_results(results: list[SurfaceStats]) -> int:
-    """Prevent a stopped dual surface from being reported as clean success."""
-
-    if any(result.errors or result.stopped_reason is not None for result in results):
-        return EXIT_PARTIAL_FAILURE
-    return EXIT_SUCCESS
-
-
 def exit_code_for_results(results: list[StreamStats | BaseException]) -> int:
     """Return 0=all useful+clean, 1=partial, 2=no useful successful work."""
     any_useful_work = False
@@ -1481,38 +723,7 @@ async def main() -> int:
     ap.add_argument("--job-dir", required=True, type=Path)
     ap.add_argument("--start-date", required=True)
     ap.add_argument("--end-date", required=True)
-    ap.add_argument("--sources", default="toss,kiwoom,kis")
-    ap.add_argument(
-        "--surface-id",
-        choices=("kis_mock", "kis_live"),
-        default=None,
-        help="bind a single generic source stream to one explicit KIS surface",
-    )
-    ap.add_argument(
-        "--kis-latest-eligible-date",
-        default=None,
-        help="required for KIS surfaces; newest date after latest-session exclusion",
-    )
-    ap.add_argument(
-        "--surface",
-        choices=("mock", "live"),
-        default=None,
-        help="run one pre-assigned Kiwoom surface; a surface CSV selects dual mode",
-    )
-    ap.add_argument(
-        "--live-env-file",
-        type=Path,
-        default=Path(
-            "/Users/mgh3326/services/auto_trader/shared/.env.kiwoom-readonly.native"
-        ),
-        help="native four-key live read-only env file",
-    )
-    ap.add_argument(
-        "--mock-env-file",
-        type=Path,
-        default=None,
-        help="optional env file containing mock gate and credentials",
-    )
+    ap.add_argument("--sources", default="toss")
     ap.add_argument("--baseline-median-ms", type=float, default=2.127)
     ap.add_argument("--limit-symbols", type=int, default=None)
     ap.add_argument(
@@ -1525,40 +736,7 @@ async def main() -> int:
     start_date = date.fromisoformat(args.start_date)
     end_date = date.fromisoformat(args.end_date)
 
-    # The generated dual artifact is self-describing.  Its `surface` column is
-    # the switch that prevents the old three-source loader from silently
-    # treating a mock/live split as a generic source split.
-    with args.split_csv.open(newline="", encoding="utf-8") as split_fh:
-        split_fields = set(csv.DictReader(split_fh).fieldnames or ())
-    if "surface" in split_fields:
-        if args.surface_id is not None:
-            raise SurfaceContractError(
-                "--surface-id cannot be combined with a Kiwoom surface CSV"
-            )
-        return await _run_dual_surface(args)
-    if args.surface is not None:
-        raise SurfaceContractError(
-            "--surface requires a dual Kiwoom split CSV with a surface column"
-        )
     wanted = [s.strip() for s in args.sources.split(",") if s.strip()]
-    if args.surface_id is not None:
-        expected_source = source_for_surface(args.surface_id)
-        if wanted != [expected_source]:
-            raise SurfaceContractError(
-                f"--surface-id {args.surface_id} requires "
-                f"--sources {expected_source} only"
-            )
-        if expected_source == "kis":
-            if args.kis_latest_eligible_date is None:
-                raise SurfaceContractError(
-                    "KIS surfaces require --kis-latest-eligible-date"
-                )
-            latest_eligible = date.fromisoformat(args.kis_latest_eligible_date)
-            if end_date > latest_eligible:
-                raise SurfaceContractError(
-                    f"KIS end-date {end_date} exceeds latest eligible "
-                    f"session boundary {latest_eligible}"
-                )
 
     assignment: dict[str, list[str]] = {s: [] for s in wanted}
     with args.split_csv.open() as fh:
@@ -1584,15 +762,15 @@ async def main() -> int:
 
     assert_fetch_window_open()
 
-    pipe_label = args.surface_id or "generic"
-    batch_id = f"kr-backfill-p1-{pipe_label}-{now_kst():%Y%m%dT%H%M%S}"
+    batch_id = f"kr-backfill-p1-toss-{now_kst():%Y%m%dT%H%M%S}"
 
-    if args.surface_id in {"kis_mock", "kis_live"}:
-        clients = {"kis": await build_kis_surface_client(args.surface_id)}
-    else:
-        from equality_gate import build_clients
+    unsupported = [src for src in wanted if src != "toss"]
+    if unsupported:
+        raise ValueError(f"unsupported backfill sources: {unsupported}")
 
-        clients = await build_clients(wanted)
+    from app.services.brokers.toss.client import TossReadClient
+
+    clients = {"toss": TossReadClient.from_settings()}
     pool = await asyncpg.create_pool(dsn(), min_size=2, max_size=6)
     log = ProgressLog(args.job_dir / "events" / "progress.jsonl")
     guard = Guard(pool, args.baseline_median_ms, log)
@@ -1602,8 +780,6 @@ async def main() -> int:
             "event": "stage_b_start",
             "target_table": TARGET_TABLE,
             "batch_id": batch_id,
-            "surface": args.surface_id,
-            "kis_latest_eligible_date": args.kis_latest_eligible_date,
             "window": [args.start_date, args.end_date],
             "symbols_per_source": {k: len(v) for k, v in assignment.items()},
         }
@@ -1617,17 +793,12 @@ async def main() -> int:
                     assignment[src],
                     clients[src],
                     pool,
-                    Checkpoint(
-                        args.job_dir
-                        / "events"
-                        / f"checkpoint_{args.surface_id or src}.json"
-                    ),
+                    Checkpoint(args.job_dir / "events" / f"checkpoint_{src}.json"),
                     log,
                     guard,
                     start_date,
                     end_date,
                     batch_id,
-                    surface_id=args.surface_id,
                 )
                 for src in wanted
             ],

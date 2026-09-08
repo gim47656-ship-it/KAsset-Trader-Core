@@ -7,7 +7,6 @@ mutation 경로(submit/cancel/modify/place_order/watch/order-intent/scheduler/wo
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -60,7 +59,7 @@ def classify_account_kind(source: str) -> AccountKindLiteral:
         return "paper"
     if source in _MANUAL:
         return "manual"
-    return "live"  # toss_api, upbit
+    return "live"  # toss_api
 
 
 def _normalize_symbol(s: str) -> str:
@@ -483,13 +482,11 @@ class InvestHomeService:
     def __init__(
         self,
         *,
-        upbit_reader,
         manual_reader,
         toss_api_reader=None,
         paper_readers: Sequence[object] | None = None,
         snapshot_cache=None,
     ) -> None:
-        self._upbit = upbit_reader
         self._manual = manual_reader
         self._toss_api = toss_api_reader
         self._paper_readers: Sequence[object] = paper_readers or []
@@ -702,48 +699,21 @@ class InvestHomeService:
         hidden_holdings: list[Holding] = []
         hidden_counts = InvestHomeHiddenCounts()
 
-        live_sources = ["upbit"]
-        live_tasks = [
-            _fetch_reader_result(
-                self._upbit.fetch,
-                span_name="invest.home.upbit",
-                source="upbit",
+        toss_api_holdings: list[Holding] = []
+        if self._toss_api is not None:
+            toss_result = await _fetch_reader_result(
+                self._toss_api.fetch,
+                span_name="invest.home.toss_api",
+                source="toss_api",
                 user_id=user_id,
                 include_paper=include_paper,
                 paper_sources=paper_sources,
-            ),
-        ]
-        if self._toss_api is not None:
-            live_sources.append("toss_api")
-            live_tasks.append(
-                _fetch_reader_result(
-                    self._toss_api.fetch,
-                    span_name="invest.home.toss_api",
-                    source="toss_api",
-                    user_id=user_id,
-                    include_paper=include_paper,
-                    paper_sources=paper_sources,
-                )
             )
-
-        live_results = await asyncio.gather(*live_tasks)
-        toss_api_holdings: list[Holding] = []
-
-        for source, result in zip(live_sources, live_results, strict=True):
-            warnings.extend(result.all_warnings)
-
-            if source == "toss_api":
-                if result.holdings or result.accounts:
-                    accounts.extend(result.accounts)
-                    holdings.extend(result.holdings)
-                    toss_api_holdings = list(result.holdings)
-                continue
-
-            accounts.extend(result.accounts)
-            holdings.extend(result.holdings)
-            hidden_holdings.extend(result.hidden_holdings)
-            hidden_counts.upbitInactive += result.hidden_counts.upbitInactive
-            hidden_counts.upbitDust += result.hidden_counts.upbitDust
+            warnings.extend(toss_result.all_warnings)
+            if toss_result.holdings or toss_result.accounts:
+                accounts.extend(toss_result.accounts)
+                holdings.extend(toss_result.holdings)
+                toss_api_holdings = list(toss_result.holdings)
 
         manual_result = await _fetch_reader_result(
             self._manual.fetch,
@@ -851,45 +821,21 @@ class InvestHomeService:
             accounts: list[Account] = []
             holdings: list[Holding] = []
 
-            live_sources = ["upbit"]
-            live_tasks = [
-                _fetch_reader_result(
-                    self._upbit.fetch,
-                    span_name="invest.home.upbit",
-                    source="upbit",
+            toss_api_holdings: list[Holding] = []
+            if self._toss_api is not None:
+                toss_result = await _fetch_reader_result(
+                    self._toss_api.fetch,
+                    span_name="invest.home.toss_api",
+                    source="toss_api",
                     user_id=user_id,
                     include_paper=include_paper,
                     paper_sources=paper_sources,
-                ),
-            ]
-            if self._toss_api is not None:
-                live_sources.append("toss_api")
-                live_tasks.append(
-                    _fetch_reader_result(
-                        self._toss_api.fetch,
-                        span_name="invest.home.toss_api",
-                        source="toss_api",
-                        user_id=user_id,
-                        include_paper=include_paper,
-                        paper_sources=paper_sources,
-                    )
                 )
-
-            live_results = await asyncio.gather(*live_tasks)
-            toss_api_holdings: list[Holding] = []
-
-            for source, result in zip(live_sources, live_results, strict=True):
-                warnings.extend(result.all_warnings)
-
-                if source == "toss_api":
-                    if result.holdings or result.accounts:
-                        accounts.extend(result.accounts)
-                        holdings.extend(result.holdings)
-                        toss_api_holdings = list(result.holdings)
-                    continue
-
-                accounts.extend(result.accounts)
-                holdings.extend(result.holdings)
+                warnings.extend(toss_result.all_warnings)
+                if toss_result.holdings or toss_result.accounts:
+                    accounts.extend(toss_result.accounts)
+                    holdings.extend(toss_result.holdings)
+                    toss_api_holdings = list(toss_result.holdings)
 
             manual_result = await _fetch_reader_result(
                 self._manual.fetch,

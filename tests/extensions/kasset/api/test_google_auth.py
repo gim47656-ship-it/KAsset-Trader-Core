@@ -367,8 +367,5 @@ async def test_google_login_token_passes_existing_device_bound_protected_route(
     assert brokers.status_code == 200
     assert [item["provider"] for item in brokers.json()["brokers"]] == [
         "PAPER",
-        "NH",
-        "KIS",
         "TOSS",
-        "KB",
     ]

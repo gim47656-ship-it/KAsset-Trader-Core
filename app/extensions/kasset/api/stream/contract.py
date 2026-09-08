@@ -2,9 +2,9 @@
 
 설계 원칙 두 개다.
 
-1. **페이로드는 REST와 같은 모델이다.** 시세는 REST `Quote`를 그대로 쓰고, 호가는
-   REST `OrderbookResponse`와 필드 이름·표기를 맞춘다. 앱이 폴링 결과와 스트림
-   결과를 같은 데이터 클래스로 다룰 수 있어야 한다. 가격·수량은 항상 문자열이다.
+1. **페이로드는 REST와 같은 표기다.** 시세는 REST `Quote`를 그대로 쓰고, 호가는
+   같은 필드 이름·표기를 따른다. 앱이 REST 결과와 스트림 결과를 같은 데이터
+   클래스로 다룰 수 있어야 한다. 가격·수량은 항상 문자열이다.
 2. **구독은 선언형 full-replace다.** 클라이언트가 보내는 `topics` 배열 하나가 그
    연결의 구독 전체다. 화면을 나가면 새 배열(또는 빈 배열)을 보내면 되고, 놓친
    `unsubscribe` 때문에 상향 예산이 새는 경로가 아예 없다. 상향 토스 프로토콜과
@@ -75,7 +75,7 @@ STATUS_MAILBOX_KEY: Final[str] = "\x00status"
 
 
 class StreamOrderbookLevel(AndroidWireModel):
-    """호가 한 단. REST `OrderbookLevel`과 같은 필드 이름·decimal 표기다."""
+    """호가 한 단. 가격·수량 모두 decimal 문자열이다."""
 
     price: str = Field(pattern=r"^\d+(?:\.\d+)?$")
     volume: str = Field(pattern=r"^\d+(?:\.\d+)?$")
@@ -84,11 +84,7 @@ class StreamOrderbookLevel(AndroidWireModel):
 class StreamOrderbook(AndroidWireModel):
     """스트림 호가 스냅샷.
 
-    REST `OrderbookResponse`를 그대로 재사용하지 않는 이유는 하나다. 그 모델은
-    NH PLUG KRX 채널의 계약이라 `market: Literal["KRX"]`,
-    `source: Literal["NH_PLUG_WS"]`, 6자리 심볼 패턴으로 좁혀져 있고, 스트림은
-    미국 종목과 토스 소스를 함께 실어야 한다. REST 계약을 넓히면 기존 앱 폴링
-    경로의 계약이 흔들리므로, 필드 이름·표기만 1:1로 맞춘 별도 모델을 둔다.
+    호가는 토스 스트림만 제공한다. REST 호가 폴백은 없다.
     """
 
     symbol: str

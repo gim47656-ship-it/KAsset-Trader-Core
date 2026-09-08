@@ -8,12 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type { AccountPanelResponse } from "../types/invest";
-import { fetchAccountPanel, type FetchAccountPanelOptions } from "../api/accountPanel";
-
-export interface AccountPanelLoadOptions {
-  includePaper?: boolean;
-  paperSources?: readonly string[];
-}
+import { fetchAccountPanel } from "../api/accountPanel";
 
 export interface AccountPanelContextValue {
   data: AccountPanelResponse | undefined;
@@ -21,11 +16,9 @@ export interface AccountPanelContextValue {
   loading: boolean;
   refreshing: boolean;
   lastLoadedAt: number | undefined;
-  /** Currently-loaded paper sources (empty unless includePaper was passed). */
-  loadedPaperSources: readonly string[];
   /** Lazy fetch entry-point. Safe to call multiple times. */
-  load: (options?: AccountPanelLoadOptions) => void;
-  /** Re-fetch with the last successful params. No-op if never loaded. */
+  load: () => void;
+  /** Re-fetch the current account panel. No-op if never loaded. */
   reload: () => void;
 }
 
@@ -37,13 +30,11 @@ export function AccountPanelProvider({ children }: Readonly<{ children: ReactNod
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState<number | undefined>();
-  const [loadedPaperSources, setLoadedPaperSources] = useState<readonly string[]>([]);
 
-  const lastOptionsRef = useRef<AccountPanelLoadOptions | null>(null);
   const inflightRef = useRef<AbortController | null>(null);
   const hasLoadedRef = useRef(false);
 
-  const doFetch = useCallback((opts: AccountPanelLoadOptions) => {
+  const load = useCallback(() => {
     inflightRef.current?.abort();
     const controller = new AbortController();
     inflightRef.current = controller;
@@ -55,22 +46,14 @@ export function AccountPanelProvider({ children }: Readonly<{ children: ReactNod
       setLoading(true);
     }
 
-    const apiOpts: FetchAccountPanelOptions = {
-      signal: controller.signal,
-      includePaper: opts.includePaper,
-      paperSources: opts.paperSources,
-    };
-
-    fetchAccountPanel(apiOpts)
+    fetchAccountPanel({ signal: controller.signal })
       .then((r) => {
         if (controller.signal.aborted) return;
         setData(r);
         setLoading(false);
         setRefreshing(false);
         setLastLoadedAt(Date.now());
-        setLoadedPaperSources(opts.paperSources ? [...opts.paperSources] : []);
         hasLoadedRef.current = true;
-        lastOptionsRef.current = opts;
       })
       .catch((e: unknown) => {
         if (controller.signal.aborted) return;
@@ -79,22 +62,14 @@ export function AccountPanelProvider({ children }: Readonly<{ children: ReactNod
         setLoading(false);
         setRefreshing(false);
         hasLoadedRef.current = true;
-        lastOptionsRef.current = opts;
       });
   }, []);
 
-  const load = useCallback(
-    (options: AccountPanelLoadOptions = {}) => {
-      doFetch(options);
-    },
-    [doFetch],
-  );
-
   const reload = useCallback(() => {
     // Lazy mode: do not auto-fetch unless we have previously loaded.
-    if (!hasLoadedRef.current || lastOptionsRef.current === null) return;
-    doFetch(lastOptionsRef.current);
-  }, [doFetch]);
+    if (!hasLoadedRef.current) return;
+    load();
+  }, [load]);
 
   const value = useMemo(
     () => ({
@@ -103,11 +78,10 @@ export function AccountPanelProvider({ children }: Readonly<{ children: ReactNod
       loading,
       refreshing,
       lastLoadedAt,
-      loadedPaperSources,
       load,
       reload,
     }),
-    [data, error, loading, refreshing, lastLoadedAt, loadedPaperSources, load, reload],
+    [data, error, loading, refreshing, lastLoadedAt, load, reload],
   );
 
   return (

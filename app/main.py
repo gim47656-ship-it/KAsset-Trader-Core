@@ -30,7 +30,6 @@ from app.monitoring.trade_notifier.runtime import (
 from app.routers import (
     agent_callback,
     ai_recommendations,
-    alpaca_paper_ledger,
     candidate_discovery,
     deprecated_pages,
     health,
@@ -44,7 +43,6 @@ from app.routers import (
     invest_loss_cut_approvals,
     invest_open_orders,
     invest_retrospectives,
-    invest_scalping,
     invest_session_context,
     invest_watches,
     invest_web_spa,
@@ -56,7 +54,6 @@ from app.routers import (
     kospi200,
     market_calendar,
     market_events,
-    mock_auto_read_model,
     news_analysis,
     news_issues,
     news_radar,
@@ -76,7 +73,6 @@ from app.routers import (
     test,
     trade_journals,
     user_defaults,
-    websocket,
 )
 from app.services.error_serialization import (
     domain_error_status_code,
@@ -221,7 +217,6 @@ def create_app() -> FastAPI:
         or settings.INVEST_LOSS_CUT_APPROVAL_ENABLED
     ):
         app.include_router(invest_loss_cut_approvals.router)
-    app.include_router(invest_scalping.router)
     app.include_router(invest_fills.router)
     app.include_router(invest_open_orders.router)
     app.include_router(invest_watches.router)
@@ -242,10 +237,8 @@ def create_app() -> FastAPI:
     app.include_router(preopen.router)
     app.include_router(news_radar.router)
     app.include_router(news_issues.router)
-    app.include_router(alpaca_paper_ledger.router)
     app.include_router(market_calendar.router)
     app.include_router(market_events.router)
-    app.include_router(mock_auto_read_model.router)
     app.include_router(research_reports.router)
     app.include_router(strategy_events.router)
     app.include_router(kospi200.router)
@@ -262,7 +255,6 @@ def create_app() -> FastAPI:
     # reason probes are rejected today.
     if settings.ORDER_PROPOSALS_TELEGRAM_ENABLED:
         app.include_router(telegram_callback.router)
-    app.include_router(websocket.router)
     if settings.EXPOSE_MONITORING_TEST_ROUTES:
         app.include_router(test.router)
     else:

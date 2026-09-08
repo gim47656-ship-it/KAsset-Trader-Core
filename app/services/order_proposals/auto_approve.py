@@ -107,7 +107,6 @@ _POLICY_MARKET = {
 # -- widening one must never silently widen the other.
 _VETO_CAPABLE_ACCOUNT_MARKETS = frozenset(
     {
-        ("upbit", "crypto"),
         # TOSS-AUTO-FULL: this membership is *not* sufficient by itself.
         # ``_is_veto_capable_account_market`` keeps both Toss surfaces
         # default-disabled behind the independently armed setting below.

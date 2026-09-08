@@ -206,6 +206,19 @@ def resolve_market_type(symbol: str, market: str | None) -> tuple[str, str]:
     raise ValueError("Unsupported symbol format")
 
 
+def _normalize_market_type_to_external(market_type: str) -> str:
+    """Convert internal market_type to external contract values.
+
+    삭제된 ``order_execution``에서 값 그대로 옮겨온 순수 매핑이다.
+    """
+    mapping = {
+        "equity_kr": "kr",
+        "equity_us": "us",
+        "crypto": "crypto",
+    }
+    return mapping.get(market_type, market_type)
+
+
 # ---------------------------------------------------------------------------
 # Value Normalization
 # ---------------------------------------------------------------------------

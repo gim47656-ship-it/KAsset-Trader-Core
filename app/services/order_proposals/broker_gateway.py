@@ -7,8 +7,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-import httpx
-
 from app.core.exceptions import describe_exception
 from app.services.order_proposals.errors import OrderProposalError
 from app.services.order_proposals.target_order import TargetOrderSnapshot
@@ -17,7 +15,6 @@ SUPPORTED_TARGET_ACTIONS = frozenset(
     {
         ("toss_live", "equity_kr"),
         ("toss_live", "equity_us"),
-        ("upbit", "crypto"),
     }
 )
 
@@ -42,14 +39,6 @@ _TOSS_CLOSED_TARGET_STATUSES = {
     "REJECTED": "rejected",
     "REPLACED": "cancelled",
 }
-
-
-@dataclass(frozen=True)
-class SubmitEvidence:
-    outcome: Literal["found", "absent", "unknown"]
-    broker_order_id: str | None = None
-    broker_state: str | None = None
-    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -205,79 +194,17 @@ async def fetch_target_order(
     market: str,
     account_mode: str,
     now: datetime,
-    history_fn: Callable[..., Any] | None = None,
     toss_client: Any | None = None,
 ) -> TargetOrderSnapshot:
     if (account_mode, market) not in SUPPORTED_TARGET_ACTIONS:
         raise OrderProposalError(
             f"target order lookup unsupported for {account_mode}/{market}"
         )
-    if account_mode == "toss_live":
-        return await _fetch_toss_target_order(
-            order_id=order_id, symbol=symbol, now=now, toss_client=toss_client
-        )
-    if history_fn is None:
-        from app.mcp_server.tooling.orders_history import get_order_history_impl
-
-        history_fn = get_order_history_impl
-
-    result = await _maybe_await(
-        history_fn(
-            symbol=symbol,
-            status="all",
-            order_id=order_id,
-            market=market,
-            limit=20,
-            is_mock=False,
-        )
+    # SUPPORTED_TARGET_ACTIONS가 toss_live만 남았으므로 이 지점 이후는 항상
+    # Toss 단건 조회다. 브로커 주문 이력 기반 조회 경로는 지원 공급자가 없다.
+    return await _fetch_toss_target_order(
+        order_id=order_id, symbol=symbol, now=now, toss_client=toss_client
     )
-    errors = result.get("errors", [])
-    if errors:
-        raise OrderProposalError(f"target broker order lookup failed: {errors}")
-
-    matches = [
-        row
-        for row in result.get("orders", [])
-        if str(row.get("order_id") or "").strip() == order_id
-    ]
-    if len(matches) != 1:
-        raise OrderProposalError("target broker order not found uniquely")
-    return TargetOrderSnapshot.from_broker_order(matches[0], observed_at=now)
-
-
-async def fetch_submit_evidence(
-    *,
-    identifier: str,
-    account_mode: str,
-    market: str,
-    lookup_fn: Callable[..., Any] | None = None,
-) -> SubmitEvidence:
-    if (account_mode, market) != ("upbit", "crypto"):
-        return SubmitEvidence(
-            "unknown",
-            reason=(f"submit evidence lookup unsupported for {account_mode}/{market}"),
-        )
-    if lookup_fn is None:
-        from app.services.brokers.upbit.orders import fetch_order_by_identifier
-
-        lookup_fn = fetch_order_by_identifier
-
-    try:
-        order = await _maybe_await(lookup_fn(identifier))
-        broker_order_id = str(order.get("uuid") or "").strip()
-        broker_state = str(order.get("state") or "").strip()
-        if not broker_order_id or not broker_state:
-            return SubmitEvidence(
-                "unknown",
-                reason="broker lookup returned incomplete order evidence",
-            )
-        return SubmitEvidence("found", broker_order_id, broker_state)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            return SubmitEvidence("absent")
-        return SubmitEvidence("unknown", reason=describe_exception(exc))
-    except Exception as exc:
-        return SubmitEvidence("unknown", reason=describe_exception(exc))
 
 
 async def fetch_operator_void_evidence(
@@ -289,9 +216,6 @@ async def fetch_operator_void_evidence(
     now: datetime,
     valid_until: datetime | None = None,
     toss_client: Any | None = None,
-    history_fn: Callable[..., Any] | None = None,
-    upbit_identifier_lookup_fn: Callable[..., Any] | None = None,
-    upbit_order_lookup_fn: Callable[..., Any] | None = None,
 ) -> dict[int, OperatorVoidEvidence]:
     """Prove broker-order absence for explicit operator voids.
 
@@ -299,59 +223,6 @@ async def fetch_operator_void_evidence(
     An incomplete scan or any broker exception is ``unknown`` so callers fail
     closed instead of treating missing evidence as cancellation evidence.
     """
-
-    if account_mode == "upbit" and market == "crypto":
-        if upbit_identifier_lookup_fn is None or upbit_order_lookup_fn is None:
-            from app.services.brokers.upbit.orders import (
-                fetch_order_by_identifier,
-                fetch_order_detail,
-            )
-
-            upbit_identifier_lookup_fn = (
-                upbit_identifier_lookup_fn or fetch_order_by_identifier
-            )
-            upbit_order_lookup_fn = upbit_order_lookup_fn or fetch_order_detail
-        result = {}
-        for rung in rungs:
-            identifier = str(rung.idempotency_key or "").strip()
-            order_id = str(rung.broker_order_id or "").strip()
-            key_kind = "identifier" if identifier else "broker_order_id"
-            key = identifier or order_id
-            scope = f"upbit GET /order by {key_kind}"
-            if not key:
-                result[rung.rung_index] = OperatorVoidEvidence(
-                    "unknown", scope, reason="rung has no broker lookup identifier"
-                )
-                continue
-            lookup_fn = (
-                upbit_identifier_lookup_fn if identifier else upbit_order_lookup_fn
-            )
-            try:
-                order = await _maybe_await(lookup_fn(key))
-                found_id = str(order.get("uuid") or "").strip()
-                state = str(order.get("state") or "").strip()
-                if not found_id or not state:
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "unknown",
-                        scope,
-                        reason="broker lookup returned incomplete order evidence",
-                    )
-                else:
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "found", scope, found_id, state
-                    )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    result[rung.rung_index] = OperatorVoidEvidence("absent", scope)
-                else:
-                    result[rung.rung_index] = OperatorVoidEvidence(
-                        "unknown", scope, reason=describe_exception(exc)
-                    )
-            except Exception as exc:
-                result[rung.rung_index] = OperatorVoidEvidence(
-                    "unknown", scope, reason=describe_exception(exc)
-                )
-        return result
 
     if account_mode != "toss_live" or market not in {"equity_kr", "equity_us"}:
         scope = f"unsupported {account_mode}/{market}"
@@ -576,51 +447,34 @@ async def cancel_target_order(
     symbol: str,
     market: str,
     account_mode: str,
-    cancel_fn: Callable[..., Any] | None = None,
     toss_cancel_fn: Callable[..., Any] | None = None,
     pre_send_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     if (account_mode, market) not in SUPPORTED_TARGET_ACTIONS:
         raise OrderProposalError(f"cancel unsupported for {account_mode}/{market}")
-    if account_mode == "toss_live":
-        if toss_cancel_fn is None:
-            from app.mcp_server.tooling.orders_toss_variants import (
-                _bind_toss_pre_send_hook,
-                toss_cancel_order,
-            )
-
-            toss_cancel_fn = toss_cancel_order
-        else:
-            from app.mcp_server.tooling.orders_toss_variants import (
-                _bind_toss_pre_send_hook,
-            )
-        # toss_cancel_order is the production tool: it still enforces
-        # TOSS_LIVE_ORDER_MUTATIONS_ENABLED and records the accepted-only
-        # ledger row itself. This call site is only ever reached post-Telegram
-        # approval (revalidate_and_submit's cancel/replace execution branch),
-        # so dry_run=False/confirm=True mirrors cancel_order_impl's KIS/Upbit
-        # path below, which has no dry_run/preview concept at all.
-        with _bind_toss_pre_send_hook(pre_send_hook):
-            return await _maybe_await(
-                toss_cancel_fn(
-                    order_id=order_id,
-                    dry_run=False,
-                    confirm=True,
-                    account_mode=account_mode,
-                )
-            )
-    if cancel_fn is None:
-        from app.mcp_server.tooling.orders_modify_cancel import cancel_order_impl
-
-        cancel_fn = cancel_order_impl
-
-    hook_kw = {"pre_send_hook": pre_send_hook} if pre_send_hook is not None else {}
-    return await _maybe_await(
-        cancel_fn(
-            order_id=order_id,
-            symbol=symbol,
-            market=market,
-            is_mock=False,
-            **hook_kw,
+    if toss_cancel_fn is None:
+        from app.mcp_server.tooling.orders_toss_variants import (
+            _bind_toss_pre_send_hook,
+            toss_cancel_order,
         )
-    )
+
+        toss_cancel_fn = toss_cancel_order
+    else:
+        from app.mcp_server.tooling.orders_toss_variants import (
+            _bind_toss_pre_send_hook,
+        )
+    # toss_cancel_order is the production tool: it still enforces
+    # TOSS_LIVE_ORDER_MUTATIONS_ENABLED and records the accepted-only
+    # ledger row itself. This call site is only ever reached post-Telegram
+    # approval (revalidate_and_submit's cancel/replace execution branch).
+    # Toss는 남아 있는 유일한 지원 취소 경로이고 dry_run/preview 개념이 없으므로
+    # dry_run=False/confirm=True가 유일하게 의미 있는 조합이다.
+    with _bind_toss_pre_send_hook(pre_send_hook):
+        return await _maybe_await(
+            toss_cancel_fn(
+                order_id=order_id,
+                dry_run=False,
+                confirm=True,
+                account_mode=account_mode,
+            )
+        )

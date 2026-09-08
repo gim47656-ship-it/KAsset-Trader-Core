@@ -22,10 +22,6 @@ test-integration: ## Run integration tests only (excludes live)
 test-services-split: ## Run split service tests for former test_services.py scope
 	uv run pytest --no-cov -q \
 		tests/test_services_upbit.py \
-		tests/test_services_kis_client.py \
-		tests/test_services_kis_market_data.py \
-		tests/test_services_kis_market_data_unit.py \
-		tests/test_services_kis_logging.py \
 		tests/test_services_dart.py \
 		tests/test_services_yahoo.py
 

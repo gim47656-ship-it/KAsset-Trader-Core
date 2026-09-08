@@ -837,8 +837,8 @@ decision_rules:
       - no_resistance_reference
       - composite_gates
   sell.single_share_exit:
-    # Toss is the only active KR account broker. NH PLUG may supply mock
-    # read-only market evidence but is never account inventory or an order route.
+    # Toss is the only active KR account broker. No other broker is account
+    # inventory or an order route.
     # Retired KIS rows are accepted only as non-routable historical replay data.
     lanes: [sell]
     semantics: >-

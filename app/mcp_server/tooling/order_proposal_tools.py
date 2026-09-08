@@ -626,10 +626,10 @@ async def order_proposal_create(
     tracker is queried.
 
     Args:
-        market: Canonical market in {equity_kr, equity_us, crypto}; aliases
-                kr→equity_kr and us→equity_us are accepted. Supported place
-                combinations are toss_live with equity_kr or equity_us, and
-                upbit with crypto.
+        market: Canonical market in {equity_kr, equity_us}; aliases
+                kr→equity_kr and us→equity_us are accepted. Supported place,
+                replace, and cancel proposals use toss_live with equity_kr or
+                equity_us.
         rungs: list of {"rung_index": int, "side": str, "quantity": str,
                "limit_price": str|None, "notional": str|None}.
         supersedes_proposal_id: if this proposal replaces an existing one (price/qty

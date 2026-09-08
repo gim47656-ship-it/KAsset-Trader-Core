@@ -337,8 +337,10 @@ async def _recent_fills(
     collected: list[tuple[Any, str, Any]] = []
 
     if account_mode == "kis_mock":
-        from app.mcp_server.tooling.kis_mock_ledger import _derive_shadow_fill
         from app.models.review import KISMockOrderLedger
+        from app.services.execution_ledger.normalizers import (
+            derive_mock_shadow_fill as _derive_shadow_fill,
+        )
 
         rows = (
             (

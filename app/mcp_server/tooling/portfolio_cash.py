@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-import app.services.brokers.upbit.client as upbit_service
 from app.core.config import settings
 from app.core.exceptions import describe_exception
 from app.core.timezone import now_kst
@@ -92,10 +91,15 @@ async def get_cash_balance_impl(
     )
 
     account_filter = _normalize_account_filter(account)
+    unsupported_provider: str | None = None
     if is_mock or (account_filter is not None and account_filter.startswith("kis")):
+        unsupported_provider = "kis"
+    elif account_filter == "upbit":
+        unsupported_provider = "upbit"
+    if unsupported_provider is not None:
         return {
             "success": False,
-            "error": "provider kis is not operational",
+            "error": f"provider {unsupported_provider} is not operational",
             "accounts": [],
             "summary": {
                 "total_krw": 0.0,
@@ -177,28 +181,6 @@ async def get_cash_balance_impl(
                 reason = describe_exception(exc)
                 errors.append({"source": "toss_api", "market": "cash", "error": reason})
                 unavailable_sources["toss"] = reason
-
-    if account_filter is None or account_filter == "upbit":
-        try:
-            summary = await upbit_service.fetch_krw_cash_summary()
-            krw_balance = float(summary.get("balance", 0.0))
-            krw_orderable = float(summary.get("orderable", 0.0))
-            accounts.append(
-                {
-                    "account": "upbit",
-                    "account_name": "기본 계좌",
-                    "broker": "upbit",
-                    "currency": "KRW",
-                    "balance": krw_balance,
-                    "orderable": krw_orderable,
-                    "formatted": f"{int(krw_balance):,} KRW",
-                }
-            )
-            total_krw += krw_balance
-        except Exception as exc:
-            reason = describe_exception(exc)
-            errors.append({"source": "upbit", "market": "crypto", "error": reason})
-            unavailable_sources["upbit"] = reason
 
     return {
         "accounts": accounts,

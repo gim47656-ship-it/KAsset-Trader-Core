@@ -11,13 +11,12 @@ from fastapi.testclient import TestClient
 from app.core.db import get_db
 from app.extensions.kasset.api.auth import get_mobile_session, mobile_auth
 from app.extensions.kasset.api.broker_registry import broker_registry
-from app.extensions.kasset.api.credential_vault import credential_vault
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.middleware.auth import AuthMiddleware
 
 ORDER = {
     "clientOrderId": "client-order-1",
-    "broker": "NH",
+    "broker": "TOSS",
     "accountId": None,
     "market": "KRX",
     "symbol": "005930",
@@ -91,8 +90,6 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/auth/revoke": {"post"},
         "/api/v1/system/status": {"get"},
         "/api/v1/brokers": {"get"},
-        "/api/v1/brokers/{provider}/credential": {"post", "delete"},
-        "/api/v1/brokers/{provider}/verify": {"post"},
         "/api/v1/account/balance": {"get"},
         "/api/v1/positions": {"get"},
         "/api/v1/positions/closed-trades": {"get"},
@@ -101,7 +98,6 @@ def test_android_compatibility_surface_exposes_required_routes() -> None:
         "/api/v1/market/overview": {"get"},
         "/api/v1/market/news": {"get"},
         "/api/v1/market/indices/{symbol}": {"get"},
-        "/api/v1/market/orderbook": {"get"},
         "/api/v1/market/candles": {"get"},
         "/api/v1/market/summary": {"get"},
         "/api/v1/market/investor-flow": {"get"},
@@ -244,14 +240,14 @@ def test_paper_order_preview_exposes_price_and_quantity_contract(
     }
 
 
-def test_nh_order_preview_submit_cancel_and_amend_are_read_only() -> None:
+def test_toss_order_preview_submit_cancel_and_amend_are_read_only() -> None:
     with _client() as client:
         responses = [
             client.post("/api/v1/orders/preview", json=ORDER),
             client.post("/api/v1/orders", json=ORDER),
-            client.post("/api/v1/orders/order-1/cancel?broker=NH"),
+            client.post("/api/v1/orders/order-1/cancel?broker=TOSS"),
             client.post(
-                "/api/v1/orders/order-1/amend?broker=NH",
+                "/api/v1/orders/order-1/amend?broker=TOSS",
                 json={"quantity": "2", "limitPrice": None},
             ),
         ]
@@ -259,41 +255,37 @@ def test_nh_order_preview_submit_cancel_and_amend_are_read_only() -> None:
     expected = {
         "error": {
             "code": "BROKER_READ_ONLY",
-            "message": "NH PLUG는 현재 모의 Read-Only 단계입니다.",
+            "message": "토스증권은 앱에서 조회 전용입니다.",
         }
     }
     assert all(response.status_code == 409 for response in responses)
     assert all(response.json() == expected for response in responses)
 
 
-def test_broker_catalog_builds_nh_entry_with_required_display_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        credential_vault,
-        "record",
-        AsyncMock(return_value=None),
-    )
-
+def test_broker_catalog_exposes_only_paper_and_read_only_toss() -> None:
     brokers = asyncio.run(
         broker_registry.list_brokers(object(), 101)  # type: ignore[arg-type]
     )
 
-    nh = next(broker for broker in brokers if broker.provider == "NH")
-    assert nh.display_name == "NH투자증권 PLUG"
-    assert nh.mode == "MOCK_READ_ONLY"
-    assert nh.capabilities.read_only is True
+    assert [broker.provider for broker in brokers] == ["PAPER", "TOSS"]
+    toss = brokers[1]
+    assert toss.display_name == "토스증권"
+    assert toss.mode == "LIVE_READ_ONLY"
+    assert toss.capabilities.read_only is True
+    assert toss.capabilities.market_order is False
+    assert toss.capabilities.limit_order is False
+    assert toss.requires_credential is False
 
 
-def test_nh_history_reads_return_empty_contracts() -> None:
+def test_history_reads_reject_non_paper_brokers() -> None:
     with _client() as client:
-        orders = client.get("/api/v1/orders?broker=NH")
-        fills = client.get("/api/v1/fills?broker=NH")
+        orders = client.get("/api/v1/orders?broker=TOSS")
+        fills = client.get("/api/v1/fills?broker=TOSS")
 
-    assert orders.status_code == 200
-    assert orders.json() == {"orders": []}
-    assert fills.status_code == 200
-    assert fills.json() == {"fills": []}
+    assert orders.status_code == 409
+    assert orders.json()["error"]["code"] == "BROKER_NOT_CONNECTED"
+    assert fills.status_code == 409
+    assert fills.json()["error"]["code"] == "BROKER_NOT_CONNECTED"
 
 
 def test_paper_kr_quote_falls_back_to_stored_candles(
