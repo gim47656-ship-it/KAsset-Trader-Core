@@ -1,10 +1,11 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-14 (자동매매 사유·점수 조회 응답 스키마 복구, 격리 회귀·HTTP 검증 완료)
+갱신: 2026-09-14 (매매 사유·점수 조회 복구 배포 및 사용자 확인 완료 / 전략 변경 검토 중, 변경 미승인)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
+- **현재 사용자 판단(2026-09-14)**: 사용자가 앱에서 복구 결과를 직접 확인했다고 알렸다. 현재 전략을 바꿀지 고민 중이며, 대안 전략·진입/청산 기준·비중 변경은 아직 결정하거나 승인하지 않았다. 다음 작업은 사용자와 전략 방향을 논의하는 것이며, 그 전에는 기존 전략·손절 기준·자동매매 설정을 임의로 변경하지 않는다. 전략 변경 고민을 자동매매 중지 지시로 해석하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
-- 2026-09-14 수정 전 실제 checkout/API/worker/scheduler/MCP/AI MCP 기준 SHA는 `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`다. PR #62의 PAPER stop 시간 소급 방지 변경은 이 기준에 이미 포함되어 있으며, 아래 9/8의 배포 대기 표기는 당시 기록이다.
+- 마지막 확인한 운영 checkout/API/worker/scheduler/MCP/AI MCP SHA는 `bac03e621967e221bc3828d0b72db0312c2a57bc`다(PR #64). 2026-09-14 14:00:42 KST 배포 완료 후 5개 서비스 SHA 일치와 정상 상태를 확인했다. PR #62의 PAPER stop 시간 소급 방지 변경도 포함돼 있으며, 아래 9/8의 배포 대기 표기는 당시 기록이다.
 - 이번 작업은 `.worktrees/recommendation-response-risk`, branch `fix/recommendation-response-risk`에서 수행했다. 기본 checkout과 다른 worktree는 변경하지 않았다. 사용자는 원인 조사 후 서버 수정·배포를 승인했으며, 앱 수정·재설치나 주문 정책 변경은 이번 범위가 아니다.
 
 ## 2026-09-14 — 자동매매 사유·점수 조회 응답 스키마 복구
@@ -20,8 +21,9 @@
 - 수정 source: `python -m pytest tests/schemas/test_ai_recommendations_schema.py tests/routers/test_ai_recommendations.py -q --tb=short -p no:cacheprovider` → **32 passed / 16 warnings / 22.20s, exit 0**. 임시 HTTP 재현은 목록·상세 200과 사유·점수·세 필드 보존을 확인하여 **1 passed, exit 0**였다. 서로 겹치는 schema-only 6 passed는 총계에 합산하지 않는다.
 - 변경 두 파일 `ruff check`, `ruff format --check`와 source `ty check`는 모두 exit 0이다. 기존 OpenDartReader/Pydantic 경고가 남는다. 임시 재현 모듈·checkout·container·run-owned DB는 검증 후 제거했다.
 - 독립 checker는 스키마 변경에 PASS를 반환했다. PR #64 최초 CI `34806358442`는 별도 날짜 fixture 문제로 shard 1에서 **6 failed / 4194 passed / 13 skipped**였으며 `ci-required` 실패를 우회하지 않았다. 날짜 한 줄 수정 후 Main의 격리 `python -m pytest tests/test_rob559_symbol_order_history.py -q --tb=short -p no:cacheprovider`는 **10 passed / 14 warnings / 8.23s, exit 0**, 해당 파일 Ruff/format도 exit 0이다. 최초 bridge-IP 검증은 socket guard가 setup을 차단해 테스트를 실행하지 못했고, guard를 바꾸지 않고 test DB container의 loopback namespace를 사용하여 통과했다. 임시 checkout/container를 제거했으며 기존 test DB 7개는 유지됐다.
-- 독립 검수와 GitHub PR/필수 CI를 거쳐 기존 `Deploy` workflow로 반영한다. 마이그레이션은 없으며 거래 설정을 변경하지 않는다. 최종 운영 SHA/배포 상태는 [Deploy 실행 기록](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/workflows/deploy-kasset.yml)을 정본으로 확인한다.
-- 배포 후 확인 대상은 기존 활성 모바일 세션의 인증 경계를 유지한 GET-only 완료 목록·매수/매도 상세, `/health`, 서비스 SHA/상태다. 실제 주문·승인 POST나 강제 자동매매 sweep으로 검증하지 않는다.
+- **운영 반영 완료**: [PR #64](https://github.com/gim47656-ship-it/KAsset-Trader-Core/pull/64) 병합 후 [main CI 34807598568](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/34807598568)와 [Deploy 34807930815](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/34807930815)가 success였다. 마이그레이션·거래 설정 변경 없이 `bac03e621967e221bc3828d0b72db0312c2a57bc`를 배포했다.
+- **배포 후 검증**: 기존 활성 모바일 세션의 인증 경계를 유지한 GET-only 조회에서 완료 목록 HTTP 200(14건), PENDING 목록 200, `443060`의 매수·매도 상세 각각 200을 확인했다. 매수 순위 점수 `0.695169`·신뢰도 `0.718277`·사유, 매도 `STOP`·손절선 `238620`·손절 사유가 보존됐다. 외부 `/health` 200, 확인한 배포 후 로그의 `RecommendationResponse` validation error 0건이었다. 실제 주문·승인 POST·강제 sweep·운영 DB 데이터 변경은 없었다.
+- **사용자 확인 완료**: 위 서버 검증 이후 사용자가 앱에서 직접 확인했다고 보고했다. 앱 수정·재설치는 하지 않았다. 조회 장애 복구와 전략의 수익성·적합성 평가는 별개이며, 전략 변경은 현재 검토 중인 미결정 사항으로 남긴다.
 
 ## 2026-09-08 — PAPER stop 시간 소급 방지·US 시세 가용성 확인 (`fix/paper-temporal-market-data`, 배포 대기)
 ### 문제와 확정 계약
