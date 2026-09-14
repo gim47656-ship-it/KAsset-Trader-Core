@@ -186,6 +186,9 @@ class RecommendationPositionSizing(BaseModel):
     risk_per_trade_rate: DecimalText = Field(alias="riskPerTradeRate")
     regime: str | None = None
     regime_multiplier: DecimalText = Field(alias="regimeMultiplier")
+    account_state_multiplier: DecimalText | None = Field(
+        default=None, alias="accountStateMultiplier"
+    )
     caps: list[RecommendationPositionSizeCap]
     limiting_caps: list[str] = Field(alias="limitingCaps")
     zero_reasons: list[RecommendationPositionSizingReason] = Field(alias="zeroReasons")
@@ -218,6 +221,8 @@ class RecommendationHardRisk(BaseModel):
     passed: bool
     checks: list[RecommendationHardRiskCheck]
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
+    account_state: dict[str, object] | None = Field(default=None, alias="accountState")
+    loss_streak: dict[str, object] | None = Field(default=None, alias="lossStreak")
 
 
 class PaperOrderResult(BaseModel):

@@ -127,3 +127,197 @@ def test_build_recommendation_response_accepts_legacy_votes_without_family() -> 
 
     payload = response.model_dump(mode="json", by_alias=True, exclude_none=True)
     assert payload["strategyVotes"] == legacy_votes
+
+
+_ACCOUNT_STATE_EVIDENCE: dict[str, object] = {
+    "schemaVersion": "kasset.account-state.v1",
+    "state": "STAGED_REDUCTION",
+    "profitRatio": "0.012500",
+    "peakDrawdownRatio": "-0.003100",
+    "multiplier": "0.75",
+    "thresholds": {
+        "stagedProfitRatio": "0.005",
+        "exitOnlyProfitRatio": "0.01",
+        "stagedPeakDrawdownRatio": "0.005",
+        "stagedReductionMultiplier": "0.75",
+    },
+    "unavailable": None,
+    "persistFailed": None,
+}
+
+_LOSS_STREAK_LOCKED_EVIDENCE: dict[str, object] = {
+    "schemaVersion": "kasset.loss-streak-gate.v1",
+    "globalLock": None,
+    "symbolLock": {
+        "scope": "SYMBOL",
+        "symbol": "138040",
+        "streakCount": 2,
+        "lossLimit": 2,
+        "newestLossAt": "2026-09-02T03:15:00+00:00",
+        "expiresAt": "2026-09-03T03:15:00+00:00",
+        "reason": "LOSS_STREAK_LIMIT_REACHED",
+    },
+    "streakGlobal": 0,
+    "streakSymbol": 2,
+    "unavailable": None,
+    "persistFailed": None,
+}
+
+_LOSS_STREAK_SELL_BYPASS_EVIDENCE: dict[str, object] = {
+    "schemaVersion": "kasset.loss-streak-gate.v1",
+    "globalLock": None,
+    "symbolLock": None,
+    "streakGlobal": 0,
+    "streakSymbol": 0,
+    "unavailable": None,
+    "persistFailed": None,
+}
+
+_BUY_POSITION_SIZING_EVIDENCE: dict[str, object] = {
+    "action": "BUY",
+    "market": "KRX",
+    "quantity": "1",
+    "unroundedQuantity": "1.500000",
+    "lotSize": "1",
+    "entryPrice": "138000",
+    "strategyStop": "133860",
+    "strategyAtr": "2070",
+    "riskBudget": "12420",
+    "riskPerUnit": "4140",
+    "riskPerTradeRate": "0.01",
+    "regime": "TRENDING_UP",
+    "regimeMultiplier": "1",
+    "accountStateMultiplier": "0.75",
+    "caps": [{"code": "RISK_BUDGET", "quantity": "1"}],
+    "limitingCaps": ["RISK_BUDGET"],
+    "zeroReasons": [],
+}
+
+
+def _hard_risk_evidence(
+    *,
+    account_state: dict[str, object],
+    loss_streak: dict[str, object],
+) -> dict[str, object]:
+    """Shape Hard Risk the way evaluate_hard_risk persists it."""
+
+    return {
+        "passed": True,
+        "checks": [
+            {"rule": rule, "passed": True, "detail": "통과"}
+            for rule in ("DAILY_MAX_LOSS", "ACCOUNT_STATE", "LOSS_STREAK", "BUDGET")
+        ],
+        "blockedReason": None,
+        "accountState": account_state,
+        "lossStreak": loss_streak,
+    }
+
+
+def test_build_recommendation_response_keeps_buy_sizing_evidence() -> None:
+    """A BUY row carries the account-state multiplier and both hard-risk snapshots."""
+
+    row = _recommendation_row(deepcopy(_STRATEGY_VOTES))
+    row.evidence[0]["portfolio"] = {
+        "targetWeight": "0.1",
+        "targetQuantity": "1",
+        "cashAfter": "9862000",
+        "note": "Deterministic ATR risk sizing; limitingCaps=RISK_BUDGET.",
+        "positionSizing": deepcopy(_BUY_POSITION_SIZING_EVIDENCE),
+    }
+    row.evidence[0]["hardRisk"] = _hard_risk_evidence(
+        account_state=deepcopy(_ACCOUNT_STATE_EVIDENCE),
+        loss_streak=deepcopy(_LOSS_STREAK_LOCKED_EVIDENCE),
+    )
+
+    response = build_recommendation_response(row)
+
+    payload = response.model_dump(mode="json", by_alias=True)
+    stored = payload["evidence"][0]
+
+    assert payload["strategyVotes"] == _STRATEGY_VOTES
+    assert payload["ranking"] == {
+        "score": "0.615191",
+        "position": 1,
+        "total": 96,
+        "note": "후보 96개 중 1위입니다.",
+    }
+    assert payload["rationale"] == row.rationale
+    assert payload["portfolio"]["positionSizing"] == _BUY_POSITION_SIZING_EVIDENCE
+    assert payload["hardRisk"]["accountState"] == _ACCOUNT_STATE_EVIDENCE
+    assert payload["hardRisk"]["lossStreak"] == _LOSS_STREAK_LOCKED_EVIDENCE
+    assert stored["portfolio"]["positionSizing"] == _BUY_POSITION_SIZING_EVIDENCE
+
+
+def test_build_recommendation_response_keeps_sell_exit_evidence() -> None:
+    """A position-manager SELL keeps its exit and standalone Hard Risk evidence."""
+
+    row = _recommendation_row(deepcopy(_STRATEGY_VOTES))
+    row.action = "SELL"
+    row.rationale = ["STOP 손절선 도달: currentStop=133860"]
+    row.paper_execution_status = None
+    row.evidence = [
+        {
+            "title": "Deterministic PAPER position exit",
+            "source": "position_manager",
+            "kind": "position_exit",
+            "exitKind": "STOP",
+            "idempotencyKey": "138040-exit-1",
+            "paperPositionId": 12,
+            "positionCycleId": "cycle-138040-1",
+            "quantityFraction": "1",
+            "initialAtr": "2070",
+            "initialStop": "133860",
+            "currentStop": "133860",
+            "evaluationHorizon": "intraday",
+            "barAsOf": "2026-09-02T03:15:00+00:00",
+            "barPeriod": "5m",
+            "barSource": "toss",
+            "dataAsOf": "2026-09-02T03:15:00+00:00",
+        },
+        {
+            "title": "PAPER exit Hard Risk",
+            "source": "kasset_hard_risk",
+            "kind": "hard_risk",
+            **_hard_risk_evidence(
+                account_state=deepcopy(_ACCOUNT_STATE_EVIDENCE),
+                loss_streak=deepcopy(_LOSS_STREAK_SELL_BYPASS_EVIDENCE),
+            ),
+        },
+    ]
+
+    response = build_recommendation_response(row)
+
+    payload = response.model_dump(mode="json", by_alias=True)
+    exit_evidence = payload["evidence"][0]
+
+    assert payload["action"] == "SELL"
+    assert payload["rationale"] == row.rationale
+    assert exit_evidence["kind"] == "position_exit"
+    assert exit_evidence["exitKind"] == "STOP"
+    assert exit_evidence["initialStop"] == "133860"
+    assert exit_evidence["currentStop"] == "133860"
+    assert payload["evidence"][1]["accountState"] == _ACCOUNT_STATE_EVIDENCE
+    assert payload["evidence"][1]["lossStreak"] == _LOSS_STREAK_SELL_BYPASS_EVIDENCE
+
+
+def test_build_recommendation_response_keeps_historical_sizing_shape() -> None:
+    """Rows persisted before the multiplier evidence keep their original wire shape."""
+
+    legacy_sizing = deepcopy(_BUY_POSITION_SIZING_EVIDENCE)
+    legacy_sizing.pop("accountStateMultiplier")
+    row = _recommendation_row(deepcopy(_STRATEGY_VOTES))
+    row.evidence[0]["portfolio"] = {
+        "targetWeight": "0.1",
+        "targetQuantity": "1",
+        "cashAfter": "9862000",
+        "note": "Deterministic ATR risk sizing; limitingCaps=RISK_BUDGET.",
+        "positionSizing": legacy_sizing,
+    }
+
+    response = build_recommendation_response(row)
+
+    payload = response.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    assert payload["portfolio"]["positionSizing"] == legacy_sizing
+    assert "accountState" not in payload["hardRisk"]
+    assert "lossStreak" not in payload["hardRisk"]

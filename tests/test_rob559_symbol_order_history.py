@@ -15,7 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
-NOW = datetime(2026, 6, 14, tzinfo=UTC)
+NOW = datetime.now(UTC)
 
 
 def _tok() -> str:
