@@ -1,11 +1,26 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-08 (PAPER stop 시간 소급 방지 구현·격리 PG15 검증·checker closure PASS, CI·PR·배포 대기 / US 일봉·분봉 기존 복구 확인·추가 코드 변경 0 / 2026-09-07 -3% floor 운영 반영 이력 보존)
+갱신: 2026-09-14 (자동매매 사유·점수 조회 응답 스키마 복구, 격리 회귀·HTTP 검증 완료)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
-- 현재 실제 checkout/API/worker/scheduler는 모두 `584b462df16b1aa3e05ec1d2f449b529ee9f6cd6`다. PAPER stop 시간 소급 방지 변경은 이 SHA에서 분리한 `fix/paper-temporal-market-data` worktree에만 있으며 아직 commit·PR·CI·운영 배포하지 않았다. 2026-09-07의 `9fefab61e80a6ade8466669e75e06cdc975a95fb` -3% floor 배포는 아래 역사 기록이다.
-- 기본 checkout과 다른 worktree의 사용자 변경은 건드리지 않았다. 이번 변경 파일과 이 HANDOFF는 `.worktrees/paper-temporal-market-data` 안에만 있다.
+- 2026-09-14 수정 전 실제 checkout/API/worker/scheduler/MCP/AI MCP 기준 SHA는 `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`다. PR #62의 PAPER stop 시간 소급 방지 변경은 이 기준에 이미 포함되어 있으며, 아래 9/8의 배포 대기 표기는 당시 기록이다.
+- 이번 작업은 `.worktrees/recommendation-response-risk`, branch `fix/recommendation-response-risk`에서 수행했다. 기본 checkout과 다른 worktree는 변경하지 않았다. 사용자는 원인 조사 후 서버 수정·배포를 승인했으며, 앱 수정·재설치나 주문 정책 변경은 이번 범위가 아니다.
+
+## 2026-09-14 — 자동매매 사유·점수 조회 응답 스키마 복구
+### 원인·변경
+- 완료 목록 `GET /api/v1/ai/recommendations?status=RESOLVED&limit=50`은 저장된 BUY 근거의 `portfolio.positionSizing.accountStateMultiplier`, `hardRisk.accountState`, `hardRisk.lossStreak`를 strict 응답 모델이 미등록 필드로 거부하여 HTTP 500이었다. 서버/DB 장애나 사유 유실이 아니며, 한 BUY 행의 변환 실패가 SELL을 포함한 목록 전체를 막았다.
+- `app/schemas/ai_recommendations.py`: 세 필드만 optional로 선언했다. multiplier는 기존 `DecimalText`, 상태·연속손실은 원본 versioned JSON snapshot을 보존하는 `dict[str, object]`다. 과거 필드 부재는 `None`으로 유지하며 가짜 multiplier를 만들지 않는다. 기존 `extra="forbid"`·응답 필터·별칭은 유지한다.
+- `tests/schemas/test_ai_recommendations_schema.py`: BUY의 세 필드와 사유·점수 보존, 실제 `position_exit` + standalone `hard_risk` SELL 근거, 새 필드가 없는 과거 sizing 응답을 방어하는 회귀 3건을 추가했다. standalone SELL은 원래도 builder를 통과하며 top-level `hardRisk`가 아닌 `evidence` 배열에 근거가 남는 기존 계약을 보존한다.
+- 변경 파일은 위 source/test와 이 문서뿐이다. 앱·producer·주문·리스크 정책·gate·스케줄·마이그레이션·운영 DB 데이터는 변경하지 않는다.
+
+### 검증·배포 경계
+- 로컬 Windows에서는 Python test/lint/type/build를 실행하지 않았다. 서버의 전용 임시 checkout과 일회성 2 CPU/3 GiB container, 운영과 분리된 `kasset-test-db`의 run-owned test DB로 검증했다. 운영 환경파일·볼륨·DB 데이터는 테스트에 사용하지 않았다.
+- base source + 새 회귀: schema **1 failed / 5 passed, exit 1** (`extra_forbidden` 3필드). 같은 원인의 임시 HTTP 재현도 **1 failed, exit 1**이었다.
+- 수정 source: `python -m pytest tests/schemas/test_ai_recommendations_schema.py tests/routers/test_ai_recommendations.py -q --tb=short -p no:cacheprovider` → **32 passed / 16 warnings / 22.20s, exit 0**. 임시 HTTP 재현은 목록·상세 200과 사유·점수·세 필드 보존을 확인하여 **1 passed, exit 0**였다. 서로 겹치는 schema-only 6 passed는 총계에 합산하지 않는다.
+- 변경 두 파일 `ruff check`, `ruff format --check`와 source `ty check`는 모두 exit 0이다. 기존 OpenDartReader/Pydantic 경고가 남는다. 임시 재현 모듈·checkout·container·run-owned DB는 검증 후 제거했다.
+- 독립 검수와 GitHub PR/필수 CI를 거쳐 기존 `Deploy` workflow로 반영한다. 마이그레이션은 없으며 거래 설정을 변경하지 않는다. 최종 운영 SHA/배포 상태는 [Deploy 실행 기록](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/workflows/deploy-kasset.yml)을 정본으로 확인한다.
+- 배포 후 확인 대상은 기존 활성 모바일 세션의 인증 경계를 유지한 GET-only 완료 목록·매수/매도 상세, `/health`, 서비스 SHA/상태다. 실제 주문·승인 POST나 강제 자동매매 sweep으로 검증하지 않는다.
 
 ## 2026-09-08 — PAPER stop 시간 소급 방지·US 시세 가용성 확인 (`fix/paper-temporal-market-data`, 배포 대기)
 ### 문제와 확정 계약
