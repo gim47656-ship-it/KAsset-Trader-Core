@@ -1,11 +1,28 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-14 (자동매매 사유·점수 조회 응답 스키마 복구, 격리 회귀·HTTP 검증 완료)
+갱신: 2026-09-16 (PAPER -3% 손절 바닥 제거·ATR 손절 복귀 PR #66, CI 대기 / 매수 부재 원인 조사 기록)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
-- **2026-09-07 사용자 승인 변경**: 실제 체결 평단 대비 -3% 자동 손절 바닥을 도입했다. 아래 "임의의 고정 3% 손절은 추가하지 않는다"던 기존 제약은 이 명시 승인으로 대체됐다. 기존 보유분에도 적용하며 다음 평가에서 곧바로 매도가 나올 수 있음을 인지한 승인이다.
+- **2026-09-16 사용자 승인 변경**: 2026-09-07의 -3% 자동 손절 바닥을 **제거**하고 원래 ATR 계약(진입가 -3 ATR 손절, +3 ATR 부분익절, 3 ATR trailing)으로 복귀했다. 아래 9/7 절의 "-3% 바닥 도입" 기록은 역사이며 현재 계약이 아니다. ATR 근거가 없는 보유분은 상태를 만들지 않고 그 tick을 관리하지 않는다.
 - 2026-09-14 수정 전 실제 checkout/API/worker/scheduler/MCP/AI MCP 기준 SHA는 `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`다. PR #62의 PAPER stop 시간 소급 방지 변경은 이 기준에 이미 포함되어 있으며, 아래 9/8의 배포 대기 표기는 당시 기록이다.
-- 이번 작업은 `.worktrees/recommendation-response-risk`, branch `fix/recommendation-response-risk`에서 수행했다. 기본 checkout과 다른 worktree는 변경하지 않았다. 사용자는 원인 조사 후 서버 수정·배포를 승인했으며, 앱 수정·재설치나 주문 정책 변경은 이번 범위가 아니다.
+- 이번 작업은 `.worktrees/remove-stop-floor`, branch `fix/remove-paper-stop-floor`(base `bac03e62`)에서 수행했다. 기본 checkout과 다른 worktree는 변경하지 않았다. 사용자는 손절 진단을 보고 -3% 바닥 제거를 선택했으며, 매수 조건(트리거 임계값)·미국장 설정·앱은 이번 범위가 아니다.
+
+## 2026-09-16 — 매수 부재 원인 조사와 -3% 손절 바닥 제거 (`fix/remove-paper-stop-floor`, PR #66, CI 대기)
+### 조사 결과 (읽기 전용, 운영 SHA `bac03e62`)
+- 서버·API·worker·scheduler는 정상이고 자동매매 사이클은 10분마다 돌았다. 9/11 15:20 `443060` 매수 뒤 매수가 없는 원인은 (1) 9/10 22:04 KST 앱 설정 `recommendation_market_scope=KR_ONLY`로 미국장 사이클이 `no_configured_regular_market_open`으로 즉시 종료, (2) KR 일봉 셋업 통과 종목이 하루 5~6개인데 9/15~9/16에는 대부분 `SELL` 방향, (3) SELL 셋업은 보유가 없어 트리거가 발동해도 `presizing_zero_quantity:ZERO_HOLDING`으로 제외되는 구조다. 매수 방향 셋업은 `relative_volume_not_confirmed`(1.5배 미달)·`no_directional_trigger`에서 떨어졌다. 근거는 `review.kasset_automation_cycle_events`와 worker 로그다.
+- 9/9 `010955`·`267250`, 9/11 13:30 `443060` BUY 추천은 PENDING 상태로 30분 뒤 만료됐고 실행 이력이 없다. `user_settings.kasset.ai_trading`이 9/11 14:02에 갱신된 직후부터 자동 승인·체결이 시작됐으므로 그 전까지 AUTO_PAPER가 아니었던 것으로 추정한다(당시 worker 로그는 컨테이너 재생성으로 소실, `[INFERENCE]`).
+- 손절 조사: 9/7 이후 청산 4건(138040 -2.5%, 180640 소급 결함으로 +4.6%, CRWD -2.7%, 443060 -4.3%)은 모두 `initial_stop == current_stop == 평단×0.97`이었다. 앱이 매수 시 보여준 전략 손절(진입가 -3 ATR, 약 -10~15%)·목표(+3 ATR)는 실제 적용되지 않았다. KR 후보군 중앙 ATR 비율이 약 5%라 -3%는 0.6 ATR로 일중 잡음 안에 있었고, 손익비가 1:1에서 사실상 0.2:1로 무너졌다. 사용자가 이 진단을 보고 바닥 제거를 선택했다.
+- 부수: `kasset_news_summary` AI 경로는 매 사이클 `subscription CLI timed out`으로 실패 중이다(매수 판정 비관여 shadow). 개장 후 ~1시간은 `relative_volume_unavailable`, 장중 간헐 `intraday_provider_unavailable`이 있다. 이번에 수정하지 않았다.
+
+### 변경 (`maker` 1개 구현, Main 리뷰)
+- `position_manager.py`: `STOP_LOSS_FLOOR_RATIO`, `stop_loss_floor`, `apply_stop_loss_floor`, `adopt_initial_atr` 삭제. `initial_atr`을 `ManagedPositionState`·`ExitLevelVersion`·`PositionExitSignal`·`initialize_position`에서 필수 `Decimal`로 환원하고 평가기의 optional-ATR 분기를 제거했다. `PositionManagerConfig` 3/3/3, STOP exact-touch/gap, PARTIAL, TIME_STOP, TREND_BROKEN, PR #62의 temporal history(`_transition_exit_levels`, `_raise_trailing_stop`)는 그대로다.
+- `position_manager_service.py`: 신규 state 생성에서 floor 래핑 제거. `daily_usable`이 아니거나 ATR이 없으면 `logger.info(reason=atr_unavailable)` 후 `return None`으로 상태를 만들지 않는다. 재적재 경로의 floor/adopt 블록 제거. `_state_from_row`는 NULL `initial_atr` 행을 `ValueError`로 거부한다(운영 NULL 행 0, 열린 state 0, 보유 0 확인). `models.py`·alembic은 변경 없음, `initial_atr` 컬럼은 nullable 유지(downgrade 금지 규약).
+- 테스트: floor/optional-ATR 테스트 9개 삭제, temporal 테스트 11개를 floor API 없이 재작성, ATR 계약 회귀 3개 추가. 문서: `docs/kasset/AUTOMATION_BREAKOUT_CONTRACT.md` Position Manager 절, `CHANGELOG.md` Unreleased.
+- 검증: 규약 14에 따라 로컬 pytest/ruff/ty를 실행하지 않았다. 정적 확인은 삭제 심볼 참조 0건, optional-ATR 분기 0건. PR #66 CI `Test` run `35055477756`이 정본이며 `ci-required`까지 완료를 기다린 뒤 병합한다. migration이 없으므로 병합 후 기존 `Deploy` workflow가 자동 배포한다.
+- 배포 후 확인: 다음 자연 BUY 체결에서 `kasset_paper_position_states.initial_stop == avg_price - 3*initial_atr`인지, `exit_level_history`가 `[]`로 시작하는지 read-only로 본다. 강제 sweep·수동 주문은 만들지 않는다.
+
+### 남은 결정 (사용자 몫, 코드 변경 안 함)
+- 미국장 재개(`KR_ONLY`→`KR_US`)는 앱 설정만으로 가능하다. 상대거래량 1.5배·no-chase 2%·돌파 버퍼 0.2%는 `intraday_triggers.py` 코드 상수이며, 변경은 `same_time_rvol_shadow` 채점 뒤에만 한다(AGENTS.md 12).
 
 ## 2026-09-14 — 자동매매 사유·점수 조회 응답 스키마 복구
 ### 원인·변경
