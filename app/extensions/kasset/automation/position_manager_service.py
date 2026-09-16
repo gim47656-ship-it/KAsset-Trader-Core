@@ -24,8 +24,6 @@ from app.extensions.kasset.automation.position_manager import (
     PositionBar,
     PositionExitSignal,
     PositionManagerConfig,
-    adopt_initial_atr,
-    apply_stop_loss_floor,
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
@@ -165,11 +163,10 @@ def _exit_level_history_from_row(
             effective_at = _aware_utc(datetime.fromisoformat(effective_raw))
         else:
             raise ValueError("exit-level effectiveAt must be an ISO timestamp or null")
-        atr_raw = item.get("initialAtr")
         versions.append(
             ExitLevelVersion(
                 effective_at=effective_at,
-                initial_atr=None if atr_raw is None else _decimal(atr_raw),
+                initial_atr=_decimal(item.get("initialAtr")),
                 initial_stop=_decimal(item.get("initialStop")),
                 current_stop=_decimal(item.get("currentStop")),
             )
@@ -187,9 +184,7 @@ def _exit_level_history_json(
                 if version.effective_at is None
                 else version.effective_at.isoformat()
             ),
-            "initialAtr": (
-                None if version.initial_atr is None else str(version.initial_atr)
-            ),
+            "initialAtr": str(version.initial_atr),
             "initialStop": str(version.initial_stop),
             "currentStop": str(version.current_stop),
         }
@@ -201,11 +196,16 @@ def _state_from_row(row: KAssetPaperPositionState) -> ManagedPositionState:
     strategy_version = (row.strategy_version or "").strip()
     if not strategy_version:
         raise ValueError("position state strategy_version is required")
+    # initial_atr 컬럼은 nullable이지만 NULL 행에는 손절선의 변동성 근거가 없다.
+    # 값을 발명하지 않고 실패시킨다. 운영에 그런 행은 없다.
+    atr = row.initial_atr
+    if atr is None:
+        raise ValueError("managed position state is missing initial_atr")
     return ManagedPositionState(
         market=row.market,
         symbol=row.symbol,
         entry_price=Decimal(row.entry_price),
-        initial_atr=None if row.initial_atr is None else Decimal(row.initial_atr),
+        initial_atr=Decimal(atr),
         initial_stop=Decimal(row.initial_stop),
         current_stop=Decimal(row.current_stop),
         highest_close=Decimal(row.highest_close),
@@ -545,25 +545,34 @@ class PaperPositionManagerService:
             market=market,
             position=position,
         )
-        filled_average_price = Decimal(position.avg_price)
         completed_rows = [row for row, _bar in completed_daily]
-        atr = _average_true_range(completed_rows) if daily_usable else None
         if not state_matches:
+            atr = _average_true_range(completed_rows) if daily_usable else None
+            if atr is None:
+                # ATR 근거 없이 상태를 만들면 손절선을 발명하게 된다. 이번 tick은
+                # 이 보유분을 관리하지 않고 유효한 일봉이 모이기를 기다린다.
+                logger.info(
+                    (
+                        "PAPER 포지션 state를 만들지 않습니다: "
+                        "owner=%s market=%s symbol=%s reason=atr_unavailable"
+                    ),
+                    owner_user_id,
+                    market,
+                    position.symbol,
+                )
+                return None
             opened_at = _aware_utc(position.created_at)
-            state = apply_stop_loss_floor(
-                initialize_position(
-                    market=market,
-                    symbol=str(position.symbol),
-                    entry_price=filled_average_price,
-                    initial_atr=atr,
-                    entry_at=opened_at,
-                    strategy_version=self._strategy_version,
-                    position_cycle_id=position_id,
-                    exit_levels_effective_at=self._now,
-                    config=self._config,
-                ),
-                filled_average_price=filled_average_price,
-                effective_at=self._now,
+            state = initialize_position(
+                market=market,
+                symbol=str(position.symbol),
+                # 진입가는 추천가가 아니라 원장의 실제 체결 평단이다.
+                entry_price=Decimal(position.avg_price),
+                initial_atr=atr,
+                entry_at=opened_at,
+                strategy_version=self._strategy_version,
+                position_cycle_id=position_id,
+                exit_levels_effective_at=self._now,
+                config=self._config,
             )
             if state_row is None:
                 state_row = KAssetPaperPositionState(position_cycle_id=position_id)
@@ -589,8 +598,8 @@ class PaperPositionManagerService:
             state_row.strategy_version = state.strategy_version
             state_row.strategy_fingerprint = self._strategy_fingerprint
         else:
-            # 이 snapshot으로 미처리 과거 관측을 먼저 평가한다. 새 floor/ATR은
-            # 아래 replay가 끝난 뒤 _now version으로 append한다.
+            # 저장된 snapshot으로 미처리 과거 관측을 먼저 평가한다. 이번 tick의
+            # 일봉으로 ATR을 다시 만들지 않는다.
             state = _state_from_row(state_row)
             stored_strategy_key = (state_row.strategy_key or "").strip()
             if (
@@ -718,22 +727,9 @@ class PaperPositionManagerService:
                 signal = intraday_signal
                 exit_horizon = "intraday"
 
-        # Full exit는 강화 전 snapshot에서 이미 성립한 더 이른 사실이므로 먼저
-        # 내보낸다. 그 외에는 no-data여도 새 floor/ATR을 즉시 _now부터 활성화하고
-        # 이전 version을 history에 남겨 늦은 관측의 old-stop crossing을 보존한다.
-        if signal is None or signal.kind is ExitKind.PARTIAL_SELL:
-            persisted_state = apply_stop_loss_floor(
-                persisted_state,
-                filled_average_price=filled_average_price,
-                effective_at=self._now,
-            )
-            if persisted_state.initial_atr is None and atr is not None:
-                persisted_state = adopt_initial_atr(
-                    persisted_state,
-                    initial_atr=atr,
-                    effective_at=self._now,
-                    config=self._config,
-                )
+        # 저장된 stop/ATR snapshot이 이 보유분의 유일한 손절 근거다. 이번 tick의
+        # 새 ATR을 _now version으로 덧붙이지 않는다. 보호선은 trailing으로만
+        # 오르고, 늦게 평가된 관측은 그때 유효했던 snapshot으로 판정한다.
         if signal is None:
             _apply_state(
                 state_row,
@@ -805,9 +801,7 @@ class PaperPositionManagerService:
             "paperPositionId": position_id,
             "positionCycleId": state.position_cycle_id,
             "quantityFraction": str(signal.quantity_fraction),
-            "initialAtr": (
-                None if signal.initial_atr is None else str(signal.initial_atr)
-            ),
+            "initialAtr": str(signal.initial_atr),
             "initialStop": str(signal.initial_stop),
             "currentStop": str(signal.current_stop),
             "evaluationHorizon": exit_horizon,
