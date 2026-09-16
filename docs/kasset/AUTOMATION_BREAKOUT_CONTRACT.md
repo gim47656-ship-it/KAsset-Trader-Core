@@ -1,6 +1,6 @@
 # KAsset PAPER Breakout Automation Contract
 
-갱신: 2026-09-01
+갱신: 2026-09-16
 
 ## 목적과 경계
 
@@ -76,6 +76,10 @@ BUY 수량은 다음 상한의 최솟값이다.
 ### Position Manager와 position cycle
 
 owner/account/market/symbol별 활성 상태는 실제 `PaperPosition.id`와 immutable `position_cycle_id`에 결합한다. 신규 BUY 체결 시 체결가·추천 ATR/stop·entry order·strategy identity/fingerprint로 새 cycle을 만들고, 재시작 시 PAPER 보유량과 reconcile한다. 수량 0이 되면 상태를 삭제하지 않고 `closed_at`으로 닫아 감사 이력을 보존한다.
+
+손절 근거는 ATR 하나다. 초기 손절선은 **진입가 - `initial_stop_atr`(3) ATR**, 부분익절선은 진입가 + `partial_profit_atr`(3) ATR, 이후 상향은 **최고 종가 - `trailing_stop_atr`(3) ATR**이다. 진입가 대비 고정 비율 바닥은 쓰지 않는다.
+
+ATR을 만들 완료 일봉이 부족하거나 일봉이 stale/future면 **상태를 만들지 않고 그 tick은 해당 보유분을 관리하지 않는다**. 없는 ATR을 발명하거나 나중에 채워 손절선을 만들지 않는다. `kasset_paper_position_states.initial_atr` 컬럼은 nullable이지만 운영에 NULL 행은 없고, 재적재 경로는 NULL 행을 거부한다.
 
 동일 종목 재진입은 과거 `highest_close`, trailing stop, partial-exit 상태를 재사용하지 않는다. 부분 매도는 잔여 수량과 stop 상태를 유지하고 전량 청산은 같은 cycle의 미처리 청산 신호를 무효화한다. 청산 idempotency key에는 cycle이 포함된다. 결과는 recommendation만 생성하며 Broker/PAPER facade를 직접 호출하지 않는다.
 
