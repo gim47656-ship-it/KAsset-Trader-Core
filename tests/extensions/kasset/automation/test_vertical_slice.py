@@ -73,11 +73,18 @@ from app.extensions.kasset.automation.position_sizing import (
     PositionSizingResult,
     PositionSizingZeroCode,
 )
-from app.extensions.kasset.automation.producer import WeightedEnsembleDecision
+from app.extensions.kasset.automation.producer import (
+    EntryPathAttribution,
+    WeightedEnsembleDecision,
+)
 from app.extensions.kasset.automation.regime import (
     MarketRegime,
     RegimeAssessment,
     weights_for_regime,
+)
+from app.extensions.kasset.automation.shadow_setups import (
+    ShadowSetupEntrySignal,
+    ShadowStatus,
 )
 from app.extensions.kasset.automation.vertical_slice import (
     AdmittedCandidate,
@@ -220,6 +227,56 @@ def _qualified_setup(ranking: CandidateRankResult) -> DailySetup:
         evaluated_at=_NOW,
         rejection_reason=None,
         rank_position=ranking.rank_position,
+    )
+
+
+def _rejected_daily_setup(ranking: CandidateRankResult) -> DailySetup:
+    setup = _qualified_setup(ranking)
+    results = tuple(
+        replace(
+            result,
+            action=Action.HOLD,
+            entry=None,
+            stop=None,
+            target=None,
+        )
+        for result in setup.strategy_results
+    )
+    return replace(
+        setup,
+        status=DailySetupStatus.REJECTED,
+        direction=Action.HOLD,
+        strategy_results=results,
+        ensemble=WeightedEnsembleDecision(
+            family=StrategyFamily.BREAKOUT,
+            action=Action.HOLD,
+            score=Decimal("0"),
+            confidence=Decimal("0"),
+            agreeing=(),
+            votes=(),
+        ),
+        rejection_reason="no_breakout_family_direction",
+        setup_position=None,
+    )
+
+
+def _shadow_entry_signal(
+    setup: str,
+    *,
+    triggered: bool,
+    reference_price: str = "101",
+    stop_price: str = "95",
+) -> ShadowSetupEntrySignal:
+    subtype = "first" if setup == "first_pullback" else "nr7_inside_day"
+    return ShadowSetupEntrySignal(
+        setup=setup,  # type: ignore[arg-type]
+        status=ShadowStatus.VALID,
+        triggered=triggered,
+        signal_at=_NOW - timedelta(minutes=1) if triggered else None,
+        trigger_price=Decimal(reference_price) if triggered else None,
+        stop_price=Decimal(stop_price) if triggered else None,
+        subtype=subtype,
+        source_timestamps=(_NOW - timedelta(days=1),),
     )
 
 
@@ -2039,3 +2096,239 @@ async def test_same_time_rvol_shadow_write_failure_replaces_pending_summary(
     assert recorded == []
     shadow_db.commit.assert_not_awaited()
     shadow_db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_breakout_only_preserves_baseline_sizing_and_single_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, analyze_for_owner, portfolio_plan, persist_recommendation = (
+        _stub_review_cycle(
+            monkeypatch,
+            ranked_symbols=("005930",),
+            unaffordable=frozenset(),
+            ranker_config=CandidateRankerConfig(strategy_review_limit=5),
+        )
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "evaluate_shadow_setup_entry",
+        MagicMock(
+            side_effect=lambda *_args, setup, **_kwargs: _shadow_entry_signal(
+                setup,
+                triggered=False,
+            )
+        ),
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["recommendationIds"] == ["rec:005930"]
+    persist_recommendation.assert_awaited_once()
+    admitted = persist_recommendation.await_args.args[1]
+    assert isinstance(admitted, AdmittedCandidate)
+    assert admitted.decision.action is Action.BUY
+    assert admitted.entry_path_attribution is not None
+    assert admitted.entry_path_attribution.triggered_paths == ("breakout-baseline",)
+    sizing_inputs = portfolio_plan.await_args.kwargs
+    assert sizing_inputs["action"] == "BUY"
+    assert sizing_inputs["reference_price"] == Decimal("100")
+    assert sizing_inputs["strategy_stop"] == Decimal("98")
+    ai_payload = analyze_for_owner.await_args.args[3]
+    assert ai_payload["strategyFamily"] == StrategyFamily.BREAKOUT.value
+    assert ai_payload["strategyVotes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detector_setup", "entry_path", "reference_price", "stop_price"),
+    [
+        ("first_pullback", "first-pullback", "101", "95"),
+        ("nr7_inside_day", "nr7-inside-day", "102", "96"),
+    ],
+)
+async def test_krx_detector_path_buys_without_daily_setup_or_intraday_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+    detector_setup: str,
+    entry_path: str,
+    reference_price: str,
+    stop_price: str,
+) -> None:
+    instance, analyze_for_owner, portfolio_plan, persist_recommendation = (
+        _stub_review_cycle(
+            monkeypatch,
+            ranked_symbols=("005930",),
+            unaffordable=frozenset(),
+            ranker_config=CandidateRankerConfig(strategy_review_limit=5),
+        )
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "evaluate_daily_setup",
+        MagicMock(
+            side_effect=lambda ranking, _bars, **_kwargs: _rejected_daily_setup(ranking)
+        ),
+    )
+    detector = MagicMock(
+        side_effect=lambda *_args, setup, **_kwargs: _shadow_entry_signal(
+            setup,
+            triggered=setup == detector_setup,
+            reference_price=reference_price,
+            stop_price=stop_price,
+        )
+    )
+    monkeypatch.setattr(vertical_slice, "evaluate_shadow_setup_entry", detector)
+
+    result = await instance.run_owner(7)
+
+    assert result["dailySetupSelectedCount"] == 0
+    assert result["recommendationIds"] == ["rec:005930"]
+    assert "skipped" not in result
+    instance._decide_triggers.assert_not_called()  # type: ignore[attr-defined]
+    persist_recommendation.assert_awaited_once()
+    admitted = persist_recommendation.await_args.args[1]
+    assert isinstance(admitted, AdmittedCandidate)
+    assert admitted.trigger_decision is None
+    assert admitted.decision.action is Action.BUY
+    assert admitted.entry_path_attribution is not None
+    assert admitted.entry_path_attribution.triggered_paths == (entry_path,)
+    sizing_inputs = portfolio_plan.await_args.kwargs
+    assert sizing_inputs["action"] == "BUY"
+    assert sizing_inputs["reference_price"] == Decimal(reference_price)
+    assert sizing_inputs["strategy_stop"] == Decimal(stop_price)
+    assert detector.call_count == 2
+    ai_payload = analyze_for_owner.await_args.args[3]
+    assert "strategyFamily" not in ai_payload
+    assert "strategyVotes" not in ai_payload
+    assert ai_payload["triggeredEntryPaths"] == [entry_path]
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_paths_merge_into_one_persisted_attributed_buy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, analyze_for_owner, _portfolio_plan, persist_recommendation = (
+        _stub_review_cycle(
+            monkeypatch,
+            ranked_symbols=("005930",),
+            unaffordable=frozenset(),
+            ranker_config=CandidateRankerConfig(strategy_review_limit=5),
+        )
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "evaluate_shadow_setup_entry",
+        MagicMock(
+            side_effect=lambda *_args, setup, **_kwargs: _shadow_entry_signal(
+                setup,
+                triggered=True,
+                reference_price="101" if setup == "first_pullback" else "102",
+                stop_price="95" if setup == "first_pullback" else "96",
+            )
+        ),
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["recommendationIds"] == ["rec:005930"]
+    persist_recommendation.assert_awaited_once()
+    admitted = persist_recommendation.await_args.args[1]
+    assert isinstance(admitted, AdmittedCandidate)
+    attribution = admitted.entry_path_attribution
+    assert isinstance(attribution, EntryPathAttribution)
+    assert attribution.triggered_paths == (
+        "breakout-baseline",
+        "first-pullback",
+        "nr7-inside-day",
+    )
+    ai_payload = analyze_for_owner.await_args.args[3]
+    assert ai_payload["strategyFamily"] == StrategyFamily.BREAKOUT.value
+    assert ai_payload["triggeredEntryPaths"] == [
+        "breakout-baseline",
+        "first-pullback",
+        "nr7-inside-day",
+    ]
+
+    class RecordingPersistence:
+        draft: object | None = None
+
+        async def create_recommendation(
+            self,
+            *,
+            owner_user_id: str,
+            draft: object,
+        ) -> object:
+            assert owner_user_id == "7"
+            self.draft = draft
+            return SimpleNamespace(id="stored-rec", action=draft.action.value)
+
+    persistence = RecordingPersistence()
+    monkeypatch.setattr(
+        vertical_slice,
+        "AIRecommendationService",
+        lambda *_args, **_kwargs: persistence,
+    )
+    hard_risk = AsyncMock(
+        return_value=HardRiskResult(passed=True, checks=(), blocked_reason=None)
+    )
+    instance._policy.evaluate_hard_risk = hard_risk  # type: ignore[attr-defined]
+    sizing = vertical_slice._PreAiSizing(  # noqa: SLF001
+        reference_price=Decimal("100"),
+        plan=_affordable_plan(),
+        account_state=_account_state(),
+    )
+
+    await AIRecommendationVerticalSlice._persist_recommendation(  # noqa: SLF001
+        instance,
+        7,
+        admitted,
+        _BULL,
+        position=1,
+        total=1,
+        sizing=sizing,
+    )
+
+    draft = persistence.draft
+    assert draft is not None
+    assert draft.action is Action.BUY  # type: ignore[attr-defined]
+    detail = next(
+        item
+        for item in draft.evidence  # type: ignore[attr-defined]
+        if item.get("kind") == "ai_vertical_slice"
+    )
+    assert detail["triggeredEntryPaths"] == [
+        "breakout-baseline",
+        "first-pullback",
+        "nr7-inside-day",
+    ]
+    assert detail["strategyFamily"] == StrategyFamily.BREAKOUT.value
+    assert detail["strategyVotes"]
+    assert {vote["family"] for vote in detail["strategyVotes"]} == {
+        StrategyFamily.BREAKOUT.value
+    }
+    rationale = " ".join(draft.rationale)  # type: ignore[attr-defined]
+    assert "돌파" in rationale
+    assert "첫 눌림목(First Pullback)" in rationale
+    assert "NR7/인사이드 데이(NR7/Inside Day)" in rationale
+    hard_risk.assert_awaited_once()
+    assert hard_risk.await_args.kwargs["action"] == "BUY"
+
+
+def test_us_candidate_cannot_evaluate_detector_entry_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=_NOW)
+    detector = MagicMock(side_effect=AssertionError("US detector path must not run"))
+    monkeypatch.setattr(vertical_slice, "evaluate_shadow_setup_entry", detector)
+    ranking = _rank_result("AAPL", position=1, market="US")
+    candidate = TradingCandidate("AAPL", "US", "Apple", "tvscreener_us")
+
+    result = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={ranking.key: ()},
+        completed_through=_NOW,
+    )
+
+    assert result == {}
+    detector.assert_not_called()
