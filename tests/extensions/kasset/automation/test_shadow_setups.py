@@ -13,6 +13,7 @@ from app.extensions.kasset.automation.shadow_setups import (
     SHADOW_SETUPS_SCHEMA_VERSION,
     ShadowStatus,
     evaluate_ranked_shadow_setups,
+    evaluate_shadow_setup_entry,
     evaluate_shadow_setups,
     shadow_setups_evidence,
 )
@@ -309,6 +310,25 @@ def test_first_pullback_supportive_volume_uses_prior_window() -> None:
     assert _evidence(weak, "supportive_volume_ratio").value == "0.500000"
 
 
+def test_public_first_pullback_entry_contract_reuses_confirmed_component_stop() -> None:
+    bars = _single_pullback()
+
+    signal = evaluate_shadow_setup_entry(
+        bars,
+        setup="first_pullback",
+        symbol="AAPL",
+        market="US",
+        as_of=bars[-1].timestamp + timedelta(hours=1),
+    )
+    component = _evaluate(bars).first_pullback
+
+    assert signal.triggered is True
+    assert signal.signal_at == bars[-1].timestamp
+    assert signal.trigger_price == component.trigger_price
+    assert signal.stop_price == component.pullback_pivot
+    assert signal.subtype == "first"
+
+
 def test_appending_future_bars_cannot_change_historical_setup_output() -> None:
     bars = _single_pullback()
     as_of = bars[-1].timestamp + timedelta(hours=1)
@@ -343,6 +363,41 @@ def test_nr7_inside_day_individual_and_combined_subtypes_are_explicit(
     assert result.pivot is not None
     assert result.pivot_at == result.source_timestamps[-1]
     assert result.valid_until == result.pivot_at + timedelta(days=1)
+
+
+def test_public_nr7_entry_contract_waits_for_independent_completed_bar_breakout() -> (
+    None
+):
+    setup_bars = _compression_bars("combined")
+    unbroken = evaluate_shadow_setup_entry(
+        setup_bars,
+        setup="nr7_inside_day",
+        symbol="AAPL",
+        market="US",
+        as_of=setup_bars[-1].timestamp + timedelta(hours=1),
+    )
+    breakout = _bar(
+        21,
+        open_="105.8",
+        high="107",
+        low="105.5",
+        close="106.5",
+        volume="100",
+    )
+    triggered = evaluate_shadow_setup_entry(
+        [*setup_bars, breakout],
+        setup="nr7_inside_day",
+        symbol="AAPL",
+        market="US",
+        as_of=breakout.timestamp + timedelta(hours=1),
+    )
+
+    assert unbroken.triggered is False
+    assert triggered.triggered is True
+    assert triggered.signal_at == breakout.timestamp
+    assert triggered.trigger_price == Decimal("106.000000")
+    assert triggered.stop_price == Decimal("105")
+    assert triggered.subtype == "nr7_inside_day"
 
 
 def test_inside_day_containment_is_strict_at_both_boundaries() -> None:

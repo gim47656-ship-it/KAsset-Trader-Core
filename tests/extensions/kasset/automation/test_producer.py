@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ from app.extensions.kasset.automation import (
 )
 from app.extensions.kasset.automation.ai_shadow import AI_SHADOW_SCHEMA_VERSION
 from app.extensions.kasset.automation.contracts import StrategyFamily
+from app.extensions.kasset.automation.producer import EntryPathAttribution
 
 _NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
@@ -193,6 +195,59 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
         if item["kind"] == "ai_shadow"
     )
     assert shadow == _ai_shadow()
+
+
+@pytest.mark.asyncio
+async def test_detector_only_buy_omits_breakout_family_and_strategy_votes() -> None:
+    persistence = RecordingPersistence()
+    producer = RecommendationProducer(
+        owner_user_id="user-a",
+        persistence=persistence,
+    )
+    strategy_results = [
+        replace(result, symbol="005930", market="KRX") for result in _strategy_quorum()
+    ]
+    decision = ExternalEvidence(
+        source="kasset_technical_decision:entry_path",
+        symbol="005930",
+        market="KRX",
+        action=Action.BUY,
+        confidence=Decimal("0.80"),
+        as_of=_NOW - timedelta(minutes=2),
+        valid_until=_NOW + timedelta(hours=1),
+        rationale=("First Pullback detector confirmed BUY.",),
+    )
+    attribution = EntryPathAttribution(
+        triggered_paths=("first-pullback",),
+        reference_price=Decimal("101"),
+        stop_price=Decimal("95"),
+        valid_until=_NOW + timedelta(hours=1),
+        rationale=("첫 눌림목(First Pullback) 진입 경로가 발동했습니다.",),
+        evidence=({"entryPath": "first-pullback", "triggered": True},),
+    )
+
+    await producer.produce(
+        symbol="005930",
+        market="KRX",
+        strategy_results=strategy_results,
+        decision_evidence=decision,
+        suggested_quantity="1",
+        now=_NOW,
+        strategy_family=None,
+        entry_path_attribution=attribution,
+    )
+
+    _owner_user_id, draft = persistence.calls[0]
+    assert draft.action is Action.BUY  # type: ignore[attr-defined]
+    assert not any(  # type: ignore[attr-defined]
+        item["kind"] == "strategy" for item in draft.evidence
+    )
+    detail = next(  # type: ignore[attr-defined]
+        item for item in draft.evidence if item["kind"] == "ai_vertical_slice"
+    )
+    assert "strategyFamily" not in detail
+    assert "strategyVotes" not in detail
+    assert detail["triggeredEntryPaths"] == ["first-pullback"]
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,51 @@ _ACTION_LABELS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class EntryPathAttribution:
+    """Deterministic entry paths merged for one symbol and owner cycle."""
+
+    triggered_paths: tuple[str, ...]
+    reference_price: Decimal | None
+    stop_price: Decimal | None
+    valid_until: datetime
+    rationale: tuple[str, ...]
+    evidence: tuple[Mapping[str, object], ...]
+
+    def __post_init__(self) -> None:
+        if not self.triggered_paths or len(set(self.triggered_paths)) != len(
+            self.triggered_paths
+        ):
+            raise ValueError("triggered entry paths must be non-empty and unique")
+        if self.valid_until.tzinfo is None or self.valid_until.utcoffset() is None:
+            raise ValueError("entry path valid_until must be timezone-aware")
+        for field_name, value in (
+            ("reference_price", self.reference_price),
+            ("stop_price", self.stop_price),
+        ):
+            if value is not None and (not value.is_finite() or value <= 0):
+                raise ValueError(f"entry path {field_name} must be positive")
+        if not self.rationale or any(not item.strip() for item in self.rationale):
+            raise ValueError("entry path rationale must be non-empty")
+        if any(not isinstance(item, Mapping) for item in self.evidence):
+            raise ValueError("entry path evidence entries must be mappings")
+
+    @property
+    def overrides_breakout_baseline(self) -> bool:
+        return "breakout-baseline" not in self.triggered_paths
+
+    def as_evidence(self) -> dict[str, object]:
+        return {
+            "triggeredEntryPaths": list(self.triggered_paths),
+            "referencePrice": (
+                str(self.reference_price) if self.reference_price is not None else None
+            ),
+            "stopPrice": str(self.stop_price) if self.stop_price is not None else None,
+            "validUntil": self.valid_until.astimezone(UTC).isoformat(),
+            "paths": [dict(item) for item in self.evidence],
+        }
+
+
 def _korean_vote_rationale(
     valid_results: Mapping[StrategyName, StrategyResult],
 ) -> str:
@@ -309,7 +354,7 @@ class RecommendationProducer:
         regime: str = "RANGING",
         regime_detail: str = "",
         strategy_weights: Mapping[StrategyName, Decimal] | None = None,
-        strategy_family: StrategyFamily = StrategyFamily.BREAKOUT,
+        strategy_family: StrategyFamily | None = StrategyFamily.BREAKOUT,
         event_evidence: Sequence[Mapping[str, object]] = (),
         ranking: Mapping[str, object] | None = None,
         portfolio: Mapping[str, object] | None = None,
@@ -317,6 +362,7 @@ class RecommendationProducer:
         strategy_promotion: Mapping[str, object] | None = None,
         ai_shadow_evidence: Mapping[str, object] | None = None,
         advisory_evidence: Sequence[Mapping[str, object]] = (),
+        entry_path_attribution: EntryPathAttribution | None = None,
     ) -> object:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
         normalized_symbol = symbol.strip().upper()
@@ -380,22 +426,37 @@ class RecommendationProducer:
                 + ",".join(sorted(item.value for item in missing))
             )
         strategy_input_valid = not rejected_reasons
+        path_override = bool(
+            entry_path_attribution is not None
+            and entry_path_attribution.overrides_breakout_baseline
+        )
+        if path_override and normalized_market != "KRX":
+            raise ValueError("non-breakout entry paths support KRX only")
+        if strategy_family is None and not path_override:
+            raise ValueError("strategy_family is required for baseline entry paths")
         weights = strategy_weights or {name: Decimal("0.25") for name in StrategyName}
         ensemble = compose_weighted_ensemble(
             tuple(valid_results.values()),
             weights,
-            family=strategy_family,
+            family=strategy_family or StrategyFamily.BREAKOUT,
         )
         candidate = ensemble.action if strategy_input_valid else Action.HOLD
         agreeing = ensemble.agreeing if strategy_input_valid else ()
 
-        # ``decision``은 기술 판정(완료 일봉 Daily Setup + 장중 trigger)이다.
-        # AI 검토와 뉴스는 ``advisory_evidence``로만 붙고 이 관문에 참여하지
-        # 않으므로, AI 실패나 불일치가 여기서 action을 바꾸지 못한다.
+        # Daily Setup + intraday triggers remain the breakout baseline. The two
+        # KRX detector paths may independently establish BUY, but only through
+        # the explicit attribution contract supplied by the vertical slice.
         confidence = Decimal("0")
-        if candidate != Action.HOLD and decision.action == candidate:
-            # Daily Setup과 intraday trigger를 통과한 기술 판정이 action의 관문이다.
-            # confidence는 근거 강도이지 별도의 숨은 허용/차단 기준이 아니다.
+        if path_override:
+            if decision.action is Action.BUY:
+                candidate = Action.BUY
+                confidence = decision.confidence
+            else:
+                rejected_reasons.append(
+                    "entry path attribution does not confirm a BUY decision"
+                )
+                candidate = Action.HOLD
+        elif candidate != Action.HOLD and decision.action == candidate:
             confidence = min(ensemble.confidence, decision.confidence)
         else:
             if candidate != Action.HOLD and decision.action != candidate:
@@ -413,13 +474,23 @@ class RecommendationProducer:
             candidate = Action.HOLD
             confidence = Decimal("0")
 
-        reference_price = self._reference_price(agreeing)
-        stop_price = self._level(agreeing, "stop")
-        target_price = self._level(agreeing, "target")
-        strategy_valid_until = min(
-            (result.valid_until.astimezone(UTC) for result in valid_results.values()),
-            default=current,
-        )
+        if path_override:
+            assert entry_path_attribution is not None
+            reference_price = entry_path_attribution.reference_price
+            stop_price = entry_path_attribution.stop_price
+            target_price = None
+            strategy_valid_until = entry_path_attribution.valid_until.astimezone(UTC)
+        else:
+            reference_price = self._reference_price(agreeing)
+            stop_price = self._level(agreeing, "stop")
+            target_price = self._level(agreeing, "target")
+            strategy_valid_until = min(
+                (
+                    result.valid_until.astimezone(UTC)
+                    for result in valid_results.values()
+                ),
+                default=current,
+            )
         valid_until = min(strategy_valid_until, decision.valid_until.astimezone(UTC))
         if valid_until <= current:
             candidate = Action.HOLD
@@ -494,44 +565,51 @@ class RecommendationProducer:
             self._validated_advisory(item) for item in advisory_evidence
         )
 
-        rationale = [
-            _korean_vote_rationale(valid_results),
-            (
-                f"기술 판정 의견은 {_ACTION_LABELS[decision.action]}이며 "
-                f"신뢰도는 {decision.confidence}입니다."
-            ),
-        ]
-        vote_by_strategy = {str(vote["strategy"]): vote for vote in ensemble.votes}
+        rationale = []
+        if not path_override:
+            rationale.append(_korean_vote_rationale(valid_results))
+        if entry_path_attribution is not None:
+            rationale.extend(entry_path_attribution.rationale)
+        rationale.append(
+            f"기술 판정 의견은 {_ACTION_LABELS[decision.action]}이며 "
+            f"신뢰도는 {decision.confidence}입니다."
+        )
         evidence: list[Mapping[str, object]] = []
-        for result in valid_results.values():
-            vote = vote_by_strategy.get(result.strategy.value, {})
-            evidence.append(
-                {
-                    "title": f"{result.strategy.value} strategy vote",
-                    "source": "kasset_strategy",
-                    "kind": "strategy",
-                    "strategy": result.strategy.value,
-                    "version": result.version,
-                    "action": result.action.value,
-                    "confidence": str(result.confidence),
-                    "weight": vote.get("weight"),
-                    "score": vote.get("score"),
-                    "entry": str(result.entry) if result.entry is not None else None,
-                    "stop": str(result.stop) if result.stop is not None else None,
-                    "target": str(result.target) if result.target is not None else None,
-                    "asOf": result.as_of.isoformat(),
-                    "validUntil": result.valid_until.isoformat(),
-                    "rationale": list(result.rationale),
-                    "evidence": [
-                        {
-                            "code": item.code,
-                            "value": item.value,
-                            "description": item.description,
-                        }
-                        for item in result.evidence
-                    ],
-                }
-            )
+        if not path_override:
+            vote_by_strategy = {str(vote["strategy"]): vote for vote in ensemble.votes}
+            for result in valid_results.values():
+                vote = vote_by_strategy.get(result.strategy.value, {})
+                evidence.append(
+                    {
+                        "title": f"{result.strategy.value} strategy vote",
+                        "source": "kasset_strategy",
+                        "kind": "strategy",
+                        "strategy": result.strategy.value,
+                        "version": result.version,
+                        "action": result.action.value,
+                        "confidence": str(result.confidence),
+                        "weight": vote.get("weight"),
+                        "score": vote.get("score"),
+                        "entry": str(result.entry)
+                        if result.entry is not None
+                        else None,
+                        "stop": str(result.stop) if result.stop is not None else None,
+                        "target": str(result.target)
+                        if result.target is not None
+                        else None,
+                        "asOf": result.as_of.isoformat(),
+                        "validUntil": result.valid_until.isoformat(),
+                        "rationale": list(result.rationale),
+                        "evidence": [
+                            {
+                                "code": item.code,
+                                "value": item.value,
+                                "description": item.description,
+                            }
+                            for item in result.evidence
+                        ],
+                    }
+                )
         evidence.append(
             {
                 "title": "AI trading vertical-slice review evidence",
@@ -539,13 +617,29 @@ class RecommendationProducer:
                 "kind": "ai_vertical_slice",
                 "regime": regime,
                 "regimeDetail": regime_detail,
-                "strategyFamily": ensemble.family.value,
-                "strategyVotes": list(ensemble.votes),
+                **(
+                    {
+                        "strategyFamily": ensemble.family.value,
+                        "strategyVotes": list(ensemble.votes),
+                    }
+                    if not path_override
+                    else {}
+                ),
                 # 앱이 이미 읽는 키다. 이제 여기 담기는 것은 AI 의견이 아니라
                 # 기술 판정 근거이며, AI 의견은 kind="ai_review" 근거로 따로 붙는다.
                 "aiRationale": list(decision.rationale),
                 "aiEvidence": [dict(item) for item in decision.evidence],
                 "eventEvidence": [dict(item) for item in event_evidence],
+                "triggeredEntryPaths": (
+                    list(entry_path_attribution.triggered_paths)
+                    if entry_path_attribution is not None
+                    else []
+                ),
+                "entryPathEvidence": (
+                    entry_path_attribution.as_evidence()
+                    if entry_path_attribution is not None
+                    else None
+                ),
                 "entryPrice": str(reference_price)
                 if reference_price is not None
                 else None,
@@ -717,6 +811,7 @@ class RecommendationProducer:
 
 __all__ = [
     "RecommendationProducer",
+    "EntryPathAttribution",
     "WeightedEnsembleDecision",
     "compose_weighted_ensemble",
     "external_evidence_from_mapping",

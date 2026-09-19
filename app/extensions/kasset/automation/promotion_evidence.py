@@ -22,12 +22,15 @@ from app.extensions.kasset.automation.contracts import PriceBar
 from app.extensions.kasset.automation.portfolio_backtest import (
     BacktestWindow,
     CandidateBenchmarkSeries,
+    EntryPathComparisonResult,
     PortfolioBacktestConfig,
     PortfolioBacktestDiagnostics,
     PortfolioBacktestResult,
+    PortfolioEntryPath,
     WalkForwardConfig,
     WalkForwardFold,
     WalkForwardResult,
+    run_entry_path_comparison,
     run_portfolio_diagnostics,
     run_walk_forward,
 )
@@ -520,6 +523,14 @@ async def build_and_store_portfolio_evidence(
             benchmark_bars_by_candidate=source.benchmark_bars_by_candidate,
             universe_evidence=universe_evidence,
         )
+        entry_path_comparison = _run_offline_entry_path_comparison(
+            source,
+            config=config,
+            walk_config=walk_config,
+            universe_evidence=universe_evidence,
+            window=window,
+            walk_forward_bars=walk_forward_bars,
+        )
     except (ArithmeticError, ValueError) as exc:
         raise PromotionEvidenceBuildError(
             f"backtest_evidence_unavailable:{exc}"
@@ -544,6 +555,7 @@ async def build_and_store_portfolio_evidence(
         walk_forward=walk_forward,
         metrics=metrics,
         thresholds=thresholds,
+        entry_path_comparison=entry_path_comparison,
     )
     payload_hash = canonical_sha256(raw_payload)
     identity = _experiment_identity(
@@ -721,6 +733,57 @@ def derive_promotion_metrics(
     )
 
 
+def _run_offline_entry_path_comparison(
+    source: PortfolioEvidenceSource,
+    *,
+    config: PortfolioBacktestConfig,
+    walk_config: WalkForwardConfig,
+    universe_evidence: Any,
+    window: BacktestWindow | None,
+    walk_forward_bars: Mapping[CandidateKey, Sequence[PriceBar]] | None = None,
+) -> EntryPathComparisonResult | None:
+    kr_candidates = tuple(
+        candidate for candidate in source.candidates if candidate.market == "KR"
+    )
+    if not kr_candidates:
+        return None
+    kr_keys = {candidate.key for candidate in kr_candidates}
+    kr_benchmarks = (
+        {"KR": source.benchmark_bars_by_market["KR"]}
+        if "KR" in source.benchmark_bars_by_market
+        else {}
+    )
+    comparison_walk_bars = walk_forward_bars
+    if comparison_walk_bars is None:
+        comparison_walk_bars = source.bars_by_candidate
+        if source.signal_start_at is not None:
+            comparison_walk_bars = _forward_walk_forward_bars(
+                source.bars_by_candidate,
+                signal_start_at=source.signal_start_at,
+                walk_config=walk_config,
+                min_folds=promotion_thresholds_for_track(
+                    _require_track(source.evidence_track)
+                ).min_walk_forward_folds,
+            )
+    return run_entry_path_comparison(
+        kr_candidates,
+        {key: bars for key, bars in source.bars_by_candidate.items() if key in kr_keys},
+        config=config,
+        walk_forward=walk_config,
+        walk_forward_bars_by_candidate={
+            key: bars for key, bars in comparison_walk_bars.items() if key in kr_keys
+        },
+        benchmark_bars_by_market=cast(Any, kr_benchmarks),
+        benchmark_bars_by_candidate={
+            key: series
+            for key, series in source.benchmark_bars_by_candidate.items()
+            if key in kr_keys
+        },
+        universe_evidence=universe_evidence,
+        window=window,
+    )
+
+
 def _require_forward_signal_window(
     diagnostics: PortfolioBacktestDiagnostics,
     walk_forward: WalkForwardResult,
@@ -776,11 +839,27 @@ def build_promotion_raw_payload(
     walk_forward: WalkForwardResult,
     metrics: PromotionMetrics,
     thresholds: Mapping[str, object],
+    entry_path_comparison: EntryPathComparisonResult | None = None,
 ) -> dict[str, object]:
     track = _require_track(source.evidence_track)
     forward = track == FORWARD_PAPER_TRACK
     if forward and source.signal_start_at is None:
         raise PromotionEvidenceBuildError("forward_signal_start_missing")
+    if entry_path_comparison is None:
+        entry_path_comparison = _run_offline_entry_path_comparison(
+            source,
+            config=config,
+            walk_config=walk_config,
+            universe_evidence=_engine_universe_evidence(source),
+            window=(
+                BacktestWindow(
+                    signal_start_at=source.signal_start_at,
+                    end_at=source.period_end,
+                )
+                if source.signal_start_at is not None
+                else None
+            ),
+        )
     markets = {
         item.market: _readiness_market_payload(item)
         for item in source.readiness.markets
@@ -898,20 +977,7 @@ def build_promotion_raw_payload(
         },
         "portfolioDiagnostics": {
             "config": _json_config(config),
-            "costSlippage": {
-                "KR": {
-                    "feeRate": str(config.kr_cost.fee_rate),
-                    "slippageRate": str(config.kr_cost.slippage_rate),
-                    "sellTaxRate": str(config.kr_cost.sell_tax_rate),
-                    "minFeeAbsolute": str(config.kr_cost.min_fee_absolute),
-                },
-                "US": {
-                    "feeRate": str(config.us_cost.fee_rate),
-                    "slippageRate": str(config.us_cost.slippage_rate),
-                    "sellTaxRate": str(config.us_cost.sell_tax_rate),
-                    "minFeeAbsolute": str(config.us_cost.min_fee_absolute),
-                },
-            },
+            "costSlippage": _cost_slippage_config(config),
             "baseline": _backtest_summary(diagnostics.baseline),
             "costStress": cost_stress,
             "oneBarDelay": {
@@ -962,6 +1028,18 @@ def build_promotion_raw_payload(
             "evidence": [_backtest_evidence(item) for item in walk_forward.evidence],
             "determinismHash": walk_forward.determinism_hash,
         },
+        **(
+            {
+                "offlineEntryPathComparison": _entry_path_comparison_payload(
+                    entry_path_comparison,
+                    source=source,
+                    config=config,
+                    walk_config=walk_config,
+                )
+            }
+            if entry_path_comparison is not None
+            else {}
+        ),
         "derivedPromotionMetrics": metrics.as_snapshot(),
         "promotionThresholds": dict(thresholds),
         "determinism": {
@@ -974,6 +1052,266 @@ def build_promotion_raw_payload(
             ],
         },
     }
+
+
+def _entry_path_comparison_payload(
+    comparison: EntryPathComparisonResult,
+    *,
+    source: PortfolioEvidenceSource,
+    config: PortfolioBacktestConfig,
+    walk_config: WalkForwardConfig,
+) -> dict[str, object]:
+    arms = [
+        {
+            "entryPath": arm.entry_path.value,
+            "baseline": _backtest_summary(arm.baseline),
+            "walkForward": {
+                "foldCount": len(arm.walk_forward.folds),
+                "meanTestReturn": str(arm.walk_forward.mean_test_return),
+                "meanTestExcessReturn": (
+                    str(arm.walk_forward.mean_test_excess_return)
+                    if arm.walk_forward.mean_test_excess_return is not None
+                    else None
+                ),
+                "folds": [
+                    {
+                        "foldIndex": fold.fold_index,
+                        "trainStartAt": _timestamp(fold.train_start_at),
+                        "trainEndAt": _timestamp(fold.train_end_at),
+                        "testStartAt": _timestamp(fold.test_start_at),
+                        "testEndAt": _timestamp(fold.test_end_at),
+                        "test": _backtest_summary(fold.test_result),
+                    }
+                    for fold in arm.walk_forward.folds
+                ],
+                "determinismHash": arm.walk_forward.determinism_hash,
+            },
+        }
+        for arm in comparison.arms
+    ]
+    expected_paths = tuple(path.value for path in PortfolioEntryPath)
+    if tuple(item["entryPath"] for item in arms) != expected_paths:
+        raise PromotionEvidenceBuildError("entry_path_arms_incomplete")
+    return {
+        "mode": "offline",
+        "market": "KR",
+        "source": {
+            "evidenceTrack": _require_track(source.evidence_track),
+            "datasetContentHash": source.dataset_content_hash,
+            "candidateKeys": [
+                f"{candidate.market}:{candidate.symbol}"
+                for candidate in source.candidates
+                if candidate.market == "KR"
+            ],
+            "period": {
+                "startAt": _timestamp(source.period_start),
+                "endAt": _timestamp(source.period_end),
+            },
+        },
+        "sharedExecutionConfig": {
+            "portfolio": _json_config(config),
+            "costSlippage": _cost_slippage_config(config),
+            "positionSizing": {
+                "maxPriceAgeSeconds": int(
+                    config.position_sizing.max_price_age.total_seconds()
+                ),
+                "krxLotSize": str(config.position_sizing.krx_lot_size),
+                "maxAverageVolumeParticipation": str(
+                    config.position_sizing.max_average_volume_participation
+                ),
+                "maxAverageTurnoverParticipation": str(
+                    config.position_sizing.max_average_turnover_participation
+                ),
+                "bullRiskMultiplier": str(config.position_sizing.bull_risk_multiplier),
+                "bearRiskMultiplier": str(config.position_sizing.bear_risk_multiplier),
+                "sidewaysRiskMultiplier": str(
+                    config.position_sizing.sideways_risk_multiplier
+                ),
+                "volatileRiskMultiplier": str(
+                    config.position_sizing.volatile_risk_multiplier
+                ),
+            },
+            "positionManager": {
+                "initialStopAtr": str(config.position_manager.initial_stop_atr),
+                "partialProfitAtr": str(config.position_manager.partial_profit_atr),
+                "partialFraction": str(config.position_manager.partial_fraction),
+                "trailingStopAtr": str(config.position_manager.trailing_stop_atr),
+                "maxHoldingBars": config.position_manager.max_holding_bars,
+                "noProgressAtr": str(config.position_manager.no_progress_atr),
+            },
+            "walkForward": {
+                "trainBars": walk_config.train_bars,
+                "testBars": walk_config.test_bars,
+                "stepBars": walk_config.step_bars,
+            },
+            "exitEvaluator": "shared_position_manager",
+        },
+        "arms": arms,
+    }
+
+
+def _cost_slippage_config(
+    config: PortfolioBacktestConfig,
+) -> dict[str, dict[str, str]]:
+    return {
+        market: {
+            "feeRate": str(cost.fee_rate),
+            "slippageRate": str(cost.slippage_rate),
+            "sellTaxRate": str(cost.sell_tax_rate),
+            "minFeeAbsolute": str(cost.min_fee_absolute),
+        }
+        for market, cost in (("KR", config.kr_cost), ("US", config.us_cost))
+    }
+
+
+def _validate_entry_path_comparison(
+    raw: object,
+    *,
+    track: PromotionTrack,
+    data: Mapping[str, object],
+    diagnostics: Mapping[str, object],
+    walk: Mapping[str, object],
+    signal_start_at: datetime | None,
+) -> None:
+    # 이 필드는 기존 immutable payload와의 재생 호환을 위해 additive다.
+    if raw is None:
+        return
+    comparison = _required_mapping(raw, "offlineEntryPathComparison")
+    if comparison.get("mode") != "offline" or comparison.get("market") != "KR":
+        raise PromotionEvidenceBuildError("entry_path_comparison_scope_invalid")
+    source = _required_mapping(
+        comparison.get("source"), "offlineEntryPathComparison.source"
+    )
+    if (
+        _require_track(source.get("evidenceTrack")) != track
+        or source.get("datasetContentHash") != data.get("datasetContentHash")
+        or canonical_sha256(source.get("period"))
+        != canonical_sha256(data.get("period"))
+    ):
+        raise PromotionEvidenceBuildError("entry_path_comparison_source_mismatch")
+    candidate_keys = _required_sequence(
+        source.get("candidateKeys"),
+        "offlineEntryPathComparison.source.candidateKeys",
+    )
+    if (
+        not candidate_keys
+        or any(
+            not isinstance(key, str) or not key.startswith("KR:")
+            for key in candidate_keys
+        )
+        or len(set(candidate_keys)) != len(candidate_keys)
+    ):
+        raise PromotionEvidenceBuildError("entry_path_comparison_candidates_invalid")
+
+    shared = _required_mapping(
+        comparison.get("sharedExecutionConfig"),
+        "offlineEntryPathComparison.sharedExecutionConfig",
+    )
+    shared_portfolio = {
+        "entryFill": "next_open",
+        "slippageMode": "adverse_rate",
+        **_required_mapping(
+            shared.get("portfolio"),
+            "offlineEntryPathComparison.sharedExecutionConfig.portfolio",
+        ),
+    }
+    diagnostic_portfolio = {
+        "entryFill": "next_open",
+        "slippageMode": "adverse_rate",
+        **_required_mapping(diagnostics.get("config"), "config"),
+    }
+    if (
+        canonical_sha256(shared_portfolio) != canonical_sha256(diagnostic_portfolio)
+        or canonical_sha256(shared.get("costSlippage"))
+        != canonical_sha256(diagnostics.get("costSlippage"))
+        or canonical_sha256(shared.get("walkForward"))
+        != canonical_sha256(walk.get("config"))
+        or shared.get("exitEvaluator") != "shared_position_manager"
+    ):
+        raise PromotionEvidenceBuildError(
+            "entry_path_comparison_shared_config_mismatch"
+        )
+    _required_mapping(
+        shared.get("positionSizing"),
+        "offlineEntryPathComparison.sharedExecutionConfig.positionSizing",
+    )
+    _required_mapping(
+        shared.get("positionManager"),
+        "offlineEntryPathComparison.sharedExecutionConfig.positionManager",
+    )
+
+    arms = _required_sequence(comparison.get("arms"), "offlineEntryPathComparison.arms")
+    expected_paths = tuple(path.value for path in PortfolioEntryPath)
+    actual_paths = tuple(
+        _required_mapping(arm, "offlineEntryPathComparison.arm").get("entryPath")
+        for arm in arms
+    )
+    if actual_paths != expected_paths:
+        raise PromotionEvidenceBuildError("entry_path_arms_incomplete")
+
+    paired_boundaries: (
+        tuple[tuple[int, datetime, datetime, datetime, datetime], ...] | None
+    ) = None
+    kr_selected = {"kr": len(candidate_keys), "us": 0}
+    for raw_arm in arms:
+        arm = _required_mapping(raw_arm, "offlineEntryPathComparison.arm")
+        baseline = _required_mapping(
+            arm.get("baseline"), "offlineEntryPathComparison.arm.baseline"
+        )
+        _require_stored_benchmark_window_coverage(baseline, kr_selected)
+        if not _is_hash(baseline.get("determinismHash")):
+            raise PromotionEvidenceBuildError("entry_path_comparison_hash_invalid")
+        if (
+            signal_start_at is not None
+            and _required_timestamp(baseline, "recordStartAt") < signal_start_at
+        ):
+            raise PromotionEvidenceBuildError("forward_window_predates_effective_date")
+
+        arm_walk = _required_mapping(
+            arm.get("walkForward"), "offlineEntryPathComparison.arm.walkForward"
+        )
+        arm_folds = _required_sequence(
+            arm_walk.get("folds"), "offlineEntryPathComparison.arm.walkForward.folds"
+        )
+        if (
+            not arm_folds
+            or _required_int(arm_walk, "foldCount") != len(arm_folds)
+            or not _is_hash(arm_walk.get("determinismHash"))
+        ):
+            raise PromotionEvidenceBuildError(
+                "entry_path_comparison_walk_forward_invalid"
+            )
+        boundaries: list[tuple[int, datetime, datetime, datetime, datetime]] = []
+        for raw_fold in arm_folds:
+            fold = _required_mapping(
+                raw_fold, "offlineEntryPathComparison.arm.walkForward.fold"
+            )
+            train_end = _required_timestamp(fold, "trainEndAt")
+            boundaries.append(
+                (
+                    _required_int(fold, "foldIndex"),
+                    _required_timestamp(fold, "trainStartAt"),
+                    train_end,
+                    _required_timestamp(fold, "testStartAt"),
+                    _required_timestamp(fold, "testEndAt"),
+                )
+            )
+            test = _required_mapping(
+                fold.get("test"),
+                "offlineEntryPathComparison.arm.walkForward.fold.test",
+            )
+            _require_stored_benchmark_window_coverage(test, kr_selected)
+            if not _is_hash(test.get("determinismHash")):
+                raise PromotionEvidenceBuildError("entry_path_comparison_hash_invalid")
+            if signal_start_at is not None and train_end < signal_start_at:
+                raise PromotionEvidenceBuildError(
+                    "forward_window_predates_effective_date"
+                )
+        frozen_boundaries = tuple(boundaries)
+        if paired_boundaries is None:
+            paired_boundaries = frozen_boundaries
+        elif frozen_boundaries != paired_boundaries:
+            raise PromotionEvidenceBuildError("entry_path_comparison_fold_mismatch")
 
 
 def _require_track(value: object) -> PromotionTrack:
@@ -1660,10 +1998,13 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         if signal_start_at is None
         else "forward_window_predates_effective_date"
     )
-    if any(_required_int(eligible, market) <= 0 for market in ("kr", "us")):
-        raise PromotionEvidenceBuildError("eligible_symbols_zero")
-    if any(_required_int(selected, market) <= 0 for market in ("kr", "us")):
+    active_markets = tuple(
+        market for market in ("kr", "us") if _required_int(selected, market) > 0
+    )
+    if not active_markets:
         raise PromotionEvidenceBuildError("selected_universe_empty")
+    if any(_required_int(eligible, market) <= 0 for market in active_markets):
+        raise PromotionEvidenceBuildError("eligible_symbols_zero")
     if not _is_hash(data.get("datasetContentHash")):
         raise PromotionEvidenceBuildError("dataset_content_hash_invalid")
     selected_universe = _required_sequence(
@@ -1676,7 +2017,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
     selected_rows = tuple(
         cast(Mapping[str, object], item) for item in selected_universe
     )
-    for market in ("kr", "us"):
+    for market in active_markets:
         eligible_values = _required_sequence(
             eligible_symbols.get(market), f"eligibleSymbols.{market}"
         )
@@ -1789,7 +2130,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
                 row.get("sources"), "selectedUniverse.sources"
             )
         )
-        if (
+        if market_rows and (
             not source_values
             or any(
                 not isinstance(source, str) or not source.strip()
@@ -1853,7 +2194,7 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         raise PromotionEvidenceBuildError("required_validation_evidence_missing")
 
     benchmarks = _required_mapping(payload.get("benchmarks"), "benchmarks")
-    for market in ("kr", "us"):
+    for market in active_markets:
         benchmark = _required_mapping(benchmarks.get(market), f"benchmark.{market}")
         sources = _required_sequence(
             benchmark.get("sources"), f"benchmark.{market}.sources"
@@ -1957,6 +2298,14 @@ def derive_metrics_from_stored_payload(raw: object) -> PromotionMetrics:
         fold_hashes.append(cast(str, test_hash))
     if _required_int(walk, "passedFoldCount") != passed_folds:
         raise PromotionEvidenceBuildError("walk_forward_pass_count_mismatch")
+    _validate_entry_path_comparison(
+        payload.get("offlineEntryPathComparison"),
+        track=track,
+        data=data,
+        diagnostics=diagnostics,
+        walk=walk,
+        signal_start_at=signal_start_at,
+    )
 
     determinism = _required_mapping(payload.get("determinism"), "determinism")
     diagnostics_hash = diagnostics.get("determinismHash")

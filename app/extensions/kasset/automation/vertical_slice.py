@@ -115,10 +115,12 @@ from app.extensions.kasset.automation.policy import (
     PortfolioPlan,
     settlement_book,
 )
+from app.extensions.kasset.automation.portfolio_backtest import PortfolioEntryPath
 from app.extensions.kasset.automation.position_manager_service import (
     PaperPositionManagerService,
 )
 from app.extensions.kasset.automation.producer import (
+    EntryPathAttribution,
     RecommendationProducer,
     WeightedEnsembleDecision,
 )
@@ -130,7 +132,9 @@ from app.extensions.kasset.automation.shadow_setups import (
     DEFAULT_SHADOW_SETUP_CONFIG,
     SHADOW_SETUPS_SCHEMA_VERSION,
     ShadowSetupConfig,
+    ShadowSetupEntrySignal,
     evaluate_ranked_shadow_setups,
+    evaluate_shadow_setup_entry,
     shadow_setups_evidence,
 )
 from app.extensions.kasset.automation.strategies import STRATEGIES
@@ -335,21 +339,31 @@ class _PreAiExclusion:
 
 
 @dataclass(frozen=True, slots=True)
-class AdmittedCandidate:
-    """기술 판정과 장중 방아쇠를 모두 통과한 주문 후보.
+class _EntryPathSignal:
+    path: PortfolioEntryPath
+    reference_price: Decimal | None
+    stop_price: Decimal | None
+    valid_until: datetime
+    subtype: str
+    evidence: Mapping[str, object]
 
-    ``ai_review``와 ``news_shadow``는 기록용이다. 둘 중 무엇이 실패해도 이
-    행이 후보에서 빠지지 않는다.
+
+@dataclass(frozen=True, slots=True)
+class AdmittedCandidate:
+    """One merged symbol candidate admitted by one or more entry paths.
+
+    ``ai_review`` and ``news_shadow`` remain non-gating observations.
     """
 
     evaluated: EvaluatedCandidate
-    trigger_decision: IntradayTriggerDecision
+    trigger_decision: IntradayTriggerDecision | None
     decision: ExternalEvidence
     ai_review: AiReviewEvidence
     news_shadow: NewsShadowEvidence
     events: tuple[Mapping[str, object], ...]
     score: Decimal
     ai_shadow: AiShadowObservation | None = None
+    entry_path_attribution: EntryPathAttribution | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,6 +709,17 @@ class AIRecommendationVerticalSlice:
                 )
             )
         selected_setups = select_daily_setups(setups, config=self._daily_setup_config)
+        setup_by_key = {_setup_key(item): item for item in setups}
+        setup_by_key.update({_setup_key(item): item for item in selected_setups})
+        selected_setup_keys = frozenset(_setup_key(item) for item in selected_setups)
+        ranked_by_key = {item.key: item for item in ranking.ranked}
+        shadow_entry_paths_by_key = self._evaluate_shadow_entry_paths(
+            ranking.ranked,
+            candidates=candidate_by_key,
+            bars_by_candidate=bars_by_candidate,
+            completed_through=completed_cutoff_by_market.get("KR"),
+        )
+        candidate_entry_keys = selected_setup_keys | shadow_entry_paths_by_key.keys()
         setup_statuses: Counter[str] = Counter(item.status.value for item in setups)
         setup_rejections: Counter[str] = Counter(
             item.rejection_reason
@@ -739,80 +764,121 @@ class AIRecommendationVerticalSlice:
         )
         news_health_by_market = await self._news_source_health(allowed_markets)
 
-        for setup in selected_setups:
-            candidate = candidate_by_key.get(_setup_key(setup))
-            if candidate is None:
-                continue
-            candidate_regime = regimes.get(candidate.ranker_market)
-            ranked_result = next(
-                (item for item in ranking.ranked if item.key == candidate.ranker_key),
-                None,
+        for candidate_key in (
+            ranked_item.key
+            for ranked_item in ranking.ranked
+            if ranked_item.key in candidate_entry_keys
+        ):
+            setup = setup_by_key.get(candidate_key)
+            candidate = candidate_by_key.get(candidate_key)
+            candidate_regime = (
+                regimes.get(candidate.ranker_market) if candidate is not None else None
             )
-            if candidate_regime is None or ranked_result is None:
+            ranked_result = ranked_by_key.get(candidate_key)
+            if (
+                setup is None
+                or setup.ensemble is None
+                or candidate is None
+                or candidate_regime is None
+                or ranked_result is None
+            ):
                 continue
             item = EvaluatedCandidate(
                 candidate=candidate,
                 strategy_results=setup.strategy_results,
-                ensemble=cast(WeightedEnsembleDecision, setup.ensemble),
+                ensemble=setup.ensemble,
                 setup=setup,
                 factor_ranking=ranked_result,
                 regime=candidate_regime,
             )
-            evaluated.append(item)
-            if setup.direction not in {Action.BUY, Action.SELL}:
-                continue
-            actionable.append(item)
-            daily_bars = bars_by_candidate.get(candidate.ranker_key, ())
-            intraday = intraday_by_key.get(candidate.ranker_key)
-            previous_close = None
-            if isinstance(intraday, CompletedIntradayBars):
-                market_timezone = _KST if candidate.market == "KRX" else _ET
-                previous_bar = next(
-                    (
-                        bar
-                        for bar in reversed(daily_bars)
-                        if bar.timestamp.astimezone(market_timezone).date()
-                        < intraday.session.session_date
+            entry_path_signals = list(shadow_entry_paths_by_key.get(candidate_key, ()))
+            trigger_decision: IntradayTriggerDecision | None = None
+
+            if candidate_key in selected_setup_keys:
+                evaluated.append(item)
+                if setup.direction not in {Action.BUY, Action.SELL}:
+                    continue
+                actionable.append(item)
+                daily_bars = bars_by_candidate.get(candidate.ranker_key, ())
+                intraday = intraday_by_key.get(candidate.ranker_key)
+                previous_close = None
+                if isinstance(intraday, CompletedIntradayBars):
+                    market_timezone = _KST if candidate.market == "KRX" else _ET
+                    previous_bar = next(
+                        (
+                            bar
+                            for bar in reversed(daily_bars)
+                            if bar.timestamp.astimezone(market_timezone).date()
+                            < intraday.session.session_date
+                        ),
+                        None,
+                    )
+                    previous_close = (
+                        previous_bar.close if previous_bar is not None else None
+                    )
+                trigger_decision = self._decide_triggers(
+                    item,
+                    intraday=intraday,
+                    index_bars=index_bars_by_symbol.get(
+                        _benchmark_symbol(ranked_result)
                     ),
-                    None,
+                    previous_close=previous_close,
+                ).expire(self._now)
+                trigger_statuses[trigger_decision.status.value] += 1
+                trigger_payload = trigger_decision.as_evidence()
+                trigger_evidence.append(trigger_payload)
+                no_chase_evidence.append(
+                    {
+                        "market": candidate.market,
+                        "symbol": candidate.symbol,
+                        **cast(dict[str, object], trigger_payload["noChase"]),
+                    }
                 )
-                previous_close = (
-                    previous_bar.close if previous_bar is not None else None
-                )
-            trigger_decision = self._decide_triggers(
-                item,
-                intraday=intraday,
-                index_bars=index_bars_by_symbol.get(_benchmark_symbol(ranked_result)),
-                previous_close=previous_close,
+                shadow_intraday = intraday_by_key.get(candidate.ranker_key)
+                if candidate.market == "KRX" and isinstance(
+                    shadow_intraday, CompletedIntradayBars
+                ):
+                    rvol_shadow_candidates.append(
+                        (item, shadow_intraday, trigger_decision)
+                    )
+                if not trigger_decision.triggered:
+                    for failure_code in (
+                        trigger_decision.blocked_reason or "unspecified"
+                    ).split(","):
+                        normalized_failure = failure_code.strip()
+                        if normalized_failure:
+                            trigger_failures[normalized_failure] += 1
+                    review_rejections[_NO_INTRADAY_TRIGGER] += 1
+                    pre_ai_exclusion_evidence.append(
+                        _trigger_exclusion_evidence(item, trigger_decision)
+                    )
+                    if not entry_path_signals:
+                        continue
+                elif setup.direction is Action.BUY:
+                    entry_path_signals.insert(
+                        0,
+                        _breakout_entry_path_signal(
+                            item,
+                            trigger_decision=trigger_decision,
+                            now=self._now,
+                        ),
+                    )
+
+            entry_path_attribution = (
+                _merge_entry_path_signals(entry_path_signals)
+                if entry_path_signals
+                else None
             )
-            trigger_decision = trigger_decision.expire(self._now)
-            trigger_statuses[trigger_decision.status.value] += 1
-            trigger_payload = trigger_decision.as_evidence()
-            trigger_evidence.append(trigger_payload)
-            no_chase_evidence.append(
-                {
-                    "market": candidate.market,
-                    "symbol": candidate.symbol,
-                    **cast(dict[str, object], trigger_payload["noChase"]),
-                }
-            )
-            shadow_intraday = intraday_by_key.get(candidate.ranker_key)
-            if candidate.market == "KRX" and isinstance(
-                shadow_intraday, CompletedIntradayBars
+            if entry_path_attribution is None and (
+                trigger_decision is None or not trigger_decision.triggered
             ):
-                rvol_shadow_candidates.append((item, shadow_intraday, trigger_decision))
-            if not trigger_decision.triggered:
-                for failure_code in (
-                    trigger_decision.blocked_reason or "unspecified"
-                ).split(","):
-                    normalized_failure = failure_code.strip()
-                    if normalized_failure:
-                        trigger_failures[normalized_failure] += 1
-                review_rejections[_NO_INTRADAY_TRIGGER] += 1
-                pre_ai_exclusion_evidence.append(
-                    _trigger_exclusion_evidence(item, trigger_decision)
-                )
                 continue
+            effective_action = (
+                Action.BUY
+                if entry_path_attribution is not None
+                else item.ensemble.action
+            )
+
             # 손절 연속은 관측값으로만 남긴다. 손절 이력이 있어도 유효한 새
             # 진입 후보는 계속 검토한다.
             loss_streak = await loss_streak_gate.evaluate(
@@ -820,7 +886,7 @@ class AIRecommendationVerticalSlice:
                 owner_user_id,
                 market=candidate.market,
                 symbol=candidate.symbol,
-                side=item.ensemble.action.value,
+                side=effective_action.value,
                 now=self._now,
             )
             loss_streak_evidence.append(
@@ -834,7 +900,7 @@ class AIRecommendationVerticalSlice:
             )
             account_state = account_state_snapshot.for_market(candidate.market)
             account_state_gate = evaluate_account_state_gate(
-                item.ensemble.action.value,
+                effective_action.value,
                 account_state,
             )
             if not account_state_gate.passed:
@@ -858,14 +924,17 @@ class AIRecommendationVerticalSlice:
                 candidate_regime,
                 snapshot=snapshot,
                 account_state=account_state,
+                entry_path_attribution=entry_path_attribution,
             )
             if isinstance(sizing, _PreAiExclusion):
                 pre_ai_exclusions[sizing.reason] += 1
                 pre_ai_exclusion_evidence.append(sizing.evidence)
                 continue
-            # 3단계: 기술 판정이 이미 후보를 확정했다. AI 검토와 뉴스 수집은
-            # 설명과 보조순위를 위한 관측이며 실패해도 이 행은 남는다.
-            review = await self._review_candidate(owner_user_id, item)
+            review = await self._review_candidate(
+                owner_user_id,
+                item,
+                entry_path_attribution=entry_path_attribution,
+            )
             if review.ai_review.status is AiReviewStatus.UNAVAILABLE:
                 ai_failures += 1
             review_rejections[f"ai_{review.ai_review.status.value}"] += 1
@@ -874,6 +943,7 @@ class AIRecommendationVerticalSlice:
                     item,
                     reason="admitted",
                     observation=review.ai_shadow,
+                    entry_path_attribution=entry_path_attribution,
                 )
             )
             news_shadow = await self._news_shadow(
@@ -888,6 +958,7 @@ class AIRecommendationVerticalSlice:
                     review=review,
                     news_shadow=news_shadow,
                     now=self._now,
+                    entry_path_attribution=entry_path_attribution,
                 )
             )
 
@@ -1018,7 +1089,12 @@ class AIRecommendationVerticalSlice:
                     COHORT_TECHNICAL_AI,
                     COHORT_TECHNICAL_AI_NEWS,
                 ],
-                "gating": ["daily_setup", "intraday_triggers", "hard_risk"],
+                "gating": ["entry_path", "hard_risk"],
+                "entryPathRequirements": {
+                    "breakout-baseline": ["daily_setup", "intraday_triggers"],
+                    "first-pullback": [],
+                    "nr7-inside-day": [],
+                },
                 "nonGating": ["ai_review", "news_shadow"],
             },
             "regime": (
@@ -1059,15 +1135,83 @@ class AIRecommendationVerticalSlice:
             result["dataPrerequisite"] = (
                 "fewer than 50 screener candidates have usable 52-week daily candles"
             )
-        if not selected_setups:
-            result["skipped"] = _NO_DAILY_SETUP
-        elif not actionable:
-            result["skipped"] = "no_breakout_family_direction"
-        elif not admitted and pre_ai_exclusions:
+        if not admitted and pre_ai_exclusions:
             result["skipped"] = "no_affordable_actionable_candidate"
+        elif not selected_setups and not shadow_entry_paths_by_key:
+            result["skipped"] = _NO_DAILY_SETUP
+        elif not actionable and not shadow_entry_paths_by_key:
+            result["skipped"] = "no_breakout_family_direction"
         elif not admitted:
             result["skipped"] = _NO_INTRADAY_TRIGGER
         return result
+
+    def _evaluate_shadow_entry_paths(
+        self,
+        ranked: Sequence[CandidateRankResult],
+        *,
+        candidates: Mapping[CandidateKey, TradingCandidate],
+        bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
+        completed_through: datetime | None,
+    ) -> dict[CandidateKey, tuple[_EntryPathSignal, ...]]:
+        """Evaluate KRX-only detector paths without Daily Setup or intraday gates."""
+
+        triggered: dict[CandidateKey, tuple[_EntryPathSignal, ...]] = {}
+        for ranking in ranked:
+            candidate = candidates.get(ranking.key)
+            if candidate is None or candidate.market != "KRX":
+                continue
+            signals: list[_EntryPathSignal] = []
+            for path, setup_name in (
+                (PortfolioEntryPath.FIRST_PULLBACK, "first_pullback"),
+                (PortfolioEntryPath.NR7_INSIDE_DAY, "nr7_inside_day"),
+            ):
+                detector_signal: ShadowSetupEntrySignal = evaluate_shadow_setup_entry(
+                    bars_by_candidate.get(ranking.key, ()),
+                    setup=cast(Any, setup_name),
+                    symbol=candidate.symbol,
+                    market="KRX",
+                    as_of=self._now,
+                    completed_through=completed_through,
+                    config=self._shadow_setup_config,
+                )
+                if (
+                    not detector_signal.triggered
+                    or detector_signal.trigger_price is None
+                    or detector_signal.stop_price is None
+                ):
+                    continue
+                valid_until = self._now + timedelta(hours=1)
+                if ranking.valid_until is not None:
+                    valid_until = min(
+                        valid_until,
+                        ranking.valid_until.astimezone(UTC),
+                    )
+                signals.append(
+                    _EntryPathSignal(
+                        path=path,
+                        reference_price=detector_signal.trigger_price,
+                        stop_price=detector_signal.stop_price,
+                        valid_until=valid_until,
+                        subtype=detector_signal.subtype,
+                        evidence={
+                            "title": "KRX detector entry path",
+                            "source": "kasset_shadow_setup_entry",
+                            "kind": "entry_path",
+                            "entryPath": path.value,
+                            "subtype": detector_signal.subtype,
+                            "signalAt": _timestamp_text(detector_signal.signal_at),
+                            "referencePrice": str(detector_signal.trigger_price),
+                            "stopPrice": str(detector_signal.stop_price),
+                            "sourceTimestamps": [
+                                _timestamp_text(value)
+                                for value in detector_signal.source_timestamps
+                            ],
+                        },
+                    )
+                )
+            if signals:
+                triggered[ranking.key] = tuple(signals)
+        return triggered
 
     async def _load_candidate_bars(
         self,
@@ -1741,6 +1885,7 @@ class AIRecommendationVerticalSlice:
         *,
         snapshot: AITradingSnapshot,
         account_state: AccountStateEvaluation | None = None,
+        entry_path_attribution: EntryPathAttribution | None = None,
     ) -> _PreAiSizing | _PreAiExclusion:
         """Size the candidate before AI so unaffordable rows cost no AI slot.
 
@@ -1751,8 +1896,26 @@ class AIRecommendationVerticalSlice:
 
         candidate = item.candidate
         book, _ = settlement_book(market=candidate.market)
-        reference_price_text = _level_text(item.ensemble.agreeing, "entry")
-        if reference_price_text is None:
+        path_override = bool(
+            entry_path_attribution is not None
+            and entry_path_attribution.overrides_breakout_baseline
+        )
+        if path_override:
+            assert entry_path_attribution is not None
+            reference_price = entry_path_attribution.reference_price
+            strategy_stop = entry_path_attribution.stop_price
+        else:
+            reference_price_text = _level_text(item.ensemble.agreeing, "entry")
+            reference_price = (
+                Decimal(reference_price_text)
+                if reference_price_text is not None
+                else None
+            )
+            strategy_stop_text = _level_text(item.ensemble.agreeing, "stop")
+            strategy_stop = (
+                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
+            )
+        if reference_price is None:
             return _PreAiExclusion(
                 reason=_PRESIZING_NO_REFERENCE_PRICE,
                 evidence=_presizing_exclusion_evidence(
@@ -1761,21 +1924,17 @@ class AIRecommendationVerticalSlice:
                     plan=None,
                 ),
             )
-        reference_price = Decimal(reference_price_text)
-        strategy_stop_text = _level_text(item.ensemble.agreeing, "stop")
         ranking = item.factor_ranking
         plan = await self._policy.portfolio_plan(
             self._db,
             owner_user_id,
-            action=item.ensemble.action.value,
+            action=(Action.BUY if path_override else item.ensemble.action).value,
             market=candidate.market,
             symbol=candidate.symbol,
             reference_price=reference_price,
             limits=snapshot.limits,
             usage=snapshot.usage_by_currency[book],
-            strategy_stop=(
-                Decimal(strategy_stop_text) if strategy_stop_text is not None else None
-            ),
+            strategy_stop=strategy_stop,
             strategy_atr=ranking.atr_14 if ranking is not None else None,
             price_as_of=ranking.data_as_of if ranking is not None else None,
             evaluated_at=self._now,
@@ -1814,6 +1973,8 @@ class AIRecommendationVerticalSlice:
         self,
         owner_user_id: int,
         item: EvaluatedCandidate,
+        *,
+        entry_path_attribution: EntryPathAttribution | None = None,
     ) -> _AiReviewOutcomeBundle:
         """AI에게 설명과 보조순위만 물어본다.
 
@@ -1823,6 +1984,13 @@ class AIRecommendationVerticalSlice:
 
         regime = item.regime
         ranking = item.factor_ranking
+        effective_action = (
+            Action.BUY if entry_path_attribution is not None else item.setup.direction
+        )
+        detector_only = bool(
+            entry_path_attribution is not None
+            and entry_path_attribution.overrides_breakout_baseline
+        )
         if self._ai_router is None or regime is None or ranking is None:
             return _AiReviewOutcomeBundle(
                 ai_review=ai_review_from_observation(
@@ -1839,11 +2007,32 @@ class AIRecommendationVerticalSlice:
             "candidateRanking": ranking.as_evidence(),
             "regime": regime.regime.value,
             "regimeDetail": regime.detail,
-            "strategyFamily": item.ensemble.family.value,
-            "strategyVotes": list(item.ensemble.votes),
+            **(
+                {
+                    "strategyFamily": item.ensemble.family.value,
+                    "strategyVotes": list(item.ensemble.votes),
+                }
+                if not detector_only
+                else {}
+            ),
             "dailySetup": item.setup.as_evidence(),
-            "entry": _level_text(item.ensemble.agreeing, "entry"),
-            "stop": _level_text(item.ensemble.agreeing, "stop"),
+            "triggeredEntryPaths": (
+                list(entry_path_attribution.triggered_paths)
+                if entry_path_attribution is not None
+                else ["breakout-baseline"]
+            ),
+            "entry": (
+                str(entry_path_attribution.reference_price)
+                if entry_path_attribution is not None
+                and entry_path_attribution.reference_price is not None
+                else _level_text(item.ensemble.agreeing, "entry")
+            ),
+            "stop": (
+                str(entry_path_attribution.stop_price)
+                if entry_path_attribution is not None
+                and entry_path_attribution.stop_price is not None
+                else _level_text(item.ensemble.agreeing, "stop")
+            ),
             "target": _level_text(item.ensemble.agreeing, "target"),
         }
         try:
@@ -1888,7 +2077,7 @@ class AIRecommendationVerticalSlice:
             else Action.HOLD
         )
         confidence = Decimal(str(verdict.confidence))
-        if ai_action is not item.setup.direction:
+        if ai_action is not effective_action:
             status = AiReviewStatus.DISAGREES
         elif not confidence.is_finite() or confidence < AI_COHORT_CONFIDENCE_FLOOR:
             status = AiReviewStatus.LOW_CONFIDENCE
@@ -1899,7 +2088,7 @@ class AIRecommendationVerticalSlice:
                 status=status,
                 observation=observation,
                 detail=(
-                    f"technical direction={item.setup.direction.value} "
+                    f"technical direction={effective_action.value} "
                     f"aiAction={ai_action.value} risk={verdict.risk}"
                 ),
             ),
@@ -1914,11 +2103,16 @@ class AIRecommendationVerticalSlice:
         *,
         reason: str,
         observation: AiShadowObservation | None = None,
+        entry_path_attribution: EntryPathAttribution | None = None,
     ) -> AIReviewOutcome:
         return AIReviewOutcome(
             symbol=item.candidate.symbol,
             market=item.candidate.ranker_market,
-            strategy_action=item.ensemble.action.value,
+            strategy_action=(
+                Action.BUY.value
+                if entry_path_attribution is not None
+                else item.ensemble.action.value
+            ),
             ai_action=observation.action if observation is not None else None,
             confidence=observation.confidence if observation is not None else None,
             reason=reason,
@@ -1949,10 +2143,13 @@ class AIRecommendationVerticalSlice:
         sizing: _PreAiSizing,
     ) -> AIRecommendation:
         candidate = item.evaluated.candidate
-        # 기술 판정 근거의 방향은 Daily Setup 방향과 같아야 한다. 이 불변식이
-        # 깨지면 조용히 다른 방향/수량으로 저장하지 않고 멈춘다.
-        if item.decision.action is not item.evaluated.setup.direction:
-            raise ValueError("decision evidence must match the daily setup direction")
+        expected_action = (
+            Action.BUY
+            if item.entry_path_attribution is not None
+            else item.evaluated.setup.direction
+        )
+        if item.decision.action is not expected_action:
+            raise ValueError("decision evidence must match the admitted entry action")
         plan = sizing.plan
         hard_risk = await self._policy.evaluate_hard_risk(
             self._db,
@@ -1981,7 +2178,11 @@ class AIRecommendationVerticalSlice:
         )
         advisory_evidence: list[Mapping[str, object]] = [
             item.evaluated.setup.as_evidence(),
-            item.trigger_decision.as_evidence(),
+            *(
+                [item.trigger_decision.as_evidence()]
+                if item.trigger_decision is not None
+                else []
+            ),
             item.ai_review.as_evidence(),
             item.news_shadow.as_evidence(),
             cohorts,
@@ -2000,16 +2201,33 @@ class AIRecommendationVerticalSlice:
             regime=regime.regime.value,
             regime_detail=regime.detail,
             strategy_weights=regime.weights,
-            strategy_family=StrategyFamily.BREAKOUT,
+            strategy_family=(
+                None
+                if item.entry_path_attribution is not None
+                and item.entry_path_attribution.overrides_breakout_baseline
+                else StrategyFamily.BREAKOUT
+            ),
             event_evidence=item.events,
             ranking={
                 "score": str(item.score),
                 "position": position,
                 "total": total,
                 "note": (
-                    f"{candidate.source} 후보 {total}개 중 완료 일봉 Daily Setup과 "
-                    "완료 장중 trigger로 진입 후보를 정하고, AI는 보조순위로만 "
-                    "썼습니다."
+                    (
+                        f"{candidate.source} 후보 {total}개 중 "
+                        f"{', '.join(item.entry_path_attribution.triggered_paths)} "
+                        "진입 경로로 후보를 정하고, AI는 보조순위로만 썼습니다."
+                    )
+                    if item.entry_path_attribution is not None
+                    and any(
+                        path != PortfolioEntryPath.BREAKOUT_BASELINE.value
+                        for path in item.entry_path_attribution.triggered_paths
+                    )
+                    else (
+                        f"{candidate.source} 후보 {total}개 중 완료 일봉 Daily Setup과 "
+                        "완료 장중 trigger로 진입 후보를 정하고, AI는 보조순위로만 "
+                        "썼습니다."
+                    )
                 ),
             },
             portfolio=plan.as_evidence(),
@@ -2025,6 +2243,7 @@ class AIRecommendationVerticalSlice:
                 else None
             ),
             advisory_evidence=advisory_evidence,
+            entry_path_attribution=item.entry_path_attribution,
         )
         return cast(AIRecommendation, row)
 
@@ -2191,6 +2410,97 @@ def _benchmark_symbol(ranking: CandidateRankResult) -> str | None:
     return None
 
 
+def _candidate_valid_until(
+    item: EvaluatedCandidate,
+    *,
+    now: datetime,
+    trigger_decision: IntradayTriggerDecision | None = None,
+) -> datetime:
+    valid_until = min(
+        (
+            result.valid_until.astimezone(UTC)
+            for result in item.strategy_results
+            if result.valid_until.tzinfo is not None
+            and result.valid_until.utcoffset() is not None
+        ),
+        default=now + timedelta(hours=1),
+    )
+    ranking = item.factor_ranking
+    if ranking is not None and ranking.valid_until is not None:
+        valid_until = min(valid_until, ranking.valid_until.astimezone(UTC))
+    valid_until = min(valid_until, now + timedelta(hours=1))
+    if trigger_decision is not None:
+        valid_until = min(valid_until, trigger_decision.valid_until)
+    return valid_until
+
+
+def _breakout_entry_path_signal(
+    item: EvaluatedCandidate,
+    *,
+    trigger_decision: IntradayTriggerDecision,
+    now: datetime,
+) -> _EntryPathSignal:
+    active = tuple(
+        trigger.code for trigger in trigger_decision.triggers if trigger.active
+    )
+    reference_price_text = _level_text(item.ensemble.agreeing, "entry")
+    stop_price_text = _level_text(item.ensemble.agreeing, "stop")
+    return _EntryPathSignal(
+        path=PortfolioEntryPath.BREAKOUT_BASELINE,
+        reference_price=(
+            Decimal(reference_price_text) if reference_price_text is not None else None
+        ),
+        stop_price=Decimal(stop_price_text) if stop_price_text is not None else None,
+        valid_until=_candidate_valid_until(
+            item,
+            now=now,
+            trigger_decision=trigger_decision,
+        ),
+        subtype="daily_setup_intraday_trigger",
+        evidence={
+            "title": "Breakout baseline entry path",
+            "source": "kasset_daily_setup_intraday_triggers",
+            "kind": "entry_path",
+            "entryPath": PortfolioEntryPath.BREAKOUT_BASELINE.value,
+            "subtype": "daily_setup_intraday_trigger",
+            "activeTriggers": list(active),
+        },
+    )
+
+
+def _merge_entry_path_signals(
+    signals: Sequence[_EntryPathSignal],
+) -> EntryPathAttribution:
+    order = {path: index for index, path in enumerate(PortfolioEntryPath)}
+    by_path = {signal.path: signal for signal in signals}
+    ordered = tuple(sorted(by_path.values(), key=lambda signal: order[signal.path]))
+    primary = ordered[0]
+    labels = {
+        PortfolioEntryPath.BREAKOUT_BASELINE: "돌파",
+        PortfolioEntryPath.FIRST_PULLBACK: "첫 눌림목(First Pullback)",
+        PortfolioEntryPath.NR7_INSIDE_DAY: "NR7/인사이드 데이(NR7/Inside Day)",
+    }
+    rationale = (
+        "감지된 진입 경로: "
+        + ", ".join(labels[signal.path] for signal in ordered)
+        + ".",
+    )
+    if primary.path is not PortfolioEntryPath.BREAKOUT_BASELINE:
+        rationale = (
+            *rationale,
+            "이 KRX 매수 경로는 Daily Setup과 장중 ORB/VWAP/RVOL 조건에 "
+            "의존하지 않습니다.",
+        )
+    return EntryPathAttribution(
+        triggered_paths=tuple(signal.path.value for signal in ordered),
+        reference_price=primary.reference_price,
+        stop_price=primary.stop_price,
+        valid_until=primary.valid_until,
+        rationale=rationale,
+        evidence=tuple(dict(signal.evidence) for signal in ordered),
+    )
+
+
 def _trigger_exclusion_evidence(
     item: EvaluatedCandidate,
     decision: IntradayTriggerDecision,
@@ -2214,71 +2524,112 @@ def _trigger_exclusion_evidence(
 def _admitted_candidate(
     item: EvaluatedCandidate,
     *,
-    trigger_decision: IntradayTriggerDecision,
+    trigger_decision: IntradayTriggerDecision | None,
     review: _AiReviewOutcomeBundle,
     news_shadow: NewsShadowEvidence,
     now: datetime,
+    entry_path_attribution: EntryPathAttribution | None = None,
 ) -> AdmittedCandidate:
-    """기술 판정을 확정 근거로 굳히고 AI는 보조순위에만 쓴다."""
+    """Freeze one merged entry decision; AI remains a ranking observation."""
 
     ranking = item.factor_ranking
     setup = item.setup
-    active = tuple(trigger for trigger in trigger_decision.triggers if trigger.active)
+    active = tuple(
+        trigger
+        for trigger in (
+            trigger_decision.triggers if trigger_decision is not None else ()
+        )
+        if trigger.active
+    )
     available = tuple(
-        trigger for trigger in trigger_decision.triggers if trigger.available
+        trigger
+        for trigger in (
+            trigger_decision.triggers if trigger_decision is not None else ()
+        )
+        if trigger.available
     )
     trigger_strength = (
         Decimal(len(active)) / Decimal(len(available)) if available else Decimal("0")
     )
-    valid_until = min(
-        (
-            result.valid_until.astimezone(UTC)
-            for result in item.strategy_results
-            if result.valid_until.tzinfo is not None
-            and result.valid_until.utcoffset() is not None
-        ),
-        default=now + timedelta(hours=1),
+    has_breakout_baseline = bool(
+        entry_path_attribution is not None
+        and PortfolioEntryPath.BREAKOUT_BASELINE.value
+        in entry_path_attribution.triggered_paths
     )
-    if ranking is not None and ranking.valid_until is not None:
-        valid_until = min(valid_until, ranking.valid_until.astimezone(UTC))
-    valid_until = min(valid_until, now + timedelta(hours=1))
-    valid_until = min(valid_until, trigger_decision.valid_until)
-    confidence = min(
-        Decimal("1"),
-        (item.ensemble.confidence + trigger_strength) / Decimal("2"),
-    ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
-    decision = ExternalEvidence(
-        source="kasset_technical_decision:daily_setup+intraday_triggers",
-        symbol=item.candidate.symbol,
-        market=cast(Any, item.candidate.market),
-        action=setup.direction,
-        confidence=confidence,
-        as_of=now,
-        valid_until=valid_until,
-        rationale=(
+
+    if entry_path_attribution is None:
+        if trigger_decision is None:
+            raise ValueError("breakout admission requires an intraday trigger decision")
+        valid_until = _candidate_valid_until(
+            item,
+            now=now,
+            trigger_decision=trigger_decision,
+        )
+        confidence = min(
+            Decimal("1"),
+            (item.ensemble.confidence + trigger_strength) / Decimal("2"),
+        ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
+        action = setup.direction
+        source = "kasset_technical_decision:daily_setup+intraday_triggers"
+        rationale = (
             "완료 일봉 Daily Setup이 적합하고 완료 장중 trigger 정책이 "
             "충족되어 진입 후보로 남았습니다.",
             f"활성 trigger: {', '.join(trigger.code for trigger in active) or '없음'}",
-        ),
-        evidence=(
+        )
+        decision_evidence: tuple[Mapping[str, object], ...] = (
             setup.as_evidence(),
             trigger_decision.as_evidence(),
-        ),
+        )
+    else:
+        valid_until = entry_path_attribution.valid_until
+        confidence = (
+            min(
+                Decimal("1"),
+                (item.ensemble.confidence + trigger_strength) / Decimal("2"),
+            ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
+            if has_breakout_baseline
+            else Decimal("1.000000")
+        )
+        action = Action.BUY
+        source = "kasset_technical_decision:entry_paths"
+        rationale = entry_path_attribution.rationale
+        decision_evidence = (
+            setup.as_evidence(),
+            *(
+                (trigger_decision.as_evidence(),)
+                if trigger_decision is not None
+                else ()
+            ),
+            entry_path_attribution.as_evidence(),
+        )
+
+    decision = ExternalEvidence(
+        source=source,
+        symbol=item.candidate.symbol,
+        market=cast(Any, item.candidate.market),
+        action=action,
+        confidence=confidence,
+        as_of=now,
+        valid_until=valid_until,
+        rationale=rationale,
+        evidence=decision_evidence,
     )
-    # AI는 순위에만 5% 기여한다. AI가 없으면 그 항은 0이 되고 채택은 바뀌지 않는다.
     ai_bonus = Decimal("0")
     if review.ai_review.agrees:
         directional = (
-            review.bullish_score
-            if setup.direction is Action.BUY
-            else review.bearish_score
+            review.bullish_score if action is Action.BUY else review.bearish_score
         )
         ai_bonus = Decimal(directional) / Decimal("100")
     score = (
-        (ranking.total_score if ranking is not None else Decimal("0")) * Decimal("0.45")
-        + abs(item.ensemble.score) * Decimal("0.35")
-        + trigger_strength * Decimal("0.15")
-        + ai_bonus * Decimal("0.05")
+        (
+            (ranking.total_score if ranking is not None else Decimal("0"))
+            * Decimal("0.45")
+            + abs(item.ensemble.score) * Decimal("0.35")
+            + trigger_strength * Decimal("0.15")
+            + ai_bonus * Decimal("0.05")
+        )
+        if entry_path_attribution is None or has_breakout_baseline
+        else (ranking.total_score if ranking is not None else Decimal("0"))
     ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
     return AdmittedCandidate(
         evaluated=item,
@@ -2289,6 +2640,7 @@ def _admitted_candidate(
         events=news_shadow.items,
         score=score,
         ai_shadow=review.ai_shadow,
+        entry_path_attribution=entry_path_attribution,
     )
 
 

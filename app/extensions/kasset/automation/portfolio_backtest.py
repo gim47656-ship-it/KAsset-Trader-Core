@@ -49,6 +49,9 @@ from app.extensions.kasset.automation.regime import (
     RegimeAssessment,
     assess_market_regime,
 )
+from app.extensions.kasset.automation.shadow_setups import (
+    evaluate_shadow_setup_entry,
+)
 from app.extensions.kasset.automation.strategies import STRATEGIES
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PAPER_STRATEGY_KEY,
@@ -62,6 +65,14 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _VALUE_QUANTUM = Decimal("0.00000001")
 _SUPPORTED_MARKETS = frozenset({"KR", "US"})
+
+
+class PortfolioEntryPath(StrEnum):
+    """서로 독립적으로 실행하는 오프라인 진입 arm."""
+
+    BREAKOUT_BASELINE = "breakout-baseline"
+    FIRST_PULLBACK = "first-pullback"
+    NR7_INSIDE_DAY = "nr7-inside-day"
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +386,20 @@ class WalkForwardResult:
 
 
 @dataclass(frozen=True, slots=True)
+class EntryPathArmResult:
+    entry_path: PortfolioEntryPath
+    baseline: PortfolioBacktestResult
+    walk_forward: WalkForwardResult
+
+
+@dataclass(frozen=True, slots=True)
+class EntryPathComparisonResult:
+    """같은 KR 입력과 fold를 각 진입 arm이 독립 실행한 결과."""
+
+    arms: tuple[EntryPathArmResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestPerformanceSlice:
     """Comparable period/regime result derived only from executed portfolio paths."""
 
@@ -443,6 +468,12 @@ class _PendingEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _EntrySignalDecision:
+    stop: Decimal
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingExit:
     key: CandidateKey
     signal_index: int
@@ -494,6 +525,7 @@ def run_portfolio_backtest(
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
     window: BacktestWindow | None = None,
+    entry_path: PortfolioEntryPath | str = PortfolioEntryPath.BREAKOUT_BASELINE,
 ) -> PortfolioBacktestResult:
     """설정에 명시된 체결 규약으로 long-only 포트폴리오를 실행한다.
 
@@ -502,7 +534,13 @@ def run_portfolio_backtest(
     체결하는 lookahead 위험 반사실이며 결과 evidence에 이 가정을 기록한다.
     """
 
+    active_entry_path = PortfolioEntryPath(entry_path)
+
     metadata = _validate_candidates(candidates)
+    if active_entry_path is not PortfolioEntryPath.BREAKOUT_BASELINE and any(
+        candidate.market != "KR" for candidate in metadata
+    ):
+        raise ValueError(f"{active_entry_path.value} supports KR candidates only")
     normalized_bars = _normalize_candidate_bars(metadata, bars_by_candidate)
     normalized_benchmarks = _normalize_benchmarks(benchmark_bars_by_market or {})
     normalized_candidate_benchmarks = _normalize_candidate_benchmarks(
@@ -610,6 +648,7 @@ def run_portfolio_backtest(
             timestamp=timestamp,
             strategies=strategy_tuple,
             regimes=regimes,
+            entry_path=active_entry_path,
         )
         if config.entry_fill == "signal_close":
             closes = {
@@ -755,6 +794,7 @@ def run_walk_forward(
     universe_evidence: UniverseEvidence = UniverseEvidence(),
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
+    entry_path: PortfolioEntryPath | str = PortfolioEntryPath.BREAKOUT_BASELINE,
 ) -> WalkForwardResult:
     """Evaluate rolling train/test folds without carrying positions across folds."""
 
@@ -805,6 +845,7 @@ def run_walk_forward(
             universe_evidence=universe_evidence,
             strategies=strategies,
             ranker=ranker,
+            entry_path=entry_path,
         )
         test_result = run_portfolio_backtest(
             metadata,
@@ -816,6 +857,7 @@ def run_walk_forward(
             strategies=strategies,
             ranker=ranker,
             window=BacktestWindow(signal_start_at=train_end, end_at=test_end),
+            entry_path=entry_path,
         )
         folds.append(
             WalkForwardFold(
@@ -872,6 +914,63 @@ def run_walk_forward(
     return replace(result, determinism_hash=_stable_hash(result))
 
 
+def run_entry_path_comparison(
+    candidates: Sequence[CandidateMetadata],
+    bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
+    *,
+    config: PortfolioBacktestConfig = PortfolioBacktestConfig(),
+    walk_forward: WalkForwardConfig = WalkForwardConfig(),
+    walk_forward_bars_by_candidate: (
+        Mapping[CandidateKey, Sequence[PriceBar]] | None
+    ) = None,
+    benchmark_bars_by_market: Mapping[MarketKey, Sequence[PriceBar]] | None = None,
+    benchmark_bars_by_candidate: (
+        Mapping[CandidateKey, CandidateBenchmarkSeries] | None
+    ) = None,
+    universe_evidence: UniverseEvidence = UniverseEvidence(),
+    strategies: Sequence[DeterministicStrategy] = STRATEGIES,
+    ranker: CandidateRanker | None = None,
+    window: BacktestWindow | None = None,
+) -> EntryPathComparisonResult:
+    """같은 KR source/config/fold에서 세 진입 arm을 서로 독립 실행한다."""
+
+    metadata = _validate_candidates(candidates)
+    if any(candidate.market != "KR" for candidate in metadata):
+        raise ValueError("entry-path comparison supports KR candidates only")
+    walk_bars = walk_forward_bars_by_candidate or bars_by_candidate
+    arms = tuple(
+        EntryPathArmResult(
+            entry_path=entry_path,
+            baseline=run_portfolio_backtest(
+                metadata,
+                bars_by_candidate,
+                config=config,
+                benchmark_bars_by_market=benchmark_bars_by_market,
+                benchmark_bars_by_candidate=benchmark_bars_by_candidate,
+                universe_evidence=universe_evidence,
+                strategies=strategies,
+                ranker=ranker,
+                window=window,
+                entry_path=entry_path,
+            ),
+            walk_forward=run_walk_forward(
+                metadata,
+                walk_bars,
+                config=config,
+                walk_forward=walk_forward,
+                benchmark_bars_by_market=benchmark_bars_by_market,
+                benchmark_bars_by_candidate=benchmark_bars_by_candidate,
+                universe_evidence=universe_evidence,
+                strategies=strategies,
+                ranker=ranker,
+                entry_path=entry_path,
+            ),
+        )
+        for entry_path in PortfolioEntryPath
+    )
+    return EntryPathComparisonResult(arms=arms)
+
+
 def run_portfolio_diagnostics(
     candidates: Sequence[CandidateMetadata],
     bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
@@ -885,6 +984,7 @@ def run_portfolio_diagnostics(
     strategies: Sequence[DeterministicStrategy] = STRATEGIES,
     ranker: CandidateRanker | None = None,
     window: BacktestWindow | None = None,
+    entry_path: PortfolioEntryPath | str = PortfolioEntryPath.BREAKOUT_BASELINE,
 ) -> PortfolioBacktestDiagnostics:
     """Produce stress, breakdown, turnover, and counterfactual promotion evidence."""
 
@@ -910,6 +1010,7 @@ def run_portfolio_diagnostics(
             strategies=strategies,
             ranker=ranker,
             window=window,
+            entry_path=entry_path,
         )
 
     baseline = run(metadata, bars_by_candidate, config)
@@ -1260,7 +1361,7 @@ def _assess_regimes(
     }
 
 
-def _evaluate_ensemble(
+def _evaluate_breakout_ensemble(
     key: CandidateKey,
     bars: Sequence[PriceBar],
     *,
@@ -1288,6 +1389,58 @@ def _evaluate_ensemble(
     )
 
 
+def _evaluate_entry_path(
+    key: CandidateKey,
+    bars: Sequence[PriceBar],
+    *,
+    timestamp: datetime,
+    strategies: Sequence[DeterministicStrategy],
+    regime: RegimeAssessment,
+    entry_path: PortfolioEntryPath,
+) -> _EntrySignalDecision | None:
+    if entry_path is PortfolioEntryPath.BREAKOUT_BASELINE:
+        decision = _evaluate_breakout_ensemble(
+            key,
+            bars,
+            timestamp=timestamp,
+            strategies=strategies,
+            regime=regime,
+        )
+        if decision.action != Action.BUY:
+            return None
+        stop = _median_level(decision.agreeing, "stop")
+        return (
+            _EntrySignalDecision(
+                stop=stop,
+                reason="ranked_top_n_regime_weighted_buy",
+            )
+            if stop is not None
+            else None
+        )
+
+    market, symbol = key
+    if market != "KR":
+        return None
+    setup: Literal["first_pullback", "nr7_inside_day"] = (
+        "first_pullback"
+        if entry_path is PortfolioEntryPath.FIRST_PULLBACK
+        else "nr7_inside_day"
+    )
+    signal = evaluate_shadow_setup_entry(
+        bars,
+        setup=setup,
+        symbol=symbol,
+        market="KRX",
+        as_of=timestamp,
+    )
+    if not signal.triggered or signal.stop_price is None:
+        return None
+    return _EntrySignalDecision(
+        stop=signal.stop_price,
+        reason=f"ranked_top_n_{entry_path.value}:{signal.subtype}",
+    )
+
+
 def _queue_entries(
     state: _RunState,
     ranked: Sequence[CandidateRankResult],
@@ -1297,6 +1450,7 @@ def _queue_entries(
     timestamp: datetime,
     strategies: Sequence[DeterministicStrategy],
     regimes: Mapping[MarketKey, RegimeAssessment],
+    entry_path: PortfolioEntryPath,
 ) -> None:
     for candidate in ranked:
         key = candidate.key
@@ -1310,17 +1464,15 @@ def _queue_entries(
         ):
             continue
         regime = regimes[candidate.market]
-        decision = _evaluate_ensemble(
+        entry = _evaluate_entry_path(
             key,
             histories[key],
             timestamp=timestamp,
             strategies=strategies,
             regime=regime,
+            entry_path=entry_path,
         )
-        if decision.action != Action.BUY:
-            continue
-        stop = _median_level(decision.agreeing, "stop")
-        if stop is None:
+        if entry is None:
             continue
         signal_index = len(state.signals)
         state.signals.append(
@@ -1331,14 +1483,14 @@ def _queue_entries(
                 signal_at=timestamp,
                 observed_bar_count=len(histories[key]),
                 rank_position=candidate.rank_position,
-                reason="ranked_top_n_regime_weighted_buy",
+                reason=entry.reason,
                 regime=regime.regime,
             )
         )
         state.pending_entries[key] = _PendingEntry(
             key=key,
             signal_index=signal_index,
-            stop=stop,
+            stop=entry.stop,
             atr=candidate.atr_14,
             regime=regime.regime,
             average_volume=candidate.average_volume_20,
@@ -1363,7 +1515,7 @@ def _queue_position_exits(
         if timestamp <= position.entry_at:
             continue
         regime = regimes[position.market]
-        decision = _evaluate_ensemble(
+        decision = _evaluate_breakout_ensemble(
             key,
             histories[key],
             timestamp=timestamp,
@@ -2032,6 +2184,8 @@ def _stable_hash(value: object) -> str:
 __all__ = [
     "CONSERVATIVE_COST_PROFILE",
     "CandidateBenchmarkSeries",
+    "EntryPathArmResult",
+    "EntryPathComparisonResult",
     "BacktestPerformanceSlice",
     "BacktestEvidence",
     "BacktestWindow",
@@ -2041,6 +2195,7 @@ __all__ = [
     "MarketBenchmarkReturn",
     "MarketExecutionCost",
     "PortfolioBacktestConfig",
+    "PortfolioEntryPath",
     "PortfolioBacktestResult",
     "PortfolioBacktestDiagnostics",
     "PortfolioOpenPosition",
@@ -2053,6 +2208,7 @@ __all__ = [
     "WalkForwardFold",
     "WalkForwardResult",
     "run_portfolio_backtest",
+    "run_entry_path_comparison",
     "run_portfolio_diagnostics",
     "run_walk_forward",
 ]

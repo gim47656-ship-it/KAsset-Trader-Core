@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 
-from app.extensions.kasset.automation.candidate_ranker import CandidateMetadata
-from app.extensions.kasset.automation.contracts import Action, PriceBar
+from app.extensions.kasset.automation.candidate_ranker import (
+    CandidateKey,
+    CandidateMetadata,
+    CandidateRankerConfig,
+    CandidateRankingBatch,
+    CandidateRankResult,
+)
+from app.extensions.kasset.automation.contracts import (
+    Action,
+    PriceBar,
+    StrategyName,
+    StrategyResult,
+)
 from app.extensions.kasset.automation.portfolio_backtest import (
     CONSERVATIVE_COST_PROFILE,
     LIVE_MATCHED_COST_PROFILE,
@@ -16,12 +29,14 @@ from app.extensions.kasset.automation.portfolio_backtest import (
     EquityPoint,
     MarketExecutionCost,
     PortfolioBacktestConfig,
+    PortfolioEntryPath,
     SignalStatus,
     UniverseEvidence,
     WalkForwardConfig,
     _annualization_periods_per_year,
     _risk_adjusted_metrics,
     _stable_hash,
+    run_entry_path_comparison,
     run_portfolio_backtest,
     run_portfolio_diagnostics,
     run_walk_forward,
@@ -73,6 +88,174 @@ from scripts.kasset_bias_audit import (
 )
 
 _START = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class _AlwaysEligibleRanker:
+    config = CandidateRankerConfig()
+
+    def rank(
+        self,
+        candidates: Sequence[CandidateMetadata],
+        bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
+        *,
+        as_of: datetime,
+        **_: object,
+    ) -> CandidateRankingBatch:
+        ranked = tuple(
+            CandidateRankResult(
+                symbol=candidate.symbol,
+                market=candidate.market,
+                total_score=Decimal("1"),
+                factor_scores=(),
+                penalties=(),
+                data_as_of=bars_by_candidate[candidate.key][-1].timestamp,
+                valid_until=as_of + timedelta(days=1),
+                exclusion_reason=None,
+                atr_14=Decimal("10"),
+                average_volume_20=Decimal("1000000"),
+                average_turnover_20=Decimal("1200000000"),
+                evidence=(),
+                sources=candidate.sources,
+                is_held=candidate.is_held,
+                is_watchlisted=candidate.is_watchlisted,
+                eligible_for_new_buy=candidate.eligible_for_new_buy,
+                rank_position=index,
+                ranked_total=len(candidates),
+            )
+            for index, candidate in enumerate(candidates, start=1)
+        )
+        return CandidateRankingBatch(ranked=ranked, excluded=())
+
+
+class _HoldBreakoutStrategy:
+    name = StrategyName.MOMENTUM
+    version = "test-hold-v1"
+    minimum_bars = 1
+
+    def evaluate(
+        self,
+        bars: Sequence[PriceBar],
+        *,
+        symbol: str,
+        market: Literal["KRX", "US"],
+        as_of: datetime,
+    ) -> StrategyResult:
+        price = bars[-1].close
+        return StrategyResult(
+            action=Action.HOLD,
+            confidence=Decimal("1"),
+            entry=price,
+            stop=price - Decimal("20"),
+            target=price + Decimal("20"),
+            rationale=("test hold",),
+            evidence=(),
+            strategy=self.name,
+            version=self.version,
+            symbol=symbol,
+            market=market,
+            as_of=as_of,
+            valid_until=as_of + timedelta(days=1),
+        )
+
+
+def _kr_first_pullback_bars() -> tuple[PriceBar, ...]:
+    bars = [
+        PriceBar(
+            timestamp=_START + timedelta(days=index),
+            open=(close := Decimal("1000") + Decimal(index)) - Decimal("0.5"),
+            high=close + Decimal("1"),
+            low=close - Decimal("1"),
+            close=close,
+            volume=Decimal("1000000"),
+        )
+        for index in range(60)
+    ]
+    bars.extend(
+        (
+            PriceBar(
+                timestamp=_START + timedelta(days=60),
+                open=Decimal("1058"),
+                high=Decimal("1060"),
+                low=Decimal("1053"),
+                close=Decimal("1056"),
+                volume=Decimal("1000000"),
+            ),
+            PriceBar(
+                timestamp=_START + timedelta(days=61),
+                open=Decimal("1056"),
+                high=Decimal("1058"),
+                low=Decimal("1054"),
+                close=Decimal("1057"),
+                volume=Decimal("1000000"),
+            ),
+            PriceBar(
+                timestamp=_START + timedelta(days=62),
+                open=Decimal("1058"),
+                high=Decimal("1062"),
+                low=Decimal("1058"),
+                close=Decimal("1061"),
+                volume=Decimal("1200000"),
+            ),
+        )
+    )
+    bars.extend(
+        PriceBar(
+            timestamp=_START + timedelta(days=index),
+            open=Decimal("1061"),
+            high=Decimal("1062"),
+            low=Decimal("1060"),
+            close=Decimal("1061"),
+            volume=Decimal("1000000"),
+        )
+        for index in range(63, 80)
+    )
+    return tuple(bars)
+
+
+def _kr_nr7_breakout_bars() -> tuple[PriceBar, ...]:
+    bars = [
+        PriceBar(
+            timestamp=_START + timedelta(days=index),
+            open=Decimal("1200"),
+            high=Decimal("1210"),
+            low=Decimal("1190"),
+            close=Decimal("1200"),
+            volume=Decimal("1000000"),
+        )
+        for index in range(65)
+    ]
+    bars.extend(
+        (
+            PriceBar(
+                timestamp=_START + timedelta(days=65),
+                open=Decimal("1200"),
+                high=Decimal("1205"),
+                low=Decimal("1195"),
+                close=Decimal("1200"),
+                volume=Decimal("900000"),
+            ),
+            PriceBar(
+                timestamp=_START + timedelta(days=66),
+                open=Decimal("1204"),
+                high=Decimal("1209"),
+                low=Decimal("1204"),
+                close=Decimal("1207"),
+                volume=Decimal("1000000"),
+            ),
+        )
+    )
+    bars.extend(
+        PriceBar(
+            timestamp=_START + timedelta(days=index),
+            open=Decimal("1207"),
+            high=Decimal("1217"),
+            low=Decimal("1197"),
+            close=Decimal("1207"),
+            volume=Decimal("1000000"),
+        )
+        for index in range(67, 85)
+    )
+    return tuple(bars)
 
 
 def _candidate(symbol: str = "ALPHA", market: str = "US") -> CandidateMetadata:
@@ -253,6 +436,175 @@ def test_repeated_portfolio_run_is_byte_hash_deterministic() -> None:
         "SURVIVORSHIP",
         "NO_LOOKAHEAD_BOUNDARY",
     }
+
+
+def test_default_entry_path_is_exact_breakout_baseline_parity() -> None:
+    bars = _bars()
+    candidate = _candidate()
+    kwargs = {
+        "config": _config(),
+        "benchmark_bars_by_market": {"US": _benchmark(bars)},
+        "universe_evidence": UniverseEvidence(
+            source="synthetic_point_in_time",
+            point_in_time_membership=True,
+            includes_delisted=True,
+            as_of=bars[-1].timestamp,
+        ),
+    }
+
+    default = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        **kwargs,  # type: ignore[arg-type]
+    )
+    explicit = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        entry_path=PortfolioEntryPath.BREAKOUT_BASELINE,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    assert explicit == default
+    assert explicit.determinism_hash == default.determinism_hash
+
+
+def test_first_pullback_enters_without_a_breakout_vote() -> None:
+    candidate = _candidate("005930", "KR")
+    bars = _kr_first_pullback_bars()
+    base = _config()
+    config = replace(
+        base,
+        position_sizing=replace(
+            base.position_sizing,
+            bear_risk_multiplier=Decimal("1"),
+            sideways_risk_multiplier=Decimal("1"),
+            volatile_risk_multiplier=Decimal("1"),
+        ),
+    )
+    common = {
+        "config": config,
+        "strategies": (_HoldBreakoutStrategy(),),
+        "ranker": _AlwaysEligibleRanker(),
+    }
+
+    breakout = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        entry_path=PortfolioEntryPath.BREAKOUT_BASELINE,
+        **common,  # type: ignore[arg-type]
+    )
+    pullback = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        entry_path=PortfolioEntryPath.FIRST_PULLBACK,
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert not any(signal.action is Action.BUY for signal in breakout.signals)
+    buy = next(
+        signal
+        for signal in pullback.signals
+        if signal.action is Action.BUY and signal.status is SignalStatus.EXECUTED
+    )
+    assert buy.reason.startswith("ranked_top_n_first-pullback:")
+    assert buy.execution_at is not None and buy.execution_at > buy.signal_at
+
+
+def test_nr7_inside_day_enters_without_a_breakout_vote() -> None:
+    candidate = _candidate("000660", "KR")
+    bars = _kr_nr7_breakout_bars()
+    base = _config()
+    config = replace(
+        base,
+        position_sizing=replace(
+            base.position_sizing,
+            bear_risk_multiplier=Decimal("1"),
+            sideways_risk_multiplier=Decimal("1"),
+            volatile_risk_multiplier=Decimal("1"),
+        ),
+    )
+    common = {
+        "config": config,
+        "strategies": (_HoldBreakoutStrategy(),),
+        "ranker": _AlwaysEligibleRanker(),
+    }
+
+    breakout = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        entry_path=PortfolioEntryPath.BREAKOUT_BASELINE,
+        **common,  # type: ignore[arg-type]
+    )
+    nr7 = run_portfolio_backtest(
+        (candidate,),
+        {candidate.key: bars},
+        entry_path=PortfolioEntryPath.NR7_INSIDE_DAY,
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert not any(signal.action is Action.BUY for signal in breakout.signals)
+    buy = next(
+        signal
+        for signal in nr7.signals
+        if signal.action is Action.BUY and signal.status is SignalStatus.EXECUTED
+    )
+    assert buy.reason == "ranked_top_n_nr7-inside-day:nr7_inside_day"
+    assert buy.execution_at is not None and buy.execution_at > buy.signal_at
+
+
+def test_three_arms_are_independent_under_the_same_risk_cost_and_exit_rules() -> None:
+    pullback_candidate = _candidate("005930", "KR")
+    nr7_candidate = _candidate("000660", "KR")
+    bars_by_candidate = {
+        pullback_candidate.key: _kr_first_pullback_bars(),
+        nr7_candidate.key: _kr_nr7_breakout_bars(),
+    }
+    base = replace(_config(), max_positions=2, candidate_top_n=2)
+    config = replace(
+        base,
+        position_sizing=replace(
+            base.position_sizing,
+            bear_risk_multiplier=Decimal("1"),
+            sideways_risk_multiplier=Decimal("1"),
+            volatile_risk_multiplier=Decimal("1"),
+        ),
+    )
+
+    comparison = run_entry_path_comparison(
+        (pullback_candidate, nr7_candidate),
+        bars_by_candidate,
+        config=config,
+        walk_forward=WalkForwardConfig(
+            train_bars=50,
+            test_bars=10,
+            step_bars=10,
+        ),
+        strategies=(_HoldBreakoutStrategy(),),
+        ranker=_AlwaysEligibleRanker(),  # type: ignore[arg-type]
+    )
+    by_path = {arm.entry_path: arm.baseline for arm in comparison.arms}
+    breakout = by_path[PortfolioEntryPath.BREAKOUT_BASELINE]
+    pullback = by_path[PortfolioEntryPath.FIRST_PULLBACK]
+    nr7 = by_path[PortfolioEntryPath.NR7_INSIDE_DAY]
+
+    assert not any(signal.action is Action.BUY for signal in breakout.signals)
+    assert any(
+        signal.symbol == pullback_candidate.symbol
+        and signal.action is Action.BUY
+        and signal.status is SignalStatus.EXECUTED
+        for signal in pullback.signals
+    )
+    assert any(
+        signal.symbol == nr7_candidate.symbol
+        and signal.action is Action.BUY
+        and signal.status is SignalStatus.EXECUTED
+        for signal in nr7.signals
+    )
+    for result in (pullback, nr7):
+        assert result.fees_paid > 0
+        assert result.slippage_cost > 0
+        assert result.trades
+        assert result.trades[0].exit_reason == "TIME_STOP"
 
 
 def test_future_bar_changes_cannot_change_prior_signals_or_equity() -> None:
@@ -906,8 +1258,12 @@ def _ready_market(market: str, *, track: str = HISTORICAL_PIT_TRACK) -> MarketRe
     )
 
 
-def _readiness(*, track: str = HISTORICAL_PIT_TRACK) -> DailyCandlesReadiness:
-    markets = (_ready_market("kr", track=track), _ready_market("us", track=track))
+def _readiness(
+    *,
+    track: str = HISTORICAL_PIT_TRACK,
+    market_names: tuple[str, ...] = ("kr", "us"),
+) -> DailyCandlesReadiness:
+    markets = tuple(_ready_market(market, track=track) for market in market_names)
     historical_blockers = tuple(
         code for market in markets for code in market.historical_evidence_blockers
     )
@@ -1107,6 +1463,146 @@ def _stored_evidence_payload(
     assert raw["schemaVersion"] == PROMOTION_EVIDENCE_SCHEMA_VERSION
     assert raw["evidenceTrack"] == track
     return raw, metrics, source, artifact
+
+
+def test_promotion_payload_pairs_three_kr_arms_on_one_source_and_fold_grid() -> None:
+    raw, expected, _source, _artifact = _stored_evidence_payload()
+    comparison = raw["offlineEntryPathComparison"]
+    assert comparison["mode"] == "offline"
+    assert comparison["market"] == "KR"
+    assert (
+        comparison["source"]["datasetContentHash"] == raw["data"]["datasetContentHash"]
+    )
+    assert comparison["source"]["candidateKeys"] == ["KR:005930"]
+    assert (
+        comparison["sharedExecutionConfig"]["portfolio"]
+        == raw["portfolioDiagnostics"]["config"]
+    )
+    assert (
+        comparison["sharedExecutionConfig"]["costSlippage"]
+        == raw["portfolioDiagnostics"]["costSlippage"]
+    )
+    assert comparison["sharedExecutionConfig"]["exitEvaluator"] == (
+        "shared_position_manager"
+    )
+
+    arms = comparison["arms"]
+    assert [arm["entryPath"] for arm in arms] == [
+        "breakout-baseline",
+        "first-pullback",
+        "nr7-inside-day",
+    ]
+    metric_fields = {
+        "totalReturn",
+        "maxDrawdown",
+        "tradeCount",
+        "winRate",
+        "expectancy",
+        "feesPaid",
+        "slippageCost",
+        "determinismHash",
+    }
+    assert all(metric_fields <= set(arm["baseline"]) for arm in arms)
+    assert all(arm["baseline"]["benchmarkMarkets"] == ["KR"] for arm in arms)
+    paired_boundaries = [
+        [
+            (
+                fold["foldIndex"],
+                fold["trainStartAt"],
+                fold["trainEndAt"],
+                fold["testStartAt"],
+                fold["testEndAt"],
+            )
+            for fold in arm["walkForward"]["folds"]
+        ]
+        for arm in arms
+    ]
+    assert paired_boundaries[0] == paired_boundaries[1] == paired_boundaries[2]
+    assert derive_metrics_from_stored_payload(raw).as_snapshot() == (
+        expected.as_snapshot()
+    )
+
+    tampered = copy.deepcopy(raw)
+    tampered["offlineEntryPathComparison"]["arms"][1]["walkForward"]["folds"][0][
+        "trainEndAt"
+    ] = "2025-02-01T00:00:00Z"
+    with pytest.raises(
+        PromotionEvidenceBuildError,
+        match="entry_path_comparison_fold_mismatch",
+    ):
+        derive_metrics_from_stored_payload(tampered)
+
+
+def test_us_only_promotion_payload_omits_kr_comparison() -> None:
+    _raw, _metrics, mixed_source, artifact = _stored_evidence_payload()
+    candidate = next(item for item in mixed_source.candidates if item.market == "US")
+    bars_by_candidate = {candidate.key: mixed_source.bars_by_candidate[candidate.key]}
+    benchmarks = {"US": mixed_source.benchmark_bars_by_market["US"]}
+    candidate_benchmarks = {
+        candidate.key: mixed_source.benchmark_bars_by_candidate[candidate.key]
+    }
+    readiness = _readiness(market_names=("us",))
+    source = replace(
+        mixed_source,
+        as_of=readiness.as_of,
+        readiness=readiness,
+        candidates=(candidate,),
+        bars_by_candidate=bars_by_candidate,
+        benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
+        selected_universe=tuple(
+            item
+            for item in mixed_source.selected_universe
+            if item.get("market") == "US"
+        ),
+    )
+    config = _config()
+    walk_config = WalkForwardConfig(train_bars=260, test_bars=20, step_bars=20)
+    universe = UniverseEvidence(
+        source="daily_candles_readiness",
+        point_in_time_membership=True,
+        includes_delisted=True,
+        as_of=readiness.as_of,
+    )
+    diagnostics = run_portfolio_diagnostics(
+        source.candidates,
+        source.bars_by_candidate,
+        config=config,
+        benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
+        universe_evidence=universe,
+    )
+    walk = run_walk_forward(
+        source.candidates,
+        source.bars_by_candidate,
+        config=config,
+        walk_forward=walk_config,
+        benchmark_bars_by_market=benchmarks,
+        benchmark_bars_by_candidate=candidate_benchmarks,
+        universe_evidence=universe,
+    )
+    metrics = derive_promotion_metrics(
+        diagnostics,
+        walk,
+        readiness,
+        evidence_track=HISTORICAL_PIT_TRACK,
+    )
+
+    raw = build_promotion_raw_payload(
+        artifact=artifact,
+        source=source,
+        config=config,
+        walk_config=walk_config,
+        diagnostics=diagnostics,
+        walk_forward=walk,
+        metrics=metrics,
+        thresholds=_thresholds(),
+    )
+
+    assert "offlineEntryPathComparison" not in raw
+    assert derive_metrics_from_stored_payload(raw).as_snapshot() == (
+        metrics.as_snapshot()
+    )
 
 
 @pytest.fixture(scope="module")

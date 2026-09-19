@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added (KR PAPER entry-path attribution; migration 0)
+- **세 진입 경로를 독립 실행합니다.** 기존 Breakout을 기본값과 동일하게 보존하면서 First Pullback과 NR7/Inside Day가 기존 SHADOW component를 통해서만 신호·stop을 만들고, 세 arm 모두 같은 sizing, next-open fill, 비용, 포지션 상한, position-manager 청산을 사용합니다.
+- **promotion evidence는 paired 비교를 원본 payload에 보존합니다.** 동일 KR point-in-time source, candidate set, walk-forward fold와 arm identity를 `offlineEntryPathComparison`에 기록하며, mixed evidence에서는 KR 후보만 비교하고 US-only evidence에는 KR 전용 필드를 생략합니다. 기존 promotion metric·threshold와 breakout 기본 결과는 바꾸지 않습니다.
+- **First Pullback과 NR7을 기존 KRX PAPER vertical slice에 연결합니다.** 두 detector는 ranker를 통과한 KR 후보에서 Daily Setup·ORB/VWAP/RVOL 돌파와 독립적으로 BUY를 제안하고, 여러 경로가 동시에 발동해도 종목·사이클당 추천 하나로 합쳐 기존 account-state/loss gate, portfolio sizing, hard-risk, cooldown, PAPER consumer를 그대로 탑니다.
+- **진입 경로는 추천부터 손익까지 귀속됩니다.** 한국어 경로 사유와 `triggeredEntryPaths`, detector 근거, reference/stop/유효시각을 기존 추천 evidence에 저장하고 기존 `ai-rec:<recommendation_id>` 주문 관계를 유지합니다. detector-only BUY는 Breakout 전략군·투표를 추천 evidence나 AI payload에 표시하지 않고, 실제 `breakout-baseline`을 포함한 신호만 기존 Breakout family/votes를 유지합니다. US/Toss/live, 설정, DB/schema/migration, scheduler, threshold, `same_time_rvol`, UI는 변경하지 않습니다.
+
 ### Changed (PAPER position manager — ATR stops only; migration 0)
 - **PAPER holdings are managed on ATR levels alone again.** The 2026-09-07 "-3% below the fill average" stop floor (`STOP_LOSS_FLOOR_RATIO`), `stop_loss_floor()`, `apply_stop_loss_floor()`, and the late-ATR `adopt_initial_atr()` path are deleted, and `initial_atr` is a required positive `Decimal` on the managed state, signal, and exit-level history again; entry uses `entry_price - 3 ATR`, the +3 ATR partial, the 3 ATR trailing, `TIME_STOP`/`TREND_BROKEN`, and the exact-touch/gap policy are unchanged. A holding with no usable completed daily bars — fewer than 14+1 bars, stale, future, or unreadable — is no longer managed at all: no state row is created, no stop is invented, and the tick is skipped with an `atr_unavailable` log line, while a legacy `NULL` `initial_atr` row now fails closed with `ValueError` instead of being back-filled. `exit_levels_effective_at`/`exit_level_history` and every BUY threshold, gate, owner scope, and kill-switch contract are untouched, and no migration is added.
 

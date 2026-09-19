@@ -195,6 +195,20 @@ class ShadowSetupsResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ShadowSetupEntrySignal:
+    """SHADOW detector가 완료 봉에서 만든 오프라인 진입 신호 계약."""
+
+    setup: Literal["first_pullback", "nr7_inside_day"]
+    status: ShadowStatus
+    triggered: bool
+    signal_at: datetime | None
+    trigger_price: Decimal | None
+    stop_price: Decimal | None
+    subtype: str
+    source_timestamps: tuple[datetime, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ContactCluster:
     indices: tuple[int, ...]
 
@@ -385,6 +399,102 @@ def evaluate_shadow_setups(
         nr7_inside_day=compression,
         observations=tuple(observations),
         evidence=batch_evidence,
+    )
+
+
+def evaluate_shadow_setup_entry(
+    bars: Sequence[PriceBar],
+    *,
+    setup: Literal["first_pullback", "nr7_inside_day"],
+    symbol: str,
+    market: Literal["KRX", "US"],
+    as_of: datetime,
+    completed_through: datetime | None = None,
+    config: ShadowSetupConfig = DEFAULT_SHADOW_SETUP_CONFIG,
+) -> ShadowSetupEntrySignal:
+    """기존 SHADOW component로 완료 봉 기준 진입 신호 하나를 평가한다.
+
+    First Pullback은 기존 ``confirmed`` 결과를 그대로 사용한다. NR7/Inside Day는
+    직전 완료 봉의 setup high를 현재 완료 봉 종가가 넘을 때만 신호를 만든다.
+    ``feature_enabled``는 관찰 저장 여부일 뿐 이 순수 오프라인 평가를 막지 않는다.
+    """
+
+    if setup not in {"first_pullback", "nr7_inside_day"}:
+        raise ValueError("unsupported shadow setup entry")
+    result = evaluate_shadow_setups(
+        bars,
+        symbol=symbol,
+        market=market,
+        as_of=as_of,
+        completed_through=completed_through,
+        config=config,
+    )
+    if setup == "first_pullback":
+        first = result.first_pullback
+        triggered = bool(
+            first.status is ShadowStatus.VALID
+            and first.confirmed
+            and first.trigger_price is not None
+            and first.pullback_pivot is not None
+        )
+        return ShadowSetupEntrySignal(
+            setup=setup,
+            status=first.status,
+            triggered=triggered,
+            signal_at=result.source_timestamps[-1] if triggered else None,
+            trigger_price=first.trigger_price,
+            stop_price=first.pullback_pivot,
+            subtype=first.contact_label,
+            source_timestamps=first.source_timestamps,
+        )
+
+    compression = result.nr7_inside_day
+    if result.status is not ShadowStatus.VALID or len(result.source_timestamps) < 2:
+        return ShadowSetupEntrySignal(
+            setup=setup,
+            status=compression.status,
+            triggered=False,
+            signal_at=None,
+            trigger_price=compression.trigger_price,
+            stop_price=None,
+            subtype=compression.subtype,
+            source_timestamps=compression.source_timestamps,
+        )
+    retained_timestamps = set(result.source_timestamps)
+    bars_by_timestamp: dict[datetime, PriceBar] = {}
+    for bar in bars:
+        timestamp = bar.timestamp.astimezone(UTC)
+        if timestamp in retained_timestamps:
+            bars_by_timestamp[timestamp] = bar
+    ordered = tuple(
+        bars_by_timestamp[timestamp] for timestamp in result.source_timestamps
+    )
+    setup_result = evaluate_shadow_setups(
+        ordered[:-1],
+        symbol=symbol,
+        market=market,
+        as_of=result.source_timestamps[-2],
+        completed_through=result.source_timestamps[-2],
+        config=config,
+    ).nr7_inside_day
+    trigger_price = setup_result.trigger_price
+    triggered = bool(
+        setup_result.status is ShadowStatus.VALID
+        and setup_result.subtype != "none"
+        and trigger_price is not None
+        and ordered[-1].close > trigger_price
+    )
+    return ShadowSetupEntrySignal(
+        setup=setup,
+        status=setup_result.status,
+        triggered=triggered,
+        signal_at=result.source_timestamps[-1] if triggered else None,
+        trigger_price=trigger_price,
+        stop_price=(
+            _quantize(ordered[-2].low) if setup_result.subtype != "none" else None
+        ),
+        subtype=setup_result.subtype,
+        source_timestamps=result.source_timestamps,
     )
 
 
@@ -1086,7 +1196,9 @@ __all__ = [
     "ShadowSetupConfig",
     "ShadowSetupObservation",
     "ShadowSetupsResult",
+    "ShadowSetupEntrySignal",
     "evaluate_ranked_shadow_setups",
+    "evaluate_shadow_setup_entry",
     "shadow_setups_evidence",
     "ShadowStatus",
     "evaluate_shadow_setups",
