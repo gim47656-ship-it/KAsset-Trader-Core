@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -66,7 +66,10 @@ from app.extensions.kasset.automation.intraday_triggers import (
     decide_intraday_triggers,
     intraday_relative_strength,
 )
-from app.extensions.kasset.automation.market_session import RegularSession
+from app.extensions.kasset.automation.market_session import (
+    RegularSession,
+    latest_completed_session,
+)
 from app.extensions.kasset.automation.policy import HardRiskResult, PortfolioPlan
 from app.extensions.kasset.automation.position_sizing import (
     PositionSizingReason,
@@ -95,6 +98,10 @@ from app.extensions.kasset.automation.vertical_slice import (
 from app.models.ai_recommendations import AIRecommendation
 from app.models.trading import User, UserRole
 from app.schemas.ai_recommendations import RecommendationRanking
+from app.services.market_events.session_calendar import (
+    next_trading_session,
+    regular_session_bounds,
+)
 
 _NOW = datetime(2026, 8, 29, 1, 0, tzinfo=UTC)
 _BULL = RegimeAssessment(
@@ -278,6 +285,84 @@ def _shadow_entry_signal(
         subtype=subtype,
         source_timestamps=(_NOW - timedelta(days=1),),
     )
+
+
+#: 주말을 건너는 KR 장중 시각. 직전 완료 세션은 그 주 마지막 거래일이고, 그 다음
+#: 세션은 주말·휴장을 지난 뒤 열린다.
+_KR_WEEKEND_INTRADAY = datetime(2026, 9, 21, 1, 0, tzinfo=UTC)
+
+
+def _kr_completed_session(as_of: datetime) -> RegularSession:
+    """``as_of`` 기준 직전 완료 정규장 세션 (공용 달력)."""
+
+    session = latest_completed_session("KR", as_of)
+    assert session is not None
+    return session
+
+
+def _kr_session_daily_bars(
+    session_date: date, *, count: int = 1
+) -> tuple[PriceBar, ...]:
+    """``session_date`` KST 날짜로 끝나는 완료 일봉 (KR 공급자 timestamp 규약)."""
+
+    first = datetime.combine(session_date, time.min, tzinfo=UTC) - timedelta(
+        days=count - 1
+    )
+    return tuple(
+        PriceBar(
+            timestamp=first + timedelta(days=index),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=Decimal("1000"),
+        )
+        for index in range(count)
+    )
+
+
+def _kr_session_pullback_bars(session_date: date) -> tuple[PriceBar, ...]:
+    """``session_date`` 봉으로 끝나는 First Pullback 성공 fixture.
+
+    ``test_shadow_setups._single_pullback``과 같은 값을 세션 날짜로 옮긴 것이다.
+    detector가 실제로 신호를 만들도록 값을 그대로 쓴다.
+    """
+
+    first = datetime.combine(session_date, time.min, tzinfo=UTC) - timedelta(days=30)
+
+    def _at(
+        index: int, *, open_: str, high: str, low: str, close: str, volume: str = "1000"
+    ) -> PriceBar:
+        return PriceBar(
+            timestamp=first + timedelta(days=index),
+            open=Decimal(open_),
+            high=Decimal(high),
+            low=Decimal(low),
+            close=Decimal(close),
+            volume=Decimal(volume),
+        )
+
+    bars: list[PriceBar] = []
+    for index in range(28):
+        close = Decimal("100") + index
+        bars.append(
+            PriceBar(
+                timestamp=first + timedelta(days=index),
+                open=close - Decimal("0.05"),
+                high=close + Decimal("0.10"),
+                low=close - Decimal("0.10"),
+                close=close,
+                volume=Decimal("1000"),
+            )
+        )
+    bars.extend(
+        (
+            _at(28, open_="126", high="126.2", low="121", close="124"),
+            _at(29, open_="124", high="125.5", low="121.5", close="125"),
+            _at(30, open_="126", high="127.2", low="126", close="127", volume="1200"),
+        )
+    )
+    return tuple(bars)
 
 
 def _completed_intraday_bars(symbol: str) -> CompletedIntradayBars:
@@ -2169,6 +2254,10 @@ async def test_krx_detector_path_buys_without_daily_setup_or_intraday_trigger(
             side_effect=lambda ranking, _bars, **_kwargs: _rejected_daily_setup(ranking)
         ),
     )
+    session = _kr_completed_session(_NOW)
+    instance._load_candidate_bars = AsyncMock(  # type: ignore[method-assign]
+        return_value={("KR", "005930"): _kr_session_daily_bars(session.session_date)}
+    )
     detector = MagicMock(
         side_effect=lambda *_args, setup, **_kwargs: _shadow_entry_signal(
             setup,
@@ -2214,6 +2303,13 @@ async def test_simultaneous_paths_merge_into_one_persisted_attributed_buy(
             unaffordable=frozenset(),
             ranker_config=CandidateRankerConfig(strategy_review_limit=5),
         )
+    )
+    session = _kr_completed_session(_NOW)
+    instance._load_candidate_bars = AsyncMock(  # type: ignore[method-assign]
+        return_value={("KR", "005930"): _kr_session_daily_bars(session.session_date)}
+    )
+    instance._decide_triggers = MagicMock(  # type: ignore[method-assign]
+        return_value=_fresh_trigger_decision("005930")
     )
     monkeypatch.setattr(
         vertical_slice,
@@ -2322,13 +2418,165 @@ def test_us_candidate_cannot_evaluate_detector_entry_paths(
     monkeypatch.setattr(vertical_slice, "evaluate_shadow_setup_entry", detector)
     ranking = _rank_result("AAPL", position=1, market="US")
     candidate = TradingCandidate("AAPL", "US", "Apple", "tvscreener_us")
+    session = _kr_completed_session(_NOW)
 
     result = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
         (ranking,),
         candidates={ranking.key: candidate},
-        bars_by_candidate={ranking.key: ()},
-        completed_through=_NOW,
+        bars_by_candidate={ranking.key: _kr_session_daily_bars(session.session_date)},
+        completed_session=session,
     )
 
     assert result == {}
     detector.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("as_of", "timestamp_offset"),
+    [
+        (datetime(2026, 9, 21, 0, 0, tzinfo=UTC), timedelta(0)),
+        (datetime(2026, 9, 21, 6, 20, tzinfo=UTC), timedelta(hours=-9)),
+        (datetime(2026, 5, 6, 0, 0, tzinfo=UTC), timedelta(hours=-9)),
+    ],
+    ids=["weekend-open-utc-label", "weekend-late-kst-label", "holiday-open-kst-label"],
+)
+def test_krx_detector_entry_paths_signal_on_the_last_completed_session_bar(
+    as_of: datetime, timestamp_offset: timedelta
+) -> None:
+    """주말·휴장 뒤에도 직전 완료 봉을 쓰고 공급자의 날짜 규약을 보존한다."""
+
+    completed = _kr_completed_session(as_of)
+    bars = tuple(
+        replace(bar, timestamp=bar.timestamp + timestamp_offset)
+        for bar in _kr_session_pullback_bars(completed.session_date)
+    )
+    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=as_of)
+    ranking = replace(
+        _rank_result("005930", position=1),
+        valid_until=as_of + timedelta(hours=2),
+    )
+    candidate = TradingCandidate("005930", "KRX", "삼성전자", "tvscreener_kr")
+
+    result = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={ranking.key: bars},
+        completed_session=completed,
+    )
+
+    signals = result[ranking.key]
+    assert [signal.path.value for signal in signals] == [
+        "first-pullback",
+        "nr7-inside-day",
+    ]
+    pullback, inside_day = signals
+    assert pullback.subtype == "first"
+    assert pullback.reference_price == Decimal("126.200000")
+    assert pullback.stop_price == Decimal("121.000000")
+    assert inside_day.subtype == "inside_day"
+    assert inside_day.reference_price == Decimal("125.500000")
+    assert inside_day.stop_price == Decimal("121.500000")
+    session_bar_at = bars[-1].timestamp.isoformat().replace("+00:00", "Z")
+    for signal in signals:
+        # 추천 유효시각은 완료 세션이 아니라 실제 cycle 시각을 따른다.
+        assert signal.valid_until == as_of + timedelta(hours=1)
+        assert signal.evidence["signalAt"] == session_bar_at
+
+
+def test_krx_detector_entry_paths_signal_on_the_immediately_previous_session_bar() -> (
+    None
+):
+    """평일 장중 cycle도 바로 앞 완료 세션 일봉으로 신호를 만든다."""
+
+    weekend_gap_session = _kr_completed_session(_KR_WEEKEND_INTRADAY)
+    weekday = next_trading_session("kr", weekend_gap_session.session_date)
+    assert weekday is not None
+    following = next_trading_session("kr", weekday)
+    assert following is not None
+    bounds = regular_session_bounds("kr", following)
+    assert bounds is not None
+    as_of = bounds[0] + timedelta(hours=1)
+    completed = _kr_completed_session(as_of)
+    assert completed.session_date == weekday
+    instance = AIRecommendationVerticalSlice(MagicMock(), MagicMock(), now=as_of)
+    ranking = _rank_result("005930", position=1)
+    candidate = TradingCandidate("005930", "KRX", "삼성전자", "tvscreener_kr")
+
+    result = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={
+            ranking.key: _kr_session_pullback_bars(completed.session_date)
+        },
+        completed_session=completed,
+    )
+
+    assert [signal.path.value for signal in result[ranking.key]] == [
+        "first-pullback",
+        "nr7-inside-day",
+    ]
+
+
+def test_krx_detector_entry_path_rejects_a_bar_older_than_the_last_completed_session() -> (
+    None
+):
+    """직전 완료 세션이 아니라 그 앞 세션의 봉이면 진입 근거로 쓰지 않는다."""
+
+    completed = _kr_completed_session(_KR_WEEKEND_INTRADAY)
+    older = _kr_completed_session(completed.opens_at)
+    assert older.session_date < completed.session_date
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(), MagicMock(), now=_KR_WEEKEND_INTRADAY
+    )
+    ranking = _rank_result("005930", position=1)
+    candidate = TradingCandidate("005930", "KRX", "삼성전자", "tvscreener_kr")
+
+    result = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={ranking.key: _kr_session_pullback_bars(older.session_date)},
+        completed_session=completed,
+    )
+
+    assert result == {}
+
+
+def test_krx_detector_entry_path_ignores_the_in_progress_session_bar() -> None:
+    """진행 중 세션의 partial 봉은 완료 세션 신호를 바꾸지 않는다."""
+
+    completed = _kr_completed_session(_KR_WEEKEND_INTRADAY)
+    following = next_trading_session("kr", completed.session_date)
+    assert following is not None
+    completed_bars = _kr_session_pullback_bars(completed.session_date)
+    in_progress = PriceBar(
+        timestamp=datetime.combine(following, time.min, tzinfo=UTC),
+        open=Decimal("126"),
+        high=Decimal("131"),
+        low=Decimal("125"),
+        close=Decimal("130"),
+        volume=Decimal("5000"),
+    )
+    instance = AIRecommendationVerticalSlice(
+        MagicMock(), MagicMock(), now=_KR_WEEKEND_INTRADAY
+    )
+    ranking = _rank_result("005930", position=1)
+    candidate = TradingCandidate("005930", "KRX", "삼성전자", "tvscreener_kr")
+
+    with_in_progress = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={ranking.key: (*completed_bars, in_progress)},
+        completed_session=completed,
+    )
+    completed_only = instance._evaluate_shadow_entry_paths(  # noqa: SLF001
+        (ranking,),
+        candidates={ranking.key: candidate},
+        bars_by_candidate={ranking.key: completed_bars},
+        completed_session=completed,
+    )
+
+    assert with_in_progress == completed_only
+    assert [signal.path.value for signal in with_in_progress[ranking.key]] == [
+        "first-pullback",
+        "nr7-inside-day",
+    ]

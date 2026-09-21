@@ -1,7 +1,12 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-19 (KR First Pullback/NR7 PAPER 진입 경로 연결·격리 검증 완료)
+갱신: 2026-09-21 (KR PAPER 신규 진입 경로의 완료 세션 시각 수정·격리 검증 완료, PR/배포 대기)
 
 ## 현재 목표·운영 상태
+- **2026-09-21 현재 작업**: `.worktrees/fix-entry-session-expiry`, branch `fix/kr-entry-session-expiry`, base `d1283a8f`. 사용자는 First Pullback/NR7의 장중 만료 결함 수정과 서버 배포를 승인했다. 아래 9/19 이전 절은 당시 기록이며, 오늘 조사 시 운영 checkout과 API/worker/scheduler/MCP/AI MCP는 모두 PR #67 `d1283a8f`였다.
+- **수정 계약**: runtime이 공용 달력의 직전 완료 세션을 한 번 확정하고, 최신 완료 일봉의 KST 날짜가 그 세션 날짜와 일치할 때만 두 detector를 세션 종료시각으로 평가한다. 미완료·미래 봉은 제외하고 최신 세션 누락은 거부한다. 공용 `shadow_setups.py`의 TTL, offline 계약, BUY 임계값·sizing·risk·승인·실제 추천 유효시각은 바꾸지 않았다. migration·설정 변경은 없다.
+- **검증 상태**: 격리 서버의 6개 관련 테스트 파일(`test_vertical_slice`, `test_shadow_setups`, `test_market_session`, `test_producer`, `test_daily_setup`, `test_portfolio_backtest`) 173개 통과, exit 0. 수정 Python 2파일 Ruff/format과 source ty도 exit 0. 같은 runtime 재현은 수정 전 신호 0으로 실패(exit 1), 수정 후 주말 개장·장후반·공휴일 뒤 개장 및 UTC/KST 날짜 라벨에서 두 경로 신호를 확인(exit 0)했다.
+- **실제 데이터의 한계**: 오늘 저장된 ranked 후보 합집합 30종목의 사후 일봉 재계산에서 두 detector 60회 모두 `valid`, 잘못된 `stale_completed_bar` 0회였지만 실제 패턴 신호도 0개였다. 장마감 재수집 데이터이므로 과거 장중 전체 후보 재현이나 수정 후 매수 보장은 아니다.
+- **다음 행동**: PR의 정확한 Test run 전체와 `ci-required`/frontend/migration을 확인한 뒤 main 병합으로 기존 Deploy workflow를 실행한다. 배포 후 5개 서비스 SHA·health·신규 runtime 경계를 읽기 전용으로 확인한다. 검증 목적으로 실제 주문·강제 sweep을 만들지 않는다. 다음 정규장의 자연 추천·체결은 조건이 발생한 경우에만 확인한다.
 - 사용자 확정 전략은 장중 돌파 단기매매다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-16 사용자 승인 변경**: 2026-09-07의 -3% 자동 손절 바닥을 **제거**하고 원래 ATR 계약(진입가 -3 ATR 손절, +3 ATR 부분익절, 3 ATR trailing)으로 복귀했다. 아래 9/7 절의 "-3% 바닥 도입" 기록은 역사이며 현재 계약이 아니다. ATR 근거가 없는 보유분은 상태를 만들지 않고 그 tick을 관리하지 않는다.
 - 2026-09-14 수정 전 실제 checkout/API/worker/scheduler/MCP/AI MCP 기준 SHA는 `d6ee70e630d8d4ed2a5c9614e17578f5ee9e6908`다. PR #62의 PAPER stop 시간 소급 방지 변경은 이 기준에 이미 포함되어 있으며, 아래 9/8의 배포 대기 표기는 당시 기록이다.

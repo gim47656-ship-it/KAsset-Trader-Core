@@ -1,6 +1,6 @@
 # KAsset PAPER Breakout Automation Contract
 
-갱신: 2026-09-16
+갱신: 2026-09-21
 
 ## 목적과 경계
 
@@ -25,6 +25,16 @@
 5. **PAPER** — `consumer.py`가 APPROVED BUY/SELL만 claim한다. Kill Switch와 owner policy 재확인 경로는 바뀌지 않았다.
 
 기술 신호(2~3단계)와 Hard Risk(4단계)가 PAPER의 유일한 관문이다. 각 trigger의 `code`, `status`, `value`, `threshold`, `source`, `asOf`, `unavailableReason`은 추천 evidence와 `KAssetAutomationCycleEvent.candidate_exclusions`에 모두 남는다. 정상적으로 진입 후보가 하나도 없이 끝난 cycle(`daily_setup_not_qualified`, `no_breakout_family_direction`, `intraday_trigger_not_satisfied`, `no_affordable_actionable_candidate`)은 실패가 아니라 `skipped`로 집계한다.
+
+### KRX detector 진입 경로의 완료 세션 계약
+
+First Pullback과 NR7/Inside Day(`shadow_setups.py`)는 Daily Setup·장중 Trigger와 독립적으로 BUY를 제안할 수 있지만, 그 근거는 **직전에 완료된 정규장 세션의 일봉** 하나로 제한된다.
+
+- `vertical_slice.py::_evaluate_shadow_entry_paths`가 공용 달력에서 직전 완료 세션을 확정한다. 세션을 확정하지 못하면 두 경로는 신호를 만들지 않는다.
+- 후보 일봉은 `market_session.py::completed_daily_bars`로 그 세션 종료시각 이전의 완료 봉만 남긴다. 진행 중 세션의 partial 봉과 미래 봉은 진입 근거가 아니다.
+- 최신 완료 봉의 KST 날짜가 직전 완료 세션의 날짜와 다르면(공급이 한 세션 이상 누락) 그 후보의 detector 경로를 건너뛴다. 주말·연휴는 세션 경계가 함께 이동하므로 누락이 아니고, 없는 최신 봉을 오래된 봉으로 대신하지 않는다.
+- detector는 세션 종료시각을 event time으로 평가한다(`as_of = completed_through = completed_session.closes_at`). `shadow_setups.py`의 wall-clock TTL 계약(`valid_until <= evaluated_at`)과 명시 cutoff 소비자(offline `portfolio_backtest.py`, SHADOW 관찰 경로)는 바뀌지 않는다.
+- 진입가·손절가는 detector component 값 그대로이고, 추천 `valid_until`·claim·사이징·hard risk·승인·PAPER consumer는 실제 cycle 시각과 기존 관문을 그대로 따른다.
 
 ## 현재 구조 감사
 
