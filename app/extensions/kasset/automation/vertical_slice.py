@@ -106,8 +106,9 @@ from app.extensions.kasset.automation.intraday_triggers import (
 from app.extensions.kasset.automation.loss_streak_gate import loss_streak_gate
 from app.extensions.kasset.automation.market_session import (
     RegularSession,
-    completed_bar_cutoff,
+    completed_daily_bars,
     current_regular_session,
+    latest_completed_session,
 )
 from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
@@ -681,10 +682,15 @@ class AIRecommendationVerticalSlice:
             for market in sorted(allowed_markets)
         }
         # 1단계: 완료 일봉만으로 Daily Setup을 판정하고 상한까지 고른다.
-        # 장중 partial bar는 setup 계산에 절대 섞이지 않는다.
-        completed_cutoff_by_market = {
-            market: completed_bar_cutoff(market, self._now)
+        # 장중 partial bar는 setup 계산에 절대 섞이지 않는다. 직전 완료 세션은
+        # detector 진입 경로도 같은 경계를 쓰도록 여기서 한 번만 확정한다.
+        completed_session_by_market = {
+            market: latest_completed_session(market, self._now)
             for market in sorted(allowed_markets)
+        }
+        completed_cutoff_by_market = {
+            market: session.closes_at if session is not None else None
+            for market, session in completed_session_by_market.items()
         }
         setups: list[DailySetup] = []
         for result in ranking.ranked:
@@ -717,7 +723,7 @@ class AIRecommendationVerticalSlice:
             ranking.ranked,
             candidates=candidate_by_key,
             bars_by_candidate=bars_by_candidate,
-            completed_through=completed_cutoff_by_market.get("KR"),
+            completed_session=completed_session_by_market.get("KR"),
         )
         candidate_entry_keys = selected_setup_keys | shadow_entry_paths_by_key.keys()
         setup_statuses: Counter[str] = Counter(item.status.value for item in setups)
@@ -1151,14 +1157,41 @@ class AIRecommendationVerticalSlice:
         *,
         candidates: Mapping[CandidateKey, TradingCandidate],
         bars_by_candidate: Mapping[CandidateKey, Sequence[PriceBar]],
-        completed_through: datetime | None,
+        completed_session: RegularSession | None,
     ) -> dict[CandidateKey, tuple[_EntryPathSignal, ...]]:
-        """Evaluate KRX-only detector paths without Daily Setup or intraday gates."""
+        """Evaluate KRX-only detector paths without Daily Setup or intraday gates.
 
+        진입 근거는 직전에 완료된 정규장 세션의 일봉 하나다. 달력이 세션을
+        확정하지 못하거나 최신 완료 봉이 그 세션의 봉이 아니면 신호를 만들지
+        않는다. detector에는 세션 종료시각을 event time으로 넘기므로, 완료 세션
+        경계와 계산 시각이 어긋나 만료로 잘리는 일이 없다.
+        """
+
+        if completed_session is None:
+            return {}
+        # 완료 세션 종료시각이 곧 detector의 event time이다. 이 경계 뒤의
+        # 진행 중 partial 봉과 미래 봉은 진입 근거에서 제외된다.
+        evaluated_at = completed_session.closes_at
         triggered: dict[CandidateKey, tuple[_EntryPathSignal, ...]] = {}
         for ranking in ranked:
             candidate = candidates.get(ranking.key)
             if candidate is None or candidate.market != "KRX":
+                continue
+            # KR 일봉은 세션 날짜를 UTC 자정 또는 시장 현지 자정으로 적는다.
+            # 두 규약 모두 timestamp의 KST 날짜가 세션 날짜와 같다.
+            completed_bars = completed_daily_bars(
+                bars_by_candidate.get(ranking.key, ()),
+                market="KRX",
+                as_of=evaluated_at,
+                cutoff=evaluated_at,
+            )
+            newest_session_date = (
+                completed_bars[-1].timestamp.astimezone(_KST).date()
+                if completed_bars
+                else None
+            )
+            if newest_session_date != completed_session.session_date:
+                # 직전 완료 세션의 봉이 없으면 오래된 봉으로 대신하지 않는다.
                 continue
             signals: list[_EntryPathSignal] = []
             for path, setup_name in (
@@ -1166,12 +1199,12 @@ class AIRecommendationVerticalSlice:
                 (PortfolioEntryPath.NR7_INSIDE_DAY, "nr7_inside_day"),
             ):
                 detector_signal: ShadowSetupEntrySignal = evaluate_shadow_setup_entry(
-                    bars_by_candidate.get(ranking.key, ()),
+                    completed_bars,
                     setup=cast(Any, setup_name),
                     symbol=candidate.symbol,
                     market="KRX",
-                    as_of=self._now,
-                    completed_through=completed_through,
+                    as_of=evaluated_at,
+                    completed_through=evaluated_at,
                     config=self._shadow_setup_config,
                 )
                 if (

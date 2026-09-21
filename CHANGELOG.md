@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed (KR PAPER detector entry paths use the last completed session; migration 0)
+- **장중 cycle에서도 직전 완료 거래일 일봉이 진입 근거로 살아남습니다.** `_evaluate_shadow_entry_paths`가 공용 달력에서 직전 완료 정규장 세션을 확정하고, 그 세션 종료시각을 detector의 event time(`as_of = completed_through`)으로 넘깁니다. 기존에는 벽시계 `now`로 평가해 KR 일봉 timestamp(세션일 00:00 UTC)의 만료 시각이 다음 세션 개장과 겹쳤고, 정규장 중 cycle에서는 First Pullback/NR7 두 경로가 항상 `stale_completed_bar`로 끝나 신호를 만들 수 없었습니다.
+- **세션 누락과 미완료 봉은 계속 거부합니다.** 후보 일봉은 직전 완료 세션 종료시각 이전의 완료 봉만 남기고, 최신 완료 봉의 KST 날짜가 그 세션 날짜와 다르면(공급이 한 세션 이상 누락) 그 후보의 detector 경로를 건너뜁니다. 진행 중 세션의 partial 봉과 미래 봉은 진입 근거로 쓰지 않습니다. 주말·연휴는 세션 경계가 함께 이동하므로 누락이 아닙니다.
+- **공용 detector와 다른 소비자는 그대로입니다.** `shadow_setups.py`의 wall-clock TTL 계약과 명시 cutoff 소비자(`portfolio_backtest.py`, SHADOW 관찰 경로, NR7 내부 재평가), Daily Setup cutoff, 매수 임계값·사이징·hard risk·승인·PAPER consumer는 변경하지 않습니다.
+
 ### Added (KR PAPER entry-path attribution; migration 0)
 - **세 진입 경로를 독립 실행합니다.** 기존 Breakout을 기본값과 동일하게 보존하면서 First Pullback과 NR7/Inside Day가 기존 SHADOW component를 통해서만 신호·stop을 만들고, 세 arm 모두 같은 sizing, next-open fill, 비용, 포지션 상한, position-manager 청산을 사용합니다.
 - **promotion evidence는 paired 비교를 원본 payload에 보존합니다.** 동일 KR point-in-time source, candidate set, walk-forward fold와 arm identity를 `offlineEntryPathComparison`에 기록하며, mixed evidence에서는 KR 후보만 비교하고 US-only evidence에는 KR 전용 필드를 생략합니다. 기존 promotion metric·threshold와 breakout 기본 결과는 바꾸지 않습니다.
