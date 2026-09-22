@@ -14,6 +14,16 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
+def _decimal_text(value: Decimal) -> str:
+    """Render a Decimal in plain notation so evidence never carries ``2.5E+2``.
+
+    ``str(Decimal("250"))``은 지수 표기를 낼 수 있고, 그 문자열이 그대로 추천
+    evidence에 저장되면 앱 응답 계약의 평문 decimal 형식을 깬다.
+    """
+
+    return format(value, "f")
+
+
 class PositionSizingZeroCode(StrEnum):
     """Stable fail-closed reason codes for a zero-quantity result."""
 
@@ -168,7 +178,7 @@ class PositionSizeCap:
     quantity: Decimal
 
     def as_evidence(self) -> dict[str, str]:
-        return {"code": self.code.value, "quantity": str(self.quantity)}
+        return {"code": self.code.value, "quantity": _decimal_text(self.quantity)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,24 +209,30 @@ class PositionSizingResult:
         return {
             "action": self.action,
             "market": self.market,
-            "quantity": str(self.quantity),
-            "unroundedQuantity": str(self.unrounded_quantity),
-            "lotSize": str(self.lot_size),
+            "quantity": _decimal_text(self.quantity),
+            "unroundedQuantity": _decimal_text(self.unrounded_quantity),
+            "lotSize": _decimal_text(self.lot_size),
             "entryPrice": (
-                str(self.entry_price) if self.entry_price is not None else None
+                _decimal_text(self.entry_price)
+                if self.entry_price is not None
+                else None
             ),
             "strategyStop": (
-                str(self.strategy_stop) if self.strategy_stop is not None else None
+                _decimal_text(self.strategy_stop)
+                if self.strategy_stop is not None
+                else None
             ),
             "strategyAtr": (
-                str(self.strategy_atr) if self.strategy_atr is not None else None
+                _decimal_text(self.strategy_atr)
+                if self.strategy_atr is not None
+                else None
             ),
-            "riskBudget": str(self.risk_budget),
-            "riskPerUnit": str(self.risk_per_unit),
-            "riskPerTradeRate": str(self.risk_per_trade_rate),
+            "riskBudget": _decimal_text(self.risk_budget),
+            "riskPerUnit": _decimal_text(self.risk_per_unit),
+            "riskPerTradeRate": _decimal_text(self.risk_per_trade_rate),
             "regime": self.regime,
-            "regimeMultiplier": str(self.regime_multiplier),
-            "accountStateMultiplier": str(self.account_state_multiplier),
+            "regimeMultiplier": _decimal_text(self.regime_multiplier),
+            "accountStateMultiplier": _decimal_text(self.account_state_multiplier),
             "caps": [cap.as_evidence() for cap in self.caps],
             "limitingCaps": [cap.value for cap in self.limiting_caps],
             "zeroReasons": [reason.as_evidence() for reason in self.zero_reasons],

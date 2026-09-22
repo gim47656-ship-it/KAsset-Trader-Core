@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     field_serializer,
@@ -23,8 +24,37 @@ from app.models.ai_recommendations import (
     TerminalRecommendationDecision,
 )
 
-DecimalText = Annotated[str, Field(pattern=r"^-?[0-9]+(?:\.[0-9]+)?$")]
 _DECIMAL_TEXT = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?$")
+_DECIMAL_EXPONENT_TEXT = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?[eE][+-]?[0-9]+$")
+
+
+def _plain_decimal_text(value: object) -> object:
+    """Accept a persisted exponent-form decimal without changing its value.
+
+    ``Decimal("250")``을 ``str()``로 저장한 과거 행은 ``"2.5E+2"``로 남아 있다.
+    수치가 같으므로 표기만 평문으로 되돌려 기존 wire 계약을 지킨다. 평문이
+    아니고 지수 표기도 아닌 입력은 그대로 돌려보내 기존 검증 오류를 남긴다.
+    """
+
+    if not isinstance(value, str) or _DECIMAL_TEXT.fullmatch(value) is not None:
+        return value
+    if _DECIMAL_EXPONENT_TEXT.fullmatch(value) is None:
+        return value
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        return value
+    if not parsed.is_finite():
+        return value
+    text = format(parsed, "f")
+    return text if _DECIMAL_TEXT.fullmatch(text) is not None else value
+
+
+DecimalText = Annotated[
+    str,
+    Field(pattern=r"^-?[0-9]+(?:\.[0-9]+)?$"),
+    BeforeValidator(_plain_decimal_text),
+]
 
 _STRATEGY_LABELS = {
     "MOMENTUM": "모멘텀",
@@ -79,15 +109,16 @@ def _localized_rationale(
 def _validate_decimal_text(value: object) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or _DECIMAL_TEXT.fullmatch(value) is None:
+    text = _plain_decimal_text(value)
+    if not isinstance(text, str) or _DECIMAL_TEXT.fullmatch(text) is None:
         raise ValueError("must be a plain decimal string")
     try:
-        parsed = Decimal(value)
+        parsed = Decimal(text)
     except InvalidOperation as exc:
         raise ValueError("must be a valid decimal string") from exc
     if not parsed.is_finite():
         raise ValueError("must be a finite decimal string")
-    return value
+    return text
 
 
 def _validate_aware_timestamp(value: datetime | None) -> datetime | None:

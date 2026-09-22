@@ -1,0 +1,29 @@
+cwd: /work  (server isolated checkout /tmp/kasset-apisurface-20260923, one-shot container 2 CPU / 3 GiB)
+image: ghcr.io/astral-sh/uv:python3.13-bookworm
+db: run-owned database on kasset-test-db (postgresql+asyncpg://postgres:postgres@localhost:5432/test_db via --network container:kasset-test-db)
+command: uv run --frozen --no-sync python -m pytest tests/schemas/test_ai_recommendations_schema.py tests/routers/test_ai_recommendations.py -q --tb=short -p no:cacheprovider
+exit: 0
+
+....................................                                     [100%]
+=============================== warnings summary ===============================
+app/auth/schemas.py:61
+  /work/app/auth/schemas.py:61: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class UserInDB(BaseModel):
+
+app/auth/schemas.py:73
+  /work/app/auth/schemas.py:73: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class UserResponse(BaseModel):
+
+tests/routers/test_ai_recommendations.py::test_main_registers_exact_recommendation_paths
+  /work/app/routers/symbol_settings.py:66: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class SymbolSettingsResponse(BaseModel):
+
+tests/routers/test_ai_recommendations.py::test_main_registers_exact_recommendation_paths
+  /work/app/routers/user_defaults.py:42: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class UserTradeDefaultsResponse(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.18 database_seconds=0.16
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+36 passed, 4 warnings in 14.39s

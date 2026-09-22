@@ -24,7 +24,7 @@ from app.extensions.kasset.automation.policy import (
     AITradingUsage,
     OperatingMode,
     _decode_setting,
-    _trading_day_start,
+    trading_day_start,
 )
 from app.models.trading import InstrumentType, User, UserRole
 from app.models.user_settings import UserSetting
@@ -535,7 +535,7 @@ async def test_usage_separates_krw_rows_from_usd_book() -> None:
 def test_us_trading_day_starts_at_new_york_midnight() -> None:
     now = datetime(2026, 9, 1, 1, 0, tzinfo=UTC)
 
-    assert _trading_day_start(now, "USD") == datetime(2026, 8, 31, 4, 0, tzinfo=UTC)
+    assert trading_day_start(now, "USD") == datetime(2026, 8, 31, 4, 0, tzinfo=UTC)
 
 
 class _EmptyRiskDb:

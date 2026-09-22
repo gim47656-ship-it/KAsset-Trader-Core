@@ -25,6 +25,7 @@ from app.extensions.kasset.automation.position_manager import (
     ExitLevelVersion,
     ManagedPositionState,
     PositionBar,
+    PositionManagerConfig,
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
@@ -417,11 +418,22 @@ def test_delayed_daily_trailing_protects_the_intermediate_session() -> None:
 
 
 @pytest.mark.unit
-def test_partial_profit_sells_half_once_at_three_atr() -> None:
+def test_partial_profit_sells_the_configured_fraction_once() -> None:
+    """도달선은 진입가 + ``partial_profit_atr`` ATR, 체결가는 max(시가, 도달선)다.
+
+    배수는 명시 config로 고정한다. 출하 기본값(0.5 ATR / 30%)은 실제 장중
+    구간을 입력으로 쓰는 세션 회귀가 따로 방어한다.
+    """
+
+    config = PositionManagerConfig(
+        partial_profit_atr=D("3"),
+        partial_fraction=D("0.5"),
+    )
     first = evaluate_position(
         _state(),
         _bar(1, open_="125", high="132", low="90", close="128"),
         bars_held=1,
+        config=config,
     )
 
     assert first.signal is not None
@@ -434,6 +446,7 @@ def test_partial_profit_sells_half_once_at_three_atr() -> None:
         first.state,
         _bar(2, open_="128", high="140", low="100", close="135"),
         bars_held=2,
+        config=config,
     )
     assert second.signal is None
 
@@ -442,20 +455,21 @@ def test_partial_profit_sells_half_once_at_three_atr() -> None:
 def test_close_based_trailing_stop_only_applies_from_next_bar() -> None:
     first = evaluate_position(
         _state(partial=True),
-        _bar(1, open_="100", high="112", low="75", close="110"),
+        _bar(1, open_="100", high="145", low="75", close="140"),
         bars_held=2,
     )
     assert first.signal is None
-    assert first.state.current_stop == D("80")
+    # 종가 140 - 3 ATR = 110. 본전 바닥 100보다 높으므로 trailing이 결정한다.
+    assert first.state.current_stop == D("110")
 
     second = evaluate_position(
         first.state,
-        _bar(2, open_="85", high="90", low="79", close="82"),
+        _bar(2, open_="115", high="116", low="109", close="112"),
         bars_held=3,
     )
     assert second.signal is not None
     assert second.signal.kind is ExitKind.TRAILING_STOP
-    assert second.signal.reference_price == D("80")
+    assert second.signal.reference_price == D("110")
 
 
 @pytest.mark.unit
@@ -675,6 +689,10 @@ def test_intraday_partial_target_uses_stored_entry_and_atr() -> None:
         _state(),
         _intraday_position_bars(bars),
         bar_interval=bars.bar_interval,
+        config=PositionManagerConfig(
+            partial_profit_atr=D("3"),
+            partial_fraction=D("0.5"),
+        ),
     )
 
     assert signal is not None
@@ -706,6 +724,199 @@ def test_intraday_full_stop_outranks_an_earlier_partial_hit() -> None:
     assert signal.quantity_fraction == D("1")
     assert signal.reference_price == D("70")
     assert signal.signal_at == bars.bars[1].timestamp + _INTRADAY_INTERVAL
+
+
+#: 2026-09-22 KRX 정규장에서 실제로 보유 중이던 000155의 운영 state와 그날 등락.
+#: 진입가 472,500 / ATR 24,964.29(진입가의 5.28%) / 손절선 진입가 -3 ATR.
+_KR_SESSION_ENTRY = D("472500")
+_KR_SESSION_ATR = D("24964.28571429")
+_KR_SESSION_STOP = D("397607.14285714")
+
+
+def _held_position_20260922() -> ManagedPositionState:
+    return ManagedPositionState(
+        market="KRX",
+        symbol="000155",
+        entry_price=_KR_SESSION_ENTRY,
+        initial_atr=_KR_SESSION_ATR,
+        initial_stop=_KR_SESSION_STOP,
+        current_stop=_KR_SESSION_STOP,
+        highest_close=_KR_SESSION_ENTRY,
+        partial_exit_completed=False,
+        entry_at=ENTRY_AT,
+        last_evaluated_at=None,
+        strategy_version="breakout-portfolio-v1",
+        position_cycle_id=101,
+    )
+
+
+@pytest.mark.unit
+def test_intraday_partial_fires_inside_the_observed_session_excursion() -> None:
+    """실측 결함: 익절선이 하루 안에 닿지 않아 그날 SELL 추천이 0건이었다.
+
+    입력은 2026-09-22 000155의 실제 정규장 구간(시가 489,500 / 고가 490,500 /
+    저가 472,000)이다. 고가는 진입가 대비 +3.81%, ATR로는 +0.72 ATR이라
+    +3 ATR 익절선(+15.85%)에는 구조적으로 닿을 수 없었다.
+    """
+
+    bars = _intraday(
+        [(0, "489500", "490500", "472000", "481500")],
+        day=3,
+        symbol="000155",
+    )
+
+    signal = evaluate_position_intraday(
+        _held_position_20260922(),
+        _intraday_position_bars(bars),
+        bar_interval=bars.bar_interval,
+    )
+
+    assert signal is not None
+    assert signal.kind is ExitKind.PARTIAL_SELL
+    # 출하 기본값을 고정한다. 잔량을 남겨 추세를 타되 일부만 실현한다.
+    assert signal.quantity_fraction == D("0.3")
+    # 장중 저가는 손절선 위였다. 익절이 손절을 앞지른 것이 아니다.
+    assert signal.current_stop == _KR_SESSION_STOP
+
+
+@pytest.mark.unit
+def test_unreachable_partial_target_leaves_the_session_without_any_exit() -> None:
+    """같은 구간이라도 익절선이 +3 ATR이면 청산 신호가 하나도 나오지 않는다."""
+
+    bars = _intraday(
+        [(0, "489500", "490500", "472000", "481500")],
+        day=3,
+        symbol="000155",
+    )
+
+    assert (
+        evaluate_position_intraday(
+            _held_position_20260922(),
+            _intraday_position_bars(bars),
+            bar_interval=bars.bar_interval,
+            config=PositionManagerConfig(partial_profit_atr=D("3")),
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_early_trailing_protects_profit_before_any_partial_exit() -> None:
+    """부분익절 전 구간에도 보호선이 따라 올라간다."""
+
+    config = PositionManagerConfig(
+        partial_profit_atr=D("3"),
+        early_trailing_activation_atr=D("1"),
+        trailing_stop_atr=D("2"),
+    )
+    first = evaluate_position(
+        _state(),
+        _bar(1, open_="100", high="115", low="95", close="112"),
+        bars_held=1,
+        config=config,
+    )
+
+    assert first.signal is None
+    assert first.state.partial_exit_completed is False
+    # 초기 손절선은 그대로 두고 보호선만 올린다.
+    assert first.state.initial_stop == D("70")
+    assert first.state.current_stop == D("92")
+
+    second = evaluate_position(
+        first.state,
+        _bar(2, open_="110", high="111", low="91", close="93"),
+        bars_held=2,
+        config=config,
+    )
+
+    assert second.signal is not None
+    assert second.signal.kind is ExitKind.TRAILING_STOP
+    assert second.signal.reference_price == D("92")
+
+
+@pytest.mark.unit
+def test_early_trailing_stays_off_until_the_activation_progress() -> None:
+    """활성화 진전폭 전에는 진입 직후 잡음이 손절선을 끌어올리지 못한다."""
+
+    config = PositionManagerConfig(
+        partial_profit_atr=D("3"),
+        early_trailing_activation_atr=D("1"),
+        trailing_stop_atr=D("2"),
+    )
+    first = evaluate_position(
+        _state(),
+        _bar(1, open_="100", high="110", low="95", close="105"),
+        bars_held=1,
+        config=config,
+    )
+
+    assert first.signal is None
+    assert first.state.current_stop == D("70")
+
+    second = evaluate_position(
+        first.state,
+        _bar(2, open_="104", high="106", low="70", close="72"),
+        bars_held=2,
+        config=config,
+    )
+
+    assert second.signal is not None
+    assert second.signal.kind is ExitKind.STOP
+    assert second.signal.reference_price == D("70")
+
+
+@pytest.mark.unit
+def test_partial_exit_keeps_trailing_without_a_second_activation() -> None:
+    """부분익절이 끝난 포지션에 활성화 진전폭을 다시 요구하지 않는다."""
+
+    result = evaluate_position(
+        _state(partial=True),
+        _bar(1, open_="100", high="128", low="95", close="125"),
+        bars_held=2,
+        config=PositionManagerConfig(
+            partial_profit_atr=D("3"),
+            early_trailing_activation_atr=D("99"),
+            trailing_stop_atr=D("2"),
+        ),
+    )
+
+    assert result.signal is None
+    # 활성화 진전폭 990을 넘지 못했는데도 종가 125 - 2 ATR = 105로 올라간다.
+    assert result.state.current_stop == D("105")
+
+
+@pytest.mark.unit
+def test_partial_exit_lifts_the_runner_stop_to_the_atr_floor() -> None:
+    """부분익절 뒤 잔여 수량은 본전 아래로 다시 노출되지 않는다."""
+
+    result = evaluate_position(
+        _state(partial=True),
+        _bar(1, open_="100", high="108", low="95", close="105"),
+        bars_held=2,
+        config=PositionManagerConfig(partial_profit_atr=D("3")),
+    )
+
+    assert result.signal is None
+    # trailing은 105 - 3 ATR = 75지만 본전 바닥 100이 이긴다.
+    assert result.state.current_stop == D("100")
+    # 초기 손절선 자체는 그대로다.
+    assert result.state.initial_stop == D("70")
+
+
+@pytest.mark.unit
+def test_time_stop_is_not_evaded_by_an_earlier_high_close() -> None:
+    """과거 최고 종가가 진전폭을 latch해 TIME_STOP을 영구 회피하면 안 된다."""
+
+    result = evaluate_position(
+        _state(high="108"),
+        _bar(10, open_="102", high="104", low="99", close="101"),
+        bars_held=10,
+        config=PositionManagerConfig(partial_profit_atr=D("3")),
+    )
+
+    assert result.signal is not None
+    assert result.signal.kind is ExitKind.TIME_STOP
+    assert result.signal.reference_price == D("101")
 
 
 @pytest.mark.asyncio
@@ -935,7 +1146,9 @@ async def test_partial_fill_keeps_same_cycle_and_marks_remaining_state() -> None
     assert state_row.position_cycle_id == 101
     assert state_row.paper_position_id == 101
     assert state_row.partial_exit_completed is True
-    assert state_row.current_stop == D("98")
+    # 체결이 확정된 뒤에야 잔여 보호선이 올라간다. trailing은 128 - 3 ATR = 98,
+    # 본전 바닥은 100이므로 100이 남는다.
+    assert state_row.current_stop == D("100")
 
 
 @pytest.mark.asyncio

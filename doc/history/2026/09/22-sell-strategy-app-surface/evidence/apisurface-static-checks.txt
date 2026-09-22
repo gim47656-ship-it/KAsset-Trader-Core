@@ -1,0 +1,23 @@
+cwd: /work  (server isolated checkout /tmp/kasset-apisurface-20260923, one-shot container)
+
+대상 4파일:
+  app/schemas/ai_recommendations.py
+  app/extensions/kasset/automation/position_sizing.py
+  tests/schemas/test_ai_recommendations_schema.py
+  tests/routers/test_ai_recommendations.py
+
+$ uv run --frozen --no-sync ruff check <4파일>
+All checks passed!
+exit: 0
+
+$ uv run --frozen --no-sync ruff format --check <4파일>
+4 files already formatted
+exit: 0
+
+실행 코드 2파일:
+  app/schemas/ai_recommendations.py
+  app/extensions/kasset/automation/position_sizing.py
+
+$ uv run --frozen --no-sync ty check --error-on-warning <2파일>
+All checks passed!
+exit: 0

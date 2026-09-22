@@ -14,7 +14,7 @@ from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -115,6 +115,7 @@ from app.extensions.kasset.automation.policy import (
     AITradingSnapshot,
     PortfolioPlan,
     settlement_book,
+    trading_day_start,
 )
 from app.extensions.kasset.automation.portfolio_backtest import PortfolioEntryPath
 from app.extensions.kasset.automation.position_manager_service import (
@@ -149,7 +150,11 @@ from app.extensions.kasset.automation.strategy_promotion import (
 from app.extensions.kasset.daily_routine_service import daily_routine_service
 from app.extensions.kasset.models import AndroidPaperAccount
 from app.jobs.watch_market_data import is_market_open
-from app.models.ai_recommendations import AIRecommendation, RecommendationAction
+from app.models.ai_recommendations import (
+    AIRecommendation,
+    RecommendationAction,
+    RecommendationExecutionStatus,
+)
 from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.news import NewsArticle
 from app.models.paper_trading import PaperPosition
@@ -176,10 +181,23 @@ _RECOMMENDATION_LIMIT = 5
 #: 같은 owner에게 BUY 추천을 반복 생성하지 않도록 두는 중복 방지 창.
 _OWNER_BUY_COOLDOWN = timedelta(hours=1)
 
+#: producer tick 간격. ``kasset_market_events.run``이 정규장 중 10분마다 돈다.
+_PRODUCER_TICK = timedelta(minutes=10)
+
+#: 추천 유효기간 상한. owner 쿨다운 때문에 다음 배치는 빨라야 쿨다운 + tick
+#: 1회 뒤에 나온다. 상한이 그 간격을 덮지 못하면 직전 배치 추천이 다음 배치가
+#: 시작되기 전에 만료된다. 집행은 owner당 한 tick에 한 건뿐이라 배치당 여러
+#: 추천 중 뒤쪽은 쓰이지도 못한 채 사라지고, 같은 종목이 매 배치 새 추천으로
+#: 다시 나간다. tick 한 번의 여유만 더해 그 창을 덮는 최소값으로 둔다.
+_RECOMMENDATION_VALIDITY = _OWNER_BUY_COOLDOWN + 2 * _PRODUCER_TICK
+
 #: 순위 상위 검토 창을 ``strategy_review_limit``의 몇 배까지 열어둘지. AI 앞단
 #: 에서 결정론적으로 걸린 행을 다음 순위 행으로 메우려면 창이 상한보다 넓어야
 #: 한다. AI로 보내는 최대 건수는 여전히 ``strategy_review_limit``이다.
 _REVIEW_WINDOW_MULTIPLIER = 2
+
+#: owner가 정한 같은 종목 재진입 한도를 이미 다 쓴 후보.
+_SAME_SYMBOL_REENTRY_EXHAUSTED = "same_symbol_reentry_exhausted"
 
 #: 앙상블 합의가 진입가를 내놓지 못해 사이징 자체가 불가능한 행.
 _PRESIZING_NO_REFERENCE_PRICE = "presizing_reference_price_unavailable"
@@ -769,6 +787,10 @@ class AIRecommendationVerticalSlice:
             session_by_market=session_by_market,
         )
         news_health_by_market = await self._news_source_health(allowed_markets)
+        reentry_used = await self._open_same_symbol_buys(
+            owner_user_id,
+            recommendation_candidates,
+        )
 
         for candidate_key in (
             ranked_item.key
@@ -884,6 +906,28 @@ class AIRecommendationVerticalSlice:
                 if entry_path_attribution is not None
                 else item.ensemble.action
             )
+
+            # owner가 정한 같은 종목 재진입 한도를 추천 생성 단계에서도 지킨다.
+            # 이미 체결된 추천과 아직 만료되지 않은 미집행 추천만 세므로, 예산
+            # 소진처럼 집행에 실패한 종목은 다음 cycle에 다시 후보가 된다.
+            reentry_limit = snapshot.limits.same_symbol_reentry_limit
+            open_buys = reentry_used.get(candidate.ranker_key, 0)
+            if effective_action is Action.BUY and open_buys >= reentry_limit:
+                pre_ai_exclusions[_SAME_SYMBOL_REENTRY_EXHAUSTED] += 1
+                pre_ai_exclusion_evidence.append(
+                    {
+                        "source": "same_symbol_reentry",
+                        "symbol": candidate.symbol,
+                        "market": candidate.ranker_market,
+                        "reason": _SAME_SYMBOL_REENTRY_EXHAUSTED,
+                        "detail": (
+                            f"openSameSymbolBuys={open_buys}/{reentry_limit}; "
+                            "counts filled orders and unexpired pending "
+                            "recommendations only"
+                        ),
+                    }
+                )
+                continue
 
             # 손절 연속은 관측값으로만 남긴다. 손절 이력이 있어도 유효한 새
             # 진입 후보는 계속 검토한다.
@@ -1213,7 +1257,7 @@ class AIRecommendationVerticalSlice:
                     or detector_signal.stop_price is None
                 ):
                     continue
-                valid_until = self._now + timedelta(hours=1)
+                valid_until = self._now + _RECOMMENDATION_VALIDITY
                 if ranking.valid_until is not None:
                     valid_until = min(
                         valid_until,
@@ -1362,29 +1406,6 @@ class AIRecommendationVerticalSlice:
                     .limit(self._ranker_config.candidate_limit)
                 )
             ).all()
-            symbols = tuple(
-                dict.fromkeys(
-                    str(row.symbol).strip().upper()
-                    for row in rows
-                    if str(row.symbol).strip()
-                )
-            )
-            names = (
-                {
-                    symbol: name
-                    for symbol, name in (
-                        await self._db.execute(
-                            select(SymbolMaster.symbol, SymbolMaster.name).where(
-                                SymbolMaster.market == recommendation_market,
-                                SymbolMaster.symbol.in_(symbols),
-                            )
-                        )
-                    ).all()
-                    if name and name.strip() and name.strip() != symbol
-                }
-                if symbols
-                else {}
-            )
             for row in rows:
                 symbol = str(row.symbol).strip().upper()
                 if not symbol:
@@ -1393,7 +1414,7 @@ class AIRecommendationVerticalSlice:
                     TradingCandidate(
                         symbol=symbol,
                         market=cast(Any, recommendation_market),
-                        name=names.get(symbol),
+                        name=None,
                         source=(f"invest_screener_snapshots:{latest_date.isoformat()}"),
                         turnover=(
                             Decimal(str(row.daily_turnover))
@@ -1467,7 +1488,52 @@ class AIRecommendationVerticalSlice:
             metadata,
             limit=self._ranker_config.candidate_limit,
         )
-        return [ordered[item.key] for item in capped]
+        return await self._fill_candidate_names([ordered[item.key] for item in capped])
+
+    async def _fill_candidate_names(
+        self,
+        candidates: list[TradingCandidate],
+    ) -> list[TradingCandidate]:
+        """Name every candidate the collection source left unnamed.
+
+        스크리너 행과 보유 포지션 행은 이름을 실어주지 않는다. 이름이 비면 앱은
+        종목코드를 그대로 보여주므로 저장된 종목 마스터 이름으로 메운다. 마스터
+        이름이 종목코드와 같으면 이름이 없는 것으로 보는 기존 계약을 지킨다.
+        """
+
+        missing_by_market: dict[str, set[str]] = {}
+        for candidate in candidates:
+            if candidate.name is None:
+                missing_by_market.setdefault(candidate.market, set()).add(
+                    candidate.symbol
+                )
+        if not missing_by_market:
+            return candidates
+        names: dict[tuple[str, str], str] = {}
+        for market, symbols in missing_by_market.items():
+            rows = (
+                await self._db.execute(
+                    select(SymbolMaster.symbol, SymbolMaster.name).where(
+                        SymbolMaster.market == market,
+                        SymbolMaster.symbol.in_(sorted(symbols)),
+                    )
+                )
+            ).all()
+            for symbol, name in rows:
+                resolved = str(name or "").strip()
+                if resolved and resolved != symbol:
+                    names[(market, symbol)] = resolved
+        if not names:
+            return candidates
+        filled: list[TradingCandidate] = []
+        for candidate in candidates:
+            resolved = (
+                names.get((candidate.market, candidate.symbol))
+                if candidate.name is None
+                else None
+            )
+            filled.append(replace(candidate, name=resolved) if resolved else candidate)
+        return filled
 
     async def _sync_missing_kr_candles(
         self,
@@ -2418,6 +2484,59 @@ class AIRecommendationVerticalSlice:
         )
         return bool(count)
 
+    async def _open_same_symbol_buys(
+        self,
+        owner_user_id: int,
+        candidates: Sequence[TradingCandidate],
+    ) -> dict[CandidateKey, int]:
+        """Count today's BUY recommendations that still hold a re-entry slot.
+
+        체결된 추천과 아직 만료되지 않은 미집행 추천만 센다. 집행에 실패한
+        추천은 재진입 기회를 쓰지 않았으므로 세지 않으며, 그래서 예산 소진으로
+        막힌 종목은 예산이 풀리면 다시 추천된다. 거래일 경계는 주문 단계 hard
+        risk가 쓰는 ``trading_day_start``와 같다.
+        """
+
+        symbols_by_market: dict[str, set[str]] = {}
+        for candidate in candidates:
+            symbols_by_market.setdefault(candidate.market, set()).add(candidate.symbol)
+        used: dict[CandidateKey, int] = {}
+        for market, symbols in symbols_by_market.items():
+            ranker_market: Literal["KR", "US"] = "KR" if market == "KRX" else "US"
+            rows = (
+                await self._db.execute(
+                    select(AIRecommendation.symbol, func.count())
+                    .where(
+                        AIRecommendation.owner_user_id == owner_user_id,
+                        AIRecommendation.source == "kasset-automation",
+                        AIRecommendation.action == RecommendationAction.BUY.value,
+                        AIRecommendation.market == market,
+                        AIRecommendation.symbol.in_(sorted(symbols)),
+                        AIRecommendation.created_at
+                        >= trading_day_start(
+                            self._now,
+                            "KRW" if market == "KRX" else "USD",
+                        ),
+                        or_(
+                            AIRecommendation.paper_execution_status.in_(
+                                (
+                                    RecommendationExecutionStatus.SUCCEEDED.value,
+                                    RecommendationExecutionStatus.CLAIMED.value,
+                                )
+                            ),
+                            and_(
+                                AIRecommendation.paper_execution_status.is_(None),
+                                AIRecommendation.valid_until > self._now,
+                            ),
+                        ),
+                    )
+                    .group_by(AIRecommendation.symbol)
+                )
+            ).all()
+            for symbol, count in rows:
+                used[(ranker_market, str(symbol))] = int(count)
+        return used
+
 
 @dataclass(frozen=True, slots=True)
 class _AiReviewOutcomeBundle:
@@ -2456,12 +2575,12 @@ def _candidate_valid_until(
             if result.valid_until.tzinfo is not None
             and result.valid_until.utcoffset() is not None
         ),
-        default=now + timedelta(hours=1),
+        default=now + _RECOMMENDATION_VALIDITY,
     )
     ranking = item.factor_ranking
     if ranking is not None and ranking.valid_until is not None:
         valid_until = min(valid_until, ranking.valid_until.astimezone(UTC))
-    valid_until = min(valid_until, now + timedelta(hours=1))
+    valid_until = min(valid_until, now + _RECOMMENDATION_VALIDITY)
     if trigger_decision is not None:
         valid_until = min(valid_until, trigger_decision.valid_until)
     return valid_until

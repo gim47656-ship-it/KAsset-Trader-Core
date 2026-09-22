@@ -547,7 +547,7 @@ class AITradingPolicyService:
         )
         if account_id is None:
             return AITradingUsage()
-        start = _trading_day_start(now, book)
+        start = trading_day_start(now, book)
         order_filters = (
             AndroidPaperOrder.owner_user_id == owner_user_id,
             AndroidPaperOrder.currency == book,
@@ -772,7 +772,7 @@ class AITradingPolicyService:
         if currency is None:
             same_symbol_buys = 0
         else:
-            start = _trading_day_start(now, currency)
+            start = trading_day_start(now, currency)
             same_symbol_buys = int(
                 await db.scalar(
                     select(func.count())
@@ -1159,7 +1159,9 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(microsecond=0)
 
 
-def _trading_day_start(value: datetime, currency: str) -> datetime:
+def trading_day_start(value: datetime, currency: str) -> datetime:
+    """Return the settlement book's local midnight for this instant, in UTC."""
+
     current = _aware_utc(value)
     book, _ = settlement_book(currency=currency)
     zone = ZoneInfo("Asia/Seoul" if book == "KRW" else "America/New_York")

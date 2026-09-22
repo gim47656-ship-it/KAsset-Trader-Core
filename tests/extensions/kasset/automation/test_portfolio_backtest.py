@@ -41,6 +41,7 @@ from app.extensions.kasset.automation.portfolio_backtest import (
     run_portfolio_diagnostics,
     run_walk_forward,
 )
+from app.extensions.kasset.automation.position_manager import ExitKind
 from app.extensions.kasset.automation.promotion_evidence import (
     _STORAGE,
     PortfolioEvidenceSource,
@@ -600,11 +601,14 @@ def test_three_arms_are_independent_under_the_same_risk_cost_and_exit_rules() ->
         and signal.status is SignalStatus.EXECUTED
         for signal in nr7.signals
     )
+    manager_exit_reasons = {kind.value for kind in ExitKind}
     for result in (pullback, nr7):
         assert result.fees_paid > 0
         assert result.slippage_cost > 0
         assert result.trades
-        assert result.trades[0].exit_reason == "TIME_STOP"
+        # 어느 arm이든 청산은 공용 Position Manager가 낸다. 구체적인 ExitKind는
+        # 설정값이 정하는 부수 결과이므로 고정하지 않는다.
+        assert {trade.exit_reason for trade in result.trades} <= manager_exit_reasons
 
 
 def test_future_bar_changes_cannot_change_prior_signals_or_equity() -> None:

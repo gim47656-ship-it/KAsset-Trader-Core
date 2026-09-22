@@ -1,0 +1,52 @@
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+__________ test_unnamed_screener_candidates_take_symbol_master_names ___________
+tests/extensions/kasset/automation/test_vertical_slice.py:2638: in test_unnamed_screener_candidates_take_symbol_master_names
+    assert names == {"000155": "두산우", "02826K": "삼성물산우B", "900110": None}
+E   AssertionError: assert {'000155': No...900110': None} == {'000155': '두...900110': None}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Differing items:
+E     {'02826K': None} != {'02826K': '삼성물산우B'}
+E     {'000155': None} != {'000155': '두산우'}
+E     Use -v to get more diff
+__________ test_failed_buy_recommendation_keeps_the_symbol_retryable ___________
+tests/extensions/kasset/automation/test_vertical_slice.py:2769: in test_failed_buy_recommendation_keeps_the_symbol_retryable
+    used = await instance._open_same_symbol_buys(  # noqa: SLF001
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'AIRecommendationVerticalSlice' object has no attribute '_open_same_symbol_buys'
+------------------------------ Captured log call -------------------------------
+WARNING  passlib.handlers.bcrypt:bcrypt.py:622 (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "/w/.venv/lib/python3.13/site-packages/passlib/handlers/bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+_______ test_exhausted_reentry_symbol_produces_no_new_buy_recommendation _______
+tests/extensions/kasset/automation/test_vertical_slice.py:2822: in test_exhausted_reentry_symbol_produces_no_new_buy_recommendation
+    assert result["recommendationIds"] == ["rec:005935"]
+E   AssertionError: assert ['rec:005930', 'rec:005935'] == ['rec:005935']
+E     
+E     At index 0 diff: 'rec:005930' != 'rec:005935'
+E     Left contains one more item: 'rec:005935'
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.extensions.kasset.automation.loss_streak_gate:loss_streak_gate.py:133 kasset LOSS_STREAK gate unavailable: owner_user_id=7 market=KRX symbol=005930 reason=ValueError:regular_session_unavailable
+Traceback (most recent call last):
+  File "/w/app/extensions/kasset/automation/loss_streak_gate.py", line 112, in evaluate
+    raise ValueError("regular_session_unavailable")
+ValueError: regular_session_unavailable
+WARNING  app.extensions.kasset.automation.loss_streak_gate:loss_streak_gate.py:133 kasset LOSS_STREAK gate unavailable: owner_user_id=7 market=KRX symbol=005935 reason=ValueError:regular_session_unavailable
+Traceback (most recent call last):
+  File "/w/app/extensions/kasset/automation/loss_streak_gate.py", line 112, in evaluate
+    raise ValueError("regular_session_unavailable")
+ValueError: regular_session_unavailable
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.87 database_seconds=0.56
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+=========================== short test summary info ============================
+FAILED tests/extensions/kasset/automation/test_vertical_slice.py::test_unnamed_screener_candidates_take_symbol_master_names
+FAILED tests/extensions/kasset/automation/test_vertical_slice.py::test_failed_buy_recommendation_keeps_the_symbol_retryable
+FAILED tests/extensions/kasset/automation/test_vertical_slice.py::test_exhausted_reentry_symbol_produces_no_new_buy_recommendation
+3 failed, 43 deselected in 19.96s
+pytest-exit=1

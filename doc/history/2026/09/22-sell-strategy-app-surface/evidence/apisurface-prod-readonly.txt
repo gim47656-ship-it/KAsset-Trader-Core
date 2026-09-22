@@ -1,0 +1,71 @@
+운영 서버 읽기 전용 조회(쓰기 없음). 2026-09-22 15:14:55+00 기준.
+접속: root@100.73.186.78 → docker exec kasset-trader-db-1 psql -U kasset -d kasset
+쓰기·UPDATE·DELETE·sweep·주문은 실행하지 않았다.
+
+[1] 운영 배포 SHA
+$ cd /opt/kasset-trader-core && git rev-parse HEAD
+a2d0b1517028c311dde0974c314b479e0433866b
+→ 작업 브랜치 base와 동일.
+
+[2] 운영 컨테이너에 배포된 목록 질의 소스 (docker exec kasset-trader-api-1 sed -n '45,80p' /app/app/services/ai_recommendations/repository.py)
+    ...
+        if status == "PENDING":
+            statement = statement.where(
+                or_(
+                    AIRecommendation.valid_until.is_(None),
+                    AIRecommendation.valid_until > now,
+                )
+            )
+    ...
+→ 만료 PENDING 제외 필터가 운영에 이미 배포돼 있다. 로컬 트리와 동일.
+
+[3] PENDING 12건과 만료 필터 적용 결과
+$ select now(),
+         count(*) filter (where decision='PENDING') as pending_all,
+         count(*) filter (where decision='PENDING'
+                          and (valid_until is null or valid_until > now())) as pending_visible
+  from review.ai_recommendations;
+2026-09-22 15:14:55.744252+00|12|0
+→ PENDING 12건 전부 이미 목록에서 제외된다. valid_until NULL 행은 0건.
+
+[4] PENDING 행 목록 (id|symbol|action|decision|created_at|valid_until|valid_until IS NULL)
+rec-c7899d96-a6d6-4430-bac7-740ac4167dba|005940|BUY|PENDING|2026-09-22 04:40:00+00|2026-09-22 05:40:00+00|f
+rec-7cd71c50-9180-4711-bd35-fd03fb181c60|000157|BUY|PENDING|2026-09-22 04:40:00+00|2026-09-22 05:40:00+00|f
+rec-d2c2282d-678c-48e3-bac2-b10a0e14b208|005940|BUY|PENDING|2026-09-22 03:30:00+00|2026-09-22 04:30:00+00|f
+rec-eebf208c-cea2-4fc5-8095-d93675277af4|000157|BUY|PENDING|2026-09-22 02:20:00+00|2026-09-22 03:20:00+00|f
+rec-d1ee1bbc-54e1-486e-88b0-e2399ece6f4d|005930|BUY|PENDING|2026-09-22 01:10:00+00|2026-09-22 02:10:00+00|f
+rec-d3c7ee3b-3434-420b-b3f1-8996f5deb41e|000157|BUY|PENDING|2026-09-22 01:10:00+00|2026-09-22 02:10:00+00|f
+rec-f9502d73-a329-43e8-9c8c-c89a9f5d3290|443060|BUY|PENDING|2026-09-11 04:30:00+00|2026-09-11 05:00:00+00|f
+rec-a6f8d626-9805-4754-aae1-b4e9ba4ee29e|267250|BUY|PENDING|2026-09-09 06:00:00+00|2026-09-09 06:30:00+00|f
+rec-a6a570b1-0fda-4d67-90f9-499fc785cd13|010955|BUY|PENDING|2026-09-09 03:10:00+00|2026-09-09 03:40:00+00|f
+rec-dd1f048d-f136-43c1-9533-e600d37fb8d8|006400|HOLD|PENDING|2026-08-31 09:28:38+00|2026-08-31 10:28:38+00|f
+rec-1ad13a5a-d0a1-436d-93b5-ed8b6d87b804|003230|HOLD|PENDING|2026-08-31 09:28:38+00|2026-08-31 10:28:38+00|f
+rec-ui2-smoke-1|005930|BUY|PENDING|2026-08-28 02:59:31.778506+00|2026-08-28 04:59:31.778506+00|f
+
+[5] evidence JSONB의 positionSizing.caps (앞부분 절단 표시)
+$ select id, symbol,
+         jsonb_path_query_first(evidence,
+           '$[*] ? (@.kind == "ai_vertical_slice").portfolio.positionSizing.caps')
+  from review.ai_recommendations where decision='PENDING' order by created_at desc limit 12;
+rec-c7899d96-...|005940|[{"code": "RISK_BUDGET", "quantity": "2.5E+2"}, {"code": "SYMBOL_ALLOCA…
+rec-7cd71c50-...|000157|[{"code": "RISK_BUDGET", "quantity": "5.454545454545454545454545455"}, …
+rec-d2c2282d-...|005940|[{"code": "RISK_BUDGET", "quantity": "2.5E+2"}, {"code": "SYMBOL_ALLOCA…
+rec-eebf208c-...|000157|[{"code": "RISK_BUDGET", "quantity": "5.454545454545454545454545455"}, …
+rec-d1ee1bbc-...|005930|[{"code": "RISK_BUDGET", "quantity": "13.63636363636363636363636364"}, …
+rec-d3c7ee3b-...|000157|[{"code": "RISK_BUDGET", "quantity": "5.454545454545454545454545455"}, …
+rec-f9502d73-...|443060|[{"code": "RISK_BUDGET", "quantity": "8.495145631136692116756769354"}, …
+rec-a6f8d626-...|267250|[{"code": "RISK_BUDGET", "quantity": "1.790281329959903454321430250"}, …
+rec-a6a570b1-...|010955|[{"code": "RISK_BUDGET", "quantity": "7.625272330933180179203102972"}, …
+rec-dd1f048d-...|006400|[{"code": "RISK_BUDGET", "quantity": "0.4953998584599881096020381492"},…
+rec-1ad13a5a-...|003230|[{"code": "RISK_BUDGET", "quantity": "0.2119285498037225032995548834"},…
+rec-ui2-smoke-1|005930|(없음)
+→ 005940 두 건만 지수 표기. 나머지는 평문이라 정규식을 통과한다. 500이 005940 추천 생성 시점부터
+  시작된 관측과 일치한다.
+
+[6] 만료 필터 도입 시점 (로컬 git, 운영 SHA와 동일한 히스토리)
+$ git log -S "AIRecommendation.valid_until > now" --oneline --pretty="%h %ad %s" --date=short \
+    -- app/services/ai_recommendations/repository.py
+22fa1180a 2026-08-31 fix: restore AI cycles and live index coherence
+e94ae620b 2026-08-29 feat: add AI paper trading vertical
+4454fbb9b 2026-08-27 feat: cut KAsset over to multi-user accounts with gated PAPER automation
+→ 2026-09-22 관측 구간 내내 만료 필터가 존재했다. 즉 목록 API가 만료 추천을 내보낸 적은 없다.

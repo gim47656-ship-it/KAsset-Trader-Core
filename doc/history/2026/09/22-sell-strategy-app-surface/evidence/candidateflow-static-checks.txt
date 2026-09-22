@@ -1,0 +1,11 @@
+$ uv run ruff check <changed>
+All checks passed!
+ruff-check-exit=0
+
+$ uv run ruff format --check <changed>
+4 files already formatted
+ruff-format-exit=0
+
+$ uv run ty check app/ --error-on-warning
+All checks passed!
+ty-exit=0

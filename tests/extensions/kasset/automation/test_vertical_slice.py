@@ -90,12 +90,17 @@ from app.extensions.kasset.automation.shadow_setups import (
     ShadowStatus,
 )
 from app.extensions.kasset.automation.vertical_slice import (
+    _OWNER_BUY_COOLDOWN,
+    _PRODUCER_TICK,
+    _RECOMMENDATION_VALIDITY,
     AdmittedCandidate,
     AIRecommendationVerticalSlice,
     EvaluatedCandidate,
     TradingCandidate,
 )
+from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
 from app.models.ai_recommendations import AIRecommendation
+from app.models.paper_trading import PaperAccount
 from app.models.trading import User, UserRole
 from app.schemas.ai_recommendations import RecommendationRanking
 from app.services.market_events.session_calendar import (
@@ -663,6 +668,7 @@ def _stub_review_cycle(
                     currency="KRW",
                     daily_target_rate_pct=Decimal("0.5"),
                     max_daily_loss_rate_pct=Decimal("1.0"),
+                    same_symbol_reentry_limit=1,
                 ),
                 usage=object(),
                 usage_by_currency={"KRW": object(), "USD": object()},
@@ -674,6 +680,7 @@ def _stub_review_cycle(
         evaluate_owner=AsyncMock(return_value=_account_snapshot())
     )
     instance._buy_cooldown_active = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    instance._open_same_symbol_buys = AsyncMock(return_value={})  # type: ignore[method-assign]
     instance._position_manager = SimpleNamespace(  # type: ignore[assignment]
         run_owner=AsyncMock(return_value=())
     )
@@ -2479,7 +2486,7 @@ def test_krx_detector_entry_paths_signal_on_the_last_completed_session_bar(
     session_bar_at = bars[-1].timestamp.isoformat().replace("+00:00", "Z")
     for signal in signals:
         # 추천 유효시각은 완료 세션이 아니라 실제 cycle 시각을 따른다.
-        assert signal.valid_until == as_of + timedelta(hours=1)
+        assert signal.valid_until == as_of + timedelta(minutes=80)
         assert signal.evidence["signalAt"] == session_bar_at
 
 
@@ -2580,3 +2587,255 @@ def test_krx_detector_entry_path_ignores_the_in_progress_session_bar() -> None:
         "first-pullback",
         "nr7-inside-day",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unnamed_screener_candidates_take_symbol_master_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """스크리너가 이름을 주지 않아도 추천에 종목명이 실린다.
+
+    운영 관측(2026-09-22)에서 KR 후보는 전부 ``tvscreener_kr``에서 왔고 그 경로는
+    마스터를 조회하지 않아 우선주 이름이 비었다. 앱은 이름이 비면 종목코드를
+    그대로 보여준다.
+    """
+
+    monkeypatch.setattr(
+        vertical_slice.watchlist_service,
+        "list_items",
+        AsyncMock(return_value=SimpleNamespace(items=[])),
+    )
+    monkeypatch.setattr(
+        vertical_slice,
+        "_load_live_kr_candidates",
+        AsyncMock(
+            return_value=(
+                TradingCandidate("000155", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("02826K", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("900110", "KRX", None, "tvscreener_kr"),
+            )
+        ),
+    )
+    db = MagicMock()
+    db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    db.scalar = AsyncMock(return_value=None)
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                ("000155", "두산우"),
+                ("02826K", "삼성물산우B"),
+                # 마스터 이름이 종목코드와 같으면 이름이 없는 것으로 본다.
+                ("900110", "900110"),
+            ]
+        )
+    )
+    instance = AIRecommendationVerticalSlice(db, MagicMock(), now=_NOW)
+
+    candidates = await instance._load_candidates(  # noqa: SLF001
+        41,
+        currency="KRW",
+        allowed_markets=frozenset({"KR"}),
+    )
+
+    names = {candidate.symbol: candidate.name for candidate in candidates}
+    assert names == {"000155": "두산우", "02826K": "삼성물산우B", "900110": None}
+    master_statement = db.execute.await_args_list[0].args[0]
+    assert "KRX" in master_statement.compile().params.values()
+
+
+def _reentry_recommendation(
+    owner_user_id: int,
+    symbol: str,
+    *,
+    action: str = "BUY",
+    status: str | None = None,
+    valid_for: timedelta = timedelta(hours=1),
+    paper_order_id: str | None = None,
+    created_ago: timedelta = timedelta(minutes=30),
+) -> AIRecommendation:
+    created = _NOW - created_ago
+    settled = status in {"SUCCEEDED", "FAILED"}
+    return AIRecommendation(
+        id=f"rec-reentry-{uuid4().hex}",
+        owner_user_id=owner_user_id,
+        action=action,
+        decision="PENDING",
+        market="KRX",
+        symbol=symbol,
+        currency="KRW",
+        rationale=["reentry scope"],
+        risks=[],
+        evidence=[],
+        source="kasset-automation",
+        created_at=created,
+        updated_at=created,
+        valid_until=created + valid_for,
+        paper_execution_status=status,
+        paper_execution_attempt_count=0 if status is None else 1,
+        paper_execution_claimed_at=None if status is None else created,
+        paper_execution_completed_at=created if settled else None,
+        paper_execution_token=None if status != "CLAIMED" else uuid4().hex,
+        paper_execution_lease_expires_at=(
+            created + timedelta(minutes=5) if status == "CLAIMED" else None
+        ),
+        paper_order_id=paper_order_id,
+        paper_execution_error=(
+            "risk_preview_rejected:BUDGET" if status == "FAILED" else None
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_buy_recommendation_keeps_the_symbol_retryable(
+    db_session: AsyncSession,
+) -> None:
+    """재진입 한도는 체결과 살아 있는 대기 추천만 센다.
+
+    2026-09-22 운영에서 ``005935``는 ``risk_preview_rejected:BUDGET``으로 네 번
+    실패한 뒤 다섯 번째에 체결됐다. 실패한 시도가 한도를 쓰면 그 체결 경로가
+    사라지므로, 실패는 세지 않는다.
+    """
+
+    username = f"reentry-owner-{uuid4().hex}"
+    user = User(
+        username=username,
+        email=f"{username}@example.com",
+        hashed_password=get_password_hash("Reentry-owner-secret-1!"),
+        role=UserRole.trader,
+        is_active=True,
+    )
+    paper_account = PaperAccount(
+        name=f"KAsset reentry {uuid4().hex}",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+    db_session.add_all([user, paper_account])
+    await db_session.flush()
+    owner_user_id = user.id
+    paper_account_id = paper_account.id
+    order_id = f"paper-order-{uuid4().hex}"
+    db_session.add_all(
+        [
+            AndroidPaperAccount(
+                owner_user_id=owner_user_id,
+                paper_account_id=paper_account_id,
+            ),
+            AndroidPaperOrder(
+                id=order_id,
+                owner_user_id=owner_user_id,
+                client_order_id=f"ai-rec:{uuid4().hex}",
+                paper_account_id=paper_account_id,
+                broker_order_id=f"paper-broker-{uuid4().hex}",
+                market="KRX",
+                symbol="005930",
+                currency="KRW",
+                side="BUY",
+                order_type="MARKET",
+                quantity=Decimal("1"),
+                status="FILLED",
+                filled_quantity=Decimal("1"),
+                average_fill_price=Decimal("70000"),
+            ),
+        ]
+    )
+    await db_session.commit()
+    try:
+        instance = AIRecommendationVerticalSlice(db_session, MagicMock(), now=_NOW)
+        db_session.add_all(
+            [
+                # 체결된 추천은 재진입 기회를 실제로 썼다.
+                _reentry_recommendation(
+                    owner_user_id,
+                    "005930",
+                    status="SUCCEEDED",
+                    paper_order_id=order_id,
+                ),
+                # 아직 유효한 미집행 추천은 자리를 잡고 있다.
+                _reentry_recommendation(owner_user_id, "005930"),
+                # 예산 소진으로 실패한 시도는 세지 않는다.
+                _reentry_recommendation(owner_user_id, "005935", status="FAILED"),
+                _reentry_recommendation(owner_user_id, "005935", status="FAILED"),
+                # 만료된 미집행 추천도 세지 않는다.
+                _reentry_recommendation(
+                    owner_user_id,
+                    "005940",
+                    valid_for=timedelta(minutes=10),
+                ),
+                # 직전 배치(쿨다운 + tick 1회 전)의 미집행 추천은 다음 배치
+                # 시점에도 살아 있어야 한다. 이게 만료되면 같은 종목이 매 배치
+                # 새 추천으로 다시 나간다.
+                _reentry_recommendation(
+                    owner_user_id,
+                    "000660",
+                    created_ago=_OWNER_BUY_COOLDOWN + _PRODUCER_TICK,
+                    valid_for=_RECOMMENDATION_VALIDITY,
+                ),
+                # 손절 SELL 추천은 매수 재진입과 무관하다.
+                _reentry_recommendation(owner_user_id, "000155", action="SELL"),
+            ]
+        )
+        await db_session.commit()
+
+        used = await instance._open_same_symbol_buys(  # noqa: SLF001
+            owner_user_id,
+            (
+                TradingCandidate("005930", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("005935", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("005940", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("000660", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("000155", "KRX", None, "tvscreener_kr"),
+            ),
+        )
+
+        assert used == {("KR", "005930"): 2, ("KR", "000660"): 1}
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            delete(AIRecommendation).where(
+                AIRecommendation.owner_user_id == owner_user_id
+            )
+        )
+        await db_session.execute(
+            delete(AndroidPaperOrder).where(
+                AndroidPaperOrder.owner_user_id == owner_user_id
+            )
+        )
+        await db_session.execute(
+            delete(AndroidPaperAccount).where(
+                AndroidPaperAccount.owner_user_id == owner_user_id
+            )
+        )
+        await db_session.execute(
+            delete(PaperAccount).where(PaperAccount.id == paper_account_id)
+        )
+        await db_session.execute(delete(User).where(User.username == username))
+        await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_reentry_symbol_produces_no_new_buy_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """재진입 한도를 채운 종목은 다음 배치에서 다시 추천되지 않는다."""
+
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930", "005935"),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    instance._open_same_symbol_buys = AsyncMock(  # type: ignore[method-assign]
+        return_value={("KR", "005930"): 1}
+    )
+
+    result = await instance.run_owner(7)
+
+    assert result["recommendationIds"] == ["rec:005935"]
+    assert result["preAiExclusions"] == {"same_symbol_reentry_exhausted": 1}
+    exclusion = result["candidateExclusions"][0]
+    assert exclusion["symbol"] == "005930"
+    assert exclusion["reason"] == "same_symbol_reentry_exhausted"
+    assert exclusion["detail"].startswith("openSameSymbolBuys=1/1")
+    persist_recommendation.assert_awaited_once()

@@ -1,0 +1,59 @@
+목적: 새 회귀 테스트가 수정 전 소스에서 실제로 실패하는지(= 결함을 잡는지) 확인.
+방법: 같은 격리 checkout에서 app/schemas/ai_recommendations.py 와
+      app/extensions/kasset/automation/position_sizing.py 만 base HEAD(a2d0b1517) 내용으로 되돌리고
+      새 테스트 4개만 실행. 테스트 파일은 수정본 그대로 둔다.
+
+cwd: /work  (server isolated checkout /tmp/kasset-apisurface-20260923)
+command: uv run --frozen --no-sync python -m pytest \
+  tests/schemas/test_ai_recommendations_schema.py::test_build_recommendation_response_reads_stored_exponent_decimals \
+  tests/schemas/test_ai_recommendations_schema.py::test_position_size_cap_evidence_is_plain_decimal_text \
+  tests/routers/test_ai_recommendations.py::test_stored_exponent_quantity_still_serves_list_and_detail \
+  tests/routers/test_ai_recommendations.py::test_pending_list_excludes_recommendations_past_valid_until \
+  -q --tb=line -p no:cacheprovider
+exit: 1
+
+FFF.                                                                     [100%]
+=================================== FAILURES ===================================
+E   pydantic_core._pydantic_core.ValidationError: 4 validation errors for RecommendationResponse
+    entryPrice
+      Value error, must be a plain decimal string [type=value_error, input_value='1.38E+5', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/value_error
+    portfolio.targetQuantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+    portfolio.positionSizing.unroundedQuantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+    portfolio.positionSizing.caps.0.quantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+/work/app/schemas/ai_recommendations.py:630: pydantic_core._pydantic_core.ValidationError: 4 validation errors for RecommendationResponse
+E   AssertionError: assert {'code': 'RIS...ty': '2.5E+2'} == {'code': 'RIS...ntity': '250'}
+
+      Omitting 1 identical items, use -vv to show
+      Differing items:
+      {'quantity': '2.5E+2'} != {'quantity': '250'}
+      Use -v to get more diff
+/work/tests/schemas/test_ai_recommendations_schema.py:369: AssertionError: assert {'code': 'RIS...ty': '2.5E+2'} == {'code': 'RIS...ntity': '250'}
+E   pydantic_core._pydantic_core.ValidationError: 3 validation errors for RecommendationResponse
+    portfolio.targetQuantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+    portfolio.positionSizing.unroundedQuantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+    portfolio.positionSizing.caps.0.quantity
+      String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$' [type=string_pattern_mismatch, input_value='2.5E+2', input_type=str]
+        For further information visit https://errors.pydantic.dev/2.12/v/string_pattern_mismatch
+/work/app/schemas/ai_recommendations.py:630: pydantic_core._pydantic_core.ValidationError: 3 validation errors for RecommendationResponse
+=========================== short test summary info ============================
+FAILED tests/schemas/test_ai_recommendations_schema.py::test_build_recommendation_response_reads_stored_exponent_decimals
+FAILED tests/schemas/test_ai_recommendations_schema.py::test_position_size_cap_evidence_is_plain_decimal_text
+FAILED tests/routers/test_ai_recommendations.py::test_stored_exponent_quantity_still_serves_list_and_detail
+3 failed, 1 passed, 2 warnings in 6.54s
+
+해석:
+- 앞의 3건은 운영 500과 동일한 오류(같은 locator portfolio.positionSizing.caps.0.quantity,
+  같은 메시지 String should match pattern '^-?[0-9]+(?:\.[0-9]+)?$', 같은 입력 '2.5E+2')를 재현한다.
+- 마지막 1건(test_pending_list_excludes_recommendations_past_valid_until)은 base에서도 통과한다.
+  만료 PENDING 제외는 이미 구현돼 있었고 이번 과제에서 코드 변경이 필요하지 않았다는 증거다.

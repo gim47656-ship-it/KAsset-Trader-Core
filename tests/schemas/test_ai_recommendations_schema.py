@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
+from app.extensions.kasset.automation.position_sizing import (
+    PositionSizeCap,
+    PositionSizeCapCode,
+)
 from app.schemas.ai_recommendations import build_recommendation_response
 
 _STRATEGY_VOTES = [
@@ -321,3 +326,44 @@ def test_build_recommendation_response_keeps_historical_sizing_shape() -> None:
     assert payload["portfolio"]["positionSizing"] == legacy_sizing
     assert "accountState" not in payload["hardRisk"]
     assert "lossStreak" not in payload["hardRisk"]
+
+
+def test_build_recommendation_response_reads_stored_exponent_decimals() -> None:
+    """운영에 저장된 지수 표기 Decimal이 값 변화 없이 평문으로 나간다."""
+
+    sizing = deepcopy(_BUY_POSITION_SIZING_EVIDENCE)
+    sizing["caps"] = [{"code": "RISK_BUDGET", "quantity": "2.5E+2"}]
+    sizing["unroundedQuantity"] = "2.5E+2"
+    row = _recommendation_row(deepcopy(_STRATEGY_VOTES))
+    row.evidence[0]["entryPrice"] = "1.38E+5"
+    row.evidence[0]["portfolio"] = {
+        "targetWeight": "0.1",
+        "targetQuantity": "2.5E+2",
+        "cashAfter": "9862000",
+        "note": "Deterministic ATR risk sizing; limitingCaps=RISK_BUDGET.",
+        "positionSizing": sizing,
+    }
+
+    payload = build_recommendation_response(row).model_dump(mode="json", by_alias=True)
+
+    assert payload["portfolio"]["positionSizing"]["caps"] == [
+        {"code": "RISK_BUDGET", "quantity": "250"}
+    ]
+    assert payload["portfolio"]["positionSizing"]["unroundedQuantity"] == "250"
+    assert payload["portfolio"]["targetQuantity"] == "250"
+    assert payload["entryPrice"] == "138000"
+    # 감사 기록인 원본 evidence는 저장된 그대로 남는다.
+    assert payload["evidence"][0]["portfolio"]["positionSizing"]["caps"] == [
+        {"code": "RISK_BUDGET", "quantity": "2.5E+2"}
+    ]
+
+
+def test_position_size_cap_evidence_is_plain_decimal_text() -> None:
+    """지수 표기로 남는 Decimal도 평문으로 저장돼 응답 계약을 다시 깨지 않는다."""
+
+    quantity = Decimal("2.5E+2")
+    cap = PositionSizeCap(PositionSizeCapCode.RISK_BUDGET, quantity)
+
+    assert str(quantity) == "2.5E+2"
+    assert quantity == Decimal("250")
+    assert cap.as_evidence() == {"code": "RISK_BUDGET", "quantity": "250"}

@@ -252,6 +252,92 @@ async def test_get_preserves_nullable_fields_and_empty_snapshots(
 
 
 @pytest.mark.asyncio
+async def test_pending_list_excludes_recommendations_past_valid_until(
+    db_session: AsyncSession,
+) -> None:
+    """A lapsed PENDING row leaves the review queue; the boundary is exclusive."""
+
+    await _seed(
+        db_session,
+        _recommendation("pending-live", valid_until=_NOW + timedelta(seconds=1)),
+        _recommendation("pending-boundary", valid_until=_NOW),
+        _recommendation("pending-lapsed", valid_until=_NOW - timedelta(seconds=1)),
+    )
+    app = _app(db_session)
+
+    response = await _request(
+        app,
+        "GET",
+        "/api/v1/ai/recommendations?status=PENDING&limit=50",
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["recommendations"]] == [
+        "pending-live"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stored_exponent_quantity_still_serves_list_and_detail(
+    db_session: AsyncSession,
+) -> None:
+    """운영에 저장된 ``2.5E+2`` 수량이 조회를 500으로 떨어뜨리지 않는다."""
+
+    await _seed(
+        db_session,
+        _recommendation(
+            "exponent-cap",
+            evidence=[
+                {
+                    "title": "AI vertical slice",
+                    "source": "kasset-automation",
+                    "kind": "ai_vertical_slice",
+                    "portfolio": {
+                        "targetWeight": "0.1",
+                        "targetQuantity": "2.5E+2",
+                        "cashAfter": "9862000",
+                        "note": "Deterministic ATR risk sizing.",
+                        "positionSizing": {
+                            "action": "BUY",
+                            "market": "KRX",
+                            "quantity": "250",
+                            "unroundedQuantity": "2.5E+2",
+                            "lotSize": "1",
+                            "riskBudget": "50000",
+                            "riskPerUnit": "200",
+                            "riskPerTradeRate": "0.01",
+                            "regimeMultiplier": "1",
+                            "caps": [{"code": "RISK_BUDGET", "quantity": "2.5E+2"}],
+                            "limitingCaps": ["RISK_BUDGET"],
+                            "zeroReasons": [],
+                        },
+                    },
+                }
+            ],
+        ),
+    )
+    app = _app(db_session)
+
+    listed = await _request(
+        app,
+        "GET",
+        "/api/v1/ai/recommendations?status=PENDING&limit=50",
+    )
+    detail = await _request(app, "GET", "/api/v1/ai/recommendations/exponent-cap")
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    listed_ids = [item["id"] for item in listed.json()["recommendations"]]
+    assert listed_ids == ["exponent-cap"]
+    portfolio = detail.json()["portfolio"]
+    assert portfolio["targetQuantity"] == "250"
+    assert portfolio["positionSizing"]["unroundedQuantity"] == "250"
+    assert portfolio["positionSizing"]["caps"] == [
+        {"code": "RISK_BUDGET", "quantity": "250"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_existing_row_get_enriches_name_and_localizes_legacy_vote_rationale(
     db_session: AsyncSession,
 ) -> None:

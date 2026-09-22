@@ -26,9 +26,22 @@ class ExitKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class PositionManagerConfig:
     initial_stop_atr: Decimal = Decimal("3")
-    partial_profit_atr: Decimal = Decimal("3")
-    partial_fraction: Decimal = Decimal("0.5")
+    #: 1차 익절 도달선. KR 후보의 ATR 중앙값이 진입가의 3~5%라 +3 ATR은 하루
+    #: 안에 닿지 않는다. 장중 평가(:func:`evaluate_position_intraday`)가 실제로
+    #: 판정할 수 있는 구간으로 내리고, 대신 일부 수량만 턴다.
+    partial_profit_atr: Decimal = Decimal("0.5")
+    partial_fraction: Decimal = Decimal("0.3")
     trailing_stop_atr: Decimal = Decimal("3")
+    #: 부분익절 전 구간에서 보호선을 켜기 시작하는 최소 진전폭. 진입 직후의
+    #: 잡음이 손절선을 끌어올리지 않도록 활성화를 이 진전폭 뒤로 미룬다.
+    early_trailing_activation_atr: Decimal = Decimal("1")
+    #: 부분익절 전 구간의 보호선 폭. 아직 아무것도 실현하지 못한 구간이므로
+    #: 잔여 runner용 ``trailing_stop_atr``보다 좁게 둔다.
+    early_trailing_stop_atr: Decimal = Decimal("2")
+    #: 부분익절 뒤 잔여 수량의 최소 보호선을 ``진입가 + 이 배수 * ATR``로 둔다.
+    #: ``0``은 본전이다. 고정 퍼센트가 아니라 ATR 배수이며 손절선은 계속
+    #: 단조 상승만 한다.
+    post_partial_floor_atr: Decimal = Decimal("0")
     max_holding_bars: int = 10
     no_progress_atr: Decimal = Decimal("0.5")
 
@@ -37,10 +50,17 @@ class PositionManagerConfig:
             self.initial_stop_atr,
             self.partial_profit_atr,
             self.trailing_stop_atr,
+            self.early_trailing_activation_atr,
+            self.early_trailing_stop_atr,
             self.no_progress_atr,
         )
         if any(not value.is_finite() or value <= _ZERO for value in positive_decimals):
             raise ValueError("position-manager ATR parameters must be positive")
+        if (
+            not self.post_partial_floor_atr.is_finite()
+            or self.post_partial_floor_atr < _ZERO
+        ):
+            raise ValueError("post_partial_floor_atr must be finite and non-negative")
         if (
             not self.partial_fraction.is_finite()
             or self.partial_fraction <= _ZERO
@@ -484,6 +504,44 @@ def _signal(
     )
 
 
+def _protective_stop(
+    state: ManagedPositionState,
+    *,
+    highest_close: Decimal,
+    initial_atr: Decimal,
+    config: PositionManagerConfig,
+) -> Decimal | None:
+    """이 일봉까지의 관측으로 정당화되는 보호선. 올릴 것이 없으면 ``None``.
+
+    부분익절 전에는 아무것도 실현하지 못한 구간이라 진전폭이
+    ``early_trailing_activation_atr``을 넘은 뒤부터 좁은
+    ``early_trailing_stop_atr``로 따라 올린다. 활성화 전에는 ``None``을
+    돌려주어 진입 직후의 잡음이 손절선을 끌어올리지 못하게 한다.
+
+    부분익절 뒤에는 잔여 runner에게 넓은 ``trailing_stop_atr``을 주되, 이미
+    일부를 실현했으므로 ``진입가 + post_partial_floor_atr * ATR`` 아래로는
+    내려가지 않는다. 이 바닥이 없으면 1차 익절이 상승만 잘라내고 잔여 수량의
+    위험은 그대로 -3 ATR에 남아 손익비가 오히려 나빠진다(백테스트 근거는
+    ``doc/history/2026/09/22-sell-strategy-app-surface/evidence/`` 참조).
+
+    반환값은 후보일 뿐이고 실제 적용은 호출부가 현재 손절선보다 높을 때만
+    한다. 초기 손절선은 여기서 계산하지 않으므로 ``entry - 3 ATR`` 계약은
+    그대로이며, 손절선은 계속 단조 상승만 한다.
+    """
+
+    if state.partial_exit_completed:
+        return max(
+            state.entry_price + config.post_partial_floor_atr * initial_atr,
+            highest_close - config.trailing_stop_atr * initial_atr,
+        )
+    if (
+        highest_close - state.entry_price
+        < config.early_trailing_activation_atr * initial_atr
+    ):
+        return None
+    return highest_close - config.early_trailing_stop_atr * initial_atr
+
+
 def evaluate_position(
     state: ManagedPositionState,
     bar: PositionBar,
@@ -498,6 +556,15 @@ def evaluate_position(
     TREND_BROKEN은 모두 완료 일봉 horizon의 판정이며 일봉 backtest
     (:mod:`portfolio_backtest`)가 같은 의미로 재현한다. 장중 보호 평가는
     상태를 바꾸지 않는 :func:`evaluate_position_intraday`가 따로 맡는다.
+
+    청산 사다리는 다섯 단이다. 초기 손절선 ``진입가 - initial_stop_atr * ATR``,
+    진전폭이 ``early_trailing_activation_atr``을 넘은 뒤 켜지는
+    ``highest_close - early_trailing_stop_atr * ATR`` 보호선,
+    ``+partial_profit_atr``의 부분익절, 그 뒤 잔여 수량의
+    ``진입가 + post_partial_floor_atr * ATR`` 바닥과
+    ``highest_close - trailing_stop_atr * ATR`` 보호선, 그리고 진전폭이
+    사라진 포지션을 거두는 TIME_STOP이다. 보호선은 단조 상승만 하므로 어느
+    단도 초기 손절선을 넓히거나 좁히지 않는다.
     """
 
     if bar.as_of <= state.entry_at:
@@ -587,7 +654,10 @@ def evaluate_position(
             ),
         )
 
-    progress = max(state.highest_close, bar.close) - state.entry_price
+    # 진전폭은 **현재** 종가로 판정한다. 과거 최고 종가를 쓰면 한 번이라도
+    # 올라간 포지션이 이후 평단 밑을 계속 기어도 진전폭이 latch되어 TIME_STOP을
+    # 영구히 회피한다.
+    progress = bar.close - state.entry_price
     if (
         bars_held >= config.max_holding_bars
         and progress < config.no_progress_atr * initial_atr
@@ -607,20 +677,21 @@ def evaluate_position(
 
     highest_close = max(state.highest_close, bar.close)
     updated = state
-    if state.partial_exit_completed:
-        raised_stop = max(
-            current_stop,
-            highest_close - config.trailing_stop_atr * initial_atr,
+    protective_stop = _protective_stop(
+        state,
+        highest_close=highest_close,
+        initial_atr=initial_atr,
+        config=config,
+    )
+    if protective_stop is not None and protective_stop > current_stop:
+        ends_at = bar.ends_at
+        if ends_at is None:
+            raise ValueError("position bar ends_at is required")
+        updated = _raise_trailing_stop(
+            state,
+            raised_stop=protective_stop,
+            effective_at=ends_at,
         )
-        if raised_stop > current_stop:
-            ends_at = bar.ends_at
-            if ends_at is None:
-                raise ValueError("position bar ends_at is required")
-            updated = _raise_trailing_stop(
-                state,
-                raised_stop=raised_stop,
-                effective_at=ends_at,
-            )
     return PositionEvaluation(
         state=replace(
             updated,
