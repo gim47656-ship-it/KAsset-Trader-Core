@@ -1,0 +1,20 @@
+# 신규 회귀 테스트 집중 실행 — KRX 우선주 종목명 fallback (SymbolName)
+
+```
+cwd: /work  (격리 checkout /tmp/kasset-symbolname-20260923, app 2파일 = 내 delta)
+$ python -m pytest tests/extensions/kasset/api/test_preferred_symbol_names.py -q --tb=short -p no:cacheprovider
+...........                                                              [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+11 passed in 4.21s
+exit: 0
+```
+
+같은 파일의 중간 실패 2회는 테스트 fake 세션 결함이었고 소스 결함이 아니었다.
+
+1. `_NameSession`이 `kr_symbol_universe` 조회 결과로 튜플을 돌려줬는데
+   `app/services/kr_symbol_universe_service.py:_get_kr_names_impl`은 `row.symbol`/`row.name`
+   속성으로 읽는다 → `AttributeError`가 운영 코드의 `except`에 삼켜져 이름이 비었다.
+   fake를 `SimpleNamespace(symbol=…, name=…)`로 바꿔 실제 반환형에 맞췄다.
+2. `Select.compile().params`는 `in_()` 목록을 심볼 하나가 아니라 **리스트 하나**(`symbol_1: [...]`)로
+   접어 둔다. 심볼 집합을 그대로 읽도록 `_requested_symbols()`가 리스트 값을 펼치게 고쳤다.

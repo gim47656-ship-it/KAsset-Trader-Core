@@ -1,0 +1,31 @@
+# 변경 범위 + 인접 kasset 모듈 pytest — KRX 우선주 종목명 fallback (SymbolName)
+
+```
+cwd: /work  (격리 checkout /tmp/kasset-symbolname-20260923, base c1dad9060ada + 내 delta 5파일)
+$ python -m pytest tests/extensions/kasset/api tests/extensions/kasset/automation/test_job.py -q --tb=short -p no:cacheprovider
+434 passed, 14 warnings in 83.81s (0:01:23)
+exit: 0
+
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.83 database_seconds=0.18
+ROB-1296 external HTTP boundary: 0 blocked requests
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+
+load before: 09:52:47 up 27 days, 28 min, load average: 0.21, 0.68, 0.53
+load after : 09:54:22 up 27 days, 29 min, load average: 1.43, 0.94, 0.64
+```
+
+## 이 실행 전 중간 실행에서 나온 실패 2건은 이번 변경이 만든 계약 변경이었다
+
+같은 명령을 앱 소스만 바꾼 상태로 먼저 돌렸을 때:
+
+```
+FAILED tests/extensions/kasset/api/test_market_quotes.py::test_batch_quotes_serve_many_symbols_from_one_toss_call
+FAILED tests/extensions/kasset/api/test_paper_regression.py::test_positions_enrich_equities_in_one_market_aware_master_…
+2 failed, 432 passed in 84.70s
+```
+
+두 실패 모두 `assert db.name_reads == 1` / `assert 2 == 1`이었다. `symbol_master`가 못 푼 KRX
+심볼(테스트 fake에서는 `000660`·`999999`)이 있으면 이름 조회가 2차까지 가기 때문이다.
+base 소스에서는 같은 테스트가 통과한다(`1 passed`) — 즉 새 회귀가 아니라 의도한 계약 변경이다.
+응답 `name` 값은 바뀌지 않았고, 두 테스트의 fake가 두 조회를 구분해 세도록 고친 뒤 위 434 passed를
+얻었다.

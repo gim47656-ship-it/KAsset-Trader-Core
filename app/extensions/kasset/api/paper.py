@@ -34,6 +34,7 @@ from app.services.exchange_rate_service import (
     UsdKrwExchangeRateQuote,
     get_usd_krw_rate_details,
 )
+from app.services.kr_symbol_universe_service import get_kr_names_by_symbols
 from app.services.market_data.toss_ohlcv import fetch_daily_toss_frame
 from app.services.paper_trading_service import PaperTradingService
 from app.services.us_symbol_universe_service import get_us_exchange_by_symbol
@@ -668,7 +669,10 @@ class PaperAccountAdapter:
         db: AsyncSession,
         positions: Sequence[_PositionIdentity],
     ) -> dict[tuple[str, str], str]:
-        """주식은 SymbolMaster, 비주식은 기존 Instrument에서 이름을 찾는다."""
+        """주식은 SymbolMaster, 비주식은 기존 Instrument에서 이름을 찾는다.
+
+        `symbol_master`에 없는 KRX 종목(우선주 등)은 `kr_symbol_universe`로 메운다.
+        """
         equity_keys = tuple(
             dict.fromkeys(
                 (position.market, position.symbol)
@@ -699,6 +703,33 @@ class PaperAccountAdapter:
                     if name and name.strip() and name.strip() != symbol
                 }
             )
+
+            # `symbol_master`는 KRX에 COMMON_STOCK/ETF만 담으므로 우선주는 여기서
+            # 빠진다. 그 종목들의 이름 출처는 `kr_symbol_universe`뿐이다.
+            unresolved_krx = sorted(
+                symbol
+                for market, symbol in equity_keys
+                if market == "KRX" and (market, symbol) not in names
+            )
+            if unresolved_krx:
+                try:
+                    universe_names = await get_kr_names_by_symbols(
+                        unresolved_krx, db=db
+                    )
+                except Exception as exc:  # noqa: BLE001 — 종목명은 없으면 null이다
+                    logger.warning(
+                        "kasset position kr symbol universe read failed (%s): "
+                        "name omitted",
+                        type(exc).__name__,
+                    )
+                else:
+                    names.update(
+                        {
+                            ("KRX", symbol): name.strip()
+                            for symbol, name in universe_names.items()
+                            if name and name.strip() and name.strip() != symbol
+                        }
+                    )
 
         legacy_types = {
             "CRYPTO": InstrumentType.crypto,

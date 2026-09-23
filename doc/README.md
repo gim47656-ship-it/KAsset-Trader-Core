@@ -53,6 +53,7 @@ STATUS: accepted | pending-user-device-check | partial | superseded-by <path>
 
 | 날짜 | 주제 | 기록 |
 |---|---|---|
+| 23 | 우선주 종목명 누락과 확정손익 부분실현 반영 | [23-preferred-name-pnl](history/2026/09/23-preferred-name-pnl/main.md) |
 | 22 | 매도 미발생·매수 과다·앱 표면 오류 조사와 수정 | [22-sell-strategy-app-surface](history/2026/09/22-sell-strategy-app-surface/main.md) |
 | 19 | KR Breakout / First Pullback / NR7 비교 및 PAPER 런타임 연결 | [19-kr-entry-paths](history/2026/09/19-kr-entry-paths/main.md) |
 | 16 | 매수 부재 원인 조사와 -3% 손절 바닥 제거 | [16-stop-floor-removal](history/2026/09/16-stop-floor-removal/main.md) |

@@ -1062,12 +1062,69 @@ class PaperTradingService:
     # Performance analytics helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _build_round_trips(trades: list[PaperTrade]) -> list[dict[str, Any]]:
-        """Group raw trades into round trips per symbol until position is flat.
+    def _round_trip_row(
+        *,
+        symbol: str,
+        instrument_type: str,
+        entry_date: datetime,
+        exit_date: datetime,
+        quantity: Decimal,
+        cost_basis: Decimal,
+        pnl: Decimal,
+        entry_reason: str,
+        exit_reason: str,
+    ) -> dict[str, Any]:
+        """One round trip row. Holding days count KST calendar dates."""
+        entry_kst = (
+            entry_date
+            if entry_date.tzinfo is not None
+            else entry_date.replace(tzinfo=UTC)
+        ).astimezone(KST)
+        exit_kst = (
+            exit_date if exit_date.tzinfo is not None else exit_date.replace(tzinfo=UTC)
+        ).astimezone(KST)
+        holding_days = (exit_kst.date() - entry_kst.date()).days
+        return_rate = (
+            _q_pct(pnl / cost_basis * Decimal("100"))
+            if cost_basis > 0
+            else Decimal("0")
+        )
+        return {
+            "symbol": symbol,
+            "instrument_type": instrument_type,
+            "currency": position_currency(instrument_type),
+            "entry_date": entry_date,
+            "exit_date": exit_date,
+            "holding_days": max(holding_days, 0),
+            "quantity": quantity,
+            "cost_basis": _q_money(cost_basis),
+            "pnl_amount": _q_money(pnl),
+            "return_rate_pct": return_rate,
+            "pnl": float(pnl),
+            "return_pct": float(return_rate),
+            "entry_reason": entry_reason,
+            "exit_reason": exit_reason,
+        }
 
-        Excludes open (unclosed) trips. ``pnl`` and ``return_pct`` preserve the
-        historical float analytics contract; ``pnl_amount`` and
-        ``return_rate_pct`` expose the same values as exact Decimals.
+    @staticmethod
+    def _build_round_trips(trades: list[PaperTrade]) -> list[dict[str, Any]]:
+        """Group raw trades into round trips per symbol.
+
+        A trip is reported once it has realized something. That is either a
+        position that went flat, or one still held after a partial sell: the
+        sold part is settled money and belongs in realized returns even while
+        the rest rides. A position that was never sold stays out — it is an
+        unrealized valuation that moves with the next quote.
+
+        For a still-open trip, ``quantity`` and ``cost_basis`` cover only the
+        sold part, so ``return_rate_pct`` measures the capital actually
+        returned. Entry fees are charged to the same proportion. A flat trip
+        sells its whole entry, so this reduces to the previous arithmetic and
+        closed-trip figures are unchanged.
+
+        ``pnl`` and ``return_pct`` preserve the historical float analytics
+        contract; ``pnl_amount`` and ``return_rate_pct`` expose the same values
+        as exact Decimals.
         """
         grouped: dict[str, list[tuple[int, PaperTrade]]] = defaultdict(list)
         for idx, t in enumerate(trades):
@@ -1080,6 +1137,9 @@ class PaperTradingService:
             position_qty = Decimal("0")
             buy_cost = Decimal("0")
             buy_quantity = Decimal("0")
+            buy_fee = Decimal("0")
+            sold_quantity = Decimal("0")
+            realized_sum = Decimal("0")
             total_pnl = Decimal("0")
             entry_date: datetime | None = None
             entry_reason = ""
@@ -1094,13 +1154,19 @@ class PaperTradingService:
                         entry_reason = t.reason or ""
                         buy_cost = Decimal("0")
                         buy_quantity = Decimal("0")
+                        buy_fee = Decimal("0")
+                        sold_quantity = Decimal("0")
+                        realized_sum = Decimal("0")
                         total_pnl = Decimal("0")
                     position_qty += qty
                     buy_quantity += qty
                     buy_cost += qty * Decimal(t.price) + Decimal(t.fee)
+                    buy_fee += Decimal(t.fee)
                     total_pnl -= Decimal(t.fee)
                 elif t.side == "sell" and position_qty > 0:
                     position_qty -= qty
+                    sold_quantity += qty
+                    realized_sum += Decimal(t.realized_pnl or 0)
                     total_pnl += Decimal(t.realized_pnl or 0)
                     last_exit_date = t.executed_at
                     last_sell_reason = t.reason or ""
@@ -1110,48 +1176,52 @@ class PaperTradingService:
                         and entry_date is not None
                         and last_exit_date is not None
                     ):
-                        entry_kst = (
-                            entry_date
-                            if entry_date.tzinfo is not None
-                            else entry_date.replace(tzinfo=UTC)
-                        ).astimezone(KST)
-                        exit_kst = (
-                            last_exit_date
-                            if last_exit_date.tzinfo is not None
-                            else last_exit_date.replace(tzinfo=UTC)
-                        ).astimezone(KST)
-                        holding_days = (exit_kst.date() - entry_kst.date()).days
-                        return_rate = (
-                            _q_pct(total_pnl / buy_cost * Decimal("100"))
-                            if buy_cost > 0
-                            else Decimal("0")
-                        )
                         round_trips.append(
-                            {
-                                "symbol": symbol,
-                                "instrument_type": instrument_type,
-                                "currency": position_currency(instrument_type),
-                                "entry_date": entry_date,
-                                "exit_date": last_exit_date,
-                                "holding_days": max(holding_days, 0),
-                                "quantity": buy_quantity,
-                                "cost_basis": _q_money(buy_cost),
-                                "pnl_amount": _q_money(total_pnl),
-                                "return_rate_pct": return_rate,
-                                "pnl": float(total_pnl),
-                                "return_pct": float(return_rate),
-                                "entry_reason": entry_reason,
-                                "exit_reason": last_sell_reason,
-                            }
+                            PaperTradingService._round_trip_row(
+                                symbol=symbol,
+                                instrument_type=instrument_type,
+                                entry_date=entry_date,
+                                exit_date=last_exit_date,
+                                quantity=buy_quantity,
+                                cost_basis=buy_cost,
+                                pnl=total_pnl,
+                                entry_reason=entry_reason,
+                                exit_reason=last_sell_reason,
+                            )
                         )
                         position_qty = Decimal("0")
                         buy_cost = Decimal("0")
                         buy_quantity = Decimal("0")
+                        buy_fee = Decimal("0")
+                        sold_quantity = Decimal("0")
+                        realized_sum = Decimal("0")
                         total_pnl = Decimal("0")
                         entry_date = None
                         entry_reason = ""
                         last_exit_date = None
                         last_sell_reason = ""
+
+            if (
+                position_qty > 0
+                and sold_quantity > 0
+                and buy_quantity > 0
+                and entry_date is not None
+                and last_exit_date is not None
+            ):
+                sold_share = min(sold_quantity / buy_quantity, Decimal("1"))
+                round_trips.append(
+                    PaperTradingService._round_trip_row(
+                        symbol=symbol,
+                        instrument_type=instrument_type,
+                        entry_date=entry_date,
+                        exit_date=last_exit_date,
+                        quantity=sold_quantity,
+                        cost_basis=buy_cost * sold_share,
+                        pnl=realized_sum - buy_fee * sold_share,
+                        entry_reason=entry_reason,
+                        exit_reason=last_sell_reason,
+                    )
+                )
 
         round_trips.sort(key=lambda trip: (trip["exit_date"], trip["symbol"]))
         return round_trips
