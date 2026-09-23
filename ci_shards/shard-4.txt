@@ -13,6 +13,7 @@ tests/extensions/kasset/api/test_market_indicators.py
 tests/extensions/kasset/api/test_market_news.py
 tests/extensions/kasset/api/test_market_overview.py
 tests/extensions/kasset/api/test_paper_regression.py
+tests/extensions/kasset/api/test_preferred_symbol_names.py
 tests/extensions/kasset/api/test_token_path_allowlist.py
 tests/extensions/kasset/automation/test_ai_shadow.py
 tests/extensions/kasset/automation/test_benchmark_relative_strength.py
