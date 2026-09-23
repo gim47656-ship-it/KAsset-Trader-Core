@@ -1,75 +1,83 @@
 # Server pytest runner
 
-Use a disposable container on the production host to run Linux-only and KAsset
-API tests. The container uses the deployed application image, mounts `tests/`
-from the matching checkout, shares the database container's Compose network
-namespace, and has one CPU. It does not inherit `.env.kasset` or the API
-container environment.
+Run Linux-only and KAsset tests in a disposable container on the production
+host. The container uses the deployed application image for its interpreter and
+`/app/.venv`, mounts the checkout under test read-only, installs the test-only
+dependency group into a Docker volume, and has one CPU.
+
+It never touches the production database. It targets the separate
+`kasset-test-db` container and lets the harness create its own run-owned
+database there.
 
 Do not run this procedure on KRX business days from 08:50 through 16:20 KST.
 The test container can saturate its one-CPU quota while the live API, worker,
-scheduler, MCP, PostgreSQL, Redis, and Caddy containers share a 2-vCPU host.
-During market hours that contention can delay paper automation and market-event
-jobs.
+scheduler, MCP, ai-MCP, PostgreSQL, Redis, and Caddy containers share a 2-vCPU
+host. During market hours that contention can delay paper automation and
+market-event jobs.
 
 ## Database safety contract
 
-The only permitted target is PostgreSQL database `test_db`. Never substitute
-`kasset` in any command below.
+The only permitted PostgreSQL instance is the `kasset-test-db` container. Never
+point this procedure at `kasset-trader-db-1`, which holds the production
+`kasset` database.
 
-The test harness enforces the target in four steps:
+Two independent layers keep production out of reach:
 
-1. `tests/conftest.py` loads defaults, then calls
-   `configure_test_database_environment()` before importing
-   `app.core.config.settings`.
-2. `tests/_run_owned_database.py` rejects
-   `AUTO_TRADER_TEST_DATABASE_URL` unless its database name is exactly
-   `test_db`. `AUTO_TRADER_PYTEST_USE_SHARED_DB=1` then forces `DATABASE_URL`
-   to that validated URL instead of creating `test_db_pytest_*`.
-3. `app/core/config.py` gives process environment variables precedence over
-   `.env`, so the forced `DATABASE_URL` reaches the application engine.
-4. `tests/_schema_bootstrap.py` receives the already configured application
-   engine. It applies test DDL through that engine and does not choose another
-   database.
+1. **Different instance.** The runner joins `--network container:kasset-test-db`,
+   so `127.0.0.1:5432` inside the container resolves to the test PostgreSQL
+   process. The production database is not reachable on that loopback address.
+2. **Run-owned database.** `AUTO_TRADER_TEST_DATABASE_URL` must name database
+   `test_db` — `tests/_run_owned_database.py` rejects anything else. Leave
+   `AUTO_TRADER_PYTEST_USE_SHARED_DB` unset so the harness creates
+   `test_db_pytest_<uid>_<worker>` inside `kasset-test-db` and drops it at the
+   end.
 
-The shell preflight below derives the test URL without displaying its
-credentials, checks both URL variables inside the disposable container, and
-aborts unless both target `test_db` over loopback.
+Do not pass `--env-file /opt/kasset-trader-core/.env.kasset`; that would inject
+live provider and broker credentials into the test process.
 
-## 1. Connect and check the deployed inputs
+### Do not use the shared `test_db` path
 
-Run on the server:
+An earlier revision of this runbook used `kasset-trader-db-1` with
+`AUTO_TRADER_PYTEST_USE_SHARED_DB=1`. That path is broken: the shared `test_db`
+on the production instance carries schema from an older revision, the bootstrap
+reports `applied=0` because the database is not empty, and fixtures then fail on
+column mismatches. On 2026-09-23 the same `tests/extensions/kasset/api`
+selection produced 12 failed / 28 errors that way and 489 passed through the
+run-owned path below.
+
+## 1. Resolve the deployed inputs
+
+Every tag below is derived, not hardcoded. The deployed image tag is the full
+commit SHA that `deploy.sh` built.
 
 ```bash
-ssh root@100.73.186.78
+ssh kasset-server   # root@100.73.186.78
 set -eu
 
-export KASSET_TEST_IMAGE='kasset-trader-core:4e6329d1'
-export KASSET_TEST_COMMIT='2ed7ef40'
+export KASSET_TEST_COMMIT="$(git -C /opt/kasset-trader-core rev-parse HEAD)"
+export KASSET_TEST_IMAGE="kasset-trader-core:${KASSET_TEST_COMMIT}"
 export KASSET_TEST_DEPS_VOLUME='kasset-pytest-deps-4e6329d1'
 
-[ "$(git -C /opt/kasset-trader-core rev-parse --short=8 HEAD)" = "$KASSET_TEST_COMMIT" ]
 docker image inspect "$KASSET_TEST_IMAGE" >/dev/null
-[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' kasset-trader-db-1)" = 'kasset-trader_default' ]
-
-docker run --rm --entrypoint /bin/sh "$KASSET_TEST_IMAGE" -lc \
-  'if [ -d /app/tests ]; then echo tests=present; else echo tests=absent; fi'
-[ -d /opt/kasset-trader-core/tests ]
+docker inspect kasset-test-db >/dev/null
+[ "$(docker inspect -f '{{.State.Status}}' kasset-test-db)" = 'running' ]
 ```
 
-Image `4e6329d1` prints `tests=absent`, so every test command below mounts the
-matching checkout's `tests/` directory read-only at `/app/tests`. Stop if the
-checkout commit assertion fails. Update the image, commit, and dependency-volume
-names together after a deployment.
+The application image ships no `tests/` directory, so section 3 mounts a
+checkout instead.
 
 ## 2. Install the locked test-only dependencies
 
-The API image contains `/app/.venv/bin/pytest`, but it omits the rest of the
-`test` dependency group. Install the versions recorded by this checkout's
-`uv.lock` into a versioned Docker volume. The application image remains
-unchanged.
+`/app/.venv` contains `pytest` itself but omits the rest of the `test`
+dependency group. Install the versions this checkout's `uv.lock` records into a
+Docker volume. The application image stays unchanged.
+
+The volume name carries the image SHA it was first built against, but its
+contract is the `uv.lock` pin set, not that image. Reuse it as long as the
+versions still match; create a new volume when a lock bump changes them.
 
 ```bash
+# Current pins (verified against uv.lock on 2026-09-23)
 docker volume inspect "$KASSET_TEST_DEPS_VOLUME" >/dev/null 2>&1 || \
   docker volume create "$KASSET_TEST_DEPS_VOLUME"
 
@@ -94,57 +102,47 @@ docker run --rm --name kasset-pytest-deps-init \
 `--user 0:0` is required because Docker creates the named volume with root
 ownership. Test containers mount the completed volume read-only.
 
-## 3. Force and verify `test_db`
-
-The test socket guard permits loopback and blocks the Compose hostname `db`.
-This block reads the API container's `DATABASE_URL`, rejects a source database
-other than `kasset`, changes the database to `test_db`, and changes the host to
-`127.0.0.1`. The test container shares the PostgreSQL container's Compose
-network namespace, so that loopback address reaches PostgreSQL without
-weakening the socket guard. The command substitution never displays the URL.
+Confirm the volume still matches the lock before trusting an existing one:
 
 ```bash
-export KASSET_TEST_DATABASE_URL="$(
-  docker exec kasset-trader-api-1 /app/.venv/bin/python -c \
-    'import os; from sqlalchemy.engine import make_url; u=make_url(os.environ["DATABASE_URL"]); assert u.get_backend_name() == "postgresql" and u.database == "kasset" and u.host; print(u.set(host="127.0.0.1", database="test_db").render_as_string(hide_password=False))'
-)"
+awk '/^name = "/{n=$3; gsub(/"/,"",n)} /^version = "/{v=$3; gsub(/"/,"",v);
+  if (n ~ /^(pytest|pytest-asyncio|pytest-cov|pytest-mock|pytest-xdist|fakeredis|aiosqlite|pytest-split)$/)
+  print n"=="v}' /opt/kasset-trader-core/uv.lock | sort
 
 docker run --rm \
-  --network container:kasset-trader-db-1 \
-  --mount type=bind,src=/opt/kasset-trader-core/tests,dst=/app/tests,readonly \
   --mount type=volume,src="$KASSET_TEST_DEPS_VOLUME",dst=/test-deps,readonly \
-  -e AUTO_TRADER_TEST_DATABASE_URL="$KASSET_TEST_DATABASE_URL" \
-  -e AUTO_TRADER_PYTEST_USE_SHARED_DB=1 \
-  -e DATABASE_URL="$KASSET_TEST_DATABASE_URL" \
-  -e PYTHONPATH=/test-deps:/app \
-  --entrypoint /app/.venv/bin/python \
-  "$KASSET_TEST_IMAGE" \
-  -c 'import os; from sqlalchemy.engine import make_url; a=make_url(os.environ["AUTO_TRADER_TEST_DATABASE_URL"]); d=make_url(os.environ["DATABASE_URL"]); assert a.database == d.database == "test_db"; assert a.host == d.host == "127.0.0.1"; assert (a.port, a.username) == (d.port, d.username); print("validated database target: test_db via loopback")'
-
-docker exec kasset-trader-db-1 \
-  psql -U kasset -d test_db -tAc 'SELECT current_database()'
+  --entrypoint sh "$KASSET_TEST_IMAGE" -c \
+  'ls /test-deps | grep dist-info | sort'
 ```
 
-Expected lines:
+## 3. Prepare the checkout under test
 
-```text
-validated database target: test_db via loopback
-test_db
+Clone the deployed checkout, detach at the deployed commit, then overlay only
+the files you are validating. Never mount `/opt/kasset-trader-core` itself into
+a test container.
+
+```bash
+export KASSET_TEST_SRC=/tmp/kasset-pytest-$(date +%Y%m%d-%H%M%S)
+
+git clone -q /opt/kasset-trader-core "$KASSET_TEST_SRC"
+git -C "$KASSET_TEST_SRC" checkout -q "$KASSET_TEST_COMMIT"
+
+# then copy in the changed files, e.g.
+#   ssh kasset-server "cat > $KASSET_TEST_SRC/pnl.patch" < local.patch
+#   git -C "$KASSET_TEST_SRC" apply pnl.patch
+# or scp/tar the individual files.
 ```
 
-Do not proceed if either line differs. Do not pass `--env-file
-/opt/kasset-trader-core/.env.kasset`; that would inject live provider and broker
-credentials into the test process.
-
-The first database-backed run creates the test schema in shared `test_db`; it
-does not return that database to zero tables. This is expected. Judge isolation
-with the `kasset` table-count check in section 7, not with a zero-table check on
-`test_db`.
+Remove the directory when finished.
 
 ## 4. Define the disposable runner
 
-Keep this serial. Do not add `-n auto`, `-n 2`, or another xdist option. Shared
-`test_db` and the 2-vCPU production host require one pytest process.
+Keep this serial. Do not add `-n auto`, `-n 2`, or another xdist option: the
+2-vCPU production host requires one pytest process.
+
+`PYTHONPATH` puts the checkout first, so `import app` resolves to the code under
+test rather than the image's copy. Verify that once per session with
+`python -c 'import app; print(app.__file__)'` if in doubt.
 
 ```bash
 run_server_pytest() {
@@ -152,21 +150,23 @@ run_server_pytest() {
   shift
   docker run --rm --name "$container_name" \
     --cpus=1.0 \
-    --network container:kasset-trader-db-1 \
-    --mount type=bind,src=/opt/kasset-trader-core/tests,dst=/app/tests,readonly \
+    --network container:kasset-test-db \
+    --mount type=bind,src="$KASSET_TEST_SRC",dst=/work,readonly \
     --mount type=volume,src="$KASSET_TEST_DEPS_VOLUME",dst=/test-deps,readonly \
-    -e AUTO_TRADER_TEST_DATABASE_URL="$KASSET_TEST_DATABASE_URL" \
-    -e AUTO_TRADER_PYTEST_USE_SHARED_DB=1 \
-    -e DATABASE_URL="$KASSET_TEST_DATABASE_URL" \
-    -e PYTHONPATH=/test-deps:/app \
+    -e AUTO_TRADER_TEST_DATABASE_URL='postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/test_db' \
+    -e PYTHONPATH=/work:/test-deps \
     -e PYTHONDONTWRITEBYTECODE=1 \
+    -w /work \
     --entrypoint /app/.venv/bin/pytest \
     "$KASSET_TEST_IMAGE" \
-    -q -p no:cacheprovider "$@"
+    -q --tb=short -p no:cacheprovider "$@"
 }
 ```
 
-## 5. Run the KAsset API slice and observe load
+`-p no:cacheprovider` is required: `/work` is read-only and pytest would
+otherwise fail creating `.pytest_cache`.
+
+## 5. Run a slice and observe load
 
 ```bash
 run_server_pytest kasset-pytest-api tests/extensions/kasset/api &
@@ -180,9 +180,29 @@ wait "$KASSET_PYTEST_PID"
 unset KASSET_PYTEST_PID
 ```
 
-Save the final pytest summary and the `uptime`/`docker stats` lines with the test
-report. A CPU reading near 100% is expected because `--cpus=1.0` caps the
+Save the final pytest summary and the `uptime`/`docker stats` lines with the
+test report. A CPU reading near 100% is expected because `--cpus=1.0` caps the
 container at one core.
+
+Every run prints the guard lines:
+
+```text
+ROB-1296 external HTTP boundary: 0 blocked requests
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+```
+
+A run that actually touches the database adds a bootstrap line:
+
+```text
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.17 database_seconds=0.19
+```
+
+`applied=1` means the harness built the schema in a fresh run-owned database.
+`applied=0` means it found an existing database and skipped DDL — stop and check
+that `AUTO_TRADER_PYTEST_USE_SHARED_DB` is unset.
+
+Selections that never open a session print no bootstrap line at all; that is
+normal, not a skipped setup.
 
 ## 6. Run a Linux-only B0-X lock file
 
@@ -196,10 +216,25 @@ This file imports `scripts.b0x.ledger`, which imports `fcntl` and uses
 `fcntl.flock` for the writer lock. A successful summary proves Linux collected
 and executed the file rather than applying the Windows collection exclusion.
 
-## 7. Prove production isolation and service health
+## 7. Static checks on the same checkout
+
+`ruff` needs `--no-cache` because `/work` is read-only.
+
+```bash
+docker run --rm \
+  --mount type=bind,src="$KASSET_TEST_SRC",dst=/work,readonly \
+  -w /work --entrypoint sh "$KASSET_TEST_IMAGE" -c \
+  '/app/.venv/bin/ruff check --no-cache <files>;
+   /app/.venv/bin/ruff format --no-cache --check <files>;
+   /app/.venv/bin/ty check --error-on-warning <files>'
+```
+
+## 8. Prove production isolation and service health
 
 Run these immediately after the tests. The first command is the production DB
-misrouting check and must still print `103` for this deployed schema.
+misrouting check; it must print the deployed schema's table count, which was
+`109` on 2026-09-23. A drop means test DDL reached production — stop and
+investigate.
 
 ```bash
 docker exec kasset-trader-db-1 \
@@ -208,11 +243,29 @@ docker exec kasset-trader-db-1 \
 
 docker ps --filter 'name=kasset-trader-' \
   --format 'table {{.Names}}\t{{.Status}}'
+
+rm -rf "$KASSET_TEST_SRC"
 ```
 
-Expect seven running containers: `db`, `redis`, `api`, `worker`, `scheduler`,
-`mcp`, and `caddy`. The test procedure must not stop, restart, or exec test code
-inside any of those containers.
+Expect eight running containers: `db`, `redis`, `api`, `worker`, `scheduler`,
+`mcp`, `ai-mcp`, and `caddy`. The test procedure must not stop, restart, or exec
+test code inside any of those containers.
+
+## Adding a test file
+
+CI enforces that every collected test file appears in exactly one
+`ci_shards/shard-N.txt`. A new file makes the `taskiq-smoke` job fail with
+`shard manifest exact-cover check failed`. Add the path to exactly one shard at
+its `LC_ALL=C` sorted position:
+
+```bash
+LC_ALL=C sort -c ci_shards/shard-4.txt          # must stay sorted
+cat ci_shards/shard-*.txt | sort | uniq -d      # must print nothing
+```
+
+Do not run `file_shard_plan generate` for an ordinary add or rename; it
+recomputes and rewrites every shard and belongs to the duration-refresh
+workflow.
 
 ## Windows collection exclusions
 

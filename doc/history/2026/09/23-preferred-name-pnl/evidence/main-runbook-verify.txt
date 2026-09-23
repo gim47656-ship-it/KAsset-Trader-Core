@@ -1,0 +1,70 @@
+# server-pytest-runner.md 갱신본 절차 그대로 실행 — 검증 원문 (Main, 2026-09-23)
+
+문서에 적은 §1~§5, §7, §8을 순서대로 스크립트화해 서버에서 실행했다.
+운영 checkout은 읽기만 했고 운영 DB는 SELECT 한 번(테이블 수)뿐이다.
+
+=== 1. Resolve the deployed inputs ===
+commit=b6c0aaeed99ee0f9bf9a569a9f0fbb2429747426 image ok, kasset-test-db running
+
+=== 2. Verify deps volume against uv.lock ===
+uv.lock 핀:
+  aiosqlite==0.22.1
+  fakeredis==2.34.1
+  pytest==9.1.1
+  pytest-asyncio==1.3.0
+  pytest-cov==7.1.0
+  pytest-mock==3.15.1
+  pytest-split==0.11.0
+  pytest-xdist==3.8.0
+볼륨 kasset-pytest-deps-4e6329d1 내용:
+  aiosqlite-0.22.1.dist-info
+  fakeredis-2.34.1.dist-info
+  pytest-9.1.1.dist-info
+  pytest_asyncio-1.3.0.dist-info
+  pytest_cov-7.1.0.dist-info
+  pytest_mock-3.15.1.dist-info
+  pytest_split-0.11.0.dist-info
+  pytest_xdist-3.8.0.dist-info
+→ 8종 전부 일치. 볼륨 이름의 4e6329d1은 최초 생성 이미지 SHA일 뿐 계약은 uv.lock이다.
+
+=== 3. Prepare the checkout under test ===
+src=/tmp/kasset-pytest-20260923-104058 at b6c0aaee (git clone + detached checkout)
+
+=== 5. Run a slice and observe load ===
+uptime before: 10:40:59 load average: 0.47, 0.83, 0.70
+$ run_server_pytest kasset-pytest-verify tests/extensions/kasset/api/test_preferred_symbol_names.py
+ROB-1296 external HTTP boundary: 0 blocked requests
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+11 passed in 4.00s
+uptime after : 10:41:15 load average: 0.59, 0.84, 0.71
+
+이 선택은 DB 세션을 열지 않아 bootstrap 줄이 나오지 않았다. 초안은 그 줄을
+"A healthy run prints"로 단정했기에 조건부 표현으로 고쳤다.
+
+=== 7. Static checks (ruff --no-cache, ty) ===
+All checks passed!
+1 file already formatted
+All checks passed!
+
+=== 8. Prove production isolation and service health ===
+운영 public 테이블 수: 109   (문서의 옛 값 103 → 109로 갱신)
+컨테이너: kasset-trader-ai-mcp-1 api-1 caddy-1 db-1 mcp-1 redis-1 scheduler-1 worker-1
+          → 8개 (문서의 옛 값 7개는 ai-mcp 누락)
+cleanup done: /tmp/kasset-pytest-20260923-104058 removed
+
+## 고친 내용 요약
+
+- 이미지 `kasset-trader-core:4e6329d1` / 커밋 `2ed7ef40` 하드코딩 → 배포 checkout
+  HEAD에서 도출(`git -C /opt/kasset-trader-core rev-parse HEAD`).
+- DB 경로: `kasset-trader-db-1` + 공유 `test_db`(`USE_SHARED_DB=1`) →
+  `kasset-test-db` + run-owned DB. 옛 경로는 공유 test_db의 낡은 스키마 때문에
+  `applied=0` 뒤 fixture가 깨진다(2026-09-23 같은 선택에서 12 failed / 28 errors).
+  그 실패 사례를 문서에 "Do not use the shared test_db path" 절로 남겼다.
+- 소스 마운트: 운영 checkout의 `tests/`를 `/app/tests`에 바인드 → 별도 clone을
+  `/work`에 read-only 마운트 + `PYTHONPATH=/work:/test-deps`. 변경분을 검증하려면
+  운영 checkout을 마운트하면 안 된다.
+- `-p no:cacheprovider`가 선택이 아니라 필수임을 명시(읽기 전용 마운트).
+- ruff `--no-cache` 필요성과 정적 검사 절(§7) 추가.
+- 테스트 파일 추가 시 `ci_shards/shard-N.txt` exact-cover 갱신 절 추가.
+  오늘 `taskiq-smoke`가 이것으로 실패했다.
+- §8 기대값 갱신: 테이블 103→109, 컨테이너 7→8(ai-mcp).

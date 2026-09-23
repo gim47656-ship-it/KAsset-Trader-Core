@@ -89,5 +89,23 @@ KRW count=3 wins=3 realized=90491.7786 rate=2.73%
 - **`balance.realizedPnl`은 `equity_kr`만 집계한다**(`paper.py:199-209`). USD 실현손익은 그 필드에 없고 확정손익 totals의 USD 통화 항목으로만 나온다. 기존 설계이며 이번에 건드리지 않았다.
 - **상장폐지 종목의 이름은 여전히 안 나온다.** 재사용한 `get_kr_names_by_symbols`가 `is_active` 필터를 걸어 비활성 심볼을 조용히 뺀다. 현재 보유 6종목은 모두 활성이다.
 - **앱 화면 확인은 사용자 몫이다.** 서버가 내려보내는 wire 값까지만 테스트로 닫았고 앱 저장소는 이 PC에 없다.
-- **`docs/runbooks/server-pytest-runner.md`가 현재 배포와 어긋나 있다.** 이미지 `4e6329d1`/커밋 `2ed7ef40`을 가리키고, 공유 `test_db` 경로는 낡은 스키마 때문에 12 failed / 28 errors를 낸다. 이번엔 `kasset-test-db`의 run-owned DB로 우회했다. runbook 갱신은 이번 범위 밖이다.
-- **장중 실행.** runbook이 KRX 영업일 08:50–16:20 KST 실행을 피하라고 하는데 이 검증은 09:57–10:04 KST에 돌았다. `--cpus=1.0`을 걸었고 load average는 0.50 → 1.06이었다. 운영 컨테이너 7종은 건드리지 않았다.
+- **장중 실행.** runbook이 KRX 영업일 08:50–16:20 KST 실행을 피하라고 하는데 이 검증은 09:57–10:04 KST에 돌았다. `--cpus=1.0`을 걸었고 load average는 0.50 → 1.06이었다. 운영 컨테이너는 건드리지 않았다.
+
+## 배포
+
+PR [#69](https://github.com/gim47656-ship-it/KAsset-Trader-Core/pull/69). 첫 CI에서 `taskiq-smoke`가 `shard manifest exact-cover check failed`로 떨어졌다 — 새 테스트 파일 `test_preferred_symbol_names.py`가 어느 `ci_shards/shard-N.txt`에도 없었다. 로그 안내대로 `shard-4.txt` 한 곳에만 `LC_ALL=C` 정렬 위치로 넣어 해결했고(`file_shard_plan generate`는 전체를 재작성하므로 쓰지 않았다) 재실행에서 `ci-required`·`frontend`·`migration` 전부 pass했다.
+
+2026-09-23 10:24 KST 병합(`b6c0aaee`) → Deploy 성공. 운영 5개 컨테이너가 `kasset-trader-core:b6c0aaee…`로 교체됐고 `/health` 200을 확인했다. migration 0건이라 승인 단계 없이 자동배포가 나갔다.
+
+## 후속: server-pytest-runner.md 갱신 (사용자 요청)
+
+위 "남은 위험"에 적었던 runbook 결함을 같은 세션에서 고쳤다. 고친 내용과 실행 증거는 [evidence/main-runbook-verify.txt](evidence/main-runbook-verify.txt).
+
+- 이미지·커밋 하드코딩(`4e6329d1`/`2ed7ef40`) → 배포 checkout HEAD에서 도출.
+- DB 경로를 `kasset-test-db` + run-owned DB로 바꾸고, 공유 `test_db` 경로가 왜 깨지는지(낡은 스키마 → `applied=0` → fixture 실패)를 전용 절로 남겼다.
+- 운영 `tests/` 바인드 → 별도 clone을 `/work`에 read-only 마운트 + `PYTHONPATH=/work:/test-deps`. 변경분을 검증하려면 운영 checkout을 마운트하면 안 된다.
+- `-p no:cacheprovider`·ruff `--no-cache`가 필수임을 명시하고 정적 검사 절을 추가했다.
+- 테스트 파일 추가 시 `ci_shards` exact-cover 갱신 절을 추가했다(이번에 실제로 걸린 항목).
+- §8 기대값을 실측으로 갱신: 테이블 103 → **109**, 컨테이너 7 → **8**(`ai-mcp` 누락이었다).
+
+갱신본의 §1~§5·§7·§8을 그대로 스크립트로 실행해 통과를 확인했다(11 passed, 정적 검사 exit 0, 테이블 109 유지, 임시 checkout 정리까지). 초안이 bootstrap 출력을 "A healthy run prints"로 단정했는데 DB를 열지 않는 선택에서는 그 줄이 없어 조건부 표현으로 고쳤다.
