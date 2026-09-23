@@ -24,6 +24,7 @@ from app.extensions.kasset.automation.position_manager import (
     PositionBar,
     PositionExitSignal,
     PositionManagerConfig,
+    _raise_trailing_stop,
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
@@ -273,7 +274,10 @@ def _quantity_for_signal(
 ) -> Decimal:
     raw = max(_ZERO, min(held_quantity, held_quantity * fraction))
     quantum = Decimal("1") if market == "KRX" else Decimal("0.0001")
-    return raw.quantize(quantum, rounding=ROUND_DOWN)
+    quantity = raw.quantize(quantum, rounding=ROUND_DOWN)
+    if market == "KRX" and fraction < Decimal("1") and held_quantity >= Decimal("2"):
+        return min(held_quantity - Decimal("1"), max(Decimal("1"), quantity))
+    return quantity
 
 
 def position_recommendation_id(signal_key: str, owner_user_id: int) -> str:
@@ -641,6 +645,16 @@ class PaperPositionManagerService:
                 if previous_status == "SUCCEEDED":
                     if previous_kind is ExitKind.PARTIAL_SELL:
                         state = replace(state, partial_exit_completed=True)
+                        floor = (
+                            state.entry_price
+                            + self._config.post_partial_floor_atr * state.initial_atr
+                        )
+                        if floor > state.current_stop:
+                            state = _raise_trailing_stop(
+                                state,
+                                raised_stop=floor,
+                                effective_at=self._now,
+                            )
                 elif previous_status == "CLAIMED":
                     # 집행이 진행 중이거나 lease 복구를 기다리는 상태다. 주문을
                     # 취소하거나 새 CAS를 만들지 않고, claim 결과가 화해된 다음
@@ -762,12 +776,47 @@ class PaperPositionManagerService:
             fraction=signal.quantity_fraction,
         )
         if quantity <= _ZERO:
-            _apply_state(
-                state_row,
-                persisted_state,
-                signal_key=stored_signal_key,
-            )
-            return None
+            if (
+                market == "KRX"
+                and Decimal(position.quantity) == Decimal("1")
+                and signal.kind is ExitKind.PARTIAL_SELL
+            ):
+                floor = (
+                    persisted_state.entry_price
+                    + self._config.post_partial_floor_atr * persisted_state.initial_atr
+                )
+                if floor > persisted_state.current_stop:
+                    persisted_state = _raise_trailing_stop(
+                        persisted_state,
+                        raised_stop=floor,
+                        effective_at=(
+                            signal.signal_at
+                            if exit_horizon == "intraday"
+                            else self._now
+                        ),
+                    )
+                if intraday is not None:
+                    follow_up = evaluate_position_intraday(
+                        persisted_state,
+                        _intraday_position_bars(intraday),
+                        bar_interval=intraday.bar_interval,
+                        after=signal.signal_at,
+                        config=self._config,
+                    )
+                    if (
+                        follow_up is not None
+                        and follow_up.kind is not ExitKind.PARTIAL_SELL
+                    ):
+                        signal = follow_up
+                        exit_horizon = "intraday"
+                        quantity = Decimal("1")
+            if quantity <= _ZERO:
+                _apply_state(
+                    state_row,
+                    persisted_state,
+                    signal_key=stored_signal_key,
+                )
+                return None
         recommendation_id = position_recommendation_id(
             signal.idempotency_key,
             owner_user_id,
