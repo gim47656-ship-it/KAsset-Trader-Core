@@ -1,0 +1,77 @@
+# 확정손익 부분실현 포함 — 검증 원문 (Main)
+
+환경: 서버 kasset-server 격리 checkout /tmp/kasset-pnl-20260923
+      (base c1dad9060ada93664e7b69917f2d9c9638f2ea1a, /opt/kasset-trader-core에서 git clone)
+      일회성 container + 배포 이미지 kasset-trader-core:c1dad9060ada의 /app/.venv
+      + 기존 볼륨 kasset-pytest-deps-4e6329d1 (pytest 9.1.1 / pytest-asyncio 1.3.0)
+      DB: kasset-test-db 컨테이너의 run-owned DB (AUTO_TRADER_PYTEST_USE_SHARED_DB 미지정)
+      운영 checkout / .env.kasset / 운영 DB·볼륨 미사용. 운영 DB는 SELECT만.
+
+## 1. 내 delta 단독 (app/services/paper_trading_service.py + tests/test_paper_trading_service.py)
+
+$ pytest tests/test_paper_trading_service.py -q --tb=short -p no:cacheprovider
+82 passed in 4.49s
+pytest exit: 0
+load before: 09:57:29 load average: 0.50, 0.78, 0.63
+load after : 09:57:43 load average: 0.61, 0.79, 0.64
+
+## 2. 역증명 — app/services/paper_trading_service.py만 base로 되돌리고 최종 테스트 실행
+
+$ git checkout -- app/services/paper_trading_service.py
+md5 814018a8c5858e39b7d140c7896dee2c  (base 소스)
+$ pytest tests/test_paper_trading_service.py -q --tb=short -p no:cacheprovider
+
+FAILED TestRoundTrips::test_partial_sell_reports_realized_share_while_open
+  assert len(trips) == 1  →  assert 0 == 1   (base는 부분실현 trip을 아예 안 냄)
+FAILED TestRoundTrips::test_reentry_after_flat_counts_separately
+  [Decimal('100.0000')] != [Decimal('100.0000'), Decimal('-50.0000')]
+2 failed, 80 passed in 4.78s
+pytest exit: 1
+
+test_partial_then_full_exit_stays_one_trip은 base에서도 통과한다 — 전량 청산 경로라
+이번 변경이 그 결과를 바꾸지 않는다는 뜻이고, 불변식 보존의 증거다.
+
+## 3. 두 조각 합본 (SymbolName delta + 내 delta)
+
+$ pytest tests/test_paper_trading_service.py tests/extensions/kasset/api -q --tb=short -p no:cacheprovider
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.17 database_seconds=0.19
+ROB-1296 external HTTP boundary: 0 blocked requests
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+489 passed, 2 warnings in 57.56s
+pytest exit: 0
+load after : 10:03:54 load average: 1.06, 1.07, 0.83
+
+$ git status --porcelain alembic/ | wc -l
+0
+
+## 4. 운영 2026-09-23 부분 익절 3건 재현 (replay.py, 순수 계산)
+
+trips:
+  005935 qty=1 cost=213031.9500  pnl=5291.4875  rate=2.48% days=1
+  005930 qty=6 cost=1680609.1964 pnl=17073.8536 rate=1.02% days=1
+  000155 qty=3 cost=1421463.1875 pnl=68126.4375 rate=4.79% days=1
+totals:
+  KRW count=3 wins=3 realized=90491.7786 cost=3315104.3339 rate=2.73%
+raw realized_pnl sum: 90988.9697
+
+차이 497.1911원은 매수 수수료(000155 852.75 / 005930 882.1875 / 005935 127.8)를
+매도 비중만큼 배분해 뺀 값이다. 기존 전량청산 경로가 쓰던 것과 같은 방식이며,
+전량 청산 시 비중이 1이 되어 기존 계산과 정확히 일치한다.
+
+balance.realizedPnl(app/extensions/kasset/api/paper.py:199-209)은 PaperTrade.realized_pnl
+단순 합이라 90988.9697을 낸다. 두 숫자의 497.1911원 차이는 이번 범위에서 고치지 않았다.
+
+## 5. 정적 검사
+
+$ ruff check --no-cache (5파일)        → All checks passed!   exit 0
+$ ruff format --no-cache --check (5파일) → 5 files already formatted  exit 0
+$ ty check --error-on-warning app/services/paper_trading_service.py → All checks passed!  exit 0
+
+## 6. 잘못 짚었던 경로 (기록용)
+
+처음에는 docs/runbooks/server-pytest-runner.md대로 kasset-trader-db-1 + 공유 test_db
+(AUTO_TRADER_PYTEST_USE_SHARED_DB=1)로 돌렸고 tests/extensions/kasset/api에서
+12 failed / 28 errors가 났다. 원인은 공유 test_db에 남아 있던 낡은 스키마였다
+(test schema bootstrap: applied=0 인데 users INSERT가 ProgrammingError).
+내 변경과 무관하며, kasset-test-db의 run-owned DB로 바꾸자 489 passed가 됐다.
+runbook의 이미지/커밋/DB 지정이 현재 배포와 어긋나 있다.

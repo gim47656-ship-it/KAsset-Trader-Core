@@ -455,19 +455,27 @@ async def test_positions_enrich_equities_in_one_market_aware_master_query(
     ]
 
     class Result:
-        @staticmethod
-        def all() -> list[tuple[str, str, str]]:
-            return [("KRX", "138040", "메리츠금융지주")]
+        def __init__(self, rows: list[object]) -> None:
+            self._rows = rows
+
+        def all(self) -> list[object]:
+            return self._rows
 
     class PositionNameSession:
+        """`symbol_master` 1차, 미해석 KRX 심볼의 `kr_symbol_universe` 2차 조회 대역."""
+
         def __init__(self) -> None:
-            self.name_reads = 0
-            self.name_statement: object | None = None
+            self.master_reads = 0
+            self.universe_reads = 0
+            self.master_statement: object | None = None
 
         async def execute(self, statement: object) -> Result:
-            self.name_reads += 1
-            self.name_statement = statement
-            return Result()
+            if "kr_symbol_universe" in str(statement):
+                self.universe_reads += 1
+                return Result([])
+            self.master_reads += 1
+            self.master_statement = statement
+            return Result([("KRX", "138040", "메리츠금융지주")])
 
     monkeypatch.setattr(
         paper_account_adapter,
@@ -491,9 +499,11 @@ async def test_positions_enrich_equities_in_one_market_aware_master_query(
         None,
     ]
     assert response.positions[-1].symbol == "999999"
-    assert db.name_reads == 1
-    assert db.name_statement is not None
-    statement_text = str(db.name_statement)
+    # 이름 조회는 심볼 집합당 1회씩이다: `symbol_master` 1차 + 미해석 KRX 심볼 2차.
+    assert db.master_reads == 1
+    assert db.universe_reads == 1
+    assert db.master_statement is not None
+    statement_text = str(db.master_statement)
     assert "symbol_master" in statement_text
     assert "(symbol_master.market, symbol_master.symbol)" in statement_text
 

@@ -1365,9 +1365,95 @@ class TestRoundTrips:
 
         assert trip["holding_days"] == 0
 
-    def test_unclosed_position_excluded(self, service):
-        from datetime import datetime
+    def test_never_sold_position_excluded(self, service):
+        """한 주도 안 팔린 보유는 실현이 없으므로 확정손익이 아니다."""
+        trades = [
+            self._trade(
+                id=1,
+                side="buy",
+                quantity=Decimal("10"),
+                executed_at=datetime(2026, 4, 1, tzinfo=UTC),
+            ),
+        ]
+        assert service._build_round_trips(trades) == []
 
+    def test_partial_sell_reports_realized_share_while_open(self, service):
+        """부분 익절은 잔량이 남아도 판 만큼 확정손익으로 잡힌다."""
+        trades = [
+            self._trade(
+                id=1,
+                side="buy",
+                quantity=Decimal("10"),
+                price=Decimal("60000"),
+                fee=Decimal("90"),
+                executed_at=datetime(2026, 4, 1, tzinfo=UTC),
+                reason="entry",
+            ),
+            self._trade(
+                id=2,
+                side="sell",
+                quantity=Decimal("4"),
+                price=Decimal("70000"),
+                fee=Decimal("546"),
+                realized_pnl=Decimal("39454"),
+                executed_at=datetime(2026, 4, 3, tzinfo=UTC),
+                reason="partial-exit",
+            ),
+        ]
+
+        trips = service._build_round_trips(trades)
+
+        assert len(trips) == 1
+        trip = trips[0]
+        # 판 수량과 그에 대응하는 원가만 센다: (10*60000+90) * 4/10
+        assert trip["quantity"] == Decimal("4")
+        assert trip["cost_basis"] == Decimal("240036.0000")
+        # 매수 수수료도 판 비중만큼만 부담한다: 39454 - 90*0.4
+        assert trip["pnl_amount"] == Decimal("39418.0000")
+        assert trip["holding_days"] == 2
+        assert trip["exit_reason"] == "partial-exit"
+
+    def test_partial_then_full_exit_stays_one_trip(self, service):
+        """부분 익절 뒤 전량 청산해도 같은 매매는 계속 1건이다."""
+        trades = [
+            self._trade(
+                id=1,
+                side="buy",
+                quantity=Decimal("10"),
+                price=Decimal("60000"),
+                fee=Decimal("90"),
+                executed_at=datetime(2026, 4, 1, tzinfo=UTC),
+            ),
+            self._trade(
+                id=2,
+                side="sell",
+                quantity=Decimal("4"),
+                price=Decimal("70000"),
+                fee=Decimal("546"),
+                realized_pnl=Decimal("39454"),
+                executed_at=datetime(2026, 4, 3, tzinfo=UTC),
+            ),
+            self._trade(
+                id=3,
+                side="sell",
+                quantity=Decimal("6"),
+                price=Decimal("65000"),
+                fee=Decimal("760"),
+                realized_pnl=Decimal("29240"),
+                executed_at=datetime(2026, 4, 5, tzinfo=UTC),
+            ),
+        ]
+
+        trips = service._build_round_trips(trades)
+
+        assert len(trips) == 1
+        trip = trips[0]
+        assert trip["quantity"] == Decimal("10")
+        assert trip["cost_basis"] == Decimal("600090.0000")
+        assert trip["pnl_amount"] == Decimal("68604.0000")
+
+    def test_reentry_after_flat_counts_separately(self, service):
+        """전량 청산 뒤 재진입해 부분 매도하면 별개의 2건이다."""
         trades = [
             self._trade(
                 id=1,
@@ -1378,12 +1464,31 @@ class TestRoundTrips:
             self._trade(
                 id=2,
                 side="sell",
-                quantity=Decimal("4"),
-                realized_pnl=Decimal("40000"),
+                quantity=Decimal("10"),
+                realized_pnl=Decimal("100"),
+                executed_at=datetime(2026, 4, 2, tzinfo=UTC),
+            ),
+            self._trade(
+                id=3,
+                side="buy",
+                quantity=Decimal("10"),
                 executed_at=datetime(2026, 4, 3, tzinfo=UTC),
             ),
+            self._trade(
+                id=4,
+                side="sell",
+                quantity=Decimal("4"),
+                realized_pnl=Decimal("-50"),
+                executed_at=datetime(2026, 4, 4, tzinfo=UTC),
+            ),
         ]
-        assert service._build_round_trips(trades) == []
+
+        trips = service._build_round_trips(trades)
+
+        assert [trip["pnl_amount"] for trip in trips] == [
+            Decimal("100.0000"),
+            Decimal("-50.0000"),
+        ]
 
     def test_multiple_symbols_grouped_independently(self, service):
         from datetime import datetime

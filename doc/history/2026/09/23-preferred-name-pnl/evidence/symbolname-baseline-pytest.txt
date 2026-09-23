@@ -1,0 +1,26 @@
+# 역증명 — 수정 전 소스 + 최종 신규 테스트 (SymbolName)
+
+목적: 새 회귀 테스트가 실제 결함을 잡는지 확인한다. 격리 checkout에서 소유 2파일만
+`git checkout --`로 base(`c1dad9060ada`)로 되돌리고, 최종 테스트 파일은 그대로 둔 채 실행했다.
+실행 후 되돌린 2파일을 원복했고 `md5sum`이 로컬 작업 트리와 일치함을 확인했다.
+
+```
+cwd: /work  (격리 checkout /tmp/kasset-symbolname-20260923, app 2파일 = base)
+$ python -m pytest tests/extensions/kasset/api/test_preferred_symbol_names.py -q --tb=line -p no:cacheprovider
+E   AssertionError: assert [None, '삼성전자'] == ['두산우', '삼성전자']
+      At index 0 diff: None != '두산우'
+/work/tests/extensions/kasset/api/test_preferred_symbol_names.py:355: AssertionError: assert [None, '삼성전자'] == ['두산우', …
+=========================== short test summary info ============================
+FAILED tests/extensions/kasset/api/test_preferred_symbol_names.py::test_position_names_fill_preferred_shares_from_kr_sy…
+FAILED tests/extensions/kasset/api/test_preferred_symbol_names.py::test_position_names_leave_unresolved_and_self_named_…
+FAILED tests/extensions/kasset/api/test_preferred_symbol_names.py::test_instrument_names_fill_preferred_shares_from_kr_…
+FAILED tests/extensions/kasset/api/test_preferred_symbol_names.py::test_positions_response_exposes_preferred_share_names
+FAILED tests/extensions/kasset/api/test_preferred_symbol_names.py::test_closed_trades_response_exposes_preferred_share_…
+5 failed, 6 passed in 4.09s
+exit: 1
+```
+
+실패 5건이 우선주 해석 계약을 직접 겨눈다. 통과 6건은 이번 변경이 건드리지 않는 계약
+(SymbolMaster 우선, US 비대상, 조회 실패 내성)이라 base에서도 통과한다 — 즉 결함이 아닌 것들이다.
+특히 `test_positions_response_exposes_preferred_share_names`가 base에서 낸
+`[None, '삼성전자']`는 앱이 종목코드를 렌더하던 실제 증상(`name=null`)과 같은 모양이다.

@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-23 (매도 미발생·매수 과다·앱 표면 오류 수정, 완료 이력 분리)
+갱신: 2026-09-23 (우선주 종목명 누락·확정손익 부분실현 반영)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
@@ -7,7 +7,9 @@
 - **현재 청산 사다리 (5단)**: ① 초기 손절 `진입가 - 3 ATR` ② 진전폭 `+1 ATR` 뒤 켜지는 `최고종가 - 2 ATR` 조기 보호선 ③ `+0.5 ATR` 1차 익절 30% ④ 부분익절 뒤 `max(진입가, 최고종가 - 3 ATR)` 바닥 ⑤ TIME_STOP 진전폭을 **현재 종가** 기준으로 판정(과거 최고 종가 latch 제거). 백테스트 근거는 [22-sell-strategy-app-surface](doc/history/2026/09/22-sell-strategy-app-surface/main.md).
 - **추천 유효기간 80분**(`_OWNER_BUY_COOLDOWN` 60분 + `_PRODUCER_TICK` 10분 × 2). 이전 60분은 배치 간격 70분을 못 덮어 모든 추천이 다음 배치 전에 만료됐고, 그래서 같은 종목이 매 배치 새로 추천됐다. 같은 종목 재진입 한도(`same_symbol_reentry_limit`)를 추천 생성 단계에도 적용하되 **체결 성공 + 미만료 PENDING만** 세고 예산 소진 실패는 세지 않는다(재시도 경로 보존).
 - **2026-09-16 사용자 승인 변경**: 2026-09-07의 -3% 자동 손절 바닥을 **제거**했다. [07-stop-loss-floor](doc/history/2026/09/07-stop-loss-floor/main.md)의 "-3% 바닥 도입" 기록은 역사이며 현재 계약이 아니다. ATR 근거가 없는 보유분은 상태를 만들지 않고 그 tick을 관리하지 않는다.
-- **다음 행동**: 2026-09-22 변경을 main 병합으로 배포한 뒤, 다음 정규장의 자연 추천·체결·청산을 읽기 전용으로 확인한다. 특히 1차 익절 30%가 실제로 발동하는지와 추천 반복이 줄었는지를 본다. 검증 목적으로 주문을 제조하거나 강제 sweep을 돌리지 않는다.
+- **2026-09-23 사용자 승인 변경(확정손익 정의)**: 부분 익절한 종목을 '진행 중 1건'으로 세어 그때까지의 실현손익을 금액·건수·승패에 반영한다. 전량 청산되면 같은 1건이 완료로 바뀌며 중복 카운트가 없다. 한 주도 팔지 않은 보유는 계속 제외한다. 열린 매매의 `quantity`·`cost_basis`는 판 만큼만 잡고 매수 수수료도 그 비중만 부담시킨다 — 전량 청산은 비중이 1이라 **기존 계산과 정확히 일치**한다. 근거는 [23-preferred-name-pnl](doc/history/2026/09/23-preferred-name-pnl/main.md).
+- **우선주 종목명**: `symbol_master`의 CHECK가 `COMMON_STOCK`/`ETF`만 받아 우선주는 행이 없다. 이름 해석은 `kr_symbol_universe` 2차 fallback으로 메우며 `symbol_master` 결과가 항상 우선이다. **`symbol_master`의 `security_type` 분류는 스크리너 유니버스 분모 의미를 가지므로 우선주를 적재하는 방향으로 바꾸지 않는다.**
+- **다음 행동**: 2026-09-23 변경 배포 후 앱에서 ① 우선주가 한글명으로 보이는지 ② 부분 익절분이 확정손익에 즉시 잡히는지를 사용자가 확인한다. 검증 목적으로 주문을 제조하지 않는다.
 
 ### 유지 중인 계약·경계 (이관한 기록에서 통합)
 - 10분 producer + 5분 execution sweep이며 틱 즉시 손절이 아니다. 장중 조건 발생 후 봉 완료·다음 평가·다음 집행을 기다린다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후의 체결은 보장하지 않는다. 장외 강제 주문은 하지 않는다.
@@ -19,6 +21,7 @@
 - **롤백 금지·주의(유효)**: 운영에 nullable 컬럼(`initial_atr`, `exit_levels_effective_at`, `exit_level_history`)이 적용됐다. 문제가 생기면 구버전 이미지로 되돌리지 않는다. 새 컬럼 downgrade는 temporal provenance를 삭제하고, 새 행/history가 생긴 뒤 이 revision을 모르는 구버전 image로 rollback하면 같은 과거 소급 결함을 재도입하므로 **구버전 rollback과 Alembic downgrade를 금지**하고 roll-forward한다. `initial_atr IS NULL` 행이 0건일 때만 `alembic downgrade` 후 이전 이미지가 가능하고, 1건 이상이면 nullable을 이해하는 버전으로 roll-forward한다(migration downgrade 자체도 NULL 행이 있으면 `RuntimeError`로 거부한다). 실패 시 worker·scheduler 정지를 유지하며, 자동 rollback 경로도 쓰지 않는다. 백업은 `backups/pre-stoploss-9fefab61/database.dump`다.
 
 ## 완료 이력 (doc/history/2026/09/)
+- [2026-09-23 — 우선주 종목명 누락과 확정손익 부분실현 반영](doc/history/2026/09/23-preferred-name-pnl/main.md)
 - [2026-09-22 — 매도 미발생·매수 과다·앱 표면 오류 조사와 수정](doc/history/2026/09/22-sell-strategy-app-surface/main.md)
 - [2026-09-19 — KR Breakout / First Pullback / NR7 비교 및 PAPER 런타임 연결](doc/history/2026/09/19-kr-entry-paths/main.md)
 - [2026-09-16 — 매수 부재 원인 조사와 -3% 손절 바닥 제거](doc/history/2026/09/16-stop-floor-removal/main.md)

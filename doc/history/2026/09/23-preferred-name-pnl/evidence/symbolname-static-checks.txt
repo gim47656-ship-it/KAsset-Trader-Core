@@ -1,0 +1,40 @@
+# 정적 검사 — KRX 우선주 종목명 fallback (SymbolName)
+
+cwd: /work  (서버 격리 checkout `/tmp/kasset-symbolname-20260923`, base `c1dad9060ada93664e7b69917f2d9c9638f2ea1a`)
+이미지: `kasset-trader-core:c1dad9060ada93664e7b69917f2d9c9638f2ea1a`
+ruff/ty: 일회성 볼륨 `kasset-symbolname-lintdeps`에 `ruff==0.15.9`, `ty==0.0.29` 설치(uv.lock 핀과 동일)
+
+대상 3파일:
+  app/extensions/kasset/api/paper.py
+  app/extensions/kasset/api/krx_quotes.py
+  tests/extensions/kasset/api/test_preferred_symbol_names.py
+
+## ruff check
+
+```
+$ ruff check --no-cache app/extensions/kasset/api/paper.py app/extensions/kasset/api/krx_quotes.py tests/extensions/kasset/api/test_preferred_symbol_names.py
+All checks passed!
+exit: 0
+```
+
+## ruff format --check
+
+```
+$ ruff format --check --no-cache app/extensions/kasset/api/paper.py app/extensions/kasset/api/krx_quotes.py tests/extensions/kasset/api/test_preferred_symbol_names.py
+3 files already formatted
+exit: 0
+```
+
+## ty check (실행 코드 2파일)
+
+```
+$ ty check --error-on-warning app/extensions/kasset/api/paper.py app/extensions/kasset/api/krx_quotes.py
+All checks passed!
+exit: 0
+```
+
+## 참고: 첫 시도에서 캐시 쓰기 실패
+
+`/work`를 read-only로 마운트했기 때문에 ruff가 `/work/.ruff_cache`를 만들지 못해
+`Read-only file system (os error 30)`으로 exit 2가 났다. `--no-cache`로 재실행해 위 결과를 얻었다.
+소스 문제가 아니라 마운트 권한 문제였다.

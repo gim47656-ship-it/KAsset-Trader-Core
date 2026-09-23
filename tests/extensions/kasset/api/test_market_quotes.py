@@ -47,18 +47,25 @@ class _FakeResult:
 
 
 class _FakeDb:
-    """`kr_candles_1d` 배치 읽기와 종목명 조회만 모사하는 세션 대역."""
+    """`kr_candles_1d` 배치 읽기와 종목명 조회만 모사하는 세션 대역.
+
+    이름 조회는 `symbol_master`가 1차, `symbol_master`가 모르는 KRX 심볼의
+    `kr_symbol_universe` 2차 조회로 나뉜다. 두 조회를 각각 세어 배치성(N+1 아님)을 본다.
+    """
 
     def __init__(
         self,
         *,
         candles: dict[str, list[dict[str, Any]]] | None = None,
         names: dict[str, str] | None = None,
+        kr_universe: dict[str, str] | None = None,
     ) -> None:
         self.candles = candles or {}
         self.names = names or {}
+        self.kr_universe = kr_universe or {}
         self.candle_reads = 0
         self.name_reads = 0
+        self.universe_reads = 0
         self.name_statement: Any | None = None
 
     async def execute(
@@ -71,6 +78,12 @@ class _FakeDb:
             for symbol in requested:
                 rows.extend(self.candles.get(symbol, []))
             return _FakeResult(rows)
+        if "kr_symbol_universe" in str(statement):
+            self.universe_reads += 1
+            # `kr_symbol_universe_service`는 `row.symbol`/`row.name`으로 읽는다.
+            return _FakeResult(
+                [SimpleNamespace(symbol=s, name=n) for s, n in self.kr_universe.items()]
+            )
         self.name_reads += 1
         self.name_statement = statement
         return _FakeResult(list(self.names.items()))
@@ -246,7 +259,10 @@ def test_batch_quotes_serve_many_symbols_from_one_toss_call(
     }
     assert toss.calls == [["005930", "000660"]]
     assert db.candle_reads == 1
+    # 이름 조회도 배치다: `symbol_master` 1회 + 미해석 KRX 심볼의
+    # `kr_symbol_universe` 1회. 000660은 양쪽에 없어 여전히 name=None이다.
     assert db.name_reads == 1
+    assert db.universe_reads == 1
 
 
 def test_batch_quotes_deduplicate_symbols_before_calling_toss(
@@ -899,6 +915,7 @@ async def test_toss_quote_reads_market_aware_name_from_symbol_master(
 
     assert quote.name == "메리츠금융지주"
     assert db.name_reads == 1
+    assert db.universe_reads == 0
     assert db.name_statement is not None
     compiled = db.name_statement.compile()
     assert "symbol_master" in str(compiled)
@@ -913,11 +930,15 @@ async def test_toss_quote_omits_name_when_symbol_master_has_no_match(
 ) -> None:
     toss = _StubTossClient({"999999": _toss_price("999999", price="1000")})
     _install_toss(monkeypatch, toss)
+    db = _FakeDb()
 
-    quote = await krx_quotes.resolve_quote(_FakeDb(), market="KRX", symbol="999999")
+    quote = await krx_quotes.resolve_quote(db, market="KRX", symbol="999999")
 
     assert quote.symbol == "999999"
+    # 두 표 모두 모르면 종목코드를 name으로 쓰지 않는다.
     assert quote.name is None
+    assert db.name_reads == 1
+    assert db.universe_reads == 1
 
 
 @pytest.mark.asyncio

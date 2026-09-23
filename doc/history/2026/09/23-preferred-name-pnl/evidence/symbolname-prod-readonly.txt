@@ -1,0 +1,35 @@
+# 운영 DB 읽기 전용 관측 — 이름 출처 (SymbolName)
+
+운영 DB는 SELECT만 사용했다. 스키마·데이터 변경 없음.
+
+```
+$ docker exec kasset-trader-db-1 psql -U kasset -d kasset -c \
+  "SELECT market, symbol, name, security_type FROM symbol_master WHERE symbol IN ('005930','138040','005940','000155','000157','005935') ORDER BY symbol;"
+ market | symbol |      name      | security_type
+--------+--------+----------------+---------------
+ KRX    | 005930 | 삼성전자       | COMMON_STOCK
+ KRX    | 005940 | NH투자증권     | COMMON_STOCK
+ KRX    | 138040 | 메리츠금융지주 | COMMON_STOCK
+(3 rows)
+
+$ docker exec kasset-trader-db-1 psql -U kasset -d kasset -c \
+  "SELECT symbol, name, security_type, is_common_share, listing_status, is_active FROM kr_symbol_universe WHERE symbol IN ('005930','138040','005940','000155','000157','005935') ORDER BY symbol;"
+ symbol |      name      | security_type | is_common_share | listing_status | is_active
+--------+----------------+---------------+-----------------+----------------+-----------
+ 000155 | 두산우         | STOCK         | f               | ACTIVE         | t
+ 000157 | 두산2우B       | STOCK         | f               | ACTIVE         | t
+ 005930 | 삼성전자       | STOCK         | t               | ACTIVE         | t
+ 005935 | 삼성전자우     | STOCK         | f               | ACTIVE         | t
+ 005940 | NH투자증권     | STOCK         | t               | ACTIVE         | t
+ 138040 | 메리츠금융지주 | STOCK         | t               | ACTIVE         | t
+(6 rows)
+```
+
+해석:
+
+- `symbol_master`에 `005930`·`005940`·`138040`이 있고 이름이 `kr_symbol_universe`와 같다.
+  이 심볼들은 계속 1차 조회에서 해석되므로 결과가 바뀌지 않는다. 설령 2차 조회로
+  떨어져도 같은 이름이 나온다.
+- `000155`·`000157`·`005935`는 `symbol_master`에 **행이 없다**(위 결과가 3행인 이유).
+  `kr_symbol_universe`에 `두산우`·`두산2우B`·`삼성전자우`로 `is_active=true`다.
+  이 3종목이 수정 전에는 `name=null` → 앱이 종목코드를 렌더하던 대상이다.

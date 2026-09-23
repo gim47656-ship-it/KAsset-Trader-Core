@@ -38,7 +38,10 @@ from app.services.daily_candles.repository import (
     DailyCandleRow,
     DailyCandlesRepository,
 )
-from app.services.kr_symbol_universe_service import get_kr_nxt_tradability
+from app.services.kr_symbol_universe_service import (
+    get_kr_names_by_symbols,
+    get_kr_nxt_tradability,
+)
 from app.services.nxt_preflight import NxtTradability
 
 logger = logging.getLogger(__name__)
@@ -592,14 +595,16 @@ async def _instrument_names(
 ) -> dict[str, str]:
     if not symbols:
         return {}
+    wire_market = _wire_market(market)
+    requested = set(symbols)
     try:
         result = await db.execute(
             select(SymbolMaster.symbol, SymbolMaster.name).where(
-                SymbolMaster.market == _wire_market(market),
-                SymbolMaster.symbol.in_(set(symbols)),
+                SymbolMaster.market == wire_market,
+                SymbolMaster.symbol.in_(requested),
             )
         )
-        return {
+        names = {
             symbol: name.strip()
             for symbol, name in result.all()
             if name and name.strip() and name.strip() != symbol
@@ -610,3 +615,24 @@ async def _instrument_names(
             type(exc).__name__,
         )
         return {}
+
+    # `symbol_master`는 KRX에 COMMON_STOCK/ETF만 담으므로 우선주는 여기서 빠진다.
+    # 그 종목들의 이름 출처는 `kr_symbol_universe`뿐이다.
+    unresolved_krx = sorted(requested - set(names)) if wire_market == "KRX" else []
+    if unresolved_krx:
+        try:
+            universe_names = await get_kr_names_by_symbols(unresolved_krx, db=db)
+        except Exception as exc:  # noqa: BLE001 — 종목명은 없으면 null이다
+            logger.warning(
+                "kasset quote kr symbol universe read failed (%s): name omitted",
+                type(exc).__name__,
+            )
+        else:
+            names.update(
+                {
+                    symbol: name.strip()
+                    for symbol, name in universe_names.items()
+                    if name and name.strip() and name.strip() != symbol
+                }
+            )
+    return names
