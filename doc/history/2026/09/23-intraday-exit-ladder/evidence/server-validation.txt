@@ -1,0 +1,31 @@
+검증 대상 revision: app/extensions/kasset/automation/position_manager_service.py 및 tests/extensions/kasset/automation/test_position_manager.py의 포맷 후 수정본. 서버 전용 checkout /tmp/kasset-exit-ladder-20260923 (원격 GitHub SHA c1e4371f91c05a83ede36d0f5c3b77472acc2b56 + 위 두 파일 overlay). 명령 호출 cwd=E:/KAsset-Trader-Core, 컨테이너 cwd=/work. KRX 영업일 16:20 KST 이후 실행. 운영 checkout/env/DB 볼륨 미사용.
+
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-pytest-exit-ladder --cpus=1.0 --network container:kasset-test-db --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly --mount type=volume,src=kasset-pytest-deps-4e6329d1,dst=/test-deps,readonly -e AUTO_TRADER_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/test_db -e PYTHONPATH=/work:/test-deps -e PYTHONDONTWRITEBYTECODE=1 -w /work --entrypoint /app/.venv/bin/pytest kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 -q --tb=short -p no:cacheprovider tests/extensions/kasset/automation/test_position_manager.py"
+...................................................................      [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.78 database_seconds=0.19
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+67 passed in 12.60s
+exit=0
+
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-ruff --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ruff kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 check --no-cache app/extensions/kasset/automation/position_manager_service.py tests/extensions/kasset/automation/test_position_manager.py research_backtest.py"
+All checks passed!
+exit=0
+
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-format --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ruff kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 format --no-cache --check app/extensions/kasset/automation/position_manager_service.py tests/extensions/kasset/automation/test_position_manager.py research_backtest.py"
+3 files already formatted
+exit=0
+
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-ty --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ty kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 check --error-on-warning app/extensions/kasset/automation/position_manager_service.py tests/extensions/kasset/automation/test_position_manager.py research_backtest.py"
+All checks passed!
+exit=0
+
+추가된 `test_succeeded_partial_never_lowers_an_existing_higher_stop`만 변경했으므로 앞의 서비스/연구 스크립트 Ruff·ty 검사는 재사용했다. 새 테스트 파일 단독 서버 확인:
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-ruff --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ruff kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 check --no-cache tests/extensions/kasset/automation/test_position_manager.py"
+All checks passed! exit=0
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-format --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ruff kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 format --no-cache --check tests/extensions/kasset/automation/test_position_manager.py"
+1 file already formatted; exit=0
+$ ssh root@100.73.186.78 "docker run --rm --name kasset-exit-ty --network none --cpus=1.0 --mount type=bind,src=/tmp/kasset-exit-ladder-20260923,dst=/work,readonly -w /work --entrypoint /app/.venv/bin/ty kasset-trader-core:c1e4371f91c05a83ede36d0f5c3b77472acc2b56 check --error-on-warning tests/extensions/kasset/automation/test_position_manager.py"
+All checks passed! exit=0
+
+최종 테스트 이후 운영 DB 읽기 전용 확인: `ssh root@100.73.186.78 "docker exec kasset-trader-db-1 psql -U kasset -d kasset -X -Atc \"BEGIN READ ONLY; SELECT count(*) FROM information_schema.tables WHERE table_schema='public'; ROLLBACK;\""` → BEGIN / 109 / ROLLBACK, exit=0. `ssh root@100.73.186.78 "docker ps --filter name=kasset-trader- --format '{{.Names}} {{.Status}}'"` → db, redis, api, worker, scheduler, mcp, ai-mcp, caddy 모두 Up, exit=0. GitHub Actions는 Main의 PR 이후에만 확인 가능, 현재 미실행.

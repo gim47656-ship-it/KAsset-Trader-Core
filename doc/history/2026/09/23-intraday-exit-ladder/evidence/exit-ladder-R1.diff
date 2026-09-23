@@ -1,0 +1,359 @@
+diff --git a/app/extensions/kasset/automation/position_manager_service.py b/app/extensions/kasset/automation/position_manager_service.py
+index 9b71af0f2..597f51ec3 100644
+--- a/app/extensions/kasset/automation/position_manager_service.py
++++ b/app/extensions/kasset/automation/position_manager_service.py
+@@ -24,6 +24,7 @@ from app.extensions.kasset.automation.position_manager import (
+     PositionBar,
+     PositionExitSignal,
+     PositionManagerConfig,
++    _raise_trailing_stop,
+     evaluate_position,
+     evaluate_position_intraday,
+     initialize_position,
+@@ -273,7 +274,10 @@ def _quantity_for_signal(
+ ) -> Decimal:
+     raw = max(_ZERO, min(held_quantity, held_quantity * fraction))
+     quantum = Decimal("1") if market == "KRX" else Decimal("0.0001")
+-    return raw.quantize(quantum, rounding=ROUND_DOWN)
++    quantity = raw.quantize(quantum, rounding=ROUND_DOWN)
++    if market == "KRX" and fraction < Decimal("1") and held_quantity >= Decimal("2"):
++        return min(held_quantity - Decimal("1"), max(Decimal("1"), quantity))
++    return quantity
+ 
+ 
+ def position_recommendation_id(signal_key: str, owner_user_id: int) -> str:
+@@ -641,6 +645,16 @@ class PaperPositionManagerService:
+                 if previous_status == "SUCCEEDED":
+                     if previous_kind is ExitKind.PARTIAL_SELL:
+                         state = replace(state, partial_exit_completed=True)
++                        floor = (
++                            state.entry_price
++                            + self._config.post_partial_floor_atr * state.initial_atr
++                        )
++                        if floor > state.current_stop:
++                            state = _raise_trailing_stop(
++                                state,
++                                raised_stop=floor,
++                                effective_at=self._now,
++                            )
+                 elif previous_status == "CLAIMED":
+                     # 집행이 진행 중이거나 lease 복구를 기다리는 상태다. 주문을
+                     # 취소하거나 새 CAS를 만들지 않고, claim 결과가 화해된 다음
+@@ -762,12 +776,47 @@ class PaperPositionManagerService:
+             fraction=signal.quantity_fraction,
+         )
+         if quantity <= _ZERO:
+-            _apply_state(
+-                state_row,
+-                persisted_state,
+-                signal_key=stored_signal_key,
+-            )
+-            return None
++            if (
++                market == "KRX"
++                and Decimal(position.quantity) == Decimal("1")
++                and signal.kind is ExitKind.PARTIAL_SELL
++            ):
++                floor = (
++                    persisted_state.entry_price
++                    + self._config.post_partial_floor_atr * persisted_state.initial_atr
++                )
++                if floor > persisted_state.current_stop:
++                    persisted_state = _raise_trailing_stop(
++                        persisted_state,
++                        raised_stop=floor,
++                        effective_at=(
++                            signal.signal_at
++                            if exit_horizon == "intraday"
++                            else self._now
++                        ),
++                    )
++                if intraday is not None:
++                    follow_up = evaluate_position_intraday(
++                        persisted_state,
++                        _intraday_position_bars(intraday),
++                        bar_interval=intraday.bar_interval,
++                        after=signal.signal_at,
++                        config=self._config,
++                    )
++                    if (
++                        follow_up is not None
++                        and follow_up.kind is not ExitKind.PARTIAL_SELL
++                    ):
++                        signal = follow_up
++                        exit_horizon = "intraday"
++                        quantity = Decimal("1")
++            if quantity <= _ZERO:
++                _apply_state(
++                    state_row,
++                    persisted_state,
++                    signal_key=stored_signal_key,
++                )
++                return None
+         recommendation_id = position_recommendation_id(
+             signal.idempotency_key,
+             owner_user_id,
+diff --git a/tests/extensions/kasset/automation/test_position_manager.py b/tests/extensions/kasset/automation/test_position_manager.py
+index 6a324a0ab..08fc5ad7d 100644
+--- a/tests/extensions/kasset/automation/test_position_manager.py
++++ b/tests/extensions/kasset/automation/test_position_manager.py
+@@ -34,6 +34,7 @@ from app.extensions.kasset.automation.position_manager_service import (
+     PaperPositionManagerService,
+     _intraday_position_bars,
+     _persistable_state,
++    _quantity_for_signal,
+     _state_from_row,
+     _state_matches_position_cycle,
+     position_recommendation_id,
+@@ -1151,6 +1152,251 @@ async def test_partial_fill_keeps_same_cycle_and_marks_remaining_state() -> None
+     assert state_row.current_stop == D("100")
+ 
+ 
++@pytest.mark.asyncio
++async def test_small_kr_partial_sells_one_share_without_liquidating_two() -> None:
++    state_row = _state_row()
++    db = MagicMock()
++    db.scalar = AsyncMock(return_value=state_row)
++    db.get = AsyncMock(return_value=None)
++    db.flush = AsyncMock()
++    db.add = MagicMock()
++    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
++    bucket = _intraday([(0, "101", "106", "101", "105")], day=3)
++
++    recommendation_id = await service._manage_position(
++        owner_user_id=23,
++        account_id=17,
++        market="KRX",
++        position=_paper_position(quantity="2"),
++        rows=[],
++        intraday=bucket,
++    )
++
++    assert recommendation_id is not None
++    recommendation = next(
++        call_.args[0]
++        for call_ in db.add.call_args_list
++        if isinstance(call_.args[0], AIRecommendation)
++    )
++    assert recommendation.suggested_quantity == "1"
++    assert state_row.partial_exit_completed is False
++    assert state_row.current_stop == D("70")
++
++
++@pytest.mark.unit
++def test_us_fractional_exit_keeps_its_existing_quantum() -> None:
++    assert _quantity_for_signal(
++        market="US",
++        held_quantity=D("0.0004"),
++        fraction=D("0.3"),
++    ) == D("0.0001")
++    assert _quantity_for_signal(
++        market="US",
++        held_quantity=D("0.0003"),
++        fraction=D("0.3"),
++    ) == D("0.0000")
++
++
++@pytest.mark.asyncio
++async def test_one_kr_share_arms_floor_once_then_exits_only_on_later_bucket() -> None:
++    state_row = _state_row(last_evaluated_at=_candle(1).time_utc)
++    db = MagicMock()
++    db.scalar = AsyncMock(return_value=state_row)
++    db.get = AsyncMock(return_value=None)
++    db.flush = AsyncMock()
++    db.add = MagicMock()
++    now = ENTRY_AT + timedelta(days=3, hours=1)
++    position = _paper_position(quantity="1")
++    bucket = _intraday([(0, "101", "106", "99", "105")], day=3)
++    service = _manager(db, now=now)
++
++    assert (
++        await service._manage_position(
++            owner_user_id=23,
++            account_id=17,
++            market="KRX",
++            position=position,
++            rows=[],
++            intraday=bucket,
++        )
++        is None
++    )
++    activated = bucket.bars[0].timestamp + bucket.bar_interval
++    assert state_row.current_stop == D("100")
++    assert state_row.exit_levels_effective_at == activated
++    assert state_row.exit_level_history == [
++        {
++            "effectiveAt": None,
++            "initialAtr": "10",
++            "initialStop": "70",
++            "currentStop": "70",
++        }
++    ]
++    assert state_row.partial_exit_completed is False
++    assert state_row.last_evaluated_at == _candle(1).time_utc
++    assert not any(
++        isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
++    )
++
++    assert (
++        await service._manage_position(
++            owner_user_id=23,
++            account_id=17,
++            market="KRX",
++            position=position,
++            rows=[],
++            intraday=bucket,
++        )
++        is None
++    )
++    assert len(state_row.exit_level_history) == 1
++
++    later = _intraday(
++        [(0, "101", "106", "99", "105"), (5, "104", "105", "99", "101")],
++        day=3,
++    )
++    recommendation_id = await service._manage_position(
++        owner_user_id=23,
++        account_id=17,
++        market="KRX",
++        position=position,
++        rows=[],
++        intraday=later,
++    )
++    assert recommendation_id is not None
++    recommendation = next(
++        call_.args[0]
++        for call_ in db.add.call_args_list
++        if isinstance(call_.args[0], AIRecommendation)
++    )
++    assert recommendation.suggested_quantity == "1"
++    assert recommendation.reference_price == "100"
++    assert state_row.partial_exit_completed is False
++    assert len(state_row.exit_level_history) == 1
++
++
++@pytest.mark.asyncio
++async def test_succeeded_partial_raises_floor_at_reconciliation_tick_not_past_bucket() -> (
++    None
++):
++    key = "position-exit:partial:23"
++    state_row = _state_row(
++        last_exit_signal_key=key,
++        last_evaluated_at=_candle(1).time_utc,
++    )
++    previous = _exit_recommendation(
++        key,
++        kind="PARTIAL_SELL",
++        execution_status="SUCCEEDED",
++        valid_until=ENTRY_AT + timedelta(days=5),
++    )
++    db = MagicMock()
++    db.scalar = AsyncMock(side_effect=[state_row, previous, state_row, previous])
++    db.get = AsyncMock(return_value=None)
++    db.flush = AsyncMock()
++    db.add = MagicMock()
++    now = ENTRY_AT + timedelta(days=3, hours=1)
++    service = _manager(db, now=now)
++    position = _paper_position(quantity="2")
++
++    assert (
++        await service._manage_position(
++            owner_user_id=23,
++            account_id=17,
++            market="KRX",
++            position=position,
++            rows=[],
++        )
++        is None
++    )
++    assert state_row.partial_exit_completed is True
++    assert state_row.current_stop == D("100")
++    assert state_row.exit_levels_effective_at == now
++    assert state_row.exit_level_history == [
++        {
++            "effectiveAt": None,
++            "initialAtr": "10",
++            "initialStop": "70",
++            "currentStop": "70",
++        }
++    ]
++    assert state_row.last_evaluated_at == _candle(1).time_utc
++
++    assert (
++        await service._manage_position(
++            owner_user_id=23,
++            account_id=17,
++            market="KRX",
++            position=position,
++            rows=[],
++        )
++        is None
++    )
++    assert len(state_row.exit_level_history) == 1
++    prior = _intraday([(0, "99", "100", "90", "99")], day=3)
++    # activation 이전에 시작한 bucket의 저가에는 새 바닥을 소급하지 않는다.
++    assert (
++        evaluate_position_intraday(
++            _state_from_row(state_row),
++            _intraday_position_bars(prior),
++            bar_interval=prior.bar_interval,
++        )
++        is None
++    )
++    following = _intraday([(60, "101", "102", "99", "100")], day=3)
++    stopped = evaluate_position_intraday(
++        _state_from_row(state_row),
++        _intraday_position_bars(following),
++        bar_interval=following.bar_interval,
++    )
++    assert stopped is not None
++    assert stopped.kind is ExitKind.TRAILING_STOP
++    assert stopped.reference_price == D("100")
++
++
++@pytest.mark.asyncio
++async def test_succeeded_partial_never_lowers_an_existing_higher_stop() -> None:
++    key = "position-exit:partial:23"
++    activated = ENTRY_AT + timedelta(days=2)
++    state_row = _state_row(
++        last_exit_signal_key=key,
++        exit_levels_effective_at=activated,
++        exit_level_history=[
++            {
++                "effectiveAt": None,
++                "initialAtr": "10",
++                "initialStop": "70",
++                "currentStop": "70",
++            }
++        ],
++    )
++    state_row.current_stop = D("110")
++    previous = _exit_recommendation(
++        key,
++        kind="PARTIAL_SELL",
++        execution_status="SUCCEEDED",
++        valid_until=ENTRY_AT + timedelta(days=5),
++    )
++    db = MagicMock()
++    db.scalar = AsyncMock(side_effect=[state_row, previous])
++    service = _manager(db, now=ENTRY_AT + timedelta(days=3, hours=1))
++
++    assert (
++        await service._manage_position(
++            owner_user_id=23,
++            account_id=17,
++            market="KRX",
++            position=_paper_position(quantity="2"),
++            rows=[],
++        )
++        is None
++    )
++    assert state_row.partial_exit_completed is True
++    assert state_row.current_stop == D("110")
++    assert state_row.exit_levels_effective_at == activated
++    assert len(state_row.exit_level_history) == 1
++
++
+ @pytest.mark.asyncio
+ async def test_reentry_cycle_does_not_reuse_old_highest_close_or_partial_state() -> (
+     None

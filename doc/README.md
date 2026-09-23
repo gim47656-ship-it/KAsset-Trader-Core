@@ -53,6 +53,7 @@ STATUS: accepted | pending-user-device-check | partial | superseded-by <path>
 
 | 날짜 | 주제 | 기록 |
 |---|---|---|
+| 23 | 장중 익절 사다리 결함(소수 보유·부분익절 뒤 본전 바닥) 수정 | [23-intraday-exit-ladder](history/2026/09/23-intraday-exit-ladder/main.md) |
 | 23 | 우선주 종목명 누락과 확정손익 부분실현 반영 | [23-preferred-name-pnl](history/2026/09/23-preferred-name-pnl/main.md) |
 | 22 | 매도 미발생·매수 과다·앱 표면 오류 조사와 수정 | [22-sell-strategy-app-surface](history/2026/09/22-sell-strategy-app-surface/main.md) |
 | 19 | KR Breakout / First Pullback / NR7 비교 및 PAPER 런타임 연결 | [19-kr-entry-paths](history/2026/09/19-kr-entry-paths/main.md) |
