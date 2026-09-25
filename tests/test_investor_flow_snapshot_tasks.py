@@ -30,7 +30,7 @@ def test_parse_args_defaults_to_dry_run_and_rejects_invalid_combinations():
     with pytest.raises(SystemExit):
         cli.parse_args(["--market", "kr", "--days", "0"])
     with pytest.raises(SystemExit):
-        cli.parse_args(["--market", "kr", "--days", "61"])
+        cli.parse_args(["--market", "kr", "--days", str(cli.MAX_DAYS + 1)])
 
 
 @pytest.mark.asyncio

@@ -21,7 +21,8 @@ import argparse
 import asyncio
 from typing import Any
 
-MAX_DAYS = 60
+#: 모바일 trend API는 bizdate로 과거를 페이징하므로 1년(약 250거래일) 백필이 된다.
+MAX_DAYS = 260
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
