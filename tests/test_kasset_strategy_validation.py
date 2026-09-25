@@ -135,7 +135,7 @@ def test_future_price_edits_do_not_change_past_signals_nav_or_trades() -> None:
     edited = candles.copy()
     future = edited["d"] >= sessions[k]
     for col in ("open", "high", "low", "close"):
-        edited.loc[future, col] = edited.loc[future, col] * 0.6
+        edited.loc[future, col] = edited.loc[future, col] * 0.8
     base_panel, base_ind = _panel(candles, flow, sessions)
     edit_panel, edit_ind = _panel(edited, flow, sessions)
 
@@ -343,3 +343,179 @@ def test_b_future_price_edits_do_not_change_past_selection() -> None:
             s for s in edit.signals if s["signal_date"] < cut
         ]
         assert [x for t, x in base.nav if t < k] == [x for t, x in edit.nav if t < k]
+
+
+def _pead_fixture(n: int = 170, count: int = 35):
+    sessions = _sessions(n)
+    closes = {
+        f"{j:06d}": np.full(n, 10_000.0 + (count - j) * 100)
+        for j in range(1, count + 1)
+    }
+    candles = _candles(sessions, closes)
+    rows = []
+    for j in range(1, count + 1):
+        for year, income, filing in (
+            (2024, 100.0, sessions[0]),
+            (2025, float(100 + j * 10), sessions[25]),
+        ):
+            rows.append(
+                {
+                    "symbol": f"{j:06d}",
+                    "fiscal_period": f"{year}Q1",
+                    "period_type": "quarterly",
+                    "period_end_date": date(year, 3, 31),
+                    "filing_date": filing,
+                    "effective_at": filing,
+                    "discrete_net_income": income,
+                    "net_income": income,
+                    "data_state": "fresh",
+                }
+            )
+    fundamentals = pd.DataFrame(rows)
+    panel = sv.build_panel(candles, _flow(sessions, {}), as_of=sessions[-1])
+    return sessions, candles, panel, fundamentals
+
+
+def test_pead_filing_next_session_future_edit_and_missing_yoy() -> None:
+    sessions, _, panel, fundamentals = _pead_fixture()
+    baseline = sv.pead_yoy_panel(panel, fundamentals, sv.PeadParams())
+    j = panel.symbols.index("000021")
+    assert not np.isfinite(baseline[25, j])
+    assert baseline[26, j] == pytest.approx(2.1)
+    fallback = fundamentals.copy()
+    fallback.loc[
+        (fallback.symbol == "000021") & (fallback.fiscal_period == "2025Q1"),
+        "filing_date",
+    ] = None
+    assert sv.pead_yoy_panel(panel, fallback, sv.PeadParams())[26, j] == pytest.approx(
+        2.1
+    )
+    fallback.loc[
+        (fallback.symbol == "000021") & (fallback.fiscal_period == "2025Q1"),
+        "effective_at",
+    ] = None
+    assert not np.isfinite(
+        sv.pead_yoy_panel(panel, fallback, sv.PeadParams())[:, j]
+    ).any()
+    edited = fundamentals.copy()
+    edited.loc[
+        (edited.symbol == "000021") & (edited.fiscal_period == "2025Q1"),
+        "discrete_net_income",
+    ] = 9999.0
+    after = sv.pead_yoy_panel(panel, edited, sv.PeadParams())
+    np.testing.assert_array_equal(
+        np.isfinite(baseline[:26, j]), np.isfinite(after[:26, j])
+    )
+    future = fundamentals.loc[
+        (fundamentals.symbol == "000021") & (fundamentals.fiscal_period == "2025Q1")
+    ].copy()
+    future["fiscal_period"] = "2026Q1"
+    future["filing_date"] = sessions[100]
+    future["effective_at"] = sessions[100]
+    future["discrete_net_income"] = 400.0
+    future["net_income"] = 400.0
+    later = pd.concat([fundamentals, future], ignore_index=True)
+    before_edit = sv.pead_yoy_panel(panel, later, sv.PeadParams())
+    later.loc[later.fiscal_period == "2026Q1", "discrete_net_income"] = 900.0
+    after_edit = sv.pead_yoy_panel(panel, later, sv.PeadParams())
+    np.testing.assert_array_equal(before_edit[:101, j], after_edit[:101, j])
+    assert before_edit[101, j] != after_edit[101, j]
+    edited.loc[
+        (edited.symbol == "000021") & (edited.fiscal_period == "2024Q1"),
+        "discrete_net_income",
+    ] = np.nan
+    missing = sv.pead_yoy_panel(panel, edited, sv.PeadParams())
+    assert not np.isfinite(missing[:, j]).any()
+
+
+def test_pead_stale_and_tranche_overlap_duplicate_skip() -> None:
+    sessions, _, panel, fundamentals = _pead_fixture(n=180)
+    scores = sv.pead_yoy_panel(panel, fundamentals, sv.PeadParams())
+    j = panel.symbols.index("000021")
+    assert np.isfinite(scores[146, j])
+    assert not np.isfinite(scores[147, j])
+    st = sv.run_pead(panel, scores, 26, len(sessions) - 1)
+    assert [event["date"] for event in st.events[:4]] == [
+        sessions[t].isoformat() for t in (26, 46, 66, 86)
+    ]
+    assert st.events[0]["new_orders"] == 10
+    assert st.events[1]["new_orders"] == 5
+    assert st.events[1]["tranche_shortfall"] == 5
+    assert st.events[2]["new_orders"] == 0
+    assert st.max_positions_seen <= 30
+    assert all(tr["holding_sessions"] == 60 for tr in st.trades)
+    assert all(tr["exit_reason"] == "tranche_maturity" for tr in st.trades)
+    summary = sv.summarize_run(
+        panel,
+        st,
+        26,
+        len(sessions) - 1,
+        1,
+        sv.dataclass_replace(sv.CommonParams(), max_positions=30),
+    )
+    assert summary["ledger_check"]["reconciled"]
+
+
+def test_pead_pending_old_tranche_blocks_fourth_fill() -> None:
+    sessions, candles, _, _ = _pead_fixture(n=110, count=65)
+    _set_bar(candles, "000021", sessions[87], close=22_000.0, high=22_100.0)
+    panel = sv.build_panel(candles, _flow(sessions, {}), as_of=sessions[-1])
+    scores = np.ones(panel.close.shape)
+    st = sv.run_pead(panel, scores, 26, 100)
+    fourth = st.events[3]
+    assert fourth["date"] == sessions[86].isoformat()
+    assert fourth["new_orders"] == 10
+    assert fourth["tranche_unfilled_due_overlap"] == 10
+    assert st.missed_entries["tranche_cap_pending_exit"] == 10
+    assert st.max_positions_seen <= 30
+
+
+def test_abnormal_jump_excludes_window_and_defers_held_exit() -> None:
+    sessions = _sessions(100)
+    candles = _candles(sessions, {"000001": np.full(100, 10_000.0)})
+    _set_bar(candles, "000001", sessions[50], close=14_000.0, high=14_100.0)
+    panel = sv.build_panel(candles, _flow(sessions, {}), as_of=sessions[-1])
+    assert panel.coverage["candles"]["abnormal_jump_excluded"] == {
+        "bars": 1,
+        "symbols": 1,
+    }
+    assert panel.entry_excluded[30:71, 0].all()
+    assert not panel.entry_excluded[29, 0]
+    sim = sv.Simulator(panel, sv.CommonParams())
+    ind = sv.compute_indicators(panel)
+    assert not ind.flow_signal[30:71, 0].any()
+    assert not ind.b_eligible[30:71, 0].any()
+    blank = sv.RunState(cash=10_000_000)
+    assert sim.buy(blank, 60, sv.Order(0, 59, 1_000_000, 1.0)) is None
+    assert blank.missed_entries == {"abnormal_jump_window": 1}
+    st = sv.RunState(cash=10_000_000)
+    pos = sim.buy(st, 25, sv.Order(0, 24, 1_000_000, 1.0))
+    assert pos is not None
+    sim.schedule_exit(pos, 49, "test_exit")
+    sim.open_phase(st, 50, [])
+    assert not st.trades and st.deferred_exit_sessions == 1
+    assert sim.buy(st, 60, sv.Order(0, 59, 1_000_000, 1.0)) is None
+    sim.open_phase(st, 51, [])
+    assert st.trades[0]["exit_date"] == sessions[51].isoformat()
+
+
+def test_b_split_is_flat_started_on_midpoint() -> None:
+    sessions, candles, flow = _b_fixture()
+    report = sv.build_report(candles, flow, as_of=sessions[-1], lookback_days=800)
+    b = report["price_factor_b"]
+    full = b["runs"]["baseline"]
+    first = b["split_runs"]["first_half"]["baseline"]
+    second = b["split_runs"]["second_half"]["baseline"]
+    assert set(b["split_runs"]["first_half"]) == set(sv.B_VARIANTS)
+    assert set(b["split_runs"]["second_half"]) == set(sv.B_VARIANTS)
+    assert first["sessions"] + second["sessions"] == full["sessions"]
+    assert sessions.index(date.fromisoformat(first["end"])) + 1 == sessions.index(
+        date.fromisoformat(second["start"])
+    )
+    assert (
+        second["first_possible_fill"]
+        == sessions[sessions.index(date.fromisoformat(second["start"])) + 1].isoformat()
+    )
+    assert first["initial_capital"] == second["initial_capital"]
+    assert all(tr["entry_date"] > second["start"] for tr in second["trades"])
+    assert report["pead"]["status"] == "inconclusive"

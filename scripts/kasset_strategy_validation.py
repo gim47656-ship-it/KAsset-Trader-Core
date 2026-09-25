@@ -1,8 +1,8 @@
 """KR 수급 순위·장기 B 가격팩터(급락 필터) 재검증 — advisory report only.
 
-DB-only, read-only research CLI. It reads ``public.kr_candles_1d`` (venue KRX)
-and ``public.investor_flow_snapshots`` (market kr) inside one REPEATABLE READ
-READ ONLY transaction and writes a single local JSON report. It never places
+DB-only, read-only research CLI. It reads ``public.kr_candles_1d`` (venue KRX),
+``public.investor_flow_snapshots`` (market kr), and KR fundamentals inside one
+REPEATABLE READ READ ONLY transaction. It writes a local JSON report and never places
 orders, never touches policy/ledger/strategy-promotion state, and imports no
 ``app.*`` module (no Settings, no provider clients).
 
@@ -27,6 +27,7 @@ import os
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,20 @@ class PriceFactorParams:
 B_VARIANTS = ("baseline", "breadth_block_new_buys", "breadth_liquidate_and_block")
 
 
+@dataclass(frozen=True)
+class PeadParams:
+    rebalance_every: int = 20
+    hold_sessions: int = 60
+    tranche_symbols: int = 10
+    tranche_allocation_divisor: int = 30
+    max_overlapping_tranches: int = 3
+    liquidity_rank_from: int = 21
+    liquidity_rank_to: int = 200
+    stale_after_sessions: int = 120
+    minimum_cross_section: int = 30
+    duplicate_policy: str = "skip_active_or_pending_and_fill_from_next_rank"
+
+
 # --------------------------------------------------------------------------
 # Panel construction (pure)
 # --------------------------------------------------------------------------
@@ -117,6 +132,8 @@ class Panel:
     value: np.ndarray
     valid: np.ndarray
     locked: np.ndarray
+    abnormal_jump: np.ndarray
+    entry_excluded: np.ndarray
     flow_net: np.ndarray
     index_closes: dict[str, dict[date, float]]
     coverage: dict[str, Any]
@@ -211,6 +228,14 @@ def build_panel(
     o, h, lo, cl, val = (wide(k) for k in ("open", "high", "low", "close", "value"))
     valid = np.isfinite(cl)
     locked = valid & (h == lo)
+    prev = _shift(cl, 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        abnormal = (
+            valid & np.isfinite(prev) & (prev > 0) & (np.abs(cl / prev - 1) > 0.35)
+        )
+    entry_excluded = abnormal.copy()
+    for t, j in np.argwhere(abnormal):
+        entry_excluded[max(0, t - 20) : min(len(session_dates), t + 21), j] = True
 
     missing_in_span = 0
     for j in range(valid.shape[1]):
@@ -271,6 +296,10 @@ def build_panel(
             "symbols": len(symbols),
             "missing_symbol_sessions_within_span": missing_in_span,
             "locked_bars_high_eq_low": int(locked.sum()),
+            "abnormal_jump_excluded": {
+                "bars": int(abnormal.sum()),
+                "symbols": int(abnormal.any(axis=0).sum()),
+            },
         },
         "flow": {
             "date_range": _range(f["d"]) if len(f) else None,
@@ -297,6 +326,8 @@ def build_panel(
         value=val,
         valid=valid,
         locked=locked,
+        abnormal_jump=abnormal,
+        entry_excluded=entry_excluded,
         flow_net=flow_net,
         index_closes=index_closes,
         coverage=coverage,
@@ -398,8 +429,10 @@ def compute_indicators(
         high_prior = _roll(_shift(hi, 1), fp.high_lookback, "max")
         flow5 = _roll(_shift(panel.flow_net, 1), fp.flow_sessions, "sum")
         flow_score = flow5 * cl / (fp.flow_sessions * adv)
+
         flow_signal = (
             base
+            & ~panel.entry_excluded
             & (run_len >= fp.min_contiguous_sessions)
             & (ema_f > ema_s)
             & (cl > ema_f)
@@ -414,6 +447,7 @@ def compute_indicators(
         vol = _roll(cl / prev_close - 1.0, bp.vol_lookback, "std")
         b_eligible = (
             base
+            & ~panel.entry_excluded
             & (run_len >= bp.min_contiguous_sessions)
             & np.isfinite(mom)
             & np.isfinite(prox)
@@ -498,7 +532,11 @@ class Simulator:
         self.c = common
 
     def tradable(self, t: int, col: int) -> bool:
-        return bool(self.p.valid[t, col] and not self.p.locked[t, col])
+        return bool(
+            self.p.valid[t, col]
+            and not self.p.locked[t, col]
+            and not self.p.abnormal_jump[t, col]
+        )
 
     def _miss(self, st: RunState, reason: str) -> None:
         st.missed_entries[reason] = st.missed_entries.get(reason, 0) + 1
@@ -509,6 +547,9 @@ class Simulator:
             return None
         if len(st.positions) >= self.c.max_positions:
             self._miss(st, "position_cap")
+            return None
+        if self.p.entry_excluded[t, order.col]:
+            self._miss(st, "abnormal_jump_window")
             return None
         if not self.tradable(t, order.col):
             self._miss(st, "not_tradable_next_open")
@@ -604,7 +645,7 @@ class Simulator:
 
     def mark(self, st: RunState, t: int) -> float:
         for col, pos in st.positions.items():
-            if self.p.valid[t, col]:
+            if self.p.valid[t, col] and not self.p.abnormal_jump[t, col]:
                 pos.last_close = float(self.p.close[t, col])
                 pos.last_close_idx = t
         nav = st.cash + sum(p.qty * p.last_close for p in st.positions.values())
@@ -767,6 +808,136 @@ def run_price_factor(
             new_buys_blocked_by_breadth=blocked,
         )
         st.events.append(event)
+    return st
+
+
+def pead_yoy_panel(
+    panel: Panel, fundamentals: pd.DataFrame, pp: PeadParams
+) -> np.ndarray:
+    """Activate each YoY only after both quarterly filings are available."""
+    scores = np.full(panel.close.shape, np.nan)
+    if fundamentals.empty or not panel.sessions or not panel.symbols:
+        return scores
+    rows = fundamentals.copy()
+    rows = rows[rows["period_type"] == "quarterly"]
+    rows["available"] = pd.to_datetime(
+        rows["filing_date"].combine_first(rows["effective_at"]), errors="coerce"
+    ).dt.date
+    rows["ni"] = pd.to_numeric(rows["discrete_net_income"], errors="coerce")
+    rows = rows[rows["available"].notna() & rows["ni"].notna()]
+    symbols = {symbol: j for j, symbol in enumerate(panel.symbols)}
+    events: list[tuple[date, int, str, float]] = []
+    for symbol, group in rows.groupby("symbol"):
+        if symbol not in symbols:
+            continue
+        by_period = {str(row.fiscal_period): row for row in group.itertuples()}
+        for row in group.itertuples():
+            period = str(row.fiscal_period)
+            if (
+                len(period) != 6
+                or not period[:4].isdigit()
+                or period[4] != "Q"
+                or period[5] not in "1234"
+            ):
+                continue
+            prior = by_period.get(f"{int(period[:4]) - 1}Q{period[5]}")
+            if prior is None or prior.ni == 0:
+                continue
+            available = max(row.available, prior.available)
+            events.append(
+                (
+                    available,
+                    symbols[symbol],
+                    period,
+                    (row.ni - prior.ni) / abs(prior.ni),
+                )
+            )
+    events.sort(key=lambda event: (event[0], event[2]))
+    latest: dict[int, tuple[int, float]] = {}
+    cursor = 0
+    for t, session in enumerate(panel.sessions):
+        while cursor < len(events) and events[cursor][0] < session:
+            _, col, _, score = events[cursor]
+            latest[col] = (t, score)
+            cursor += 1
+        for col, (activated, score) in latest.items():
+            if t - activated <= pp.stale_after_sessions:
+                scores[t, col] = score
+    return scores
+
+
+def run_pead(
+    panel: Panel,
+    scores: np.ndarray,
+    start: int,
+    end: int,
+    common: CommonParams = CommonParams(),
+    pp: PeadParams = PeadParams(),
+) -> RunState:
+    """Three staggered, independently maturing tranches with one position per symbol."""
+    sim = Simulator(
+        panel, dataclass_replace(common, max_positions=pp.tranche_allocation_divisor)
+    )
+    st = RunState(cash=common.initial_capital)
+    orders: list[Order] = []
+    owned: dict[int, int] = {}
+    adv = _roll(panel.value, common.adv_sessions, "mean")
+    for t in range(start, end + 1):
+        if t > start:
+            sim.open_phase(st, t, [])
+            active = {owned[col] for col in st.positions if col in owned}
+            if len(active) >= pp.max_overlapping_tranches:
+                for _order in orders:
+                    sim._miss(st, "tranche_cap_pending_exit")
+                if orders:
+                    st.events[-1]["tranche_unfilled_due_overlap"] = len(orders)
+            else:
+                for order in orders:
+                    sim.buy(st, t, order)
+        orders = []
+        owned = {col: created for col, created in owned.items() if col in st.positions}
+        nav = sim.mark(st, t)
+        if t == end:
+            break
+        for col, created in owned.items():
+            if t - created >= pp.hold_sessions:
+                sim.schedule_exit(st.positions[col], t, "tranche_maturity")
+        if (t - start) % pp.rebalance_every:
+            continue
+        liquid = np.flatnonzero(
+            panel.valid[t]
+            & ~panel.entry_excluded[t]
+            & (panel.close[t] >= common.min_price)
+            & (adv[t] >= common.min_adv20_krw)
+        )
+        ranked_liquid = sorted(liquid, key=lambda j: (-adv[t, j], panel.symbols[j]))
+        universe = ranked_liquid[pp.liquidity_rank_from - 1 : pp.liquidity_rank_to]
+        eligible = [j for j in universe if np.isfinite(scores[t, j])]
+        eligible.sort(key=lambda j: (-scores[t, j], panel.symbols[j]))
+        selected = [j for j in eligible if j not in st.positions and j not in owned][
+            : pp.tranche_symbols
+        ]
+        for j in selected:
+            orders.append(
+                Order(j, t, nav / pp.tranche_allocation_divisor, scores[t, j])
+            )
+            owned[j] = t
+            st.signals.append(
+                {
+                    "signal_date": panel.sessions[t].isoformat(),
+                    "symbol": panel.symbols[j],
+                    "score": _r(scores[t, j], 6),
+                }
+            )
+        st.events.append(
+            {
+                "date": panel.sessions[t].isoformat(),
+                "liquid_universe": len(universe),
+                "eligible_yoy": len(eligible),
+                "new_orders": len(selected),
+                "tranche_shortfall": pp.tranche_symbols - len(selected),
+            }
+        )
     return st
 
 
@@ -984,6 +1155,7 @@ def flow_period(panel: Panel, common: CommonParams, fp: FlowParams) -> dict[str,
 def build_report(
     candles: pd.DataFrame,
     flow: pd.DataFrame,
+    fundamentals: pd.DataFrame | None = None,
     *,
     as_of: date,
     lookback_days: int,
@@ -991,6 +1163,7 @@ def build_report(
     common: CommonParams = CommonParams(),
     fp: FlowParams = FlowParams(),
     bp: PriceFactorParams = PriceFactorParams(),
+    pp: PeadParams = PeadParams(),
 ) -> dict[str, Any]:
     panel = build_panel(candles, flow, as_of=as_of, params=common)
     report: dict[str, Any] = {
@@ -1009,6 +1182,7 @@ def build_report(
             "common": asdict(common),
             "flow_rank": asdict(fp),
             "price_factor_b": asdict(bp),
+            "pead": asdict(pp),
         },
         "coverage": panel.coverage,
         "limitations": _limitations(panel),
@@ -1022,6 +1196,7 @@ def build_report(
             "status": "missing",
             "reason": "no usable candle sessions",
         }
+        report["pead"] = {"status": "missing", "reason": "no usable candle sessions"}
         return report
     ind = compute_indicators(panel, common, fp, bp)
     report["coverage"]["exclusions_by_contiguity"] = {
@@ -1096,6 +1271,23 @@ def build_report(
                 b_out["runs"][v] = summarize_run(
                     panel, st, bs, be, bp.required_sessions, common
                 )
+            midpoint = bs + (be - bs + 1) // 2
+            b_out["split_runs"] = {}
+            for half, hs, he in (
+                ("first_half", bs, midpoint - 1),
+                ("second_half", midpoint, be),
+            ):
+                b_out["split_runs"][half] = {
+                    v: summarize_run(
+                        panel,
+                        run_price_factor(panel, ind, hs, he, v, common, bp),
+                        hs,
+                        he,
+                        bp.required_sessions,
+                        common,
+                    )
+                    for v in B_VARIANTS
+                }
             base = b_out["runs"]["baseline"]
             b_out["comparison_vs_baseline"] = {
                 v: {
@@ -1111,6 +1303,63 @@ def build_report(
             b_out["index_reference"] = index_reference(panel, bs, be)
             b_out["status"] = "ok"
     report["price_factor_b"] = b_out
+    fundamentals = (
+        fundamentals
+        if fundamentals is not None
+        else pd.DataFrame(
+            columns=[
+                "symbol",
+                "fiscal_period",
+                "period_type",
+                "filing_date",
+                "effective_at",
+                "discrete_net_income",
+            ]
+        )
+    )
+    scores = pead_yoy_panel(panel, fundamentals, pp)
+    ps, pe = (
+        min(common.adv_sessions - 1, len(panel.sessions) - 2),
+        len(panel.sessions) - 1,
+    )
+    pead_state = run_pead(
+        panel,
+        scores,
+        ps,
+        pe,
+        common,
+        pp,
+    )
+    pead = summarize_run(
+        panel,
+        pead_state,
+        ps,
+        pe,
+        1,
+        dataclass_replace(common, max_positions=pp.tranche_allocation_divisor),
+    )
+    thin = sum(
+        event["eligible_yoy"] < pp.minimum_cross_section for event in pead_state.events
+    )
+    pead["dart_coverage"] = {
+        "symbols": int(np.isfinite(scores).any(axis=0).sum()),
+        "snapshot_symbols": (
+            int(fundamentals["symbol"].nunique()) if len(fundamentals) else 0
+        ),
+        "median_available_yoy_cross_section": (
+            _r(float(np.median(np.isfinite(scores).sum(axis=1))), 2)
+            if scores.size
+            else 0
+        ),
+        "rebalance_days_below_30": thin,
+        "rebalance_days": len(pead_state.events),
+    }
+    if pead_state.events and thin * 2 > len(pead_state.events):
+        pead["status"] = "inconclusive"
+        pead["inconclusive_reasons"].append(
+            "eligible_yoy_below_30_on_majority_of_rebalances"
+        )
+    report["pead"] = pead
     return report
 
 
@@ -1124,6 +1373,10 @@ def _limitations(panel: Panel) -> list[str]:
     cov = panel.coverage["candles"]
     return [
         "PIT 전체 상장 유니버스가 아니라 현재 DB에 백필된 종목만 사용 — 상장폐지·과거 편출 종목이 빠진 survivor bias가 있다.",
+        "PEAD는 시총 부재로 기존 유동성 필터 통과 종목의 20일 평균 거래대금 순위 21~200위를 대리 유니버스로 사용한다.",
+        "PEAD 정정공시 knowledge_date가 없어 과거 정정치의 시점 누출 가능성이 남는다. 지수를 이기지 못할 수 있다.",
+        "PEAD의 활성 tranche 보유·pending 종목은 다음 tranche에서 건너뛰고 차순위를 채운다. 부족하면 부족한 채 운용하며 tranche_shortfall에 기록한다.",
+        "비정상 급등락 봉은 해당 봉 체결·평가에 쓰지 않고 앞뒤 20세션 신규 신호·진입에서 제외한다. 과거 20세션의 사후 제외는 실시간 예측 가능한 필터가 아니다.",
         "수급 발표시각(publication timestamp)이 없어 당일 수급 대신 전거래일까지 5세션만 사용했다. 실제 확정 시각이 더 늦으면 여전히 낙관적일 수 있다.",
         "일봉은 수정주가 기반일 수 있어 과거 체결가·정수주·거래대금·비용 계산이 실제와 다를 수 있다.",
         "시가 체결은 해당 봉 open에 슬리피지 0.1%를 더한 가정이며, 호가·체결 가능 수량·VI·상하한가 대기열은 반영하지 않는다. high==low 봉은 잠김으로 보고 체결하지 않는다.",
@@ -1156,10 +1409,19 @@ FROM public.investor_flow_snapshots
 WHERE market = 'kr' AND snapshot_date >= $1 AND snapshot_date <= $2
 """
 
+FUNDAMENTALS_SQL = """
+SELECT symbol, fiscal_period, period_type, period_end_date, filing_date,
+       effective_at, discrete_net_income::float8 AS discrete_net_income,
+       net_income::float8 AS net_income, data_state
+FROM public.financial_fundamentals_snapshots
+WHERE market = 'kr' AND period_type = 'quarterly'
+  AND period_end_date >= $1 AND period_end_date <= $2
+"""
+
 
 async def load_from_db(
     dsn: str, as_of: date, lookback_days: int
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     import asyncpg
 
     start = as_of - timedelta(days=lookback_days)
@@ -1172,26 +1434,36 @@ async def load_from_db(
                 "SELECT now() AS snapshot_at, current_setting('transaction_isolation') AS iso, "
                 "current_setting('transaction_read_only') AS ro"
             )
-            cbuf, fbuf = io.BytesIO(), io.BytesIO()
+            cbuf, fbuf, pbuf = io.BytesIO(), io.BytesIO(), io.BytesIO()
             await conn.copy_from_query(
                 CANDLE_SQL, t_from, t_to, output=cbuf, format="csv", header=True
             )
             await conn.copy_from_query(
                 FLOW_SQL, start, as_of, output=fbuf, format="csv", header=True
             )
+            await conn.copy_from_query(
+                FUNDAMENTALS_SQL,
+                start - timedelta(days=500),
+                as_of,
+                output=pbuf,
+                format="csv",
+                header=True,
+            )
     finally:
         await conn.close()
     cbuf.seek(0)
     fbuf.seek(0)
+    pbuf.seek(0)
     candles = pd.read_csv(cbuf, dtype={"symbol": str, "source": str})
     flow = pd.read_csv(fbuf, dtype={"symbol": str, "source": str})
+    fundamentals = pd.read_csv(pbuf, dtype={"symbol": str, "fiscal_period": str})
     meta = {
         "db_snapshot_at": meta_row["snapshot_at"].isoformat(),
         "transaction_isolation": meta_row["iso"],
         "transaction_read_only": meta_row["ro"],
         "query_window": {"from": start.isoformat(), "to": as_of.isoformat()},
     }
-    return candles, flow, meta
+    return candles, flow, fundamentals, meta
 
 
 def _parse_date(value: str) -> date:
@@ -1258,6 +1530,7 @@ def _summary(report: dict[str, Any], path: Path) -> dict[str, Any]:
             k: run_line(v) for k, v in report["price_factor_b"].get("runs", {}).items()
         }
         or report["price_factor_b"].get("status"),
+        "pead": run_line(report["pead"]),
     }
 
 
@@ -1270,12 +1543,19 @@ async def amain(argv: list[str] | None = None) -> int:
     dsn = raw.replace("postgresql+asyncpg://", "postgresql://", 1)
     as_of = args.as_of or datetime.now(KST).date()
     try:
-        candles, flow, meta = await load_from_db(dsn, as_of, args.lookback_days)
+        candles, flow, fundamentals, meta = await load_from_db(
+            dsn, as_of, args.lookback_days
+        )
     except Exception as exc:  # never echo the DSN
         print(f"database read failed: {type(exc).__name__}", file=sys.stderr)
         return 1
     report = build_report(
-        candles, flow, as_of=as_of, lookback_days=args.lookback_days, metadata=meta
+        candles,
+        flow,
+        fundamentals,
+        as_of=as_of,
+        lookback_days=args.lookback_days,
+        metadata=meta,
     )
     write_report(args.output, report)
     print(json.dumps(_summary(report, args.output), ensure_ascii=False))
