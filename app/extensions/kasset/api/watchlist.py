@@ -330,21 +330,41 @@ class MobileWatchlistService:
         )
         market_rank = case((SymbolMaster.market == "KRX", 0), else_=1)
         capped_limit = min(max(limit, 1), 100)
-        rows = await db.scalars(
-            statement.order_by(
-                prefix_rank,
-                market_rank,
-                SymbolMaster.symbol,
-            ).limit(capped_limit)
+        ordered = select(SymbolMaster, prefix_rank.label("prefix_rank")).where(
+            statement.whereclause
         )
+        ordering = (prefix_rank, market_rank, SymbolMaster.symbol)
+        if market == "ALL":
+            # 한 시장(주로 KRX)이 limit을 다 채워 다른 시장의 일치 결과가 사라지지
+            # 않도록 시장마다 limit까지 받아 절반씩 나누고, 남는 칸은 다른 시장이 채운다.
+            per_market = {
+                name: (
+                    await db.execute(
+                        ordered.where(SymbolMaster.market == name)
+                        .order_by(*ordering)
+                        .limit(capped_limit)
+                    )
+                ).all()
+                for name in ("KRX", "US")
+            }
+            krx, us = per_market["KRX"], per_market["US"]
+            krx_take = min(len(krx), max(capped_limit - len(us), -(-capped_limit // 2)))
+            picked = krx[:krx_take] + us[: capped_limit - krx_take]
+            picked.sort(
+                key=lambda r: (r.prefix_rank, r[0].market != "KRX", r[0].symbol)
+            )
+        else:
+            picked = (
+                await db.execute(ordered.order_by(*ordering).limit(capped_limit))
+            ).all()
         return InstrumentSearchResponse(
             items=[
                 InstrumentSearchItem(
-                    symbol=row.symbol,
-                    name=row.name.strip(),
-                    market=row.market,
+                    symbol=row[0].symbol,
+                    name=row[0].name.strip(),
+                    market=row[0].market,
                 )
-                for row in rows.all()
+                for row in picked
             ]
         )
 

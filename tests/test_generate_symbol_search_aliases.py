@@ -48,18 +48,25 @@ def test_response_filters_unknown_duplicate_short_long_and_ambiguous_aliases() -
     ]
 
 
-@pytest.mark.parametrize(
-    "response",
-    [
-        None,
-        {"items": "invalid"},
-        {"items": [{"symbol": "005930", "aliases": [1]}]},
-        {"items": [{"symbol": "005930", "aliases": ["aa"] * 7}]},
-    ],
-)
-def test_malformed_response_rejects_batch(response: object) -> None:
+@pytest.mark.parametrize("response", [None, {"items": "invalid"}])
+def test_malformed_envelope_rejects_batch(response: object) -> None:
     with pytest.raises(ValueError):
         normalize_response(response, [stock("005930")])
+
+
+def test_bad_item_is_skipped_and_excess_aliases_truncated() -> None:
+    rows = [stock("005930"), stock("000660", "SK하이닉스")]
+    result = normalize_response(
+        {
+            "items": [
+                {"symbol": "005930", "aliases": [f"a{i}" for i in range(8)]},
+                {"symbol": "000660", "aliases": "하닉"},
+                "garbage",
+            ]
+        },
+        rows,
+    )
+    assert [item["alias"] for item in result] == [f"a{i}" for i in range(6)]
 
 
 def test_dry_run_skips_failed_batch_without_writing(
