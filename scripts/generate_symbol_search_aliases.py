@@ -87,18 +87,17 @@ def normalize_response(
     requested = {row.symbol: row for row in batch}
     aliases_by_symbol: dict[str, set[str]] = {}
     for item in payload["items"]:
-        if not isinstance(item, dict) or set(item) != {"symbol", "aliases"}:
-            raise ValueError("invalid alias item")
-        symbol, aliases = item["symbol"], item["aliases"]
+        # 종목 하나의 형식 오류로 배치 전체를 버리지 않는다: 그 종목만 건너뛴다.
+        if not isinstance(item, dict):
+            continue
+        symbol, aliases = item.get("symbol"), item.get("aliases")
         if (
             not isinstance(symbol, str)
             or not isinstance(aliases, list)
-            or len(aliases) > 6
-            or not all(isinstance(a, str) for a in aliases)
+            or symbol not in requested
         ):
-            raise ValueError("invalid alias values")
-        if symbol not in requested:
             continue
+        aliases = [a for a in aliases if isinstance(a, str)][:6]
         row = requested[symbol]
         existing = aliases_by_symbol.setdefault(symbol, set())
         own_names = {
@@ -222,7 +221,7 @@ async def generate(
             values = normalize_response(payload, batch)
         except (ValueError, RuntimeError, TimeoutError, OSError) as exc:
             summary.failures += 1
-            print(f"배치 {summary.calls} 실패: {type(exc).__name__}")
+            print(f"배치 {summary.calls} 실패: {type(exc).__name__}: {str(exc)[:160]}")
             continue
         summary.sample.extend(
             (value["market"], value["symbol"], value["alias"])

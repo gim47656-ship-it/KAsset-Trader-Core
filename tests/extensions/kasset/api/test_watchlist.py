@@ -521,6 +521,26 @@ async def test_instrument_search_matches_alias(
 
 
 @pytest.mark.asyncio
+async def test_instrument_search_all_keeps_us_match_when_krx_fills_limit(
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+    watchlist_data: dict[str, object],
+) -> None:
+    client, _state = watchlist_client
+    # search_term은 KRX 22종목과 US 1종목에 일치한다. limit 20에서도 US가 남아야 한다.
+    response = await client.get(
+        f"/api/v1/instruments/search?q={watchlist_data['search_term']}&limit=20"
+    )
+    items = response.json()["items"]
+    assert len(items) == 20
+    assert [item["market"] for item in items].count("US") == 1
+    assert items[-1] == {
+        "symbol": watchlist_data["us_instrument"].symbol,
+        "name": watchlist_data["us_instrument"].name,
+        "market": "US",
+    }
+
+
+@pytest.mark.asyncio
 async def test_instrument_search_matches_generated_alias_only_in_its_market(
     db_session: AsyncSession,
     watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
