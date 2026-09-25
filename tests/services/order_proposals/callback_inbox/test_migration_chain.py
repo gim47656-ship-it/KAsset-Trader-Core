@@ -123,6 +123,7 @@ _POST_PARENT_TABLES: tuple[str, ...] = (
     "kasset_global_runtime_state",
     "kasset_device_sessions",
     "kasset_broker_credentials",
+    "symbol_search_aliases",
     "symbol_master",
 )
 
