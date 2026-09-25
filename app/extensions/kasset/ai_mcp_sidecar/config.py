@@ -17,7 +17,7 @@ from __future__ import annotations
 import shlex
 import shutil
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 
 #: CLI 한 번 호출에 허용하는 벽시계 상한. 하한은 구독 CLI가 응답할 수 없는
@@ -53,6 +53,8 @@ class SidecarConfig:
     path: str
     timeout_seconds: float
     max_concurrency: int
+    #: 추론강도별 CLI 모델 대체값. 비어 있으면 명령의 기본 모델을 쓴다.
+    effort_models: Mapping[str, str] = field(default_factory=dict)
 
 
 def load_config(env: Mapping[str, str]) -> SidecarConfig:
@@ -86,6 +88,7 @@ def load_config(env: Mapping[str, str]) -> SidecarConfig:
         raise SidecarConfigError("KASSET_AI_SIDECAR_PATH must start with '/'")
 
     return SidecarConfig(
+        effort_models=_read_effort_models(env),
         command=command,
         token=token,
         host=host,
@@ -166,6 +169,25 @@ def _read_float(
     if not isfinite(value) or not minimum <= value <= maximum:
         raise SidecarConfigError(f"{key} must be between {minimum} and {maximum}")
     return value
+
+
+_EFFORTS = ("low", "medium", "high")
+
+
+def _read_effort_models(env: Mapping[str, str]) -> dict[str, str]:
+    """`KASSET_AI_SIDECAR_EFFORT_MODELS=medium=gpt-6-sol,high=gpt-6-sol`을 읽는다."""
+
+    raw = env.get("KASSET_AI_SIDECAR_EFFORT_MODELS", "").strip()
+    models: dict[str, str] = {}
+    for item in filter(None, (part.strip() for part in raw.split(","))):
+        effort, sep, model = (piece.strip() for piece in item.partition("="))
+        if not sep or effort not in _EFFORTS or not model or " " in model:
+            raise SidecarConfigError(
+                "KASSET_AI_SIDECAR_EFFORT_MODELS entries must be "
+                "<low|medium|high>=<model>"
+            )
+        models[effort] = model
+    return models
 
 
 __all__ = [

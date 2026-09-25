@@ -132,6 +132,7 @@ def build_server(config: SidecarConfig) -> FastMCP:
     runner = SkillRunner(
         command=config.command,
         timeout_seconds=config.timeout_seconds,
+        effort_models=config.effort_models,
     )
     mcp = FastMCP(
         name=SERVICE_NAME,
