@@ -25,6 +25,7 @@ from app.models.trading import (
     User,
     UserWatchItem,
 )
+from app.models.us_symbol_universe import USSymbolUniverse
 
 _MARKET_TYPES: dict[WatchlistMarket, InstrumentType] = {
     "KRX": InstrumentType.equity_kr,
@@ -257,7 +258,22 @@ class MobileWatchlistService:
 
         escaped_query = self._escape_like(normalized_query)
         prefix_pattern = f"{escaped_query}%"
-        contains_pattern = f"%{escaped_query}%"
+        # 이름의 공백과 입력의 공백을 모두 무시한다("rise200" → "RISE 200").
+        compact_query = self._escape_like("".join(normalized_query.split()))
+        compact_prefix = f"{compact_query}%"
+        compact_contains = f"%{compact_query}%"
+
+        def compact(column):
+            return func.replace(column, " ", "")
+
+        us_korean_name_match = exists(
+            select(USSymbolUniverse.symbol).where(
+                SymbolMaster.market == "US",
+                USSymbolUniverse.is_active.is_(True),
+                USSymbolUniverse.symbol == SymbolMaster.symbol,
+                compact(USSymbolUniverse.name_kr).ilike(compact_contains, escape="\\"),
+            )
+        )
         alias_match = exists(
             select(Instrument.id).where(
                 Instrument.is_active.is_(True),
@@ -272,17 +288,18 @@ class MobileWatchlistService:
                         Instrument.type == InstrumentType.equity_us,
                     ),
                 ),
-                func.array_to_string(Instrument.aliases, " ").ilike(
-                    contains_pattern,
+                compact(func.array_to_string(Instrument.aliases, "")).ilike(
+                    compact_contains,
                     escape="\\",
                 ),
             )
         )
         matches = or_(
             SymbolMaster.symbol.ilike(prefix_pattern, escape="\\"),
-            SymbolMaster.name.ilike(contains_pattern, escape="\\"),
-            SymbolMaster.name_en.ilike(contains_pattern, escape="\\"),
+            compact(SymbolMaster.name).ilike(compact_contains, escape="\\"),
+            compact(SymbolMaster.name_en).ilike(compact_contains, escape="\\"),
             alias_match,
+            us_korean_name_match,
         )
         statement = select(SymbolMaster).where(
             SymbolMaster.is_active.is_(True),
@@ -295,8 +312,8 @@ class MobileWatchlistService:
             (
                 or_(
                     SymbolMaster.symbol.ilike(prefix_pattern, escape="\\"),
-                    SymbolMaster.name.ilike(prefix_pattern, escape="\\"),
-                    SymbolMaster.name_en.ilike(prefix_pattern, escape="\\"),
+                    compact(SymbolMaster.name).ilike(compact_prefix, escape="\\"),
+                    compact(SymbolMaster.name_en).ilike(compact_prefix, escape="\\"),
                 ),
                 0,
             ),
@@ -315,7 +332,7 @@ class MobileWatchlistService:
             items=[
                 InstrumentSearchItem(
                     symbol=row.symbol,
-                    name=row.name,
+                    name=row.name.strip(),
                     market=row.market,
                 )
                 for row in rows.all()
