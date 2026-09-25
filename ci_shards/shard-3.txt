@@ -261,6 +261,7 @@ tests/test_investor_flow_service.py
 tests/test_investor_flow_snapshot_job.py
 tests/test_journal_counterfactual_service.py
 tests/test_kasset_research_cohort_models.py
+tests/test_kasset_strategy_validation.py
 tests/test_kr_fundamentals_dart_hybrid.py
 tests/test_kr_lifecycle_action_models.py
 tests/test_kr_news_symbol_mapping_freshness.py
