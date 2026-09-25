@@ -25,6 +25,7 @@ from app.models.trading import (
     UserRole,
     UserWatchItem,
 )
+from app.models.us_symbol_universe import USSymbolUniverse
 
 
 @pytest_asyncio.fixture
@@ -516,3 +517,62 @@ async def test_instrument_search_matches_alias(
             }
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_instrument_search_ignores_spaces_and_matches_us_korean_name(
+    db_session: AsyncSession,
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+) -> None:
+    client, _state = watchlist_client
+    suffix = uuid4().hex[:8].upper()
+    kr_symbol, us_symbol = f"R{suffix}", f"X{suffix}"
+    db_session.add_all(
+        [
+            SymbolMaster(
+                market="KRX",
+                symbol=kr_symbol,
+                name=f" RISE 2{suffix}",
+                name_en=f" RISE 2{suffix}",
+                security_type="ETF",
+                is_active=True,
+            ),
+            SymbolMaster(
+                market="US",
+                symbol=us_symbol,
+                name=f"DIREXION DAILY {suffix} BULL 2X ETF",
+                name_en=f"DIREXION DAILY {suffix} BULL 2X ETF",
+                security_type="ETF",
+                is_active=True,
+            ),
+            USSymbolUniverse(
+                symbol=us_symbol,
+                exchange="NYSE",
+                name_kr=f"디렉시온 하이닉스(Q{suffix}) 2X",
+                name_en=f"DIREXION DAILY {suffix} BULL 2X ETF",
+                is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+    try:
+        compact = await client.get(
+            f"/api/v1/instruments/search?q=rise2{suffix.lower()}&market=KRX"
+        )
+        assert compact.status_code == 200
+        assert compact.json()["items"] == [
+            {"symbol": kr_symbol, "name": f"RISE 2{suffix}", "market": "KRX"}
+        ]
+
+        korean_name = await client.get(
+            f"/api/v1/instruments/search?q=q{suffix.lower()}&market=US"
+        )
+        assert [item["symbol"] for item in korean_name.json()["items"]] == [us_symbol]
+    finally:
+        await db_session.execute(
+            delete(SymbolMaster).where(SymbolMaster.symbol.in_([kr_symbol, us_symbol]))
+        )
+        await db_session.execute(
+            delete(USSymbolUniverse).where(USSymbolUniverse.symbol == us_symbol)
+        )
+        await db_session.commit()
