@@ -167,7 +167,10 @@ class SkillRunner:
     async def run(self, invocation: SkillInvocation) -> dict[str, Any]:
         """CLI를 호출해 `response_schema`를 만족하는 객체 하나를 돌려준다."""
 
-        stdout = await self._exchange(build_prompt(invocation))
+        command = command_with_reasoning_effort(
+            self._command, invocation.reasoning_effort
+        )
+        stdout = await self._exchange(command, build_prompt(invocation))
         payload = _last_json_object(stdout.decode("utf-8", errors="replace"))
         if payload is None:
             raise SidecarContractError(
@@ -182,10 +185,10 @@ class SkillRunner:
             ) from None
         return payload
 
-    async def _exchange(self, prompt: bytes) -> bytes:
+    async def _exchange(self, command: tuple[str, ...], prompt: bytes) -> bytes:
         try:
             process = await asyncio.create_subprocess_exec(
-                *self._command,
+                *command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -238,6 +241,32 @@ class SkillRunner:
                 )
             )
         return stdout
+
+
+def command_with_reasoning_effort(
+    command: tuple[str, ...], reasoning_effort: str | None
+) -> tuple[str, ...]:
+    """codex CLI면 `exec` 뒤에 추론강도 설정을 끼운다.
+
+    prompt 안내만으로는 모델 추론강도가 바뀌지 않으므로 CLI 설정으로 넘긴다.
+    codex가 아니거나 `exec` 하위명령이 없으면 argv를 바꾸지 않는다.
+    """
+
+    if reasoning_effort is None or not command:
+        return command
+    program = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if program not in ("codex", "codex.exe", "codex.cmd"):
+        return command
+    try:
+        exec_index = command.index("exec")
+    except ValueError:
+        return command
+    return (
+        *command[: exec_index + 1],
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort}"',
+        *command[exec_index + 1 :],
+    )
 
 
 def _encode_json(value: Mapping[str, Any], *, field: str, max_bytes: int) -> str:
@@ -311,6 +340,7 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
 
 
 __all__ = [
+    "command_with_reasoning_effort",
     "MAX_CONTEXT_BYTES",
     "MAX_INSTRUCTION_CHARS",
     "MAX_OUTPUT_BYTES",

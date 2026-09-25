@@ -42,6 +42,7 @@ from app.extensions.kasset.ai_mcp_sidecar.runner import (
     SkillRunner,
     build_invocation,
     build_prompt,
+    command_with_reasoning_effort,
 )
 from app.extensions.kasset.ai_mcp_sidecar.server import (
     TOOL_NAME,
@@ -592,3 +593,27 @@ def test_verify_command_executable_rejects_a_missing_binary(tmp_path: Path) -> N
 
 def test_verify_command_executable_accepts_a_real_binary() -> None:
     verify_command_executable((sys.executable, "-"))
+
+
+@pytest.mark.parametrize(
+    ("command", "effort", "expected"),
+    [
+        (
+            ("codex", "exec", "-m", "gpt-6-luna", "-"),
+            "high",
+            (
+                "codex",
+                "exec",
+                "-c",
+                'model_reasoning_effort="high"',
+                "-m",
+                "gpt-6-luna",
+                "-",
+            ),
+        ),
+        (("codex", "exec", "-"), None, ("codex", "exec", "-")),
+        (("other-cli", "exec", "-"), "low", ("other-cli", "exec", "-")),
+    ],
+)
+def test_reasoning_effort_reaches_codex_argv(command, effort, expected) -> None:
+    assert command_with_reasoning_effort(command, effort) == expected
