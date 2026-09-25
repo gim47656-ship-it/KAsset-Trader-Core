@@ -513,6 +513,12 @@ class Settings(BaseSettings):
     KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
     KASSET_AI_OPENROUTER_MODEL_FLASH: str = "z-ai/glm-5.3-flash"
     KASSET_AI_OPENROUTER_MODEL_PRO: str = "z-ai/glm-5.3-flash"
+    # Vercel AI Gateway의 Jev(`typesafe-ai/jev`) 판정. 키가 비어 있으면 Jev를
+    # 전혀 호출하지 않고 뉴스 선별·후보 가산점은 기존 결정론 규칙 그대로다.
+    KASSET_JEV_API_KEY: SecretStr | None = None
+    KASSET_JEV_TIMEOUT_SECONDS: Annotated[
+        float, Field(gt=0.0, le=30.0, allow_inf_nan=False)
+    ] = 5.0
     # 등락 push 발송. 기본 off이며, service-account 자격이 없으면 켜져 있어도
     # 외부 요청 없이 fail closed로 멈춘다.
     KASSET_FCM_ENABLED: bool = False

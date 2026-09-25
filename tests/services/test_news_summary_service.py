@@ -13,6 +13,11 @@ import pytest
 from sqlalchemy import func, select
 
 from app.extensions.kasset.ai.base import STRUCTURED_ANALYSIS_SYSTEM_INSTRUCTIONS
+from app.extensions.kasset.ai.jev_client import (
+    JevBooleanAnswer,
+    JevJudgment,
+    JevJudgmentError,
+)
 from app.models.ai_call_events import AiCallEvent
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
 from app.schemas.news import NewsAnalysisResultResponse
@@ -1453,6 +1458,115 @@ async def test_recent_incomplete_analysis_observes_retry_backoff(
 
     assert result.selected == 0
     assert generator.calls == []
+
+
+class FakeJevClient:
+    """제목별로 관련성 확률을 돌려주고, 확률 대신 예외면 판정 실패를 낸다."""
+
+    def __init__(self, outcomes: dict[str, float | BaseException]) -> None:
+        self.outcomes = outcomes
+        self.titles: list[str] = []
+
+    async def judge(self, *, state, questions, feature):
+        title = state["title"]
+        self.titles.append(title)
+        outcome = self.outcomes[title]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        (question_id,) = questions
+        return JevJudgment(
+            answers={
+                question_id: JevBooleanAnswer(probability=outcome, confidence=0.9)
+            },
+            input_tokens=10,
+            output_tokens=1,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_jev_excludes_irrelevant_news_once_and_fails_open(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex
+    relevant_title = "Chipmaker raises quarterly guidance"
+    # 결정론 잡음 필터를 통과하는 평범한 제목이어야 Jev 단계까지 간다.
+    irrelevant_title = "Retailer updates its store opening hours"
+    failing_title = "Carmaker announces a supply agreement"
+    body = (
+        "The company reported quarterly operating results and maintained its guidance. "
+        "Management also described demand conditions in its primary market."
+    )
+    articles = [
+        _article(
+            url=f"https://news.test.invalid/{suffix}/{index}",
+            title=title,
+            summary=body,
+            published_at=datetime(2026, 8, 29, 12 - index, 0),
+        )
+        for index, title in enumerate((relevant_title, irrelevant_title, failing_title))
+    ]
+    db_session.add_all(articles)
+    await db_session.flush()
+    irrelevant_id = articles[1].id
+    await db_session.commit()
+    urls = [article.url for article in articles]
+    summary_text = "회사는 분기 영업 실적을 발표했다. 기존 가이던스도 유지했다."
+    translation = (
+        "기업의 실적 발표",
+        "회사는 분기 영업 실적을 보고하고 가이던스를 유지했다. "
+        "경영진은 주력 시장의 수요 여건도 설명했다.",
+    )
+    generator = FakeSummaryGenerator(
+        {relevant_title: summary_text, failing_title: summary_text},
+        translations={relevant_title: translation, failing_title: translation},
+    )
+    jev = FakeJevClient(
+        {
+            relevant_title: 0.9,
+            irrelevant_title: 0.05,
+            failing_title: JevJudgmentError("jev rejected: HTTP 503"),
+        }
+    )
+
+    first = await summarize_pending_news(
+        db_session,
+        batch_size=3,
+        article_urls=urls,
+        generator=generator,
+        jev_client=jev,
+    )
+
+    # 관련성 낮은 기사만 codex 요약에서 빠지고, Jev 실패 기사는 그대로 요약된다.
+    assert sorted(call.title for call in generator.calls) == sorted(
+        [relevant_title, failing_title]
+    )
+    assert first.summarized == 2
+    # 세 기사 모두 결정론 gate를 통과해 Jev가 판정했다.
+    assert sorted(jev.titles) == sorted(
+        [relevant_title, irrelevant_title, failing_title]
+    )
+    assert irrelevant_id in first.skipped_article_ids
+    backoff = await db_session.scalar(
+        select(NewsAnalysisResult).where(NewsAnalysisResult.article_id == irrelevant_id)
+    )
+    assert backoff is not None
+    recorded = json.loads(backoff.raw_response)
+    assert recorded["error_type"] == "jev_not_relevant"
+    assert recorded["jev"]["probability"] == pytest.approx(0.05)
+
+    second = await summarize_pending_news(
+        db_session,
+        batch_size=3,
+        article_urls=urls,
+        generator=generator,
+        jev_client=jev,
+    )
+
+    # 배제된 기사는 backoff 동안 다시 뽑히지 않아 Jev도 codex도 다시 부르지 않는다.
+    assert second.selected == 0
+    assert jev.titles.count(irrelevant_title) == 1
+    assert len(generator.calls) == 2
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ tests/ci/test_ci_required_workflow_contract.py
 tests/core/test_invest_deep_links.py
 tests/core/test_money.py
 tests/core/test_normalizers.py
+tests/extensions/kasset/ai/test_jev_client.py
 tests/extensions/kasset/ai/test_mcp_provider.py
 tests/extensions/kasset/api/test_android_contract.py
 tests/extensions/kasset/api/test_candles.py

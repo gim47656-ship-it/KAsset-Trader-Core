@@ -59,6 +59,27 @@ timeout, 동시 실행 수와 stdout 크기를 제한하고, 반환 JSON을 요�
 
 롤백은 Kill Switch, Hard Risk, PAPER/LIVE 설정, promotion bypass를 변경하지 않는다.
 
+## Jev 판정 (Vercel AI Gateway)
+
+`KASSET_JEV_API_KEY`에 Vercel AI Gateway 키(`vck_…`)를 넣으면 코어가
+`typesafe-ai/jev`를 두 곳에서 부른다. 전송은 `app/extensions/kasset/ai/jev_client.py`의
+`httpx` 호출 하나이며, 키가 비어 있으면 어떤 호출도 하지 않고 아래 두 동작 모두
+기존과 같다. timeout은 `KASSET_JEV_TIMEOUT_SECONDS`(기본 5초, 최대 30초), 재시도는 없다.
+
+- **뉴스 선별:** 결정론 gate를 통과해 요약 입력이 만들어진 기사마다 boolean
+  `market_relevant`를 묻는다. P(true) < 0.2면 codex 요약에서 빼고 기존 6시간 backoff
+  행(`error_type=jev_not_relevant`, `raw_response.jev`에 확률·신뢰도)을 남긴다. 배제
+  기사는 codex 일일 호출 상한을 쓰지 않는다. 판정 실패는 그 기사를 요약 대상에 둔다.
+- **후보 AI 가산점:** codex 후보 검토 verdict를 얻은 후보마다 choice `stance`
+  (`AGREE`/`DISAGREE`/`INSUFFICIENT`)를 묻고, 점수의 AI 가산 항(비중 0.05)을
+  P(AGREE)로 바꾼다. 판정 실패·verdict 없음이면 기존 규칙(codex 동의 시 방향 점수)이다.
+  `AiReviewStatus`, 후보 채택, 주문·수량·손절·Hard Risk는 바뀌지 않는다. 판정은
+  추천 evidence에 `kind=jev_stance` 항목으로 남는다.
+
+호출은 `review.ai_call_events`에 provider `vercel-jev`, feature
+`kasset_jev_news_relevance`/`kasset_jev_candidate_stance`로 기록된다. 롤백은 키를
+비우고 api·worker를 재기동하는 것이다.
+
 ## 공통 안전 계약
 
 provider 결과는 설명·검토 evidence다. candidate factor, stop, 수량, Hard Risk,
