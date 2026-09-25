@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -21,6 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.extensions.kasset.ai.base import StructuredJsonClient
 from app.extensions.kasset.ai.factory import build_summary_json_client
+from app.extensions.kasset.ai.jev_client import (
+    JEV_FEATURE_NEWS_RELEVANCE,
+    JevBooleanAnswer,
+    JevClient,
+    JevJudgmentError,
+    boolean_question,
+    build_jev_client,
+)
 from app.extensions.kasset.ai.runtime_config import AiRuntimeSnapshot
 from app.models.ai_call_events import AiCallEvent
 from app.models.news import NewsAnalysisResult, NewsArticle, Sentiment
@@ -44,6 +52,16 @@ MAX_TRANSLATED_EXCERPT_CHARS = 6_000
 MIN_SOURCE_BODY_CHARS = 40
 MIN_SOURCE_BODY_WORDS = 6
 CANDIDATE_SCAN_MULTIPLIER = 10
+#: Jev 관련성 판정을 요청하는 질문 id. wire 계약의 questions 키다.
+_JEV_RELEVANCE_QUESTION = "market_relevant"
+#: 이 확률 미만인 기사는 요약 대상에서 빠진다.
+_JEV_RELEVANCE_MIN_PROBABILITY = 0.2
+#: Jev에 보내는 state의 본문 앞부분 길이 상한.
+_JEV_RELEVANCE_BODY_MAX_CHARS = 1_500
+#: Jev 동시 호출 상한. 기사별 호출을 하나의 batch 안에서 제한한다.
+_JEV_RELEVANCE_CONCURRENCY = 4
+_JEV_IRRELEVANT_ERROR_TYPE = "jev_not_relevant"
+_JEV_BELOW_THRESHOLD_REASON = "below_relevance_threshold"
 #: 제목 잡음(``classify_pre_summary_noise``)은 SQL 술어로 옮길 수 없어 gate 탈락이
 #: 한 page를 통째로 채울 수 있다. 그때 스캔을 멈추지 않고 다음 page를 이어 읽되,
 #: page 수를 고정 상한으로 묶어 무한 스캔과 무한 루프를 함께 막는다.
@@ -1134,8 +1152,13 @@ async def _persist_failure_backoff(
     article_id: int,
     error_type: str,
     elapsed_ms: int,
+    detail: Mapping[str, object] | None = None,
 ) -> bool:
-    """완료 데이터는 건드리지 않고 불완전 분석 행으로 6시간 backoff를 남긴다."""
+    """완료 데이터는 건드리지 않고 불완전 분석 행으로 6시간 backoff를 남긴다.
+
+    ``detail``은 원인 분류와 함께 보존할 bounded 근거다. 판정 확률·신뢰도처럼
+    사후에 확인해야 하는 값만 넣고 prompt/응답 원문은 넣지 않는다.
+    """
 
     article = await db.scalar(
         select(NewsArticle)
@@ -1166,7 +1189,7 @@ async def _persist_failure_backoff(
                 analysis_quality="low",
                 prompt="",
                 raw_response=json.dumps(
-                    {"error_type": error_type},
+                    {"error_type": error_type, **(detail or {})},
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -1182,6 +1205,140 @@ async def _persist_failure_backoff(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _JevRelevance:
+    """기사 한 건의 Jev 관련성 판정. ``answer``가 None이면 fail-open이다."""
+
+    answer: JevBooleanAnswer | None
+    elapsed_ms: int
+
+
+def _jev_relevance_state(news: NewsSummaryInput) -> dict[str, object]:
+    """관련성 판정 state. 본문은 앞부분만 보내 payload를 묶어 둔다."""
+
+    return {
+        "title": news.title,
+        "source": news.source,
+        "body": news.body[:_JEV_RELEVANCE_BODY_MAX_CHARS],
+    }
+
+
+def _jev_relevance_question() -> dict[str, object]:
+    return boolean_question(
+        instructions=(
+            "Judge whether this news item carries investment meaning for Korean "
+            "or US stock investors. Answer true only when a company, industry, "
+            "macro, policy, or market development in the item changes what an "
+            "investor needs to know. Answer false for lifestyle, sports, "
+            "entertainment, crime, and promotional items."
+        ),
+        true_criterion="investment-relevant company, industry, macro, or market news",
+        false_criterion="no investment meaning for stock investors",
+    )
+
+
+async def _jev_relevance_judgments(
+    client: JevClient,
+    prepared: Sequence[_PreparedNewsSummary],
+) -> dict[int, _JevRelevance]:
+    """기사별 관련성을 동시 상한 안에서 판정한다. 실패는 fail-open 표시다."""
+
+    question = _jev_relevance_question()
+    semaphore = asyncio.Semaphore(_JEV_RELEVANCE_CONCURRENCY)
+
+    async def judge(item: _PreparedNewsSummary) -> _JevRelevance:
+        async with semaphore:
+            started = time.monotonic()
+            answer: JevBooleanAnswer | None = None
+            try:
+                judgment = await client.judge(
+                    state=_jev_relevance_state(item.news),
+                    questions={_JEV_RELEVANCE_QUESTION: question},
+                    feature=JEV_FEATURE_NEWS_RELEVANCE,
+                )
+                answer = judgment.boolean(_JEV_RELEVANCE_QUESTION)
+            except JevJudgmentError:
+                logger.warning(
+                    "일반 뉴스 Jev 관련성 판정 실패(fail-open): article_id=%d",
+                    item.article_id,
+                )
+            return _JevRelevance(
+                answer=answer,
+                elapsed_ms=int((time.monotonic() - started) * 1_000),
+            )
+
+    results = await asyncio.gather(*(judge(item) for item in prepared))
+    return {
+        item.article_id: result for item, result in zip(prepared, results, strict=True)
+    }
+
+
+async def _apply_jev_relevance(
+    db: AsyncSession,
+    *,
+    client: JevClient,
+    prepared: Sequence[_PreparedNewsSummary],
+    skipped_ids: list[int],
+) -> list[_PreparedNewsSummary]:
+    """관련성 확률이 낮은 기사를 요약 대상에서 빼고 6시간 backoff를 남긴다.
+
+    판정에 실패한 기사는 그대로 요약 대상에 남는다(fail-open). 돌려주는 목록은
+    입력 순서를 유지하며 어떤 기사도 새로 더하지 않는다.
+    """
+
+    judgments = await _jev_relevance_judgments(client, prepared)
+    kept: list[_PreparedNewsSummary] = []
+    excluded = 0
+    failed = 0
+    for item in prepared:
+        judgment = judgments[item.article_id]
+        answer = judgment.answer
+        if answer is None:
+            failed += 1
+            kept.append(item)
+            continue
+        if answer.probability >= _JEV_RELEVANCE_MIN_PROBABILITY:
+            kept.append(item)
+            continue
+        excluded += 1
+        skipped_ids.append(item.article_id)
+        try:
+            await _persist_failure_backoff(
+                db,
+                article_id=item.article_id,
+                error_type=_JEV_IRRELEVANT_ERROR_TYPE,
+                elapsed_ms=judgment.elapsed_ms,
+                detail={
+                    "jev": {
+                        "status": "judged",
+                        "probability": answer.probability,
+                        "confidence": answer.confidence,
+                        "reason": _JEV_BELOW_THRESHOLD_REASON,
+                    }
+                },
+            )
+        except asyncio.CancelledError:
+            await db.rollback()
+            raise
+        except Exception:
+            # backoff 저장 실패는 배제 판정 자체를 되돌리지 않는다. 다음 스캔에서
+            # 다시 판정될 뿐이며, 이번 batch의 스킵 보고는 그대로 남긴다.
+            await db.rollback()
+            logger.warning(
+                "일반 뉴스 Jev 배제 backoff 저장 실패: article_id=%d",
+                item.article_id,
+                exc_info=True,
+            )
+    logger.info(
+        "일반 뉴스 Jev 관련성 판정: judged=%d excluded=%d failed=%d threshold=%.2f",
+        len(prepared) - failed,
+        excluded,
+        failed,
+        _JEV_RELEVANCE_MIN_PROBABILITY,
+    )
+    return kept
+
+
 async def _run_batch(
     db: AsyncSession,
     *,
@@ -1190,6 +1347,7 @@ async def _run_batch(
     feed_source: str | None,
     article_urls: Sequence[str] | None,
     generator: NewsSummaryGenerator,
+    jev_client: JevClient | None,
 ) -> NewsSummaryBatchResult:
     if await _daily_call_limit_reached(db):
         await db.rollback()
@@ -1259,6 +1417,17 @@ async def _run_batch(
 
         if not prepared_batch:
             continue
+        if jev_client is not None:
+            # codex 호출 직전, 결정론 gate를 통과해 요약 입력이 만들어진 기사만
+            # Jev가 본다. 배제된 기사는 모델 호출도 일일 예산도 쓰지 않는다.
+            prepared_batch = await _apply_jev_relevance(
+                db,
+                client=jev_client,
+                prepared=prepared_batch,
+                skipped_ids=skipped_ids,
+            )
+            if not prepared_batch:
+                continue
         if not await _lock_daily_call_budget(db):
             await db.rollback()
             daily_limit_hit = True
@@ -1366,6 +1535,7 @@ async def summarize_pending_news(
     feed_source: str | None = None,
     article_urls: Sequence[str] | None = None,
     generator: NewsSummaryGenerator | None = None,
+    jev_client: JevClient | None = None,
 ) -> NewsSummaryBatchResult:
     """미요약 일반 뉴스를 제한 batch로 처리하며 각 행을 독립 커밋한다."""
 
@@ -1387,6 +1557,9 @@ async def summarize_pending_news(
             skipped_insufficient=0,
             failed=0,
         )
+    # Jev는 정책 snapshot이 아니라 환경 키로만 켜진다. 키가 없으면 None이라
+    # 이 batch는 Jev를 한 번도 호출하지 않는다.
+    effective_jev_client = jev_client if jev_client is not None else build_jev_client()
     return await _run_batch(
         db,
         batch_size=batch_size,
@@ -1394,6 +1567,7 @@ async def summarize_pending_news(
         feed_source=feed_source,
         article_urls=article_urls,
         generator=effective_generator,
+        jev_client=effective_jev_client,
     )
 
 

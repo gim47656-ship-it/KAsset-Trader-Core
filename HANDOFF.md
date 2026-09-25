@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-23 (장중 익절 사다리 결함 수정 운영 배포)
+갱신: 2026-09-25 (코어 AI gpt-6-luna 전환·Jev 판정 연동·새 계정 설정)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
@@ -14,6 +14,9 @@
 - **2026-09-23 앱 확인 완료(사용자 관측)**: 배포 후 앱에서 우선주 한글명 표시와 부분 익절분의 확정손익 반영이 정상 동작함을 사용자가 확인했다. 두 결함은 닫혔다.
 - **다음 행동**: 배포 뒤 첫 정규장(2026-09-24)에서 부분익절 체결 직후 잔량 `current_stop`이 진입가로 오르는지, 3주 이하 보유도 1차 익절이 나가는지를 읽기 전용으로 관찰한다. 둘 다 확인되거나 반례가 나오면 이 줄을 닫는다. 검증 목적으로 주문을 제조하지 않는다.
 - **관찰만 하는 미해결 경계**: 일봉 `as_of`가 날짜 label(00:00 UTC)이라 진입 당일 봉이 평가에서 빠져 추격선 갱신이 하루 늦다(그날 봉에 진입 전 고가·저가가 섞여 있어 별도 판단 필요). 2026-09-23 수동 매도 005930 LIMIT `67b1f6c8…`가 포지션 0주인데 `OPEN`으로 남아 있다.
+- **2026-09-25 코어 AI 모델 전환(운영 반영, 코드 변경 없음)**: 서버 `/usr/local/bin/codex`·`codex-code-mode-host`를 0.150.1→0.156.1로 교체(백업 `*.bak-0.150.1-20260925115535`)하고 `.env.kasset`의 `KASSET_AI_SIDECAR_CMD`·`KASSET_AI_SUBSCRIPTION_CMD`에 `-m gpt-6-luna`를 넣었다(백업 `.env.kasset.pre-gpt6-luna-20260925115535`). 0.150.1은 ChatGPT 계정으로 `gpt-6-*`를 거부했다. route policy는 그대로 `mcp_tool` 단일 경로라 luna·terra·sol tier가 모두 gpt-6-luna다. 워커 MCP 경로 단건 7.5초·codex 세션 `model=gpt-6-luna` 확인.
+- **2026-09-25 새 계정(owner 7, 사용자 부친)**: 사용자 요청으로 `recommendation_market_scope=KR_ONLY`와 `promotion_bypass_enabled=true`만 owner 4와 맞췄다(서비스 함수 경유). risk_level 3·목표 0.8%·일손실 1.5%·매수 3/매도 2건은 그대로다 — 목표 0.8%는 `AccountStateGate`에서 실제 매수 축소(50%)·중단(100%) 기준이다.
+- **Jev 판정 연동(브랜치 `feat/kasset-jev-judgment`, 미배포)**: `KASSET_JEV_API_KEY`(Vercel AI Gateway `vck_…`)가 있으면 뉴스 요약 전 관련성 선별(P<0.2 배제, 6시간 backoff)과 후보 AI 가산 항=P(AGREE)(비중 0.05 유지)를 수행한다. 키가 없으면 기존 동작 그대로다. 사용자가 준 `oc_s…` 키는 Vercel이 401로 거부해 아직 서버에 넣지 않았다. 상세는 `docs/kasset/AI_DUAL_PROVIDER.md` 「Jev 판정」.
 
 ### 유지 중인 계약·경계 (이관한 기록에서 통합)
 - 10분 producer + 5분 execution sweep이며 틱 즉시 손절이 아니다. 장중 조건 발생 후 봉 완료·다음 평가·다음 집행을 기다린다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후의 체결은 보장하지 않는다. 장외 강제 주문은 하지 않는다.

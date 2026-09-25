@@ -15,6 +15,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
+from app.extensions.kasset.ai.jev_client import JevJudgmentError
 from app.extensions.kasset.ai.model_router import _TierAnalysis
 from app.extensions.kasset.automation import vertical_slice
 from app.extensions.kasset.automation.account_state_gate import (
@@ -46,6 +47,8 @@ from app.extensions.kasset.automation.daily_setup import (
 from app.extensions.kasset.automation.decision_evidence import (
     AiReviewStatus,
     ai_review_from_observation,
+    is_deterministic_position_exit,
+    latest_ai_review_from_evidence,
     unknown_news_shadow,
 )
 from app.extensions.kasset.automation.intraday_data import (
@@ -1815,6 +1818,136 @@ def test_admitted_candidate_valid_until_is_bounded_by_trigger() -> None:
     )
 
     assert admitted.decision.valid_until == trigger_decision.valid_until
+
+
+def _disagreeing_review(
+    jev: vertical_slice._JevStance | None,  # noqa: SLF001 - admission 계약
+) -> vertical_slice._AiReviewOutcomeBundle:  # noqa: SLF001 - admission 계약
+    ai_shadow = build_ai_shadow_observation(
+        SimpleNamespace(
+            input_hash="c" * 64,
+            provider="mcp",
+            tier="terra",
+            model_id="tool:run_skill",
+            action="REVIEW",
+            risk="MEDIUM",
+            bullish_score=62,
+            bearish_score=38,
+            rationale_tags=["volume_confirmed"],
+            confidence=0.7,
+        ),
+        observed_at=_NOW,
+    )
+    return vertical_slice._AiReviewOutcomeBundle(  # noqa: SLF001 - admission 계약
+        ai_review=ai_review_from_observation(
+            status=AiReviewStatus.DISAGREES,
+            observation=ai_shadow,
+            detail="technical direction=BUY aiAction=HOLD",
+        ),
+        ai_shadow=ai_shadow,
+        bullish_score=62,
+        bearish_score=38,
+        jev=jev,
+    )
+
+
+def _admit(
+    review: vertical_slice._AiReviewOutcomeBundle,  # noqa: SLF001 - admission 계약
+) -> vertical_slice.AdmittedCandidate:
+    return vertical_slice._admitted_candidate(  # noqa: SLF001 - admission 계약
+        _evaluated_candidate("005930"),
+        trigger_decision=_fresh_trigger_decision("005930"),
+        review=review,
+        news_shadow=unknown_news_shadow(
+            observed_at=_NOW,
+            detail="fixture source health is intentionally unproven",
+        ),
+        now=_NOW,
+    )
+
+
+def test_jev_agree_probability_replaces_the_ai_bonus_term() -> None:
+    baseline = _admit(_disagreeing_review(None))
+    judged = _admit(
+        _disagreeing_review(
+            vertical_slice._JevStance(  # noqa: SLF001 - admission 계약
+                status="judged",
+                choice="AGREE",
+                probabilities={"AGREE": 0.8, "DISAGREE": 0.15, "INSUFFICIENT": 0.05},
+                confidence=0.7,
+                agree_probability=Decimal("0.8"),
+            )
+        )
+    )
+
+    # codex가 불일치여서 기존 가산 항은 0이었다. Jev P(AGREE)=0.8이 비중 0.05로 더해진다.
+    assert judged.score - baseline.score == Decimal("0.040000")
+    assert baseline.jev_evidence is None
+    assert judged.jev_evidence is not None
+    assert judged.jev_evidence["kind"] == "jev_stance"
+    assert judged.jev_evidence["agreeProbability"] == "0.8"
+    # 새 근거 항목은 기존 AI 검토 근거 해석을 바꾸지 않는다.
+    evidence = [judged.ai_review.as_evidence(), judged.jev_evidence]
+    assert latest_ai_review_from_evidence(evidence) == latest_ai_review_from_evidence(
+        [judged.ai_review.as_evidence()]
+    )
+    assert is_deterministic_position_exit(evidence) is False
+
+
+def test_failed_jev_keeps_the_existing_ai_bonus_rule() -> None:
+    baseline = _admit(_disagreeing_review(None))
+    failed = _admit(
+        _disagreeing_review(
+            vertical_slice._JevStance(  # noqa: SLF001 - admission 계약
+                status="failed",
+                reason="jev rejected: HTTP 503",
+            )
+        )
+    )
+
+    assert failed.score == baseline.score
+    assert failed.jev_evidence is not None
+    assert failed.jev_evidence["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_judge_stance_is_disabled_without_client_and_fails_open() -> None:
+    verdict = SimpleNamespace(
+        action="REVIEW",
+        confidence=0.7,
+        risk="MEDIUM",
+        bullish_score=62,
+        bearish_score=38,
+        rationale_tags=["volume_confirmed"],
+    )
+    judge_stance = vertical_slice.AIRecommendationVerticalSlice._judge_stance  # noqa: SLF001
+    payload = {"symbol": "005930", "market": "KRX"}
+
+    disabled = await judge_stance(
+        SimpleNamespace(_jev_client=None),  # type: ignore[arg-type]
+        7,
+        payload=payload,
+        effective_action=Action.BUY,
+        verdict=verdict,  # type: ignore[arg-type]
+    )
+    assert disabled is None
+
+    failing_client = SimpleNamespace(
+        judge=AsyncMock(side_effect=JevJudgmentError("jev rejected: HTTP 503"))
+    )
+    failed = await judge_stance(
+        SimpleNamespace(_jev_client=failing_client),  # type: ignore[arg-type]
+        7,
+        payload=payload,
+        effective_action=Action.BUY,
+        verdict=verdict,  # type: ignore[arg-type]
+    )
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.agree_probability is None
+    sent_state = failing_client.judge.await_args.kwargs["state"]
+    assert sent_state["technicalDirection"] == "BUY"
+    assert sent_state["codexVerdict"]["action"] == "REVIEW"
 
 
 @pytest.mark.asyncio

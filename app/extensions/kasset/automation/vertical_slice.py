@@ -20,7 +20,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.ai.base import AiProviderUnavailable
-from app.extensions.kasset.ai.model_router import AnalysisKind, OpenAiModelRouter
+from app.extensions.kasset.ai.jev_client import (
+    JEV_FEATURE_CANDIDATE_STANCE,
+    JevClient,
+    JevJudgmentError,
+    build_jev_client,
+    choice_question,
+)
+from app.extensions.kasset.ai.model_router import (
+    AnalysisKind,
+    OpenAiModelRouter,
+    TierVerdict,
+)
 from app.extensions.kasset.ai.runtime_config import (
     AiLane,
     build_ai_availability,
@@ -161,6 +172,7 @@ from app.models.paper_trading import PaperPosition
 from app.models.symbol_master import SymbolMaster
 from app.models.trading import InstrumentType, User, UserRole
 from app.services.ai_recommendations.service import AIRecommendationService
+from app.services.ai_usage_service import attribute_ai_calls
 from app.services.daily_candles.repository import DailyCandlesRepository, MarketKey
 from app.services.disclosures.feed_sources import DISCLOSURE_FEED_SOURCES
 from app.services.kasset_automation_audit import (
@@ -208,6 +220,13 @@ _PRESIZING_ZERO_QUANTITY = "presizing_zero_quantity"
 _AI_REVIEW_UNAVAILABLE = "review_routes_unavailable"
 _NO_REGULAR_MARKET_OPEN = "no_regular_market_open"
 _NO_CONFIGURED_REGULAR_MARKET_OPEN = "no_configured_regular_market_open"
+
+#: Jev 판정 evidence의 schema/kind/source. 후보 추천 근거 목록에 한 항목으로 남는다.
+JEV_JUDGMENT_SCHEMA_VERSION = "kasset.jev-judgment.v1"
+_JEV_JUDGMENT_KIND = "jev_stance"
+_JEV_JUDGMENT_SOURCE = "kasset_jev_judgment"
+#: Jev에 묻는 질문 id와 label. label은 wire 계약의 criteria 키다.
+_JEV_STANCE_QUESTION = "stance"
 
 #: 장중 방아쇠가 걸리지 않아 주문 후보에서 빠진 행.
 _NO_INTRADAY_TRIGGER = "intraday_trigger_not_satisfied"
@@ -383,6 +402,8 @@ class AdmittedCandidate:
     score: Decimal
     ai_shadow: AiShadowObservation | None = None
     entry_path_attribution: EntryPathAttribution | None = None
+    #: Jev stance 판정 근거. Jev가 비활성이면 ``None``이고 추천 근거에 들어가지 않는다.
+    jev_evidence: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,9 +540,11 @@ class AIRecommendationVerticalSlice:
         daily_setup_config: DailySetupConfig = DEFAULT_DAILY_SETUP_CONFIG,
         trigger_policy: IntradayTriggerPolicy = DEFAULT_INTRADAY_TRIGGER_POLICY,
         cycle_trace_id: str | None = None,
+        jev_client: JevClient | None = None,
     ) -> None:
         self._db = db
         self._ai_router = ai_router
+        self._jev_client = jev_client
         self._now = _aware_utc(now)
         # 후보를 한 건도 만지기 전에 이 cycle의 추적 id를 확정한다. 호출자가
         # 넘겨주면 그 값을 쓰고, 그래야 owner cycle이 예외로 끝나도 원장과
@@ -2182,6 +2205,12 @@ class AIRecommendationVerticalSlice:
             status = AiReviewStatus.LOW_CONFIDENCE
         else:
             status = AiReviewStatus.AGREES
+        jev = await self._judge_stance(
+            owner_user_id,
+            payload=payload,
+            effective_action=effective_action,
+            verdict=verdict,
+        )
         return _AiReviewOutcomeBundle(
             ai_review=ai_review_from_observation(
                 status=status,
@@ -2194,6 +2223,76 @@ class AIRecommendationVerticalSlice:
             ai_shadow=observation,
             bullish_score=int(verdict.bullish_score),
             bearish_score=int(verdict.bearish_score),
+            jev=jev,
+        )
+
+    async def _judge_stance(
+        self,
+        owner_user_id: int,
+        *,
+        payload: Mapping[str, object],
+        effective_action: Action,
+        verdict: TierVerdict,
+    ) -> _JevStance | None:
+        """codex verdict가 기술 판정 방향을 지지할 확률을 Jev에 묻는다.
+
+        Jev가 비활성이면 ``None``이다. 실패는 fail-open으로 ``agree_probability``가
+        비어 있는 판정을 돌려주며, 그때 가산점은 기존 규칙으로 계산된다. 이
+        판정은 후보를 탈락시키지 않고 ``AiReviewStatus``도 바꾸지 않는다.
+        """
+
+        if self._jev_client is None:
+            return None
+        state = {
+            "candidate": dict(payload),
+            "technicalDirection": effective_action.value,
+            "codexVerdict": {
+                "action": str(verdict.action),
+                "confidence": float(verdict.confidence),
+                "risk": str(verdict.risk),
+                "bullishScore": int(verdict.bullish_score),
+                "bearishScore": int(verdict.bearish_score),
+                "rationaleTags": list(verdict.rationale_tags)[:12],
+            },
+        }
+        question = choice_question(
+            instructions=(
+                "Read the candidate evidence and the codex analysis. Decide whether "
+                "the codex analysis supports taking the technical direction for "
+                "this stock now."
+            ),
+            criteria={
+                "AGREE": "the analysis evidence supports the technical direction",
+                "DISAGREE": "the evidence against the technical direction dominates",
+                "INSUFFICIENT": "the evidence is too thin or mixed to decide",
+            },
+        )
+        try:
+            with attribute_ai_calls(owner_user_id=owner_user_id):
+                judgment = await self._jev_client.judge(
+                    state=state,
+                    questions={_JEV_STANCE_QUESTION: question},
+                    feature=JEV_FEATURE_CANDIDATE_STANCE,
+                )
+            answer = judgment.choice(_JEV_STANCE_QUESTION)
+        except JevJudgmentError as exc:
+            logger.warning(
+                "KAsset Jev candidate stance failed (fail-open): market=%s symbol=%s "
+                "error=%s",
+                payload.get("market"),
+                payload.get("symbol"),
+                type(exc).__name__,
+            )
+            return _JevStance(
+                status="failed",
+                reason=str(exc)[:200],
+            )
+        return _JevStance(
+            status="judged",
+            choice=answer.choice,
+            probabilities=dict(answer.probabilities),
+            confidence=answer.confidence,
+            agree_probability=Decimal(str(answer.probabilities["AGREE"])),
         )
 
     def _review_outcome(
@@ -2285,6 +2384,7 @@ class AIRecommendationVerticalSlice:
             item.ai_review.as_evidence(),
             item.news_shadow.as_evidence(),
             cohorts,
+            *([item.jev_evidence] if item.jev_evidence is not None else []),
         ]
         row = await RecommendationProducer(
             owner_user_id=str(owner_user_id),
@@ -2539,6 +2639,37 @@ class AIRecommendationVerticalSlice:
 
 
 @dataclass(frozen=True, slots=True)
+class _JevStance:
+    """후보 한 건의 Jev stance 판정. ``agree_probability``가 있을 때만 가산점이 된다."""
+
+    status: Literal["judged", "failed"]
+    choice: str | None = None
+    probabilities: Mapping[str, float] | None = None
+    confidence: float | None = None
+    agree_probability: Decimal | None = None
+    reason: str | None = None
+
+    def as_evidence(self) -> dict[str, object]:
+        return {
+            "schemaVersion": JEV_JUDGMENT_SCHEMA_VERSION,
+            "kind": _JEV_JUDGMENT_KIND,
+            "source": _JEV_JUDGMENT_SOURCE,
+            "status": self.status,
+            "choice": self.choice,
+            "probabilities": (
+                dict(self.probabilities) if self.probabilities is not None else None
+            ),
+            "confidence": self.confidence,
+            "agreeProbability": (
+                str(self.agree_probability)
+                if self.agree_probability is not None
+                else None
+            ),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _AiReviewOutcomeBundle:
     """AI 검토 관측 결과. 어떤 필드도 후보 채택을 바꾸지 않는다."""
 
@@ -2546,6 +2677,7 @@ class _AiReviewOutcomeBundle:
     ai_shadow: AiShadowObservation | None
     bullish_score: int = 0
     bearish_score: int = 0
+    jev: _JevStance | None = None
 
 
 def _setup_key(setup: DailySetup) -> CandidateKey:
@@ -2767,7 +2899,11 @@ def _admitted_candidate(
         evidence=decision_evidence,
     )
     ai_bonus = Decimal("0")
-    if review.ai_review.agrees:
+    if review.jev is not None and review.jev.agree_probability is not None:
+        # Jev가 판정했으면 codex 자기 신뢰도 대신 보정된 P(AGREE)를 쓴다.
+        # 비중(0.05)과 후보 채택 규칙은 그대로다.
+        ai_bonus = review.jev.agree_probability
+    elif review.ai_review.agrees:
         directional = (
             review.bullish_score if action is Action.BUY else review.bearish_score
         )
@@ -2793,6 +2929,7 @@ def _admitted_candidate(
         score=score,
         ai_shadow=review.ai_shadow,
         entry_path_attribution=entry_path_attribution,
+        jev_evidence=(review.jev.as_evidence() if review.jev is not None else None),
     )
 
 
@@ -2862,6 +2999,10 @@ async def run_ai_recommendation_cycle_once(
         ai_policy_source = None
         ai_usable_lanes = []
 
+    # Jev는 codex verdict를 얻은 후보만 판정하므로 router가 없으면 만들지 않는다.
+    # 키가 없으면 ``None``이고 후보 가산점은 기존 규칙 그대로다.
+    jev_client = build_jev_client() if ai_router is not None else None
+
     logger.info(
         "kasset AI recommendation cycle start: owners=%d open_markets=%s "
         "ai_available=%s ai_policy_source=%s ai_usable_lanes=%s "
@@ -2897,6 +3038,7 @@ async def run_ai_recommendation_cycle_once(
                         live_candidates_cache=live_candidates_cache,
                         allowed_markets=open_markets,
                         cycle_trace_id=cycle_trace_id,
+                        jev_client=jev_client,
                     ).run_owner(owner_id)
             except Exception as exc:
                 # 스택 없이 errorClass만 담아 돌려주면 TaskIQ가 그 dict를 버리는
