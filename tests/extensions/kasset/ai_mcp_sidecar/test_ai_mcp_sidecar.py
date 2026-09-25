@@ -617,3 +617,28 @@ def test_verify_command_executable_accepts_a_real_binary() -> None:
 )
 def test_reasoning_effort_reaches_codex_argv(command, effort, expected) -> None:
     assert command_with_reasoning_effort(command, effort) == expected
+
+
+def test_effort_model_replaces_configured_model() -> None:
+    assert command_with_reasoning_effort(
+        ("codex", "exec", "-m", "gpt-6-luna", "-"), "high", model="gpt-6-sol"
+    ) == (
+        "codex",
+        "exec",
+        "-c",
+        'model_reasoning_effort="high"',
+        "-m",
+        "gpt-6-sol",
+        "-",
+    )
+
+
+def test_load_config_reads_effort_models() -> None:
+    base = {"KASSET_AI_SIDECAR_CMD": "codex exec -", "KASSET_AI_SIDECAR_TOKEN": "t"}
+    config = load_config(
+        {**base, "KASSET_AI_SIDECAR_EFFORT_MODELS": "medium=gpt-6-sol, high=gpt-6-sol"}
+    )
+    assert config.effort_models == {"medium": "gpt-6-sol", "high": "gpt-6-sol"}
+    assert load_config(base).effort_models == {}
+    with pytest.raises(SidecarConfigError):
+        load_config({**base, "KASSET_AI_SIDECAR_EFFORT_MODELS": "max=gpt-6-sol"})

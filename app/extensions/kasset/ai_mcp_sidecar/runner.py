@@ -154,10 +154,17 @@ def build_prompt(invocation: SkillInvocation) -> bytes:
 class SkillRunner:
     """CLI 프로세스 하나와 한 번 교환한다. 호출 간 상태를 보관하지 않는다."""
 
-    __slots__ = ("_command", "_timeout_seconds")
+    __slots__ = ("_command", "_effort_models", "_timeout_seconds")
 
-    def __init__(self, *, command: tuple[str, ...], timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        command: tuple[str, ...],
+        timeout_seconds: float,
+        effort_models: Mapping[str, str] | None = None,
+    ) -> None:
         self._command = command
+        self._effort_models = dict(effort_models or {})
         self._timeout_seconds = timeout_seconds
 
     @property
@@ -167,8 +174,11 @@ class SkillRunner:
     async def run(self, invocation: SkillInvocation) -> dict[str, Any]:
         """CLI를 호출해 `response_schema`를 만족하는 객체 하나를 돌려준다."""
 
+        effort = invocation.reasoning_effort
         command = command_with_reasoning_effort(
-            self._command, invocation.reasoning_effort
+            self._command,
+            effort,
+            model=self._effort_models.get(effort) if effort is not None else None,
         )
         stdout = await self._exchange(command, build_prompt(invocation))
         payload = _last_json_object(stdout.decode("utf-8", errors="replace"))
@@ -244,11 +254,15 @@ class SkillRunner:
 
 
 def command_with_reasoning_effort(
-    command: tuple[str, ...], reasoning_effort: str | None
+    command: tuple[str, ...],
+    reasoning_effort: str | None,
+    *,
+    model: str | None = None,
 ) -> tuple[str, ...]:
-    """codex CLI면 `exec` 뒤에 추론강도 설정을 끼운다.
+    """codex CLI면 `exec` 뒤에 추론강도 설정을 끼우고, 모델이 주어지면 바꾼다.
 
     prompt 안내만으로는 모델 추론강도가 바뀌지 않으므로 CLI 설정으로 넘긴다.
+    `model`은 기존 `-m`/`--model` 값을 대체하고, 없으면 `exec` 뒤에 넣는다.
     codex가 아니거나 `exec` 하위명령이 없으면 argv를 바꾸지 않는다.
     """
 
@@ -261,12 +275,16 @@ def command_with_reasoning_effort(
         exec_index = command.index("exec")
     except ValueError:
         return command
-    return (
-        *command[: exec_index + 1],
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-        *command[exec_index + 1 :],
-    )
+    rest = list(command[exec_index + 1 :])
+    inserted = ["-c", f'model_reasoning_effort="{reasoning_effort}"']
+    if model:
+        for index, arg in enumerate(rest[:-1]):
+            if arg in ("-m", "--model"):
+                rest[index + 1] = model
+                break
+        else:
+            inserted += ["-m", model]
+    return (*command[: exec_index + 1], *inserted, *rest)
 
 
 def _encode_json(value: Mapping[str, Any], *, field: str, max_bytes: int) -> str:
