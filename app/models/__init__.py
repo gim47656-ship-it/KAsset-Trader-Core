@@ -164,6 +164,7 @@ from .session_context import OperatorSessionContext
 from .strategy_learning_event import ResearchStrategyLearningEvent
 from .symbol_master import SymbolMaster
 from .symbol_news_relevance import SymbolNewsRelevance
+from .symbol_search_alias import SymbolSearchAlias
 from .symbol_sectors import SymbolSector
 from .symbol_trade_settings import SymbolTradeSettings
 from .telegram_callback_inbox import (
@@ -293,6 +294,7 @@ __all__ = [
     "ScreenerPickLog",
     "SymbolSector",
     "SymbolMaster",
+    "SymbolSearchAlias",
     "SymbolTradeSettings",
     "SymbolNewsRelevance",
     "NewsArticle",

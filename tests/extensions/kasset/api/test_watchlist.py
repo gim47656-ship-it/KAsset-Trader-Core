@@ -17,6 +17,7 @@ from app.extensions.kasset.api.auth import get_mobile_session
 from app.extensions.kasset.api.installation import install_android_compat_api
 from app.extensions.kasset.api.schemas import MAX_WATCHLIST_ITEMS
 from app.models.symbol_master import SymbolMaster
+from app.models.symbol_search_alias import SymbolSearchAlias
 from app.models.trading import (
     Exchange,
     Instrument,
@@ -517,6 +518,54 @@ async def test_instrument_search_matches_alias(
             }
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_instrument_search_matches_generated_alias_only_in_its_market(
+    db_session: AsyncSession,
+    watchlist_client: tuple[httpx.AsyncClient, dict[str, object]],
+    watchlist_data: dict[str, object],
+) -> None:
+    client, _state = watchlist_client
+    primary = watchlist_data["primary"]
+    suffix = uuid4().hex[:10]
+    alias = f"하닉{suffix}"
+    wrong_market_alias = f"시장격리{suffix}"
+    db_session.add_all(
+        [
+            SymbolSearchAlias(
+                market="KRX",
+                symbol=primary.symbol,
+                alias=alias,
+                source="llm_batch",
+                model="gpt-6-luna",
+            ),
+            SymbolSearchAlias(
+                market="US",
+                symbol=primary.symbol,
+                alias=wrong_market_alias,
+                source="llm_batch",
+                model="gpt-6-luna",
+            ),
+        ]
+    )
+    await db_session.commit()
+    try:
+        response = await client.get(f"/api/v1/instruments/search?q={alias}&market=KRX")
+        assert response.status_code == 200
+        assert response.json()["items"] == [
+            {"symbol": primary.symbol, "name": primary.name, "market": "KRX"}
+        ]
+        wrong_market = await client.get(
+            f"/api/v1/instruments/search?q={wrong_market_alias}&market=KRX"
+        )
+        assert wrong_market.status_code == 200
+        assert wrong_market.json()["items"] == []
+    finally:
+        await db_session.execute(
+            delete(SymbolSearchAlias).where(SymbolSearchAlias.symbol == primary.symbol)
+        )
+        await db_session.commit()
 
 
 @pytest.mark.asyncio

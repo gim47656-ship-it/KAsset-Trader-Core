@@ -224,6 +224,7 @@ tests/test_financial_fundamentals_derive.py
 tests/test_forecast_service.py
 tests/test_fundamentals_helpers.py
 tests/test_fundamentals_sources_naver.py
+tests/test_generate_symbol_search_aliases.py
 tests/test_hermes_ingest_dimension_refs.py
 tests/test_hermes_roundtrip_smoke.py
 tests/test_intraday_order_review_tasks.py

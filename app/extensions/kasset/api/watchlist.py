@@ -18,6 +18,7 @@ from app.extensions.kasset.api.schemas import (
     WatchlistResponse,
 )
 from app.models.symbol_master import SymbolMaster
+from app.models.symbol_search_alias import SymbolSearchAlias
 from app.models.trading import (
     Exchange,
     Instrument,
@@ -294,11 +295,19 @@ class MobileWatchlistService:
                 ),
             )
         )
+        generated_alias_match = exists(
+            select(SymbolSearchAlias.id).where(
+                SymbolSearchAlias.market == SymbolMaster.market,
+                SymbolSearchAlias.symbol == SymbolMaster.symbol,
+                SymbolSearchAlias.alias.ilike(compact_contains, escape="\\"),
+            )
+        )
         matches = or_(
             SymbolMaster.symbol.ilike(prefix_pattern, escape="\\"),
             compact(SymbolMaster.name).ilike(compact_contains, escape="\\"),
             compact(SymbolMaster.name_en).ilike(compact_contains, escape="\\"),
             alias_match,
+            generated_alias_match,
             us_korean_name_match,
         )
         statement = select(SymbolMaster).where(

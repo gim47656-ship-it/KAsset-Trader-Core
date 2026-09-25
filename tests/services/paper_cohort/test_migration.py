@@ -365,6 +365,7 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             await connection.execute(
                 text("ALTER TABLE instruments DROP COLUMN aliases")
             )
+            await connection.execute(text("DROP TABLE symbol_search_aliases"))
             await connection.execute(text("DROP TABLE symbol_master"))
             await connection.execute(text("DROP TABLE research.kr_candles_1m_toss"))
             # KR lifecycle evidence and persisted research cohorts are also
