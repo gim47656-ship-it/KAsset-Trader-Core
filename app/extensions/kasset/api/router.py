@@ -551,7 +551,7 @@ async def search_instruments(
     _session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
     market: Annotated[InstrumentSearchMarket, Query()] = "ALL",
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> InstrumentSearchResponse:
     return await watchlist_service.search_instruments(
         db,
