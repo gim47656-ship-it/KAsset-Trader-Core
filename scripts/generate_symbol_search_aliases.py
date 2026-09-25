@@ -6,17 +6,15 @@ import argparse
 import asyncio
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import func, inspect, select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
 from app.extensions.kasset.ai.mcp_provider import McpStructuredJsonClient
-from app.models.invest_screener_snapshot import InvestScreenerSnapshot
 from app.models.symbol_master import SymbolMaster
 from app.models.symbol_search_alias import SymbolSearchAlias
 
@@ -153,48 +151,22 @@ async def select_targets(
             : args.limit
         ], "지정 symbol 순"
 
-    connection = await db.connection()
-    has_snapshot = await connection.run_sync(
-        lambda sync: inspect(sync).has_table("invest_screener_snapshots")
-    )
-    if not has_snapshot:
-        return sorted(rows, key=lambda row: (row.market, row.symbol))[
-            : args.limit
-        ], "거래대금 테이블 없음: symbol 순"
-
+    # KRX는 운영 일봉(kr_candles_1d.value)의 최근 20거래일 거래대금 합계로 고른다.
+    # 이 테이블에 없는 시장(US)은 symbol 순이며, 그 사실을 근거 문자열에 그대로 남긴다.
     totals: dict[tuple[str, str], Any] = {}
-    for market in markets:
-        snapshot_market = market.lower()
-        latest_dates = (
-            select(InvestScreenerSnapshot.snapshot_date)
-            .where(
-                InvestScreenerSnapshot.market == snapshot_market,
-                InvestScreenerSnapshot.snapshot_date
-                >= date.today() - timedelta(days=40),
-            )
-            .distinct()
-            .order_by(InvestScreenerSnapshot.snapshot_date.desc())
-            .limit(20)
-        )
+    if "KRX" in markets:
         result = await db.execute(
-            select(
-                InvestScreenerSnapshot.symbol,
-                func.sum(InvestScreenerSnapshot.daily_turnover),
+            text(
+                "WITH d AS (SELECT DISTINCT time FROM public.kr_candles_1d "
+                "WHERE venue = 'KRX' AND time >= now() - interval '40 days' "
+                "ORDER BY time DESC LIMIT 20) "
+                "SELECT c.symbol, sum(c.value) FROM public.kr_candles_1d c "
+                "WHERE c.venue = 'KRX' AND c.time IN (SELECT time FROM d) "
+                "GROUP BY c.symbol"
             )
-            .where(
-                InvestScreenerSnapshot.market == snapshot_market,
-                InvestScreenerSnapshot.snapshot_date
-                >= date.today() - timedelta(days=40),
-                InvestScreenerSnapshot.snapshot_date.in_(latest_dates),
-            )
-            .group_by(InvestScreenerSnapshot.symbol)
         )
         totals.update(
-            {
-                (market, symbol): amount
-                for symbol, amount in result
-                if amount is not None
-            }
+            {("KRX", symbol): amount for symbol, amount in result if amount is not None}
         )
     rows.sort(
         key=lambda row: (
@@ -203,10 +175,14 @@ async def select_targets(
             row.symbol,
         )
     )
-    return (
-        rows[: args.limit],
-        "최근 20거래일 invest_screener_snapshots.daily_turnover 합계; 데이터 없는 시장은 symbol 순",
+    basis = (
+        f"KRX: 최근 20거래일 kr_candles_1d 거래대금 합계({len(totals)}종목 집계)"
+        if "KRX" in markets
+        else ""
     )
+    if "US" in markets:
+        basis = f"{basis}; US: symbol 순(거래대금 소스 없음)".lstrip("; ")
+    return rows[: args.limit], basis
 
 
 async def generate(
