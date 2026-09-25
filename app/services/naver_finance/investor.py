@@ -19,6 +19,7 @@ from app.services.analyst_normalizer import (
 from app.services.naver_finance.detail_cache_port import DetailCachePort
 from app.services.naver_finance.news import _parse_news_soup
 from app.services.naver_finance.parser import (
+    DEFAULT_HEADERS,
     NAVER_FINANCE_BASE,
     NAVER_FINANCE_ITEM,
     _extract_current_price_from_main_soup,
@@ -194,99 +195,95 @@ def _parse_holding_rate(text: str | None) -> float | None:
         return None
 
 
-async def fetch_investor_trends(code: str, days: int = 20) -> dict[str, Any]:
-    """Fetch foreign/institutional investor trading trends.
+#: 데스크톱 ``frgn.naver``는 Npay 증권 SPA로 바뀌어 수급 표가 사라졌다
+#: (2026-09-25 관측). 같은 데이터를 모바일 증권 JSON에서 받는다.
+NAVER_MOBILE_TREND_URL = "https://m.stock.naver.com/api/stock/{code}/trend"
+#: 모바일 API가 한 번에 돌려주는 최대 행 수. 더 과거는 ``bizdate``로 넘긴다.
+_TREND_PAGE_SIZE = 60
+#: 네이버 등락 코드. 4=하한, 5=하락은 전일비가 음수다.
+_FALLING_CODES = frozenset({"4", "5"})
 
-    URL: finance.naver.com/item/frgn.naver?code={code}
+
+async def _fetch_trend_page(
+    code: str, *, page_size: int, bizdate: str | None
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"pageSize": page_size}
+    if bizdate is not None:
+        params["bizdate"] = bizdate
+    url = NAVER_MOBILE_TREND_URL.format(code=code)
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=10) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _parse_trend_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    bizdate = str(row.get("bizdate") or "")
+    if len(bizdate) != 8 or not bizdate.isdigit():
+        return None
+    close = _parse_korean_number(row.get("closePrice"))
+    change = _parse_korean_number(row.get("compareToPreviousClosePrice"))
+    direction = row.get("compareToPreviousPrice")
+    if (
+        change is not None
+        and change > 0
+        and isinstance(direction, dict)
+        and str(direction.get("code")) in _FALLING_CODES
+    ):
+        change = -change
+    base = close - change if close is not None and change is not None else None
+    return {
+        "date": f"{bizdate[:4]}-{bizdate[4:6]}-{bizdate[6:]}",
+        "close": close,
+        "change": change,
+        # 기존 계약과 같이 비율(0.015 = 1.5%)로 돌려준다.
+        "change_pct": change / base if base else None,
+        "volume": _parse_korean_number(row.get("accumulatedTradingVolume")),
+        "institutional_net": _parse_korean_number(row.get("organPureBuyQuant")),
+        "foreign_net": _parse_korean_number(row.get("foreignerPureBuyQuant")),
+        "individual_net": _parse_korean_number(row.get("individualPureBuyQuant")),
+        # 모바일 API는 보유주수를 주지 않는다. 보유율은 0..100 퍼센트다.
+        "foreign_holding_shares": None,
+        "foreign_holding_rate": _parse_holding_rate(row.get("foreignerHoldRatio")),
+    }
+
+
+async def fetch_investor_trends(code: str, days: int = 20) -> dict[str, Any]:
+    """Fetch daily foreign/institutional/individual net trades, newest first.
+
+    URL: m.stock.naver.com/api/stock/{code}/trend (``bizdate`` pages backwards)
 
     Args:
         code: 6-digit Korean stock code
-        days: Number of days of data to fetch
+        days: Number of trading days of data to fetch
 
     Returns:
         Daily investor flow data (foreign, institutional, individual net trades)
     """
-    url = f"{NAVER_FINANCE_ITEM}/frgn.naver"
-    soup = await _fetch_html(url, params={"code": code})
-
-    trends: dict[str, Any] = {
-        "symbol": code,
-        "days": days,
-        "data": [],
-    }
-
-    # There are multiple table.type2 on the page
-    # The one with actual investor data has rows with 7+ cells
-    # Columns: 날짜, 종가, 전일비, 등락률, 거래량, 기관, 외국인
-    tables = soup.select("table.type2")
-    target_table = None
-
-    for table in tables:
-        # Find the table that has data rows with 7 cells
-        rows = table.select("tr")
+    trends: dict[str, Any] = {"symbol": code, "days": days, "data": []}
+    bizdate: str | None = None
+    while len(trends["data"]) < days:
+        rows = await _fetch_trend_page(
+            code,
+            page_size=min(_TREND_PAGE_SIZE, days - len(trends["data"])),
+            bizdate=bizdate,
+        )
+        next_bizdate = bizdate
         for row in rows:
-            cells = row.select("td")
-            if len(cells) >= 7:
-                # Check if first cell looks like a date
-                first_cell = cells[0].get_text(strip=True)
-                if first_cell and first_cell[0].isdigit():
-                    target_table = table
-                    break
-        if target_table:
-            break
-
-    if not target_table:
-        return trends
-
-    rows = target_table.select("tr")
-    for row in rows:
-        cells = row.select("td")
-        # ROB-448: the 외국인 column is a 2-level header → the data row actually has 9
-        # cells (the old "7 cells" comment was stale). Columns:
-        #   날짜(0), 종가(1), 전일비(2), 등락률(3), 거래량(4), 기관 순매수(5),
-        #   외국인 순매수(6), 외국인 보유주수(7), 외국인 보유율(8)
-        if len(cells) < 7:
-            continue
-
-        try:
-            date_text = cells[0].get_text(strip=True)
-            if not date_text or not date_text[0].isdigit():
+            parsed = _parse_trend_row(row)
+            if parsed is None:
                 continue
-
-            # Parse 전일비 which includes direction text (상승/하락)
-            change_text = cells[2].get_text(strip=True)
-
-            data_point = {
-                "date": _parse_naver_date(date_text),
-                "close": _parse_korean_number(cells[1].get_text(strip=True)),
-                "change": _parse_korean_number(change_text),
-                "change_pct": _parse_korean_number(cells[3].get_text(strip=True)),
-                "volume": _parse_korean_number(cells[4].get_text(strip=True)),
-                "institutional_net": _parse_korean_number(
-                    cells[5].get_text(strip=True)
-                ),
-                "foreign_net": _parse_korean_number(cells[6].get_text(strip=True)),
-                # ROB-448: foreign holding shares (count) + rate (%, 0..100). Guarded so
-                # a legacy 7-cell layout degrades to None instead of IndexError.
-                "foreign_holding_shares": (
-                    _parse_korean_number(cells[7].get_text(strip=True))
-                    if len(cells) >= 9
-                    else None
-                ),
-                "foreign_holding_rate": (
-                    _parse_holding_rate(cells[8].get_text(strip=True))
-                    if len(cells) >= 9
-                    else None
-                ),
-            }
-
-            trends["data"].append(data_point)
-
+            trends["data"].append(parsed)
+            next_bizdate = str(row["bizdate"])
             if len(trends["data"]) >= days:
                 break
-        except (IndexError, ValueError):
-            continue
-
+        # 빈 페이지이거나 커서가 줄지 않으면 더 과거가 없다.
+        if not rows or next_bizdate == bizdate:
+            break
+        bizdate = next_bizdate
     return trends
 
 

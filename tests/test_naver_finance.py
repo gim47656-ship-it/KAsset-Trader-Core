@@ -300,42 +300,6 @@ SAMPLE_PROFILE_HTML = """
 </html>
 """
 
-SAMPLE_INVESTOR_TRENDS_HTML = """
-<html>
-<body>
-<!-- First table.type2 is empty (matches real Naver structure) -->
-<table class="type2">
-    <tbody><tr><td></td></tr></tbody>
-</table>
-<!-- Second table.type2 has the actual data (ROB-448: 9 cells — the 외국인 column is a
-     2-level header with 순매수 / 보유주수 / 보유율) -->
-<table class="type2">
-    <tr>
-        <td>2024.01.15</td>
-        <td>75,000</td>
-        <td>▲500</td>
-        <td>+0.67%</td>
-        <td>10,000,000</td>
-        <td>1,000,000</td>
-        <td>-500,000</td>
-        <td>2,790,424,635</td>
-        <td>47.73%</td>
-    </tr>
-    <tr>
-        <td>2024.01.14</td>
-        <td>74,500</td>
-        <td>▼300</td>
-        <td>-0.40%</td>
-        <td>8,000,000</td>
-        <td>-200,000</td>
-        <td>300,000</td>
-        <td>2,789,924,635</td>
-        <td>47.72%</td>
-    </tr>
-</table>
-</body>
-</html>
-"""
 
 # ROB-486: 리스트 fixture 날짜를 상대값으로 생성해 recency 윈도우 시한폭탄을 막는다.
 _OPINION_LIST_DATE_RECENT_1 = date.today() - timedelta(days=30)
@@ -710,77 +674,91 @@ class TestFetchCompanyProfile:
 @pytest.mark.asyncio
 @pytest.mark.unit
 class TestFetchInvestorTrends:
-    """Tests for fetch_investor_trends function."""
+    """Tests for fetch_investor_trends (m.stock.naver.com trend JSON)."""
 
-    async def test_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def mock_fetch_html(
-            url: str, params: dict[str, Any] | None = None
-        ) -> BeautifulSoup:
-            return BeautifulSoup(SAMPLE_INVESTOR_TRENDS_HTML, "lxml")
+    @staticmethod
+    def _row(bizdate: str, **overrides: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "itemCode": "005930",
+            "bizdate": bizdate,
+            "foreignerPureBuyQuant": "-500,000",
+            "foreignerHoldRatio": "47.73%",
+            "organPureBuyQuant": "+1,000,000",
+            "individualPureBuyQuant": "-500,000",
+            "closePrice": "75,500",
+            "compareToPreviousClosePrice": "500",
+            "compareToPreviousPrice": {"code": "2", "name": "RISING"},
+            "accumulatedTradingVolume": "10,000,000",
+        }
+        row.update(overrides)
+        return row
 
-        monkeypatch.setattr(naver_finance.investor, "_fetch_html", mock_fetch_html)
+    async def test_parses_row_units(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_page(code: str, *, page_size: int, bizdate: str | None):
+            return [
+                self._row("20240115"),
+                self._row(
+                    "20240114",
+                    closePrice="74,500",
+                    compareToPreviousClosePrice="300",
+                    compareToPreviousPrice={"code": "5", "name": "FALLING"},
+                    foreignerHoldRatio="47.72%",
+                ),
+            ]
 
-        result = await naver_finance.fetch_investor_trends("005930", days=20)
+        monkeypatch.setattr(naver_finance.investor, "_fetch_trend_page", fake_page)
 
-        assert result["symbol"] == "005930"
-        assert len(result["data"]) == 2
+        result = await naver_finance.fetch_investor_trends("005930", days=2)
 
-        # First day
-        day1 = result["data"][0]
+        day1, day2 = result["data"]
         assert day1["date"] == "2024-01-15"
-        assert day1["close"] == 75000
-        assert day1["change"] == 500  # ▲500
+        assert day1["close"] == 75500
+        assert day1["change"] == 500
+        assert day1["change_pct"] == pytest.approx(500 / 75000)
         assert day1["institutional_net"] == 1000000
         assert day1["foreign_net"] == -500000
-        # ROB-448: foreign holding shares (count) + rate (percent, 0..100)
-        assert day1["foreign_holding_shares"] == 2790424635
+        assert day1["individual_net"] == -500000
         assert day1["foreign_holding_rate"] == pytest.approx(47.73)
+        assert day1["foreign_holding_shares"] is None
+        # 하락 코드면 부호 없는 전일비도 음수가 된다.
+        assert day2["change"] == -300
+        assert day2["change_pct"] == pytest.approx(-300 / 74800)
 
-        # Second day
-        day2 = result["data"][1]
-        assert day2["date"] == "2024-01-14"
-        assert day2["change"] == -300  # ▼300
-        assert day2["foreign_holding_rate"] == pytest.approx(47.72)
-
-    async def test_days_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def mock_fetch_html(
-            url: str, params: dict[str, Any] | None = None
-        ) -> BeautifulSoup:
-            return BeautifulSoup(SAMPLE_INVESTOR_TRENDS_HTML, "lxml")
-
-        monkeypatch.setattr(naver_finance.investor, "_fetch_html", mock_fetch_html)
-
-        result = await naver_finance.fetch_investor_trends("005930", days=1)
-
-        assert len(result["data"]) == 1
-
-    async def test_legacy_7cell_layout_degrades_to_none(
+    async def test_pages_backwards_until_days(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # ROB-448: a 7-cell row (no holding columns) must degrade to None, not IndexError.
-        html = """
-        <html><body>
-        <table class="type2"><tbody><tr><td></td></tr></tbody></table>
-        <table class="type2">
-            <tr><td>2024.01.15</td><td>75,000</td><td>▲500</td><td>+0.67%</td>
-                <td>10,000,000</td><td>1,000,000</td><td>-500,000</td></tr>
-        </table>
-        </body></html>
-        """
+        calls: list[tuple[int, str | None]] = []
+        pages = {
+            None: [self._row("20240115"), self._row("20240112")],
+            "20240112": [self._row("20240111"), self._row("20240110")],
+        }
 
-        async def mock_fetch_html(
-            url: str, params: dict[str, Any] | None = None
-        ) -> BeautifulSoup:
-            return BeautifulSoup(html, "lxml")
+        async def fake_page(code: str, *, page_size: int, bizdate: str | None):
+            calls.append((page_size, bizdate))
+            return pages.get(bizdate, [])[:page_size]
 
-        monkeypatch.setattr(naver_finance.investor, "_fetch_html", mock_fetch_html)
+        monkeypatch.setattr(naver_finance.investor, "_fetch_trend_page", fake_page)
+
+        result = await naver_finance.fetch_investor_trends("005930", days=3)
+
+        assert [row["date"] for row in result["data"]] == [
+            "2024-01-15",
+            "2024-01-12",
+            "2024-01-11",
+        ]
+        assert calls == [(3, None), (1, "20240112")]
+
+    async def test_stops_when_history_runs_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_page(code: str, *, page_size: int, bizdate: str | None):
+            return [self._row("20240115")] if bizdate is None else []
+
+        monkeypatch.setattr(naver_finance.investor, "_fetch_trend_page", fake_page)
 
         result = await naver_finance.fetch_investor_trends("005930", days=20)
 
         assert len(result["data"]) == 1
-        assert result["data"][0]["foreign_net"] == -500000
-        assert result["data"][0]["foreign_holding_shares"] is None
-        assert result["data"][0]["foreign_holding_rate"] is None
 
 
 @pytest.mark.unit
