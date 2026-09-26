@@ -300,7 +300,6 @@ async def test_classify_idempotency_handles_keys_beyond_bind_arg_limit(
         await db_session.commit()
 
 
-
 def test_kr_dart_common_symbol_filter_excludes_non_dart_universe_rows() -> None:
     assert job._is_kr_dart_common_symbol("005930", "삼성전자") is True
     assert job._is_kr_dart_common_symbol("035420", "NAVER") is True
