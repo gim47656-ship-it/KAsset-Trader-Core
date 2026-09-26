@@ -17,6 +17,28 @@
 
 서버 한 대(`kasset-prod`, Tailscale)에서 `docker-compose.kasset.yml`로 돌립니다.
 
+```mermaid
+flowchart LR
+    APP["KAsset Trader<br/>Android 앱"] -->|HTTPS| CADDY["caddy"]
+    CADDY --> API["api<br/>앱 API · 시세 스트림"]
+
+    subgraph Server["kasset-prod (docker compose)"]
+        API
+        SCHED["scheduler"] -->|TaskIQ| WORKER["worker<br/>자동매매 사이클 · 데이터 수집"]
+        WORKER -->|MCP| AIMCP["ai-mcp<br/>codex exec<br/>luna / sol"]
+        API --> DB[("PostgreSQL<br/>PAPER 원장 · 시세 · 재무 · 수급")]
+        WORKER --> DB
+        API & WORKER --> REDIS[("redis")]
+        CRON["root cron<br/>DART 재무 · 종목 마스터"] --> DB
+    end
+
+    WORKER -->|시세·종목| TOSS["Toss Open API<br/>(조회 전용)"]
+    API -->|시세·호가| TOSS
+    WORKER --> EXT["DART · 네이버 수급 · 뉴스"]
+    WORKER -->|보조 판정| JEV["Jev<br/>(Vercel AI Gateway)"]
+    API -->|푸시| FCM["FCM"]
+```
+
 | 서비스 | 역할 |
 |---|---|
 | `api` | 앱용 FastAPI (Caddy 뒤) |
