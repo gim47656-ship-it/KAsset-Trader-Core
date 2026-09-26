@@ -350,9 +350,9 @@ class MobileWatchlistService:
             krx, us = per_market["KRX"], per_market["US"]
             krx_take = min(len(krx), max(capped_limit - len(us), -(-capped_limit // 2)))
             picked = krx[:krx_take] + us[: capped_limit - krx_take]
-            picked.sort(
-                key=lambda r: (r.prefix_rank, r[0].market != "KRX", r[0].symbol)
-            )
+            # 같은 관련도(prefix_rank) 안에서는 KRX·US를 번갈아 세워 한 시장이 앞
+            # 페이지를 독점하지 않게 한다. 각 시장 안의 순서는 그대로 유지한다.
+            picked = self._interleave_markets(picked)
         else:
             picked = (
                 await db.execute(ordered.order_by(*ordering).limit(capped_limit))
@@ -367,6 +367,24 @@ class MobileWatchlistService:
                 for row in picked
             ]
         )
+
+    @staticmethod
+    def _interleave_markets(rows: list) -> list:
+        result: list = []
+        for rank in sorted({row.prefix_rank for row in rows}):
+            krx = [
+                row
+                for row in rows
+                if row.prefix_rank == rank and row[0].market == "KRX"
+            ]
+            us = [
+                row
+                for row in rows
+                if row.prefix_rank == rank and row[0].market != "KRX"
+            ]
+            for index in range(max(len(krx), len(us))):
+                result.extend(group[index] for group in (krx, us) if index < len(group))
+        return result
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:

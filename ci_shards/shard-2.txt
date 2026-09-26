@@ -333,6 +333,7 @@ tests/test_symbol_sectors_model.py
 tests/test_symbol_trade_settings.py
 tests/test_symbol_universe_common.py
 tests/test_symbol_universe_sector_preservation.py
+tests/test_sync_symbol_master.py
 tests/test_sync_us_common_stock_flags_cli.py
 tests/test_toss_sellable_cache.py
 tests/test_toss_symbol_master_screener_filter.py
