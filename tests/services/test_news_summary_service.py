@@ -854,7 +854,7 @@ async def test_batch_persists_analysis_isolates_failure_skips_thin_input_and_is_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_ten_articles_use_one_model_call_and_missing_item_only_backs_off_that_row(
+async def test_full_batch_uses_one_model_call_and_missing_item_only_backs_off_that_row(
     db_session,
 ) -> None:
     suffix = uuid.uuid4().hex
@@ -903,9 +903,11 @@ async def test_ten_articles_use_one_model_call_and_missing_item_only_backs_off_t
     )
 
     assert len(client.calls) == 1
-    assert len(client.calls[0]["input_payload"]["items"]) == 10
+    assert (
+        len(client.calls[0]["input_payload"]["items"]) == NEWS_SUMMARY_ARTICLES_PER_CALL
+    )
     assert first.status == "partial"
-    assert first.summarized == 9
+    assert first.summarized == NEWS_SUMMARY_ARTICLES_PER_CALL - 1
     assert first.failed == 1
     requested_title = client.calls[0]["input_payload"]["items"][4]["title"]
     failed_article = next(
@@ -923,7 +925,7 @@ async def test_ten_articles_use_one_model_call_and_missing_item_only_backs_off_t
             )
         ).all()
     )
-    assert len(analyses) == 10
+    assert len(analyses) == NEWS_SUMMARY_ARTICLES_PER_CALL
     assert sum(analysis.summary == "" for analysis in analyses) == 1
     assert (
         next(
