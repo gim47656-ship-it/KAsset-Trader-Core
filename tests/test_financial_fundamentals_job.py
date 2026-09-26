@@ -244,6 +244,62 @@ async def test_skip_existing_budget_split(bind_job_session, db_session, monkeypa
     await db_session.commit()
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_classify_idempotency_handles_keys_beyond_bind_arg_limit(
+    bind_job_session, db_session
+):
+    # 전 종목 분기 백필은 고유 키가 8,192개를 넘는다. 키당 인자 4개라 한 쿼리로
+    # 조회하면 asyncpg의 32767 인자 한도를 넘어 커밋 전체가 실패했다(2026-09-26).
+    from types import SimpleNamespace
+
+    import sqlalchemy as sa
+
+    from app.models.financial_fundamentals_snapshot import (
+        FinancialFundamentalsSnapshot,
+    )
+
+    period = "2099A"
+    symbols = [f"8{i:05d}" for i in range(8200)]
+    await db_session.execute(
+        sa.delete(FinancialFundamentalsSnapshot).where(
+            FinancialFundamentalsSnapshot.fiscal_period == period
+        )
+    )
+    db_session.add(
+        FinancialFundamentalsSnapshot(
+            market="kr",
+            symbol=symbols[-1],
+            fiscal_period=period,
+            period_type="annual",
+            period_end_date=dt.date(2099, 12, 31),
+            source="dart",
+            source_collected_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+            data_state="fresh",
+        )
+    )
+    await db_session.commit()
+    payloads = [
+        SimpleNamespace(market="kr", symbol=s, fiscal_period=period, source="dart")
+        for s in symbols
+    ]
+
+    try:
+        result = await job._classify_idempotency(payloads)  # type: ignore[arg-type]
+        assert result == {
+            "wouldInsert": 8199,
+            "wouldUpdate": 1,
+            "duplicatePayloadKeys": 0,
+        }
+    finally:
+        await db_session.execute(
+            sa.delete(FinancialFundamentalsSnapshot).where(
+                FinancialFundamentalsSnapshot.fiscal_period == period
+            )
+        )
+        await db_session.commit()
+
+
 def test_kr_dart_common_symbol_filter_excludes_non_dart_universe_rows() -> None:
     assert job._is_kr_dart_common_symbol("005930", "삼성전자") is True
     assert job._is_kr_dart_common_symbol("035420", "NAVER") is True

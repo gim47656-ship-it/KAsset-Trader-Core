@@ -158,6 +158,11 @@ def _payload_key(p: FinancialFundamentalsUpsert) -> tuple[str, str, str, str]:
     )
 
 
+# asyncpg는 쿼리당 바인드 인자를 32767개까지 받는다. 키 하나가 인자 4개를 쓰므로
+# 전 종목(400 x 분기 포함 약 20 period) 백필이 이 한도를 넘지 않게 나눠 조회한다.
+_IDEMPOTENCY_KEYS_PER_QUERY = 5000
+
+
 async def _classify_idempotency(
     payloads: list[FinancialFundamentalsUpsert],
 ) -> dict[str, int]:
@@ -166,25 +171,30 @@ async def _classify_idempotency(
     unique = set(keys)
     if not unique:
         return {"wouldInsert": 0, "wouldUpdate": 0, "duplicatePayloadKeys": duplicate}
-    conditions = [
-        sa.and_(
-            FinancialFundamentalsSnapshot.market == m,
-            FinancialFundamentalsSnapshot.symbol == s,
-            FinancialFundamentalsSnapshot.fiscal_period == fp,
-            FinancialFundamentalsSnapshot.source == src,
-        )
-        for m, s, fp, src in unique
-    ]
+    unique_keys = list(unique)
+    existing: set[tuple[str, str, str, str]] = set()
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            sa.select(
-                FinancialFundamentalsSnapshot.market,
-                FinancialFundamentalsSnapshot.symbol,
-                FinancialFundamentalsSnapshot.fiscal_period,
-                FinancialFundamentalsSnapshot.source,
-            ).where(sa.or_(*conditions))
-        )
-        existing = set(result.all())
+        for start in range(0, len(unique_keys), _IDEMPOTENCY_KEYS_PER_QUERY):
+            conditions = [
+                sa.and_(
+                    FinancialFundamentalsSnapshot.market == m,
+                    FinancialFundamentalsSnapshot.symbol == s,
+                    FinancialFundamentalsSnapshot.fiscal_period == fp,
+                    FinancialFundamentalsSnapshot.source == src,
+                )
+                for m, s, fp, src in unique_keys[
+                    start : start + _IDEMPOTENCY_KEYS_PER_QUERY
+                ]
+            ]
+            result = await session.execute(
+                sa.select(
+                    FinancialFundamentalsSnapshot.market,
+                    FinancialFundamentalsSnapshot.symbol,
+                    FinancialFundamentalsSnapshot.fiscal_period,
+                    FinancialFundamentalsSnapshot.source,
+                ).where(sa.or_(*conditions))
+            )
+            existing.update(tuple(row) for row in result.all())
     return {
         "wouldInsert": len(unique) - len(existing),
         "wouldUpdate": len(existing),
