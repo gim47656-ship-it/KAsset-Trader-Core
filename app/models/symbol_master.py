@@ -13,7 +13,7 @@ class SymbolMaster(Base):
     __table_args__ = (
         CheckConstraint("market IN ('KRX', 'US')", name="ck_symbol_master_market"),
         CheckConstraint(
-            "security_type IN ('COMMON_STOCK', 'ETF')",
+            "security_type IN ('COMMON_STOCK', 'ETF', 'DEPOSITARY_RECEIPT')",
             name="ck_symbol_master_security_type",
         ),
         Index(

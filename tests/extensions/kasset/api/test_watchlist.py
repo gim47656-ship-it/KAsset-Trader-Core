@@ -448,7 +448,8 @@ async def test_instrument_search_integrates_markets_and_supports_filters(
     assert integrated.status_code == 200
     integrated_items = integrated.json()["items"]
     assert len(integrated_items) == 23
-    assert [item["market"] for item in integrated_items] == ["KRX"] * 22 + ["US"]
+    # 같은 관련도 안에서는 KRX·US가 번갈아 선다.
+    assert [item["market"] for item in integrated_items] == ["KRX", "US"] + ["KRX"] * 21
     assert inactive.symbol not in {item["symbol"] for item in integrated_items}
 
     explicit_all = await client.get(
@@ -534,7 +535,7 @@ async def test_instrument_search_all_keeps_us_match_when_krx_fills_limit(
     items = response.json()["items"]
     assert len(items) == 20
     assert [item["market"] for item in items].count("US") == 1
-    assert items[-1] == {
+    assert items[1] == {
         "symbol": watchlist_data["us_instrument"].symbol,
         "name": watchlist_data["us_instrument"].name,
         "market": "US",
