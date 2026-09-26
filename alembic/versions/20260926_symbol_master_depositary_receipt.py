@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from sqlalchemy.sql.naming import conv
+
 from alembic import op
 
 revision = "20260926_symbol_master_adr"
@@ -15,8 +17,9 @@ down_revision = "20260926_symbol_search_aliases"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# 원래 마이그레이션(20260828)과 같이 op.f()로 naming convention 접두사를 막는다.
-_NAME = op.f("ck_symbol_master_security_type")
+# 원래 마이그레이션(20260828)의 op.f()와 같이 naming convention 접두사를 막는다.
+# op.f()는 모듈 import 시점에 부를 수 없어 같은 역할의 conv()를 쓴다.
+_NAME = conv("ck_symbol_master_security_type")
 
 
 def upgrade() -> None:
