@@ -1,17 +1,19 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+KAsset-Trader-Core의 개발·운영 계약입니다. 운영 진입점은 `README.md`, 현재 상태는 `HANDOFF.md`를 확인합니다. 아래 ROB 번호별 설명에는 원본에서 계승한 비운영·역사 경로도 포함되므로, 기능이 코드에 남아 있다는 사실을 운영 활성화로 해석하지 않습니다.
 
 ## 프로젝트 개요
 
-AI 기반 자동 거래 분석 시스템으로, 다양한 금융 데이터를 수집하고 out-of-process MCP consumer(claude 세션 등)를 통해 투자 분석을 제공합니다.
+KAsset Trader Android 앱을 위한 FastAPI 서버입니다. 현재 운영 중심은 국장 PAPER 자동매매이며, 앱은 KR/US 시세·관심종목·검색·추천·모의 주문을 사용합니다.
 
-**주요 특징:**
-- 다중 시장 지원: 국내·해외주식(Toss / Yahoo Finance), 암호화폐(Upbit)
-- 다중 시간대 분석: 일봉 200개 + 분봉(60분/5분/1분)
-- AI 분석: out-of-process MCP consumer(claude 세션 등)가 담당 (런타임은 in-process LLM provider 미탑재 — ROB-501 가드)
+**운영 구성:**
+- 주식 데이터 provider는 Toss이며 수급·재무·뉴스는 네이버·DART 등 보조 소스를 사용합니다.
+- Codex 분석은 별도 `ai-mcp` sidecar가 맡습니다. Jev 보조 판정은 별도 HTTP 클라이언트 경로입니다.
+- `docker-compose.kasset.yml`과 `.github/workflows/deploy-kasset.yml`이 운영 구성·배포의 기준입니다. 원본 개발용 compose와 과거 MCP·웹 문서를 운영 실행 지침으로 대신 사용하지 않습니다.
 
 ## 개발 환경 설정
+
+이 절의 `uv`·`make` 명령은 격리된 개발 환경용입니다. **이 저장소의 Python test·lint·type check·build는 로컬 워크스테이션에서 실행하지 않습니다.** GitHub Actions가 기본이며, 서버 검증은 운영 DB·운영 프로세스와 분리한 checkout·test DB·container에서만 실행합니다. 운영 배포는 아래 PR 흐름과 README의 승인 절차를 따릅니다.
 
 ### 필수 요구사항
 - Python 3.13+
@@ -667,8 +669,8 @@ DB Tables:
 - 모든 코드 변경은 Pull Request를 통해 머지
 
 ### 브랜치 역할
-- **main**: 개발 브랜치 (모든 PR의 base)
-- **production**: 배포 브랜치 (GHCR 이미지 빌드 트리거)
+- **main**: PR의 기준 브랜치이자 현재 KAsset 배포 소스.
+- **production**: 원본 배포 방식에서 사용하던 이름. 현재 KAsset 운영을 위해 `main → production` 머지를 하지 않습니다.
 
 ### 브랜치 네이밍
 ```
@@ -677,50 +679,17 @@ fix/<task-id>-<설명>         # 버그 수정
 chore/<설명>                 # 유지보수
 ```
 
-### 워크플로우
-1. `main` 브랜치에서 feature branch 생성
-2. 코드 변경 후 커밋
-3. PR 생성 (base: `main`)
-4. 리뷰 후 머지
-5. 배포 시 `main` → `production` 머지
+### 워크플로우와 작업 경계
+1. 최신 `origin/main` 기준 새 feature/fix/docs 브랜치를 만듭니다.
+2. 브랜치가 `origin/main`을 upstream으로 물려받지 않도록 설정하고, 변경 파일만 커밋·push합니다.
+3. PR(base: `main`)의 해당 revision CI를 확인한 뒤 머지합니다.
+4. main의 Test 성공 후 Deploy가 self-hosted `kasset-prod`에서 실행됩니다. 마이그레이션 포함 배포는 운영자 승인과 `allow_migration=true`가 필요합니다.
 
-### Worktree 운영 규칙 (필수)
-
-**canonical repo `/Users/mgh3326/work/auto_trader` 는 항상 `main` 체크아웃 고정. 배포 머지 시에만 `production` 으로 일시 전환.** canonical repo에서 feature/fix 브랜치를 체크아웃하거나 작업하지 않습니다.
-
-코드 변경은 worktree에서 수행합니다. 다만 **새 Linear 이슈/병렬 작업**과 **같은 Linear 이슈의 follow-up**을 구분합니다:
-
-- 새 Linear 이슈, 병렬 작업, 기존 worktree가 dirty인 경우, 또는 이전 diff/reference를 보존해야 하는 경우: 새 worktree를 만듭니다.
-- 같은 Linear 이슈의 follow-up이고 기존 issue worktree가 clean하며 재사용 가능하면: 기존 worktree를 재사용해도 됩니다. 물리 worktree를 매번 새로 만드는 것이 필수는 아닙니다.
-- PR이 merge된 브랜치 위에서 계속 커밋하지 않습니다. follow-up 작업은 항상 최신 `origin/main` 기준 새 branch로 시작합니다.
-- worktree 재사용 전에는 `git status --short`, 필요한 diff/reference 백업, `git fetch --prune`을 먼저 확인합니다.
-
-```bash
-# canonical repo 업데이트
-cd /Users/mgh3326/work/auto_trader
-git fetch --prune origin
-git switch main
-git pull --ff-only
-
-# 새 Linear 이슈/병렬 작업: 새 worktree 생성
-git worktree add ../auto_trader.<issue-id> -b <branch-name> origin/main
-
-# 같은 Linear 이슈 follow-up: 기존 worktree가 clean하면 재사용
-cd /Users/mgh3326/work/auto_trader.<issue-id>
-git status --short
-git fetch --prune origin
-git switch -c <new-followup-branch> origin/main
-
-# PR 머지 후 정리 (필요 diff/reference가 없고 clean한 상태에서)
-cd /Users/mgh3326/work/auto_trader
-git worktree remove ../auto_trader.<issue-id>
-git branch -D <branch-name>
-```
-
-- **표준 worktree 경로**: `/Users/mgh3326/work/auto_trader.<issue-id>` (예: `/Users/mgh3326/work/auto_trader.rob-287`)
-- 이전 경로 `.claude/worktrees/`, `~/.claude/worktrees/`, `~/auto_trader/.worktrees/` 는 deprecated — 남아 있다면 표준 경로로 이관하거나 prune
-- 이관: `git worktree move <old-path> <new-path>` (dirty 없는 상태에서)
-- 삭제된 원격 브랜치(`upstream gone`) 는 주기적으로 `git fetch --prune && git branch -vv | grep ': gone\]'` 로 확인하고 정리
+- 이 PC의 Core 프로젝트는 `E:/KAsset-Trader-Core`입니다. Android 앱은 별도 HANSE 저장소의 `KAsset-Trader/android`이며, Core와 앱의 커밋·빌드를 혼동하지 않습니다.
+- 병렬 편집이나 다른 작업의 변경과 겹치는 경우 별도 worktree로 격리합니다. 기존 사용자 변경과 다른 owner의 파일을 덮어쓰지 않습니다.
+- 머지된 브랜치 위에 계속 커밋하지 않습니다. follow-up은 최신 `origin/main`에서 새 브랜치를 만듭니다.
+- CI 대기·머지·배포를 하나의 무인 명령으로 묶지 않습니다. 새 커밋이 생기면 기존 CI 결과가 그 커밋을 검증했다고 간주하지 않습니다.
+- 자동 커밋·push는 Main의 `git_finalize`를 사용하고 정확한 파일 목록을 넘깁니다. `main`·`production` 직접 push 금지는 유지합니다.
 
 ### CI required check — `ci-required` 집계와 HANDOFF-only fast path
 
