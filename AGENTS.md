@@ -13,8 +13,8 @@
    정적 가드 테스트(`tests/services/action_report/snapshot_backed/test_no_internal_llm_imports.py`)가
    이를 스캔한다.
 2. **브랜치 보호**: `main`·`production` 직접 push 금지. 모든 코드 변경은 feature branch + PR.
-3. **Worktree 규칙**: canonical repo `/Users/mgh3326/work/auto_trader`는 항상 `main` 체크아웃 고정.
-   코드 변경은 `/Users/mgh3326/work/auto_trader.<issue-id>` worktree에서 수행.
+3. **작업 경계**: 이 PC의 Core는 `E:/KAsset-Trader-Core`이고 Android 앱은 별도 HANSE 저장소다.
+   병렬 편집·다른 작업과의 충돌은 worktree로 격리하고, 사용자 변경은 보존한다.
    머지된 브랜치 위에 계속 커밋 금지 — follow-up은 최신 `origin/main` 기준 새 브랜치로 시작.
 4. **브로커 실행 표면은 전부 default-disabled**: demo/mock/live 실행 경로는 env 게이트
    (예: `BINANCE_SPOT_DEMO_ENABLED`, `KIWOOM_MOCK_ENABLED`, `TOSS_API_ENABLED`) +

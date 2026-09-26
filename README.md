@@ -11,7 +11,7 @@
 - **Android 앱 API**: `app/extensions/kasset/api/` — 로그인(Google), 관심종목·종목 검색, 시세·차트·호가 스트림, 추천 승인/거절, PAPER 주문·체결, 푸시(FCM).
 - **데이터 적재**: KR/US 일봉, 투자자 수급(네이버 모바일 API), DART 재무, 종목 마스터, 뉴스·공시.
 
-앱 소스는 별도 저장소(HANSE `KAsset-Trader/android`)에 있습니다.
+앱 소스는 [HANSE의 `KAsset-Trader/android`](https://github.com/gim47656-ship-it/HANSE/tree/main/KAsset-Trader/android)에 있습니다. 앱 APK 빌드는 HANSE에서, 서버 테스트·배포는 이 저장소에서 관리합니다.
 
 ## 운영 구성
 
@@ -24,17 +24,22 @@ flowchart LR
 
     subgraph Server["kasset-prod (docker compose)"]
         API
-        SCHED["scheduler"] -->|TaskIQ| WORKER["worker<br/>자동매매 사이클 · 데이터 수집"]
-        WORKER -->|MCP| AIMCP["ai-mcp<br/>codex exec<br/>luna / sol"]
-        API --> DB[("PostgreSQL<br/>PAPER 원장 · 시세 · 재무 · 수급")]
+        SCHED["scheduler"] -->|작업 등록| REDIS[("Redis 작업 큐 · 캐시")]
+        REDIS -->|TaskIQ| WORKER["worker<br/>자동매매 사이클 · 데이터 수집"]
+        WORKER -->|MCP| AIMCP["ai-mcp<br/>codex exec · luna / sol"]
+        API -->|MCP| AIMCP
+        API --> DB[("PostgreSQL / TimescaleDB<br/>PAPER 원장 · 시세 · 재무 · 수급")]
         WORKER --> DB
-        API & WORKER --> REDIS[("redis")]
-        CRON["root cron<br/>DART 재무 · 종목 마스터"] --> DB
+        API --> REDIS
+        MCP["mcp · analysis_readonly"] --> DB
+        CRON["root cron"] --> JOB["일회성 worker 컨테이너<br/>DART 재무 · 종목 마스터 보충"]
+        JOB --> DB
     end
 
     WORKER -->|시세·종목| TOSS["Toss Open API<br/>(조회 전용)"]
     API -->|시세·호가| TOSS
     WORKER --> EXT["DART · 네이버 수급 · 뉴스"]
+    JOB -->|재무 공시 수집| DART["OpenDART"]
     WORKER -->|보조 판정| JEV["Jev<br/>(Vercel AI Gateway)"]
     API -->|푸시| FCM["FCM"]
 ```
@@ -59,9 +64,9 @@ Toss 실계좌는 조회 전용입니다. 앱 주문은 PAPER로만 나갑니다
 
 ### AI 경로
 
-- 런타임(`app/**`)은 LLM SDK를 import하지 않습니다. 모든 호출은 `ai-mcp` sidecar(`McpStructuredJsonClient`) 경유이고, 정적 가드 테스트가 이를 강제합니다.
+- Codex 기반 뉴스·후보·매매 분석과 별칭 생성은 `McpStructuredJsonClient` → `ai-mcp` → `codex exec` 순서로 호출합니다. 앱 런타임에 LLM provider SDK를 직접 넣지 않는 경계를 정적 테스트로 검사합니다.
 - 추론 강도별 모델: `low`(뉴스·시장·스캔) = `gpt-6-luna`, `medium`/`high`(후보 검토·매매·크리티컬) = `gpt-6-sol` (`KASSET_AI_SIDECAR_EFFORT_MODELS`).
-- 뉴스 관련성·후보 가산점 보조 판정은 Jev(Vercel AI Gateway)입니다. 상세는 [`docs/kasset/AI_DUAL_PROVIDER.md`](docs/kasset/AI_DUAL_PROVIDER.md).
+- 뉴스 관련성·후보 가산점의 보조 판정은 별도 Jev HTTP 클라이언트가 Vercel AI Gateway를 호출합니다. Codex sidecar와 다른 경로입니다. 상세는 [`docs/kasset/AI_DUAL_PROVIDER.md`](docs/kasset/AI_DUAL_PROVIDER.md).
 
 ## 배포
 
@@ -86,13 +91,21 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 | 스크립트 | 용도 | 실행 |
 |---|---|---|
 | `build_financial_fundamentals_snapshots` | DART 재무 (하루 400종목, API 한도 18,000건) | root cron 매일 18:30 KST |
-| `sync_symbol_master` | 종목 마스터를 Toss universe에서 보충 (KRX 보통주·ETF, US 보통주·ETF·ADR) | 수동 (`--commit`), 예약 등록 예정 |
+| `sync_symbol_master` | 원본 KR/US universe에 있지만 검색 마스터에는 없는 보통주·ETF·미국 ADR 추가 | root cron 매일 22:00 KST, 수동 실행은 `--commit` |
 | `build_investor_flow_snapshots` | 투자자 수급 백필 | 수동 |
 | `backfill_daily_candles` | 일봉 백필 | 수동 |
 | `generate_symbol_search_aliases` | AI 검색 별칭 (sidecar `low`) | 수동 (`--commit`) |
 | `kasset_strategy_validation` | 전략 검증 보고서 (DB 읽기 전용) | 수동 (`--output`) |
 
-쓰기가 있는 스크립트는 모두 기본 dry-run이고 `--commit`을 줘야 저장합니다. 새 스케줄 등록은 운영자 승인이 필요합니다.
+`sync_symbol_master`와 AI 별칭 CLI는 기본 dry-run이며 `--commit`일 때 저장합니다. 나머지 수집기는 각 `--help`의 쓰기 옵션을 확인하세요. 새 스케줄 등록은 운영자 승인이 필요합니다.
+
+종목 동기화는 기존 `kr_symbol_universe`·`us_symbol_universe`에서 `symbol_master`로 **누락 행만** 보충합니다. 기존 이름 수정·상장폐지 반영·우선주 추가는 하지 않습니다. 원본 universe 수집과 검색 마스터 보충은 별개의 단계입니다.
+
+- 실행 파일: `/usr/local/bin/kasset-symbol-master-daily.sh`
+- 예약: `0 22 * * * /usr/local/bin/kasset-symbol-master-daily.sh >> /var/log/kasset-symbol-master-daily.log 2>&1`
+- 중복 실행 방지: `/run/kasset-symbol-master-daily.lock`에 `flock`
+- 점검: `crontab -l`, `systemctl is-active crond`, `/var/log/kasset-symbol-master-daily.log`
+- 복구: 원본 수집 상태를 확인한 뒤 위 일회성 컨테이너 명령으로 `scripts.sync_symbol_master --commit`을 실행합니다. 중복 키는 추가하지 않습니다.
 
 ## 개발 규칙 (요약)
 
