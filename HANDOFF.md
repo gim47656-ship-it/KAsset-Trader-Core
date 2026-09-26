@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-26 (ADR 검색 복구·종목 마스터 일일 보충·실기 확인·운영 문서 정리)
+갱신: 2026-09-26 (ADR 검색 복구·종목 마스터 일일 보충·실기 확인·운영 문서 정리·예약 작업 CRLF 복구·DART 인자 한도 수정·뉴스 요약 타임아웃 원인)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
@@ -21,6 +21,8 @@
 - **2026-09-25 전략 추가 검증(결론: 채택 없음)**: `scripts/kasset_strategy_validation.py`(PR #82, 주문·DB쓰기 없는 advisory CLI, `--output` JSON)를 수급 1년치 백필 완료(3,944종목, 950,074행 commit) 뒤 운영 DB로 실행했다. 수급 순위 1년(2025-09-22~2026-09-23) −27.6%·MDD −39.0%·310건·승률 34%, 최근 3개월 +0.9%·MDD −16.3% — 폐기. B 가격팩터(2025-11-10~) baseline −1.9%·MDD −44.2%, 시장폭<40% 신규매수 중단 +17.6%·MDD −33.2%, 시장폭<40% 전량청산 +1.0%·MDD −26.6%. 같은 기간 KOSPI/KOSDAQ 지수(toss_index)는 참고용이다. 앞선 브라우저 임시 계산(수급 +12.7%, B +36.5%)은 결측·캘린더·회계 처리 차이로 재현되지 않아 폐기한다. survivor bias·수급 공표시각 미확보·조정가 가정 한계가 있어 엄격한 OOS가 아니다. 재실행: `compose run --rm worker python -m scripts.kasset_strategy_validation --output <쓰기 가능 경로>`.
 - **2026-09-25 PEAD·B 기간분할(PR #84)**: 검증 CLI에 `pead`(DART 분기 순이익 YoY, 공시 다음 세션부터, 120세션 stale, 거래대금 21~200위, 20세션마다 10종목 tranche·60세션 보유, 활성 보유 중복은 차순위 대체)와 `price_factor_b.split_runs`(전/후반 flat-start), ±35% 이상봉 앞뒤 20세션 공통 제외(13봉·8종목)를 추가했다. B 전반(2025-11-10~2026-04-16) baseline +43.2%·필터 동일, 후반(2026-04-17~09-23) baseline −23.4% vs 신규매수 중단 +2.1% — 필터 효과는 후반 급락 회피에서만 나왔고 두 구간 모두 126세션 미만이라 inconclusive. PEAD는 DART 40종목뿐이라 inconclusive(+10.7%, 20건은 무의미). **다음 행동**: DART cron이 거래대금 상위 200위를 채우면 PEAD를 재실행해 PAPER 연결 여부를 판단한다.
 - **DART 재무 cron(2026-09-25 사용자 승인)**: 서버 root crontab `30 18 * * * /usr/local/bin/kasset-dart-daily.sh >> /var/log/kasset-dart-daily.log`(flock, `--with-quarterly --skip-existing --limit 400 --commit --allow-partial`, 하루 약 16,400요청). 전 종목이 차면 0종목 실행이 된다. 제거는 `crontab -e`에서 그 줄 삭제.
+- **2026-09-26 예약 작업 복구**: root crontab 두 줄(DART·종목 마스터) 끝에 CRLF가 붙어 `/bin/sh: 1#015: ambiguous redirect`로 스크립트가 아예 실행되지 않았다(로그 0바이트, `/var/log/cron`의 `CMDOUT`에만 남음). `tr -d '\r'`로 고쳤고 백업은 `/root/crontab.bak-20260926-crlf`다. crontab을 넣은 뒤에는 `crontab -l | cat -A`로 `^M`이 없는지 본다.
+- **2026-09-26 DART 전 종목 실행 실패와 수정**: 사용자 요청으로 수동 실행한 400종목 분기 백필이 fetch를 끝낸 뒤 `_classify_idempotency`의 단일 OR 조회에서 `the number of query arguments cannot exceed 32767`로 죽어 0행 커밋됐다(키 8,192개 초과, 키당 인자 4개). `upsert`는 이미 청크 처리라 무관했다. 조회를 키 5,000개 단위로 나누는 수정과 회귀 테스트를 `fix/fundamentals-idempotency-chunk` PR로 올렸다. 같은 날은 OpenDART 요청을 약 1.6만 건 쓴 뒤라 `--limit 70`으로만 재실행했다. **이 PR이 배포되기 전까지 `--limit 400` cron은 매번 같은 지점에서 실패한다.**
 - **종목 검색·ADR 복구(2026-09-26, PR #90·#91, 운영 `422e0ea6`)**: API 기본 50건·상한 100건, ALL은 같은 관련도에서 KRX/US 교차 정렬한다. `symbol_master`가 ADR을 허용하고 원본 universe의 누락 1,095행(KRX 보통주 188·ETF 3, US 보통주 159·ETF 365·ADR 380)을 운영 DB에 추가했다. SM-S926N에서 `skhy` 재검색 후 **SK하이닉스(ADR) / SKHY / US가 첫 행**, 결과 27건과 국장·미국 교차 표시를 확인했고 사용자도 정상 표시를 확인했다. 관심종목 추가·주문 제출은 하지 않았다.
 - **종목 마스터 자동 보충**: 사용자 승인으로 매일 22:00 KST root cron을 등록했다. 실행 파일·로그·수동 복구는 README 「수동·예약 데이터 작업」 참조. 같은 예약 스크립트를 수동 실행해 `추가 대상 0건 / 저장 0건`, exit 0과 crond active를 확인했다. 첫 예약 시각의 자연 실행 로그는 아직 미관측이다.
 - **AI 별칭**: 기존 수동 배치로 179종목·332행이 저장돼 있다. 별칭 생성은 자동 예약하지 않았다. `삼전`·`현차`는 매칭되지만 `하닉`·`엘솔`은 생성되지 않았다. ADR 누락은 AI 별칭 문제가 아니라 검색 마스터 누락이었으며 위 동기화로 해결했다.
@@ -28,6 +30,7 @@
 - **2026-09-25 새 계정(owner 7, 사용자 부친)**: 사용자 요청으로 `recommendation_market_scope=KR_ONLY`와 `promotion_bypass_enabled=true`만 owner 4와 맞췄다(서비스 함수 경유). risk_level 3·목표 0.8%·일손실 1.5%·매수 3/매도 2건은 그대로다 — 목표 0.8%는 `AccountStateGate`에서 실제 매수 축소(50%)·중단(100%) 기준이다.
 - **Jev 판정 연동(PR #74, 운영 배포 `fa87b3a2`, 키 적용 완료)**: `KASSET_JEV_API_KEY`(Vercel AI Gateway `vck_…`, CUELO와 같은 키 — 사용량·과금이 한 계정으로 합쳐진다)로 뉴스 요약 전 관련성 선별(P<0.2 배제, 6시간 backoff)과 후보 AI 가산 항=P(AGREE)(비중 0.05 유지)를 수행한다. 키가 없으면 기존 동작 그대로다. 2026-09-25 워커에서 `build_jev_client()` 활성·실호출 성공(747ms)과 `review.ai_call_events` provider `vercel-jev` 기록을 확인했다(`.env.kasset.pre-jev-20260925125331` 백업). 롤백은 키를 비우고 api·worker 재기동. 상세는 `docs/kasset/AI_DUAL_PROVIDER.md` 「Jev 판정」.
 - **다음 행동(Jev)**: 연휴 뒤 첫 정규장에서 뉴스 배제 비율(`raw_response.error_type=jev_not_relevant`)과 후보 evidence의 `kind=jev_stance` 분포, sidecar timeout 건수 변화를 읽기 전용으로 관찰한다.
+- **뉴스 요약 타임아웃(2026-09-26 원인 확인, 미수정)**: 09-20 이후 `news-summary` MCP 호출이 성공 191·120초 타임아웃(`AiProviderUnavailable`) 508·`ValueError` 301이다. codex 세션 기록상 모델 `gpt-6-luna`·effort `low`·도구 호출 0건이고, 출력 속도가 초당 약 50토큰으로 일정하다. 반면 10건 배치의 출력은 1.5k~7.6k토큰이라 약 6천 토큰을 넘으면 worker `KASSET_AI_MCP_TIMEOUT_SECONDS=120`에서 끊긴다(sidecar는 150초에 `exit_code=-9`). 실패도 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT=100`을 소모해 매일 13시 전후 한도가 바닥나 요약이 멈춘다. 행 로그의 `MissingBatchItem`(96건)은 항목별 검증 탈락이고 주원인이 아니다. 해결안(배치 축소·타임아웃 상향)은 사용자 결정 대기다.
 
 ### 유지 중인 계약·경계 (이관한 기록에서 통합)
 - 10분 producer + 5분 execution sweep이며 틱 즉시 손절이 아니다. 장중 조건 발생 후 봉 완료·다음 평가·다음 집행을 기다린다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후의 체결은 보장하지 않는다. 장외 강제 주문은 하지 않는다.
