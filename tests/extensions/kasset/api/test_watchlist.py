@@ -458,7 +458,8 @@ async def test_instrument_search_integrates_markets_and_supports_filters(
 
     kr = await client.get(f"/api/v1/instruments/search?q={search_term}&market=KRX")
     assert kr.status_code == 200
-    assert len(kr.json()["items"]) == 20
+    # 기본 limit(50)은 KRX 일치 22종목을 모두 돌려준다.
+    assert len(kr.json()["items"]) == 22
     assert all(item["market"] == "KRX" for item in kr.json()["items"])
 
     symbol_match = await client.get(
