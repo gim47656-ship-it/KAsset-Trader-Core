@@ -15,9 +15,9 @@ down_revision = "20260926_symbol_search_aliases"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_NAME = "ck_symbol_master_security_type"
 # 원래 마이그레이션(20260828)과 같이 op.f()로 naming convention 접두사를 막는다.
 _NAME = op.f("ck_symbol_master_security_type")
+
 
 def upgrade() -> None:
     op.drop_constraint(_NAME, "symbol_master", type_="check")
