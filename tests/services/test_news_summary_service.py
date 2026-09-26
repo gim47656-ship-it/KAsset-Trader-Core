@@ -904,8 +904,7 @@ async def test_full_batch_uses_one_model_call_and_missing_item_only_backs_off_th
 
     assert len(client.calls) == 1
     assert (
-        len(client.calls[0]["input_payload"]["items"])
-        == NEWS_SUMMARY_ARTICLES_PER_CALL
+        len(client.calls[0]["input_payload"]["items"]) == NEWS_SUMMARY_ARTICLES_PER_CALL
     )
     assert first.status == "partial"
     assert first.summarized == NEWS_SUMMARY_ARTICLES_PER_CALL - 1
