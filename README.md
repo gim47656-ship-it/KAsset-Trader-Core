@@ -1,160 +1,89 @@
-# Auto Trader
+# KAsset-Trader-Core
 
-**LLM 에이전트가 시장 분석부터 주문 실행, 체결 확정, 매매 회고까지 수행하는 AI 자동매매 시스템.**
+**KAsset Trader Android 앱의 서버.** 국장(KRX) 중심의 **PAPER(모의) 자동매매**를 돌리고, 앱에 시세·관심종목·추천·주문·잔고 API를 제공합니다.
 
-런타임은 결정론적인 데이터·주문·안전 레이어만 담당하고, 판단(LLM)은 MCP(Model Context Protocol)로 연결된 **프로세스 밖의 에이전트**가 수행합니다. 실계좌 주문 경로는 국내주식·미국주식의 Toss 하나이며, 그 밖의 주문 표면은 KAsset PAPER 모의 원장뿐입니다. 제거된 provider(KIS 등)는 과거 레저 행을 원래 provenance로 읽기 위한 데이터 모델만 남습니다.
+> 개인 운영 프로젝트이며 투자 조언이 아닙니다. 실계좌 주문 경로는 모두 기본 비활성(fail-closed)입니다.
+> 이 저장소는 `mgh3326/auto_trader`에서 출발했지만 지금은 독립 운영됩니다. 원본의 MCP 에이전트 매매·`/invest` 대시보드·KIS·Upbit 경로는 운영에서 쓰지 않습니다.
 
-이 저장소를 관통하는 질문은 하나입니다 — **"AI에게 계좌를 맡기려면 무엇이 필요한가?"** 아래 설계 원칙들은 그 답으로 하나씩 쌓아온 안전장치입니다.
+## 무엇을 하나
 
-> ⚠️ 개인 프로젝트이며 투자 조언이 아닙니다. 실계좌 연동 기능은 모두 기본 비활성(fail-closed)이며, 명시적인 환경변수 게이트와 주문별 confirm 없이는 동작하지 않습니다.
+- **PAPER 자동매매**: 장중 스캔 → 후보 선정 → AI 검토 → PAPER 주문 → 5단 청산 사다리(초기 손절 `진입가 − 3 ATR` 등). 현재 규칙과 근거는 [`HANDOFF.md`](HANDOFF.md).
+- **Android 앱 API**: `app/extensions/kasset/api/` — 로그인(Google), 관심종목·종목 검색, 시세·차트·호가 스트림, 추천 승인/거절, PAPER 주문·체결, 푸시(FCM).
+- **데이터 적재**: KR/US 일봉, 투자자 수급(네이버 모바일 API), DART 재무, 종목 마스터, 뉴스·공시.
 
-## 아키텍처
+앱 소스는 별도 저장소(HANSE `KAsset-Trader/android`)에 있습니다.
 
-```mermaid
-flowchart LR
-    subgraph Agents["LLM 에이전트 (out-of-process)"]
-        A1["Claude / Hermes"]
-        A2["Codex (TradingCodex)"]
-    end
+## 운영 구성
 
-    subgraph Runtime["auto_trader 런타임 (결정론 레이어)"]
-        MCP["MCP 서버<br/>140+ 도구 · 권한 프로파일 분리"]
-        DATA["시장 데이터<br/>시세 · 차트 · 뉴스 · 공시 · 수급 · 실적"]
-        GATE["주문 안전 게이트<br/>dry-run 기본 · confirm · approval_hash · 멱등키"]
-        LEDGER["주문 레저<br/>accepted-only 기록"]
-        REC["Reconcile<br/>fill-evidence 게이트"]
-        LOOP["학습 루프<br/>forecast · 매매 회고 · decision history"]
-    end
+서버 한 대(`kasset-prod`, Tailscale)에서 `docker-compose.kasset.yml`로 돌립니다.
 
-    subgraph Brokers["브로커"]
-        B1["Toss (live)"]
-        B2["KAsset PAPER (모의 원장)"]
-    end
+| 서비스 | 역할 |
+|---|---|
+| `api` | 앱용 FastAPI (Caddy 뒤) |
+| `worker` / `scheduler` | TaskIQ 작업자와 주기 트리거 (PAPER 자동매매 사이클, 시세·데이터 수집) |
+| `ai-mcp` | AI sidecar. 구독형 `codex exec`를 MCP로 감싸 앱 밖에서 LLM을 호출 |
+| `mcp` | 운영 조회용 MCP 서버 |
+| `db` / `redis` / `caddy` | PostgreSQL(TimescaleDB) · Redis · HTTPS 프록시 |
+| `migration` | 수동 배포 때만 쓰는 Alembic 실행 프로필 |
 
-    A1 & A2 --> MCP
-    MCP --> DATA
-    MCP --> GATE
-    GATE --> B1 & B2
-    GATE --> LEDGER
-    LEDGER --> REC
-    REC -. "order-id 체결 증거 조회" .-> B1 & B2
-    REC --> LOOP
-    LOOP -. "다음 판단에 재주입" .-> MCP
+### 브로커
+
+| 시장 | 시세 | 주문 |
+|---|---|---|
+| 국장 (KRX) | Toss | KAsset PAPER (모의 원장) |
+| 미국 | Toss | KAsset PAPER |
+
+Toss 실계좌는 조회 전용입니다. 앱 주문은 PAPER로만 나갑니다. KIS는 제거됐습니다.
+
+### AI 경로
+
+- 런타임(`app/**`)은 LLM SDK를 import하지 않습니다. 모든 호출은 `ai-mcp` sidecar(`McpStructuredJsonClient`) 경유이고, 정적 가드 테스트가 이를 강제합니다.
+- 추론 강도별 모델: `low`(뉴스·시장·스캔) = `gpt-6-luna`, `medium`/`high`(후보 검토·매매·크리티컬) = `gpt-6-sol` (`KASSET_AI_SIDECAR_EFFORT_MODELS`).
+- 뉴스 관련성·후보 가산점 보조 판정은 Jev(Vercel AI Gateway)입니다. 상세는 [`docs/kasset/AI_DUAL_PROVIDER.md`](docs/kasset/AI_DUAL_PROVIDER.md).
+
+## 배포
+
+```
+feature branch → PR → GitHub Actions Test 통과 → squash merge → Deploy(self-hosted runner, kasset-prod) 자동
 ```
 
-## 핵심 설계 원칙
+- `main` 직접 push는 금지입니다.
+- `alembic/versions` 변경이 있으면 자동 배포가 멈춥니다(`exit 2`). 이때는 Actions → Deploy → `workflow_dispatch`에서 `allow_migration=true`로 수동 배포합니다(DB 백업 후 migration).
+- 롤백과 재배포도 `workflow_dispatch`(`sha`)로 합니다.
 
-### 1. LLM은 프로세스 밖에
+## 수동·예약 데이터 작업
 
-런타임 코드는 in-process LLM provider를 import하지 않습니다(정적 가드 테스트가 `app/**` 전체를 스캔해 강제). 판단은 MCP로 연결된 에이전트가, 데이터 수집·주문 실행·검증은 런타임이 맡습니다. 도구 표면은 **권한 프로파일**로 분리되어, 계좌조회 전용 에이전트는 주문 도구에 아예 접근할 수 없습니다.
-
-### 2. 주문은 fail-closed
-
-- 모든 주문 도구는 `dry_run` 기본값 — 실전송은 `confirm=True`를 매번 명시해야 합니다.
-- `preview → approval_hash(정규화된 주문의 해시 토큰, TTL 5분) → place에서 재계산 검증` — 프리뷰와 다른 주문은 전송 자체가 거부됩니다.
-- 결정적 멱등키가 같은 주문의 이중 제출을 차단합니다. 주문 POST의 타임아웃 재시도는 전면 제거했고(재-POST = 이중주문 리스크), 브로커가 멱등을 지원하지 않는 경로는 전송 전 intent 테이블 선점으로 로컬에서 차단합니다.
-- 손실매도 가드, 래더 사이징 캡, 섹터 집중도 경고 등 코드 레벨 가드가 판단 레이어와 독립적으로 동작합니다.
-- 실계좌·모의 어댑터 모두 호스트 allowlist로 엔드포인트를 고정합니다(모의 어댑터에서 live 호스트는 선택 불가).
-
-### 3. 체결은 증거로만 (fill-evidence gate)
-
-주문 전송 시점에는 **accepted-only**만 기록합니다. 체결·손익 장부는 브로커의 order-id 키 체결 증거를 확인한 reconcile을 통해서만 확정됩니다. "보냈으니 체결됐겠지"를 시스템 차원에서 금지한 것으로, KR/US 라이브 주문 경로에 동일하게 적용되어 있습니다.
-
-### 4. 매매는 학습 루프로
-
-주문→체결→저널→forecast→회고가 `correlation_id`로 연결됩니다. 에이전트는 다음 판단 때 자신의 과거 결정과 회고를 주입받고, forecast는 확률·범위로 기록되어 실제 결과와 대조하는 캘리브레이션 대시보드로 노출됩니다. 예측이 맞았는지 시스템이 기억하고 다시 보여주는 구조입니다.
-
-## 지원 시장 / 브로커
-
-| 시장 | 데이터 | 실주문 | 모의 |
-|---|---|---|---|
-| 국내주식 (KRX/NXT) | Toss · Naver · KRX | Toss | KAsset PAPER |
-| 미국주식 | Toss · Yahoo · Finnhub · TradingView | Toss | KAsset PAPER |
-
-보조 데이터: DART 공시, Finnhub 실적 캘린더, 네이버/Finnhub 뉴스(관련성 판정 파이프라인), 투자자 수급(외인/기관), 증권사 리서치 리포트 인제스트, 환율.
-
-## MCP 도구 표면
-
-140+ 도구가 streamable-http MCP 서버로 노출됩니다.
-
-- **조회/분석**: 시세, OHLCV(멀티 타임프레임), 스크리너(KR/US/crypto), 뉴스, 공시, 실적, 수급, 밸류에이션, 포트폴리오
-- **주문 계열**: preview / place / modify / cancel + 주문이력 · 주문가능금액 (브로커·계좌모드별 변형)
-- **레저/검증**: 주문 레저 조회, reconcile(fill-evidence), 매매 회고, forecast 기록
-- **정책/운영**: trading policy 조회(버전 스탬핑), 운영 브리핑, watch 조건 관리
-
-도구 상세는 [`app/mcp_server/README.md`](app/mcp_server/README.md)를 참고하세요.
-
-## 웹 대시보드 (`/invest`)
-
-스크리너(KR/US/crypto), 종목 상세(수급·뉴스·실적·리서치), 통합 주문/체결 뷰(주문 provenance 포함), forecast 캘리브레이션 인사이트를 제공하는 React 대시보드입니다.
-
-<!-- TODO(ROB-805): 스크린샷 2~3장 — 스크리너 / 종목 상세 / insights 캘리브레이션 -->
-
-## 기술 스택
-
-Python 3.13 · FastAPI · SQLAlchemy(async) + PostgreSQL · Redis · Alembic · TaskIQ · Prefect · React + TypeScript(invest 프론트엔드) · MCP(streamable-http) · pytest(85%+ 커버리지, xdist 병렬)
-
-## 시작하기
-
-### 요구사항
-
-- Python 3.13+, UV, PostgreSQL, Redis
-
-### 설치
+서버에서 일회성 컨테이너로 실행합니다.
 
 ```bash
-git clone <repository-url>
-cd auto_trader
-
-uv sync --all-groups          # 의존성 설치
-cp env.example .env           # 환경변수 설정 (.env 편집)
-uv run alembic upgrade head   # DB 마이그레이션
-make dev                      # 개발 서버 (uvicorn --reload)
+cd /opt/kasset-trader-core
+docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
+  -w /app -e PYTHONPATH=/app worker /app/.venv/bin/python -m scripts.<script> [...]
 ```
 
-```bash
-docker compose up -d          # PostgreSQL / Redis / Adminer
-```
+| 스크립트 | 용도 | 실행 |
+|---|---|---|
+| `build_financial_fundamentals_snapshots` | DART 재무 (하루 400종목, API 한도 18,000건) | root cron 매일 18:30 KST |
+| `sync_symbol_master` | 종목 마스터를 Toss universe에서 보충 (KRX 보통주·ETF, US 보통주·ETF·ADR) | 수동 (`--commit`), 예약 등록 예정 |
+| `build_investor_flow_snapshots` | 투자자 수급 백필 | 수동 |
+| `backfill_daily_candles` | 일봉 백필 | 수동 |
+| `generate_symbol_search_aliases` | AI 검색 별칭 (sidecar `low`) | 수동 (`--commit`) |
+| `kasset_strategy_validation` | 전략 검증 보고서 (DB 읽기 전용) | 수동 (`--output`) |
 
-**주요 환경 변수** (전체는 `env.example` 참고):
+쓰기가 있는 스크립트는 모두 기본 dry-run이고 `--commit`을 줘야 저장합니다. 새 스케줄 등록은 운영자 승인이 필요합니다.
 
-- `DATABASE_URL`, `REDIS_URL` — 필수 인프라
-- `TOSS_API_CLIENT_ID/SECRET` — 운영 브로커 자격증명
-- 실주문 게이트(`TOSS_LIVE_ORDER_MUTATIONS_ENABLED` 등)는 **모두 기본 off**
+## 개발 규칙 (요약)
 
-## KAsset Android 호환 API
+정본은 [`CLAUDE.md`](CLAUDE.md)이고, 에이전트용 요약은 [`AGENTS.md`](AGENTS.md)입니다.
 
-`app/extensions/kasset/api/`가 KAsset Trader Android 앱의 pairing, broker, account,
-market, PAPER order 계약을 제공한다. 주문·정정·취소는 `PAPER` 전용이고, `TOSS`는
-조회 전용(`LIVE_READ_ONLY`) 카탈로그 항목으로만 노출되어 앱 주문 요청은 서버에서
-`409 BROKER_READ_ONLY`로 차단된다.
-
-## 테스트
-
-```bash
-make test          # fast gate (live 제외)
-make test-unit     # 단위 테스트만
-make test-cov      # 커버리지 리포트
-make test-live     # 외부 API 실호출 테스트 (--run-live 명시 필요)
-make lint          # Ruff + ty 타입체크
-make security      # bandit · safety
-```
-
-- 마커: `unit` / `integration` / `live`(integration의 strict subset, `--run-live` 필요) / `slow`
-- 소켓 가드: 외부 소켓은 `live` 마커 **+** 명시적 `--run-live` 조합에서만 허용된다(ROB-1296). `integration` 마커는 네트워크 접근 권한을 주지 않으며, 로컬 PostgreSQL/Redis는 마커와 무관하게 loopback 주소로 허용된다 — [`docs/runbooks/hermetic-test-socket-guard.md`](docs/runbooks/hermetic-test-socket-guard.md)
-- CI(GitHub Actions): lint → 병렬 fast gate(xdist loadfile) → TaskIQ smoke → 보안 검사 → 커버리지
+- **테스트·lint는 로컬에서 돌리지 않습니다.** 기본 검증 경로는 GitHub Actions입니다(`ruff` + `ty` + pytest 4 shard, TaskIQ smoke, migration round-trip). 새 테스트 파일은 `ci_shards/shard-N.txt` 한 곳에 정렬 위치로 추가합니다.
+- 새 테이블이나 제약을 바꾸는 마이그레이션은 migration round-trip 테스트의 post-boundary 목록과 `tests/_schema_bootstrap.py` 버전도 함께 갱신합니다.
+- 주문 레저 직접 쓰기, 게이트 완화, 스케줄 무단 등록은 금지입니다.
+- 심볼 변환은 `app/core/symbol.py`만 사용합니다.
 
 ## 문서
 
-- 운영 런북: [`docs/runbooks/`](docs/runbooks/) — 브로커별 smoke 테스트, reconcile, 배포, 인시던트 대응
-- DB 구조: [`STOCK_INFO_GUIDE.md`](STOCK_INFO_GUIDE.md)
-- 배포: [`DEPLOYMENT.md`](DEPLOYMENT.md) · [`DOCKER_USAGE.md`](DOCKER_USAGE.md)
-- Upbit WebSocket: [`UPBIT_WEBSOCKET_README.md`](UPBIT_WEBSOCKET_README.md)
-
-## 모니터링
-
-표준 모니터링은 Sentry입니다. `SENTRY_DSN` 설정 시 활성화되며, 민감 필드(`authorization`, `cookie`, `token`, `secret`, `password`)는 마스킹됩니다.
-
-## 라이센스
-
-이 프로젝트는 MIT 라이센스 하에 배포됩니다.
+- 현재 운영 상태와 다음 행동: [`HANDOFF.md`](HANDOFF.md)
+- 작업 기록: [`doc/history/`](doc/history/)
+- KAsset 설계: [`docs/kasset/`](docs/kasset/) — AI 경로, 자동매매 돌파 계약, Core 통합 지도
+- 런북: [`docs/runbooks/`](docs/runbooks/)
