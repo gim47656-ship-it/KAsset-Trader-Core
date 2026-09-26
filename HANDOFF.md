@@ -1,5 +1,5 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-26 (ADR 검색 복구·종목 마스터 일일 보충·실기 확인·운영 문서 정리·예약 작업 CRLF 복구·DART 인자 한도 수정·뉴스 요약 타임아웃 원인)
+갱신: 2026-09-26 (ADR 검색 복구·종목 마스터 일일 보충·실기 확인·운영 문서 정리·예약 작업 CRLF 복구·DART 인자 한도 수정(PR #93)·뉴스 요약 배치 5건)
 
 ## 현재 목표·운영 상태
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
@@ -30,7 +30,7 @@
 - **2026-09-25 새 계정(owner 7, 사용자 부친)**: 사용자 요청으로 `recommendation_market_scope=KR_ONLY`와 `promotion_bypass_enabled=true`만 owner 4와 맞췄다(서비스 함수 경유). risk_level 3·목표 0.8%·일손실 1.5%·매수 3/매도 2건은 그대로다 — 목표 0.8%는 `AccountStateGate`에서 실제 매수 축소(50%)·중단(100%) 기준이다.
 - **Jev 판정 연동(PR #74, 운영 배포 `fa87b3a2`, 키 적용 완료)**: `KASSET_JEV_API_KEY`(Vercel AI Gateway `vck_…`, CUELO와 같은 키 — 사용량·과금이 한 계정으로 합쳐진다)로 뉴스 요약 전 관련성 선별(P<0.2 배제, 6시간 backoff)과 후보 AI 가산 항=P(AGREE)(비중 0.05 유지)를 수행한다. 키가 없으면 기존 동작 그대로다. 2026-09-25 워커에서 `build_jev_client()` 활성·실호출 성공(747ms)과 `review.ai_call_events` provider `vercel-jev` 기록을 확인했다(`.env.kasset.pre-jev-20260925125331` 백업). 롤백은 키를 비우고 api·worker 재기동. 상세는 `docs/kasset/AI_DUAL_PROVIDER.md` 「Jev 판정」.
 - **다음 행동(Jev)**: 연휴 뒤 첫 정규장에서 뉴스 배제 비율(`raw_response.error_type=jev_not_relevant`)과 후보 evidence의 `kind=jev_stance` 분포, sidecar timeout 건수 변화를 읽기 전용으로 관찰한다.
-- **뉴스 요약 타임아웃(2026-09-26 원인 확인, 미수정)**: 09-20 이후 `news-summary` MCP 호출이 성공 191·120초 타임아웃(`AiProviderUnavailable`) 508·`ValueError` 301이다. codex 세션 기록상 모델 `gpt-6-luna`·effort `low`·도구 호출 0건이고, 출력 속도가 초당 약 50토큰으로 일정하다. 반면 10건 배치의 출력은 1.5k~7.6k토큰이라 약 6천 토큰을 넘으면 worker `KASSET_AI_MCP_TIMEOUT_SECONDS=120`에서 끊긴다(sidecar는 150초에 `exit_code=-9`). 실패도 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT=100`을 소모해 매일 13시 전후 한도가 바닥나 요약이 멈춘다. 행 로그의 `MissingBatchItem`(96건)은 항목별 검증 탈락이고 주원인이 아니다. 해결안(배치 축소·타임아웃 상향)은 사용자 결정 대기다.
+- **뉴스 요약 타임아웃(2026-09-26 원인 확인, 배치 5건으로 수정)**: 09-20 이후 `news-summary` MCP 호출이 성공 191·120초 타임아웃(`AiProviderUnavailable`) 508·`ValueError` 301이었다. codex 세션 기록상 모델 `gpt-6-luna`·effort `low`·도구 호출 0건이고, 출력 속도가 초당 약 50토큰으로 일정하다. 반면 10건 배치의 출력은 1.5k~7.6k토큰이라 약 6천 토큰을 넘으면 worker `KASSET_AI_MCP_TIMEOUT_SECONDS=120`에서 끊겼다(sidecar는 150초에 `exit_code=-9`). 실패도 `KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT=100`을 소모해 매일 13시 전후 한도가 바닥났다. 행 로그의 `MissingBatchItem`(96건)은 항목별 검증 탈락이고 주원인이 아니다. 사용자 결정으로 `NEWS_SUMMARY_ARTICLES_PER_CALL`을 10→5로 줄였다(최악 약 76초). 일일 호출 상한 100은 그대로라 하루 최대 요약 기사 수는 1,000→500건이다. **다음 행동**: 배포 뒤 첫 요약 시간대에 `review.ai_call_events`의 `news-summary` 성공률·지연을 읽기 전용으로 본다.
 
 ### 유지 중인 계약·경계 (이관한 기록에서 통합)
 - 10분 producer + 5분 execution sweep이며 틱 즉시 손절이 아니다. 장중 조건 발생 후 봉 완료·다음 평가·다음 집행을 기다린다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후의 체결은 보장하지 않는다. 장외 강제 주문은 하지 않는다.

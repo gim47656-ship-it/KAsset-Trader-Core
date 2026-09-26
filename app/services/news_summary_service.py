@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
-NEWS_SUMMARY_ARTICLES_PER_CALL = 10
+# gpt-6-luna(codex exec)는 초당 약 50토큰이고 10건 배치 출력이 7.6k토큰까지 나와
+# 120초 MCP timeout을 자주 넘었다(2026-09-26). 5건이면 최악 약 76초다.
+NEWS_SUMMARY_ARTICLES_PER_CALL = 5
 NEWS_SUMMARY_DAILY_CALL_LIMIT = settings.KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT
 NEWS_SUMMARY_RETRY_BACKOFF = timedelta(hours=6)
 _NEWS_SUMMARY_FEATURE = "kasset_news_summary"

@@ -15,6 +15,7 @@ from app.services.disclosures.summary_service import (
     build_disclosure_summary_generator,
 )
 from app.services.news_summary_service import (
+    NEWS_SUMMARY_ARTICLES_PER_CALL,
     NewsSummaryInput,
     build_news_summary_generator,
 )
@@ -154,7 +155,7 @@ async def test_news_summary_mcp_route_receives_the_batch_schema(
     schema = captured["schema"]
     assert isinstance(schema, dict)
     assert schema["required"] == ["items"]
-    assert schema["properties"]["items"]["maxItems"] == 10
+    assert schema["properties"]["items"]["maxItems"] == NEWS_SUMMARY_ARTICLES_PER_CALL
 
 
 @pytest.mark.asyncio
