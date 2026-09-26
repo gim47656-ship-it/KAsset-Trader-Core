@@ -58,5 +58,6 @@
 - `deploy.sh`는 기존 수동 절차와 동일: `git checkout <sha>` → `.env.kasset`의 `CORE_IMAGE_TAG/VCS_REF` 갱신(`.env.kasset.pre-<sha8>` 백업) → `compose build api` → `up -d api worker scheduler mcp ai-mcp` → `https://$KASSET_DOMAIN/health` 200 + 5개 컨테이너 새 이미지 확인(최대 180초) → 실패 시 이전 SHA로 롤백.
 - **alembic/versions 변경이 포함되면 자동배포는 exit 2로 멈춘다.** `workflow_dispatch`에서 `allow_migration=true`로 수동 실행하면 `backups/kasset-pre-migration-*.dump.gz` 백업 후 `compose --profile migration run migration`을 돌리고 배포한다. DB는 자동 롤백하지 않는다.
 - 롤백/재배포: Actions → Deploy → Run workflow에 `sha` 입력.
+- **배포 릴리즈 기록(2026-09-26 사용자 승인)**: Deploy가 성공하면 `release` job(ubuntu-latest, `contents: write`)이 `deploy-<KST YYYYMMDD-HHMM>-<sha7>` 태그로 GitHub Release를 만든다. 노트는 직전 릴리즈 이후 merge된 PR 목록이다(`--generate-notes --notes-start-tag`). 수동 재배포·롤백도 새 릴리즈로 남는다. GITHUB_TOKEN이 만든 release는 다른 워크플로를 트리거하지 않아 legacy `ghcr-images.yml`(`release: published`)은 돌지 않는다. 릴리즈 생성이 실패해도 배포는 되돌리지 않는다.
 - `/opt/kasset-trader-core`는 `ghrunner` 소유로 바꿨다(root가 아닌 runner가 checkout·env 갱신·compose를 실행). 기존 root cron 백업(`deploy/kasset-db-backup.sh`, `/root/backups`)은 영향 없다.
 - 저장소가 public이라 fork PR 워크플로는 외부 기여자 전원 승인 필수로 설정했다. 사용자가 fork network 이탈 후 private 전환 예정(Free 플랜에서는 branch protection·environment 승인이 비활성화되지만 위 자동배포 모델은 그것에 의존하지 않는다).

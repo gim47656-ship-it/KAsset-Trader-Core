@@ -6,6 +6,10 @@ name: Deploy
 # allow_migration=true 로만 배포할 수 있다(DB 백업 후 migration). 롤백/재배포도 workflow_dispatch(sha).
 # 러너는 운영서버 자체(self-hosted, label kasset-prod)라 SSH 포트를 열지 않는다.
 # `production` environment는 배포 이력·URL 표시용이며 protection rule은 두지 않는다.
+# 배포가 성공하면 release job이 `deploy-<KST 시각>-<sha7>` 태그로 GitHub Release를 만든다
+# (배포 기록용, 2026-09-26 사용자 승인). GITHUB_TOKEN으로 만든 release는 다른 워크플로를
+# 트리거하지 않으므로 `ghcr-images.yml`의 `release: published`는 실행되지 않는다.
+# Release 생성 실패는 이미 끝난 배포를 되돌리지 않는다.
 on:
   workflow_run:
     workflows: [Test]
@@ -40,6 +44,8 @@ jobs:
       name: production
       url: https://${{ vars.KASSET_PUBLIC_HOST }}/health
     timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
     steps:
       - name: Resolve target SHA
         id: target
@@ -78,3 +84,32 @@ jobs:
           set -euo pipefail
           chmod +x deploy/kasset/deploy.sh
           deploy/kasset/deploy.sh "${{ steps.target.outputs.sha }}"
+
+  release:
+    name: record GitHub release
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    steps:
+      - name: Create deploy release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ needs.deploy.outputs.sha }}
+        run: |
+          set -euo pipefail
+          short="${SHA:0:7}"
+          tag="deploy-$(TZ=Asia/Seoul date +%Y%m%d-%H%M)-${short}"
+          title="Deploy $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST') · ${short}"
+          prev=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')
+          if [ -n "$prev" ]; then
+            gh release create "$tag" --target "$SHA" --title "$title" \
+              --generate-notes --notes-start-tag "$prev" --latest
+          else
+            gh release create "$tag" --target "$SHA" --title "$title" \
+              --notes "운영 배포 기록 시작. 배포 commit: ${SHA}" --latest
+          fi
+          echo "created release $tag"
