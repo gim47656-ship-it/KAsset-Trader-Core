@@ -428,7 +428,8 @@ class PaperAccountAdapter:
             elif identity in market_symbols:
                 previous = stale.get(identity)
                 if previous is None or (row.updated_at, row.position_cycle_id) > (
-                    previous.updated_at, previous.position_cycle_id
+                    previous.updated_at,
+                    previous.position_cycle_id,
                 ):
                     stale[identity] = row
 

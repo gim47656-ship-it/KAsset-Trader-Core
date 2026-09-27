@@ -237,20 +237,29 @@ async def test_trading_state_reads_latest_owner_cycle_without_rewriting_settings
     db_session.add_all(
         [
             KAssetAutomationCycleEvent(
-                owner_user_id=user.id, observed_at=cycle_time - timedelta(hours=1),
-                finished_at=cycle_time - timedelta(hours=1), status="completed",
-                candidate_count=8, recommendation_count=2,
+                owner_user_id=user.id,
+                observed_at=cycle_time - timedelta(hours=1),
+                finished_at=cycle_time - timedelta(hours=1),
+                status="completed",
+                candidate_count=8,
+                recommendation_count=2,
             ),
             KAssetAutomationCycleEvent(
-                owner_user_id=user.id, observed_at=cycle_time,
-                finished_at=cycle_time + timedelta(seconds=18), status="skipped",
+                owner_user_id=user.id,
+                observed_at=cycle_time,
+                finished_at=cycle_time + timedelta(seconds=18),
+                status="skipped",
                 skipped_reason="no_regular_market_open",
-                candidate_count=2, recommendation_count=0,
+                candidate_count=2,
+                recommendation_count=0,
             ),
             KAssetAutomationCycleEvent(
-                owner_user_id=other_user.id, observed_at=cycle_time + timedelta(hours=1),
-                finished_at=cycle_time + timedelta(hours=1), status="failed",
-                candidate_count=99, recommendation_count=0,
+                owner_user_id=other_user.id,
+                observed_at=cycle_time + timedelta(hours=1),
+                finished_at=cycle_time + timedelta(hours=1),
+                status="failed",
+                candidate_count=99,
+                recommendation_count=0,
             ),
         ]
     )
@@ -270,7 +279,8 @@ async def test_trading_state_reads_latest_owner_cycle_without_rewriting_settings
     )
     try:
         response = await ai_trading_state(
-            SimpleNamespace(user=user), db_session  # type: ignore[arg-type]
+            SimpleNamespace(user=user),
+            db_session,  # type: ignore[arg-type]
         )
         payload = response.model_dump(mode="json", by_alias=True)
         assert payload["updatedAt"] == "2026-09-01T00:00:00Z"
@@ -307,7 +317,8 @@ async def test_trading_state_missing_cycle_is_not_reported_as_success(
     )
     db = SimpleNamespace(scalar=AsyncMock(return_value=None))
     response = await ai_trading_state(
-        SimpleNamespace(user=SimpleNamespace(id=102)), db  # type: ignore[arg-type]
+        SimpleNamespace(user=SimpleNamespace(id=102)),
+        db,  # type: ignore[arg-type]
     )
     assert response.latest_automation_cycle is None
     db.scalar.assert_awaited_once()

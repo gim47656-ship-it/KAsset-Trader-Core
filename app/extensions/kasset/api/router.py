@@ -1055,9 +1055,7 @@ async def ai_trading_state(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AITradingStateResponse:
     now = datetime.now(UTC)
-    snapshot = await AITradingPolicyService().get_snapshot(
-        db, session.user.id, now=now
-    )
+    snapshot = await AITradingPolicyService().get_snapshot(db, session.user.id, now=now)
     latest_cycle = await db.scalar(
         select(KAssetAutomationCycleEvent)
         .where(KAssetAutomationCycleEvent.owner_user_id == session.user.id)

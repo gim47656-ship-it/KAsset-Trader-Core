@@ -553,7 +553,6 @@ class AITradingStateResponse(BaseModel):
         return _serialize_timestamp(value)
 
 
-
 class PromotionBypassRequest(BaseModel):
     """승격 근거 없는 PAPER 자동실행 허용을 소유자가 직접 켜고 끈다."""
 
