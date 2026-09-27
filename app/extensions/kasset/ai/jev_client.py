@@ -241,9 +241,7 @@ def parse_judgment(
     if not isinstance(usage, Mapping):
         raise JevJudgmentError("response is missing a usage object")
     input_tokens = _non_negative_int(usage.get("input_tokens"), field="input_tokens")
-    output_tokens = _non_negative_int(
-        usage.get("output_tokens"), field="output_tokens"
-    )
+    output_tokens = _non_negative_int(usage.get("output_tokens"), field="output_tokens")
 
     parsed: dict[str, JevBooleanAnswer | JevChoiceAnswer] = {}
     for question_id, question in questions.items():
