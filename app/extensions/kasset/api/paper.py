@@ -26,7 +26,7 @@ from app.extensions.kasset.api.paper_schemas import (
     SymbolsResponse,
 )
 from app.extensions.kasset.api.toss_market_data import toss_market_data
-from app.extensions.kasset.models import AndroidPaperAccount
+from app.extensions.kasset.models import AndroidPaperAccount, KAssetPaperPositionState
 from app.models.paper_trading import PaperAccount, PaperTrade
 from app.models.symbol_master import SymbolMaster
 from app.models.trading import Instrument, InstrumentType
@@ -383,12 +383,83 @@ class PaperAccountAdapter:
         reference["market_value_krw_reference"] = decimal_text(converted)
         return reference
 
+    @staticmethod
+    async def _management_snapshots(
+        db: AsyncSession,
+        owner_user_id: int,
+        account_id: int,
+        positions: list[dict[str, object]],
+    ) -> dict[int, dict[str, object]]:
+        """Read saved management records once, without treating an old cycle as current."""
+        identities = {
+            int(item["position_id"]): (
+                PaperAccountAdapter.market_name(str(item["instrument_type"])),
+                str(item["symbol"]),
+            )
+            for item in positions
+            if item.get("position_id") is not None
+            and str(item["instrument_type"]) in {"equity_kr", "equity_us"}
+        }
+        if not identities:
+            return {}
+        market_symbols = set(identities.values())
+        result = await db.execute(
+            select(KAssetPaperPositionState).where(
+                KAssetPaperPositionState.owner_user_id == owner_user_id,
+                KAssetPaperPositionState.paper_account_id == account_id,
+                tuple_(
+                    KAssetPaperPositionState.market, KAssetPaperPositionState.symbol
+                ).in_(market_symbols),
+            )
+        )
+        current: dict[int, KAssetPaperPositionState] = {}
+        stale: dict[tuple[str, str], KAssetPaperPositionState] = {}
+        for row in result.scalars():
+            identity = (row.market, row.symbol)
+            position_id = row.paper_position_id
+            if (
+                position_id in identities
+                and identity == identities[position_id]
+                and row.position_cycle_id == position_id
+                and row.closed_at is None
+                and (row.strategy_version or "").strip()
+            ):
+                current[position_id] = row
+            elif identity in market_symbols:
+                previous = stale.get(identity)
+                if previous is None or (row.updated_at, row.position_cycle_id) > (
+                    previous.updated_at, previous.position_cycle_id
+                ):
+                    stale[identity] = row
+
+        snapshots: dict[int, dict[str, object]] = {}
+        for position_id, identity in identities.items():
+            row = current.get(position_id)
+            if row is not None:
+                snapshots[position_id] = {
+                    "management_record": "current",
+                    "management_saved_at": iso_z(row.updated_at),
+                    "current_stop": decimal_text(row.current_stop),
+                    "partial_exit_completed": row.partial_exit_completed,
+                }
+            elif previous := stale.get(identity):
+                snapshots[position_id] = {
+                    "management_record": "stale",
+                    "management_saved_at": iso_z(previous.updated_at),
+                }
+        return snapshots
+
     async def positions(
         self, db: AsyncSession, owner_user_id: int
     ) -> PositionsResponse:
         account = await self.default_account(db, owner_user_id)
         service = PaperTradingService(db)
-        raw_positions = await service.get_positions(account.id)
+        raw_positions = await service.get_positions(
+            account.id, include_position_id=True
+        )
+        management = await self._management_snapshots(
+            db, owner_user_id, account.id, raw_positions
+        )
         observed_at = datetime.now(UTC)
         fx_snapshot = self._empty_krw_reference()
         if any(
@@ -436,6 +507,7 @@ class PaperAccountAdapter:
                     else None
                 ),
                 **self._quote_provenance(item),  # type: ignore[arg-type]
+                **management.get(item.get("position_id"), {}),
                 updated_at=now,
             )
             for item in raw_positions

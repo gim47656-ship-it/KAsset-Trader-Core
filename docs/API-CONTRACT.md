@@ -299,8 +299,40 @@
   `3단계 3/2/5`, `4단계 5/3/8`, `5단계 8/4/12`다. 사용자 횟수가 `null`이면
   이 기본값을 쓰고, 값이 있으면 각 side의 `maxCustom*` 상한을 넘을 수 없다.
 - `usage`는 `buysToday`, `sellsToday`, `ordersToday`, `concurrentHoldings`,
-  `budgetUsed`, 당일 실현 손익을 반환한다. 목표수익은 참고값이고 최대손실은 신규 매수를
-  차단한다. 위험을 줄이는 매도는 최대손실 도달만을 이유로 차단하지 않는다.
+  `budgetUsed`, 당일 실현 손익을 반환한다. 목표수익률은 계좌 상태 게이트의
+  신규 BUY 축소·중지에 쓰지만 `maxDailyLossRatePct`와 파생 손실 금액은
+  참고값이며 BUY 차단이나 종목 손절선이 아니다. 보호 매도는 유지된다.
+  `updatedAt`은 설정 저장시각이지 자동매매의 마지막 점검시각이 아니다.
+- GET은 `observedAt`(요청 시각, UTC)과 owner별 저장된 최근
+  `latestAutomationCycle`을 추가한다. 기록이 없으면 `null`이며 기록이 있으면
+  `{observedAt, finishedAt, status, skippedReason, candidateCount,
+  recommendationCount}`를 반환한다. status는 `completed|skipped|failed`,
+  `skippedReason`은 없으면 `null`이다. 이 시각은 추천 producer cycle의
+  시작·종료시각이지 주문 집행이나 현재 시장 평가시각이 아니다.
+- 현재 운용 계좌 상태(`NORMAL|STAGED_REDUCTION|EXIT_ONLY`)는 이 조회가
+  제공하지 않는다. 과거 추천의 `hardRisk.accountState`는 당시 평가 근거이고
+  저장된 SHADOW 고점도 현재 시세·잔고의 증명이 아니다. 앱은 현재 상태를
+  미계측으로 표시하고 과거 상태를 현재로 치환하지 않는다. GET에서 평가 엔진,
+  DB 쓰기, 외부 AI를 호출하지 않는다. PUT/promotion-bypass 응답에도 cycle
+  조회 결과를 새로 계산하지 않고 `latestAutomationCycle:null`로 둔다.
+
+## PAPER 보유 보호 상태
+
+`GET /api/v1/positions?broker=PAPER`
+
+- 각 `positions[]`에 `currentStop`(십진수 문자열|null),
+  `partialExitCompleted`(boolean|null), `managementRecord`
+  (`current|stale|missing`), `managementSavedAt`(UTC 시각|null)를 더한다.
+- `current`는 로그인 owner의 해당 PAPER 계좌·시장·심볼·현재 보유
+  position cycle ID와 저장된 관리 레코드가 모두 일치한 경우다.
+  이때만 저장된 보호선과 부분익절 완료 여부를 보여 준다. `stale`은
+  동일 계좌·시장·심볼에 과거/불일치 레코드만 남은 경우이고 `missing`은
+  기록이 없는 경우다. 두 경우 보호선과 부분익절 값은 `null`이다.
+  `managementSavedAt`은 표시한 저장 레코드의 `updated_at`이며,
+  일봉 cursor인 `last_evaluated_at`을 마지막 전체 평가시각이라 부르지 않는다.
+  보호 상태는 읽기 전용 저장 기록이며 조회 순간 주문 보호가 실행된다는
+  뜻이 아니다. 최초 부분익절 가격은 저장된 전략 버전과 일치하는 순수
+  규칙으로 확정되지 않아 제공하지 않는다.
 
 ## AI 추천 시장 범위와 일일 루틴
 

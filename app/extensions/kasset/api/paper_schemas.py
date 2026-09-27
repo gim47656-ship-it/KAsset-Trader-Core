@@ -63,6 +63,10 @@ class Position(AndroidWireModel):
     quote_session: MarketSessionState | None = None
     quote_is_stale: bool | None = None
     valuation_error: str | None = None
+    current_stop: str | None = None
+    partial_exit_completed: bool | None = None
+    management_record: Literal["current", "stale", "missing"] = "missing"
+    management_saved_at: str | None = None
     updated_at: str
 
     @model_validator(mode="after")
