@@ -1,6 +1,6 @@
 # KAsset AI Provider Routing
 
-갱신: 2026-09-02
+갱신: 2026-09-27
 
 ## 실행 경로
 
@@ -48,7 +48,25 @@ timeout, 동시 실행 수와 stdout 크기를 제한하고, 반환 JSON을 요�
 6. MCP 성공과 MCP unavailable 시 direct/OpenRouter fallback을 각각 확인한다.
 
 `KASSET_AI_MCP_TIMEOUT_SECONDS` 기본 30초는 sidecar timeout 기본 90초보다 짧다.
-호출자가 먼저 availability failure로 분류해야 fallback이 지연되지 않는다.
+호출자가 먼저 availability failure로 분류해야 fallback이 지연되지 않는다. 운영 서버는
+`KASSET_AI_MCP_TIMEOUT_SECONDS=120`(검증 상한)과 `KASSET_AI_SIDECAR_TIMEOUT_SECONDS=150`을
+쓴다. 뉴스 요약 5건 배치는 2026-09-27 기준 평균 67초·최대 86초였다.
+
+## 구독 CLI 인증 만료
+
+sidecar의 `codex exec`는 `/opt/kasset-codex`(컨테이너 `CODEX_HOME=/var/lib/kasset-codex`)의
+ChatGPT 로그인을 쓴다. 토큰 갱신이 실패하면 모든 sidecar 호출이
+`provider_unavailable: subscription CLI exited non-zero (exit_code=1)`로 실패한다. sidecar는
+stderr를 남기지 않으므로 원인은 단건 실행으로 본다. 실패한 호출도 뉴스 요약 일일 한도를 쓴다.
+
+1. 원인 확인: `echo 'Reply with the single word ok.' | docker exec -i kasset-trader-ai-mcp-1 codex exec -m gpt-6-luna --skip-git-repo-check --sandbox read-only -`
+   출력에 `Failed to refresh token` 또는 `unauthorized (401)`가 있으면 재로그인이 필요하다.
+2. `/opt/kasset-codex/auth.json`을 백업한다.
+3. `ssh -tt <server> "docker exec -it kasset-trader-ai-mcp-1 codex login --device-auth"`로 코드를 받고,
+   계정 소유자가 `https://auth.openai.com/codex/device`에서 승인한다. ChatGPT 보안 설정에서 기기
+   코드 로그인이 꺼져 있으면 거부되므로 켠 뒤 새 코드로 다시 한다.
+4. `codex login status`가 `Logged in using ChatGPT`인지, 1번 명령이 `ok`를 내는지 확인한다.
+   `review.ai_call_events`의 `kasset_news_summary`가 다음 5분 주기에 success로 돌아오는지 본다.
 
 ## 롤백
 
@@ -79,6 +97,10 @@ timeout, 동시 실행 수와 stdout 크기를 제한하고, 반환 JSON을 요�
 호출은 `review.ai_call_events`에 provider `vercel-jev`, feature
 `kasset_jev_news_relevance`/`kasset_jev_candidate_stance`로 기록된다. 롤백은 키를
 비우고 api·worker를 재기동하는 것이다.
+
+2026-09-27에는 HTTP 429·503이 분당 수건씩 나왔다(키 단건 호출은 200). 실패는 fail-open이라
+그 기사는 관련성 판정 없이 요약되고, 후보는 기존 가산 규칙을 쓴다. 요약이 연속 실패하면 같은
+기사가 5분마다 다시 판정돼 429가 늘어난다.
 
 ## 공통 안전 계약
 
