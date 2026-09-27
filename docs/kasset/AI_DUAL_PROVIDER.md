@@ -77,16 +77,19 @@ stderr를 남기지 않으므로 원인은 단건 실행으로 본다. 실패한
 
 롤백은 Kill Switch, Hard Risk, PAPER/LIVE 설정, promotion bypass를 변경하지 않는다.
 
-## Jev 판정 (Vercel AI Gateway)
+## Jev 판정 (OpenRouter Decisions API)
 
-`KASSET_JEV_API_KEY`에 Vercel AI Gateway 키(`vck_…`)를 넣으면 코어가
-`typesafe-ai/jev`를 두 곳에서 부른다. 전송은 `app/extensions/kasset/ai/jev_client.py`의
-`httpx` 호출 하나이며, 키가 비어 있으면 어떤 호출도 하지 않고 아래 두 동작 모두
-기존과 같다. timeout은 `KASSET_JEV_TIMEOUT_SECONDS`(기본 5초, 최대 30초), 재시도는 없다.
+`KASSET_JEV_API_KEY`에 OpenRouter 키(`sk-or-…`)를 넣으면 코어가
+`typesafe/jev-1.13`을 두 곳에서 부른다. 전송은 `app/extensions/kasset/ai/jev_client.py`의
+`POST https://openrouter.ai/api/alpha/decisions` 호출 하나이며, 키가 비어 있으면 어떤
+호출도 하지 않고 아래 두 동작 모두 기존과 같다. 이 키는 `KASSET_AI_OPENROUTER_API_KEY`와
+별도라 요약·검토의 OpenRouter fallback을 켜지 않는다. timeout은
+`KASSET_JEV_TIMEOUT_SECONDS`(기본 5초, 최대 30초), 재시도는 없다. 모델 버전은 뉴스 배제
+임계값이 흔들리지 않도록 고정했다.
 
-- **뉴스 선별:** 결정론 gate를 통과해 요약 입력이 만들어진 기사마다 boolean
+- **뉴스 선별:** 결정론 gate를 통과해 요약 입력이 만들어진 기사마다 yes/no(`noul`)
   `market_relevant`를 묻는다. P(true) < 0.2면 codex 요약에서 빼고 기존 6시간 backoff
-  행(`error_type=jev_not_relevant`, `raw_response.jev`에 확률·신뢰도)을 남긴다. 배제
+  행(`error_type=jev_not_relevant`, `raw_response.jev`에 확률)을 남긴다. 배제
   기사는 codex 일일 호출 상한을 쓰지 않는다. 판정 실패는 그 기사를 요약 대상에 둔다.
 - **후보 AI 가산점:** codex 후보 검토 verdict를 얻은 후보마다 choice `stance`
   (`AGREE`/`DISAGREE`/`INSUFFICIENT`)를 묻고, 점수의 AI 가산 항(비중 0.05)을
@@ -94,13 +97,15 @@ stderr를 남기지 않으므로 원인은 단건 실행으로 본다. 실패한
   `AiReviewStatus`, 후보 채택, 주문·수량·손절·Hard Risk는 바뀌지 않는다. 판정은
   추천 evidence에 `kind=jev_stance` 항목으로 남는다.
 
-호출은 `review.ai_call_events`에 provider `vercel-jev`, feature
-`kasset_jev_news_relevance`/`kasset_jev_candidate_stance`로 기록된다. 롤백은 키를
-비우고 api·worker를 재기동하는 것이다.
+호출은 `review.ai_call_events`에 provider `openrouter-jev`(2026-09-27 이전은
+`vercel-jev`), feature `kasset_jev_news_relevance`/`kasset_jev_candidate_stance`로
+기록되고, 응답의 USD `cost`가 `cost_amount`에 남는다. 롤백은 키를 비우고 api·worker를
+재기동하는 것이다.
 
-2026-09-27에는 HTTP 429·503이 분당 수건씩 나왔다(키 단건 호출은 200). 실패는 fail-open이라
-그 기사는 관련성 판정 없이 요약되고, 후보는 기존 가산 규칙을 쓴다. 요약이 연속 실패하면 같은
-기사가 5분마다 다시 판정돼 429가 늘어난다.
+2026-09-27까지는 Vercel AI Gateway(`typesafe-ai/jev`)를 불렀다. 그날 HTTP 429·503이
+분당 수건씩 나와 판정의 약 45%가 fail-open으로 빠졌고, 같은 모델을 제공하는 OpenRouter로
+옮겼다. OpenRouter 응답은 choice 확률을 소수 둘째 자리로 반올림하므로 확률 합은 label당
+0.005 허용오차로 검사한다.
 
 ## 공통 안전 계약
 

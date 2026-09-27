@@ -1,8 +1,12 @@
-"""Vercel AI Gateway Jev 클라이언트의 wire 계약과 엄격한 응답 파서."""
+"""OpenRouter Decisions API Jev 클라이언트의 wire 계약과 엄격한 응답 파서.
+
+payload 모양은 2026-09-27 실제 ``/api/alpha/decisions`` 응답을 따른다.
+"""
 
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -30,6 +34,7 @@ _CHOICE = choice_question(
     instructions="stance?",
     criteria={"AGREE": "a", "DISAGREE": "d", "INSUFFICIENT": "i"},
 )
+_USAGE = {"input_tokens": 410, "output_tokens": 45, "cost": 0.00001722}
 
 
 def _choice_payload(
@@ -37,65 +42,63 @@ def _choice_payload(
     *,
     choice: str = "AGREE",
     confidence: float | None = 0.8,
-    rounding: dict[str, int] | None = None,
 ) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "answers": {
-            "stance": {
-                "type": "choice",
-                "choice": choice,
-                "probabilities": probabilities,
-            }
-        },
-        "usage": {"inputTokens": 120, "outputTokens": 3},
+    answer: dict[str, object] = {
+        "type": "choice",
+        "choice": choice,
+        "probabilities": probabilities,
     }
     if confidence is not None:
-        payload["providerMetadata"] = {
-            "typesafe": {"confidence": {"stance": confidence}}
-        }
-    if rounding is not None:
-        payload["rounding"] = rounding
-    return payload
+        answer["confidence"] = confidence
+    return {
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {"stance": answer},
+        "usage": dict(_USAGE),
+    }
 
 
-def test_parse_boolean_answer_reads_probability_and_optional_confidence() -> None:
+def test_parse_noul_answer_reads_probability_and_reported_cost() -> None:
     judgment = parse_judgment(
         {
-            "answers": {"relevant": {"type": "boolean", "probability": 0.12}},
-            "usage": {"inputTokens": 10, "outputTokens": 1},
+            "answers": {"relevant": {"type": "noul", "noul": 0.13}},
+            "usage": {"input_tokens": 345, "output_tokens": 23, "cost": 0.00001449},
         },
         questions={"relevant": _BOOLEAN},
     )
 
-    answer = judgment.boolean("relevant")
-    assert answer.probability == pytest.approx(0.12)
-    assert answer.confidence is None
-    assert (judgment.input_tokens, judgment.output_tokens) == (10, 1)
+    assert judgment.boolean("relevant").probability == pytest.approx(0.13)
+    assert (judgment.input_tokens, judgment.output_tokens) == (345, 23)
+    assert judgment.cost_usd == Decimal("0.00001449")
 
 
 def test_parse_choice_answer_reads_all_label_probabilities() -> None:
     judgment = parse_judgment(
-        _choice_payload({"AGREE": 0.7, "DISAGREE": 0.2, "INSUFFICIENT": 0.1}),
+        _choice_payload({"DISAGREE": 0, "INSUFFICIENT": 0.01, "AGREE": 0.99}),
         questions={"stance": _CHOICE},
     )
 
     answer = judgment.choice("stance")
     assert answer.choice == "AGREE"
-    assert answer.probabilities["AGREE"] == pytest.approx(0.7)
+    assert answer.probabilities["AGREE"] == pytest.approx(0.99)
     assert answer.confidence == pytest.approx(0.8)
 
 
-def test_rounding_widens_the_probability_sum_tolerance() -> None:
-    rounded = _choice_payload(
+def test_two_decimal_rounding_is_within_the_sum_tolerance() -> None:
+    # 실제 응답: 0.19 + 0.5599999999999999 + 0.25, 반올림 합이 1을 조금 벗어난 경우.
+    for probabilities in (
+        {"AGREE": 0.19, "DISAGREE": 0.5599999999999999, "INSUFFICIENT": 0.25},
         {"AGREE": 0.34, "DISAGREE": 0.33, "INSUFFICIENT": 0.34},
-        rounding={"probabilityDecimals": 2},
-    )
+    ):
+        choice = max(probabilities, key=probabilities.__getitem__)
+        payload = _choice_payload(probabilities, choice=choice)
+        assert parse_judgment(payload, questions={"stance": _CHOICE}).choice("stance")
 
-    assert parse_judgment(rounded, questions={"stance": _CHOICE}).choice("stance")
 
-    unrounded = _choice_payload({"AGREE": 0.34, "DISAGREE": 0.33, "INSUFFICIENT": 0.34})
-    with pytest.raises(JevJudgmentError, match="sum to 1"):
-        parse_judgment(unrounded, questions={"stance": _CHOICE})
+def test_malformed_cost_does_not_fail_the_judgment() -> None:
+    payload = _choice_payload({"AGREE": 0.7, "DISAGREE": 0.2, "INSUFFICIENT": 0.1})
+    payload["usage"] = {"input_tokens": 1, "output_tokens": 1, "cost": "free"}
+
+    assert parse_judgment(payload, questions={"stance": _CHOICE}).cost_usd is None
 
 
 @pytest.mark.parametrize(
@@ -103,10 +106,24 @@ def test_rounding_widens_the_probability_sum_tolerance() -> None:
     [
         (
             {
-                "answers": {"other": {"type": "boolean", "probability": 0.5}},
-                "usage": {"inputTokens": 1, "outputTokens": 1},
+                "answers": {"other": {"type": "noul", "noul": 0.5}},
+                "usage": dict(_USAGE),
             },
             "requested question ids",
+        ),
+        (
+            {
+                "answers": {"relevant": {"type": "boolean", "probability": 0.5}},
+                "usage": dict(_USAGE),
+            },
+            "answered as a noul",
+        ),
+        (
+            {
+                "answers": {"relevant": {"type": "noul", "noul": 1.2}},
+                "usage": dict(_USAGE),
+            },
+            "between 0 and 1",
         ),
         (
             _choice_payload({"AGREE": 0.7, "DISAGREE": 0.2}),
@@ -133,7 +150,7 @@ def test_rounding_widens_the_probability_sum_tolerance() -> None:
         (
             {
                 "answers": {"stance": {"type": "choice"}},
-                "usage": {"inputTokens": -1, "outputTokens": 1},
+                "usage": {"input_tokens": -1, "output_tokens": 1},
             },
             "non-negative",
         ),
@@ -183,45 +200,51 @@ def _patch(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> list[objec
 
 
 @pytest.mark.asyncio
-async def test_judge_sends_the_gateway_wire_contract(
+async def test_judge_sends_the_decisions_wire_contract_and_records_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     transport = _Transport(
         httpx.Response(
             200,
             json={
-                "answers": {"relevant": {"type": "boolean", "probability": 0.9}},
-                "usage": {"inputTokens": 5, "outputTokens": 1},
+                "model": "typesafe/jev-1.13-20260917",
+                "answers": {"relevant": {"type": "noul", "noul": 0.95}},
+                "usage": {"input_tokens": 350, "output_tokens": 23, "cost": 0.0000147},
+                "provider": "TypeSafe",
             },
         )
     )
     recorded = _patch(monkeypatch, transport)
 
-    judgment = await JevClient(api_key="vck_secret").judge(
+    judgment = await JevClient(api_key="sk-or-secret").judge(
         state={"title": "t"},
         questions={"relevant": _BOOLEAN},
         feature="kasset_jev_news_relevance",
     )
 
-    assert judgment.boolean("relevant").probability == pytest.approx(0.9)
+    assert judgment.boolean("relevant").probability == pytest.approx(0.95)
     request = transport.requests[0]
     assert str(request.url) == JEV_BASE_URL
-    assert request.headers["ai-model-id"] == JEV_MODEL_ID
-    assert request.headers["ai-gateway-protocol-version"] == "0.0.1"
-    assert request.headers["ai-gateway-auth-method"] == "api-key"
-    assert request.headers["ai-evaluation-model-specification-version"] == "4"
-    assert request.headers["authorization"] == "Bearer vck_secret"
+    assert request.headers["authorization"] == "Bearer sk-or-secret"
     assert json.loads(request.content) == {
+        "model": JEV_MODEL_ID,
         "state": {"title": "t"},
         "questions": {"relevant": _BOOLEAN},
     }
-    assert [attempt.status for attempt in recorded] == ["success"]  # type: ignore[attr-defined]
+    (attempt,) = recorded
+    assert attempt.status == "success"  # type: ignore[attr-defined]
+    assert attempt.provider == "openrouter-jev"  # type: ignore[attr-defined]
+    telemetry = attempt.telemetry  # type: ignore[attr-defined]
+    assert (telemetry.prompt_tokens, telemetry.completion_tokens) == (350, 23)
+    assert telemetry.cost_amount == Decimal("0.0000147")
+    assert telemetry.cost_currency == "USD"
 
 
 @pytest.mark.parametrize(
     "response",
     [
         httpx.Response(401, json={"error": {"message": "auth"}}),
+        httpx.Response(429, json={"error": {"message": "rate limited"}}),
         httpx.Response(503, text="unavailable"),
         httpx.Response(200, text="not json"),
         httpx.ReadTimeout("slow"),
@@ -236,13 +259,13 @@ async def test_transport_failures_raise_one_error_and_never_leak_the_key(
     recorded = _patch(monkeypatch, _Transport(response))
 
     with pytest.raises(JevJudgmentError) as raised:
-        await JevClient(api_key="vck_secret").judge(
+        await JevClient(api_key="sk-or-secret").judge(
             state="s",
             questions={"relevant": _BOOLEAN},
             feature="kasset_jev_news_relevance",
         )
 
-    assert "vck_secret" not in str(raised.value)
+    assert "sk-or-secret" not in str(raised.value)
     assert [attempt.status for attempt in recorded] == ["failure"]  # type: ignore[attr-defined]
 
 
@@ -253,5 +276,5 @@ def test_missing_key_disables_jev(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "KASSET_JEV_API_KEY", SecretStr("   "))
     assert build_jev_client() is None
 
-    monkeypatch.setattr(settings, "KASSET_JEV_API_KEY", SecretStr("vck_secret"))
+    monkeypatch.setattr(settings, "KASSET_JEV_API_KEY", SecretStr("sk-or-secret"))
     assert isinstance(build_jev_client(), JevClient)

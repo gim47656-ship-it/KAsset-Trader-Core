@@ -1314,7 +1314,6 @@ async def _apply_jev_relevance(
                     "jev": {
                         "status": "judged",
                         "probability": answer.probability,
-                        "confidence": answer.confidence,
                         "reason": _JEV_BELOW_THRESHOLD_REASON,
                     }
                 },

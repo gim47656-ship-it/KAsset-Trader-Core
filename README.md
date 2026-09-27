@@ -40,7 +40,7 @@ flowchart LR
     API -->|시세·호가| TOSS
     WORKER --> EXT["DART · 네이버 수급 · 뉴스"]
     JOB -->|재무 공시 수집| DART["OpenDART"]
-    WORKER -->|보조 판정| JEV["Jev<br/>(Vercel AI Gateway)"]
+    WORKER -->|보조 판정| JEV["Jev<br/>(OpenRouter Decisions)"]
     API -->|푸시| FCM["FCM"]
 ```
 
@@ -66,7 +66,7 @@ Toss 실계좌는 조회 전용입니다. 앱 주문은 PAPER로만 나갑니다
 
 - Codex 기반 뉴스·후보·매매 분석과 별칭 생성은 `McpStructuredJsonClient` → `ai-mcp` → `codex exec` 순서로 호출합니다. 앱 런타임에 LLM provider SDK를 직접 넣지 않는 경계를 정적 테스트로 검사합니다.
 - 추론 강도별 모델: `low`(뉴스·시장·스캔) = `gpt-6-luna`, `medium`/`high`(후보 검토·매매·크리티컬) = `gpt-6-sol` (`KASSET_AI_SIDECAR_EFFORT_MODELS`).
-- 뉴스 관련성·후보 가산점의 보조 판정은 별도 Jev HTTP 클라이언트가 Vercel AI Gateway를 호출합니다. Codex sidecar와 다른 경로입니다. 상세는 [`docs/kasset/AI_DUAL_PROVIDER.md`](docs/kasset/AI_DUAL_PROVIDER.md).
+- 뉴스 관련성·후보 가산점의 보조 판정은 별도 Jev HTTP 클라이언트가 OpenRouter Decisions API(`typesafe/jev-1.13`)를 호출합니다. Codex sidecar와 다른 경로입니다. 상세는 [`docs/kasset/AI_DUAL_PROVIDER.md`](docs/kasset/AI_DUAL_PROVIDER.md).
 
 ## 배포
 

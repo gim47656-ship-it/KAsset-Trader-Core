@@ -1477,9 +1477,7 @@ class FakeJevClient:
             raise outcome
         (question_id,) = questions
         return JevJudgment(
-            answers={
-                question_id: JevBooleanAnswer(probability=outcome, confidence=0.9)
-            },
+            answers={question_id: JevBooleanAnswer(probability=outcome)},
             input_tokens=10,
             output_tokens=1,
         )
