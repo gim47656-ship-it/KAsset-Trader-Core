@@ -513,8 +513,10 @@ class Settings(BaseSettings):
     KASSET_AI_OPENROUTER_API_KEY: SecretStr | None = None
     KASSET_AI_OPENROUTER_MODEL_FLASH: str = "z-ai/glm-5.3-flash"
     KASSET_AI_OPENROUTER_MODEL_PRO: str = "z-ai/glm-5.3-flash"
-    # Vercel AI Gateway의 Jev(`typesafe-ai/jev`) 판정. 키가 비어 있으면 Jev를
-    # 전혀 호출하지 않고 뉴스 선별·후보 가산점은 기존 결정론 규칙 그대로다.
+    # OpenRouter Decisions API의 Jev(`typesafe/jev-1.13`) 판정. OpenRouter 키
+    # (`sk-or-…`)를 넣는다. `KASSET_AI_OPENROUTER_API_KEY`와 별도라 AI fallback
+    # 경로를 켜지 않는다. 비어 있으면 Jev를 전혀 호출하지 않고 뉴스 선별·후보
+    # 가산점은 기존 결정론 규칙 그대로다.
     KASSET_JEV_API_KEY: SecretStr | None = None
     KASSET_JEV_TIMEOUT_SECONDS: Annotated[
         float, Field(gt=0.0, le=30.0, allow_inf_nan=False)

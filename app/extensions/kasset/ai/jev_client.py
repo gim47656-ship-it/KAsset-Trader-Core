@@ -1,16 +1,16 @@
-"""Vercel AI Gateway의 Jev 판정 클라이언트와 엄격한 응답 파서.
+"""OpenRouter Decisions API의 Jev 판정 클라이언트와 엄격한 응답 파서.
 
 코어는 이 판정을 두 곳에만 쓴다.
 
 * 뉴스 요약 전 관련성 선별 — 통과 기사를 codex 요약 호출로 넘기기 직전에
-  boolean ``market_relevant`` 확률을 본다.
+  yes/no(``noul``) ``market_relevant`` 확률을 본다.
 * 매수 후보 AI 가산점 — codex 검토 verdict를 얻은 후보의 choice ``stance``
   확률 P(AGREE)를 ``ai_bonus``로 쓴다.
 
-전송은 ``httpx``다. 런타임 in-process LLM 경계(ROB-501)와 무관하게 게이트웨이의
-HTTP ``evaluation-model`` 엔드포인트만 호출하며 broker/계좌 자격이나 주문 정보를
-보내지 않는다. 판정은 확률·확신도만 돌려주고 주문·수량·손절·Hard Risk를 결정하지
-않는다.
+전송은 ``httpx``다. 런타임 in-process LLM 경계(ROB-501)와 무관하게 OpenRouter의
+HTTP ``/api/alpha/decisions`` 엔드포인트만 호출하며 broker/계좌 자격이나 주문
+정보를 보내지 않는다. 판정은 확률·확신도만 돌려주고 주문·수량·손절·Hard Risk를
+결정하지 않는다.
 
 실패는 HTTP non-2xx, timeout, 연결 실패, 응답 형식 위반을 모두
 :class:`JevJudgmentError` 하나로 올린다. 호출부는 이 예외를 fail-open으로 처리해
@@ -20,15 +20,18 @@ HTTP ``evaluation-model`` 엔드포인트만 호출하며 broker/계좌 자격�
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import perf_counter
 from typing import Final
 
 import httpx
 
 from app.core.config import settings
+from app.models.ai_call_events import COST_SOURCE_PROVIDER_REPORTED
 from app.services.ai_usage_service import (
     AiAttemptTelemetry,
     AiCallAttempt,
@@ -43,25 +46,23 @@ from app.services.ai_usage_service import (
 
 logger = logging.getLogger(__name__)
 
-#: wire 계약(고정값). gateway가 버전을 올리면 이 값들만 바뀐다.
-JEV_BASE_URL: Final = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
-JEV_MODEL_ID: Final = "typesafe-ai/jev"
-JEV_PROTOCOL_VERSION: Final = "0.0.1"
-JEV_AUTH_METHOD: Final = "api-key"
-JEV_SPECIFICATION_VERSION: Final = "4"
+#: wire 계약(고정값). 모델은 판정 확률 임계값(뉴스 P<0.2)이 흔들리지 않도록
+#: 버전을 고정한다. 새 버전으로 올릴 때는 이 값과 임계값을 함께 본다.
+JEV_BASE_URL: Final = "https://openrouter.ai/api/alpha/decisions"
+JEV_MODEL_ID: Final = "typesafe/jev-1.13"
 
 #: AI 호출 원장에 남기는 provider/route 이름. transport가 하나뿐이라 같다.
-JEV_PROVIDER_NAME: Final = "vercel-jev"
+JEV_PROVIDER_NAME: Final = "openrouter-jev"
 
 #: 원장 ``feature`` 값. 호출처마다 고정 문자열 하나를 쓴다.
 JEV_FEATURE_NEWS_RELEVANCE: Final = "kasset_jev_news_relevance"
 JEV_FEATURE_CANDIDATE_STANCE: Final = "kasset_jev_candidate_stance"
 
-#: ``rounding``이 없을 때 choice 확률 합의 허용오차.
-_JEV_SUM_TOLERANCE: Final = 1e-6
-#: wire가 허용하는 소수 자릿수 상한.
-_JEV_MAX_DECIMALS: Final = 15
-_ROUNDING_DECIMAL_KEYS: Final = ("probabilityDecimals", "scoreDecimals")
+#: OpenRouter는 choice 확률을 소수 둘째 자리로 반올림해 돌려준다. 확률 합의
+#: 허용오차는 label마다 반올림 오차 절반씩이다.
+_JEV_PROBABILITY_DECIMALS: Final = 2
+#: OpenRouter usage의 ``cost``는 USD 금액이다.
+_JEV_COST_CURRENCY: Final = "USD"
 
 
 class JevJudgmentError(RuntimeError):
@@ -70,10 +71,9 @@ class JevJudgmentError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class JevBooleanAnswer:
-    """boolean 질문의 답. ``probability``는 true일 확률이다."""
+    """yes/no(``noul``) 질문의 답. ``probability``는 true일 확률이다."""
 
     probability: float
-    confidence: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +92,8 @@ class JevJudgment:
     answers: Mapping[str, JevBooleanAnswer | JevChoiceAnswer]
     input_tokens: int
     output_tokens: int
+    #: provider가 보고한 USD 비용. 없거나 형식이 어긋나면 ``None``이다.
+    cost_usd: Decimal | None = None
 
     def boolean(self, question_id: str) -> JevBooleanAnswer:
         answer = self.answers.get(question_id)
@@ -112,10 +114,10 @@ def boolean_question(
     true_criterion: str,
     false_criterion: str,
 ) -> dict[str, object]:
-    """true 확률을 묻는 boolean 질문 하나를 wire 형태로 만든다."""
+    """true 확률을 묻는 yes/no 질문 하나를 wire(``noul``) 형태로 만든다."""
 
     return {
-        "type": "boolean",
+        "type": "noul",
         "instructions": instructions,
         "criteria": {"true": true_criterion, "false": false_criterion},
     }
@@ -152,48 +154,14 @@ def _non_negative_int(value: object, *, field: str) -> int:
     return value
 
 
-def _probability_decimals(rounding: object) -> int | None:
-    """``rounding``이 있으면 확률 소수 자릿수를, 없으면 ``None``을 돌려준다."""
+def _reported_cost(value: object) -> Decimal | None:
+    """usage ``cost``를 받는다. 계측값이라 형식이 어긋나도 판정은 실패시키지 않는다."""
 
-    if rounding is None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if not isinstance(rounding, Mapping):
-        raise JevJudgmentError("rounding must be an object")
-    decimals: int | None = None
-    for key in _ROUNDING_DECIMAL_KEYS:
-        if key not in rounding:
-            continue
-        value = rounding[key]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise JevJudgmentError(f"rounding.{key} must be an integer 0..15")
-        if not 0 <= value <= _JEV_MAX_DECIMALS:
-            raise JevJudgmentError(f"rounding.{key} must be an integer 0..15")
-        if key == "probabilityDecimals":
-            decimals = value
-    return decimals
-
-
-def _confidence_by_question(provider_metadata: object) -> dict[str, float]:
-    """``providerMetadata.typesafe.confidence``만 읽는다. 없으면 빈 map이다."""
-
-    if provider_metadata is None:
-        return {}
-    if not isinstance(provider_metadata, Mapping):
-        raise JevJudgmentError("providerMetadata must be an object")
-    typesafe = provider_metadata.get("typesafe")
-    if typesafe is None:
-        return {}
-    if not isinstance(typesafe, Mapping):
-        raise JevJudgmentError("providerMetadata.typesafe must be an object")
-    raw_confidence = typesafe.get("confidence")
-    if raw_confidence is None:
-        return {}
-    if not isinstance(raw_confidence, Mapping):
-        raise JevJudgmentError("providerMetadata.typesafe.confidence is invalid")
-    return {
-        str(question_id): _probability(value, field=f"confidence[{question_id}]")
-        for question_id, value in raw_confidence.items()
-    }
+    if not math.isfinite(value) or value < 0:
+        return None
+    return Decimal(str(value))
 
 
 def _choice_labels(question: Mapping[str, object]) -> tuple[str, ...]:
@@ -206,20 +174,11 @@ def _choice_labels(question: Mapping[str, object]) -> tuple[str, ...]:
     return labels
 
 
-def _parse_boolean_answer(
-    question_id: str,
-    raw: object,
-    confidence_by_question: Mapping[str, float],
-) -> JevBooleanAnswer:
-    if not isinstance(raw, Mapping) or raw.get("type") != "boolean":
-        raise JevJudgmentError(f"{question_id} must be answered as a boolean")
-    probability = _probability(
-        raw.get("probability"),
-        field=f"{question_id}.probability",
-    )
+def _parse_boolean_answer(question_id: str, raw: object) -> JevBooleanAnswer:
+    if not isinstance(raw, Mapping) or raw.get("type") != "noul":
+        raise JevJudgmentError(f"{question_id} must be answered as a noul")
     return JevBooleanAnswer(
-        probability=probability,
-        confidence=confidence_by_question.get(question_id),
+        probability=_probability(raw.get("noul"), field=f"{question_id}.noul"),
     )
 
 
@@ -227,8 +186,6 @@ def _parse_choice_answer(
     question_id: str,
     raw: object,
     labels: tuple[str, ...],
-    confidence_by_question: Mapping[str, float],
-    probability_decimals: int | None,
 ) -> JevChoiceAnswer:
     if not isinstance(raw, Mapping) or raw.get("type") != "choice":
         raise JevJudgmentError(f"{question_id} must be answered as a choice")
@@ -241,9 +198,7 @@ def _parse_choice_answer(
         label: _probability(raw_probabilities[label], field=f"{question_id}.{label}")
         for label in labels
     }
-    tolerance = _JEV_SUM_TOLERANCE
-    if probability_decimals is not None:
-        tolerance = len(labels) * 0.5 / (10**probability_decimals)
+    tolerance = len(labels) * 0.5 / (10**_JEV_PROBABILITY_DECIMALS)
     if abs(sum(probabilities.values()) - 1.0) > tolerance:
         raise JevJudgmentError(f"{question_id}.probabilities must sum to 1")
     choice = raw.get("choice")
@@ -251,13 +206,14 @@ def _parse_choice_answer(
         raise JevJudgmentError(f"{question_id}.choice must be a label")
     if probabilities[choice] != max(probabilities.values()):
         raise JevJudgmentError(f"{question_id}.choice must be the largest")
-    confidence = confidence_by_question.get(question_id)
-    if confidence is None:
+    if raw.get("confidence") is None:
         raise JevJudgmentError(f"{question_id} is missing a confidence value")
     return JevChoiceAnswer(
         choice=choice,
         probabilities=probabilities,
-        confidence=confidence,
+        confidence=_probability(
+            raw.get("confidence"), field=f"{question_id}.confidence"
+        ),
     )
 
 
@@ -270,9 +226,8 @@ def parse_judgment(
 
     ``answers`` 키 집합은 요청한 질문 id와 정확히 같아야 하고, usage의 두 token
     수는 비음수 정수여야 한다. choice 답은 모든 criteria label의 확률을 담고 합이
-    1(``rounding`` 허용오차 안)이어야 하며, ``choice``는 최대확률 label이고
-    ``providerMetadata.typesafe.confidence``가 있어야 한다. boolean 답에
-    confidence가 없으면 ``None``으로 남긴다.
+    1(반올림 허용오차 안)이어야 하며, ``choice``는 최대확률 label이고
+    ``confidence``가 있어야 한다. ``noul`` 답은 true 확률 하나만 담는다.
     """
 
     if not isinstance(payload, Mapping):
@@ -285,26 +240,18 @@ def parse_judgment(
     usage = payload.get("usage")
     if not isinstance(usage, Mapping):
         raise JevJudgmentError("response is missing a usage object")
-    input_tokens = _non_negative_int(usage.get("inputTokens"), field="inputTokens")
-    output_tokens = _non_negative_int(usage.get("outputTokens"), field="outputTokens")
-    probability_decimals = _probability_decimals(payload.get("rounding"))
-    confidence_by_question = _confidence_by_question(payload.get("providerMetadata"))
+    input_tokens = _non_negative_int(usage.get("input_tokens"), field="input_tokens")
+    output_tokens = _non_negative_int(usage.get("output_tokens"), field="output_tokens")
 
     parsed: dict[str, JevBooleanAnswer | JevChoiceAnswer] = {}
     for question_id, question in questions.items():
         question_type = question.get("type")
         raw = answers[question_id]
-        if question_type == "boolean":
-            parsed[question_id] = _parse_boolean_answer(
-                question_id, raw, confidence_by_question
-            )
+        if question_type == "noul":
+            parsed[question_id] = _parse_boolean_answer(question_id, raw)
         elif question_type == "choice":
             parsed[question_id] = _parse_choice_answer(
-                question_id,
-                raw,
-                _choice_labels(question),
-                confidence_by_question,
-                probability_decimals,
+                question_id, raw, _choice_labels(question)
             )
         else:
             raise JevJudgmentError(f"unsupported question type: {question_type!r}")
@@ -312,6 +259,7 @@ def parse_judgment(
         answers=parsed,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cost_usd=_reported_cost(usage.get("cost")),
     )
 
 
@@ -349,7 +297,7 @@ def _attempt_row(
 
 
 class JevClient:
-    """게이트웨이 ``evaluation-model`` 한 엔드포인트를 호출하는 transport."""
+    """OpenRouter ``/api/alpha/decisions`` 한 엔드포인트를 호출하는 transport."""
 
     def __init__(
         self,
@@ -388,10 +336,10 @@ class JevClient:
         if not normalized_feature:
             raise ValueError("Jev feature is required")
         body: dict[str, object] = {
+            "model": self._model_id,
             "state": state,
             "questions": {key: dict(value) for key, value in questions.items()},
         }
-        headers = self._headers()
         logger.info(
             "KAsset Jev judgment attempt provider=%s model=%s feature=%s",
             JEV_PROVIDER_NAME,
@@ -407,12 +355,18 @@ class JevClient:
         try:
             with capture_ai_attempt() as telemetry:
                 try:
-                    payload = await self._post(body, headers=headers)
+                    payload = await self._post(body)
                     judgment = parse_judgment(payload, questions=questions)
+                    cost = judgment.cost_usd
                     report_ai_attempt_usage(
                         prompt_tokens=judgment.input_tokens,
                         completion_tokens=judgment.output_tokens,
                         total_tokens=judgment.input_tokens + judgment.output_tokens,
+                        cost_amount=cost,
+                        cost_currency=_JEV_COST_CURRENCY if cost is not None else None,
+                        cost_source=(
+                            COST_SOURCE_PROVIDER_REPORTED if cost is not None else None
+                        ),
                     )
                 except Exception as exc:
                     # 원장에는 bounded classifier만 남긴다. provider 본문은 요청
@@ -440,28 +394,17 @@ class JevClient:
             # 올라가는 예외 어느 쪽도 원장 쓰기 때문에 바뀌지 않는다.
             await record_ai_call_attempts(attempts)
 
-    def _headers(self) -> dict[str, str]:
-        return {
+    async def _post(self, body: Mapping[str, object]) -> object:
+        headers = {
             "content-type": "application/json",
-            "ai-gateway-protocol-version": JEV_PROTOCOL_VERSION,
-            "ai-gateway-auth-method": JEV_AUTH_METHOD,
-            "ai-evaluation-model-specification-version": JEV_SPECIFICATION_VERSION,
-            "ai-model-id": self._model_id,
             "authorization": f"Bearer {self._api_key}",
         }
-
-    async def _post(
-        self,
-        body: Mapping[str, object],
-        *,
-        headers: Mapping[str, str],
-    ) -> object:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.post(
                     self._base_url,
                     json=body,
-                    headers=dict(headers),
+                    headers=headers,
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             raise JevJudgmentError(f"jev unreachable: {type(exc).__name__}") from exc
@@ -490,7 +433,6 @@ def build_jev_client() -> JevClient | None:
 
 
 __all__ = [
-    "JEV_AUTH_METHOD",
     "JEV_BASE_URL",
     "JEV_FEATURE_CANDIDATE_STANCE",
     "JEV_FEATURE_NEWS_RELEVANCE",
