@@ -90,7 +90,8 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 
 | 스크립트 | 용도 | 실행 |
 |---|---|---|
-| `build_financial_fundamentals_snapshots` | DART 재무 (하루 400종목, API 한도 18,000건) | root cron 매일 18:30 KST |
+| `build_financial_fundamentals_snapshots` | DART 재무 (하루 400종목, API 한도 18,000건) | root cron 매일 18:30 KST (`kasset-dart-daily.sh` 1단계) |
+| `app.jobs.dart_disclosure_ingestion` (`-m`으로 실행) | DART 공시 목록 → `news_articles`(`feed_source=dart`), 최근 N일 upsert | root cron 매일 18:30 KST (`kasset-dart-daily.sh` 2단계, `--recent-days 2`) · 백필은 `--from-date`/`--to-date` |
 | `sync_symbol_master` | 원본 KR/US universe에 있지만 검색 마스터에는 없는 보통주·ETF·미국 ADR 추가 | root cron 매일 22:00 KST, 수동 실행은 `--commit` |
 | `build_investor_flow_snapshots` | 투자자 수급 백필 | 수동 |
 | `backfill_daily_candles` | 일봉 백필 | 수동 |
@@ -106,6 +107,14 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 - 중복 실행 방지: `/run/kasset-symbol-master-daily.lock`에 `flock`
 - 점검: `crontab -l`, `systemctl is-active crond`, `/var/log/kasset-symbol-master-daily.log`
 - 복구: 원본 수집 상태를 확인한 뒤 위 일회성 컨테이너 명령으로 `scripts.sync_symbol_master --commit`을 실행합니다. 중복 키는 추가하지 않습니다.
+
+DART 일일 작업은 재무 백필 뒤에 공시 목록 수집을 이어서 돌립니다. 두 단계는 같은 `OPENDART_API_KEY` 하루 한도(20,000건)를 나눠 씁니다.
+
+- 실행 파일: `/usr/local/bin/kasset-dart-daily.sh` (이전 판 `/root/kasset-dart-daily.sh.bak-20260927`)
+- 예약: `30 18 * * * /usr/local/bin/kasset-dart-daily.sh >> /var/log/kasset-dart-daily.log 2>&1`
+- 중복 실행 방지: 스크립트 전체를 `/run/kasset-dart-daily.lock`에 `flock`. 재무 단계가 실패해도 공시 단계는 실행됩니다.
+- 점검: 로그의 `fundamentals exit=`·`disclosures exit=` 줄, `news_ingestion_runs`의 `feed_set=dart` 행
+- 공시 백필: 한 번에 여러 달을 넣지 말고 하루씩 나눠 실행합니다. 공시 목록만 받는 경우 약 100건당 1요청입니다.
 
 ## 개발 규칙 (요약)
 
