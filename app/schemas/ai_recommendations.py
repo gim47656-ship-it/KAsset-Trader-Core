@@ -506,6 +506,24 @@ class AITradingUsageResponse(BaseModel):
         return format(value, "f")
 
 
+class LatestAutomationCycle(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    observed_at: datetime = Field(alias="observedAt")
+    finished_at: datetime = Field(alias="finishedAt")
+    status: Literal["completed", "skipped", "failed"]
+    skipped_reason: str | None = Field(default=None, alias="skippedReason")
+    candidate_count: int = Field(ge=0, alias="candidateCount")
+    recommendation_count: int = Field(ge=0, alias="recommendationCount")
+
+    _observed_timezone = field_validator("observed_at")(_validate_aware_timestamp)
+    _finished_timezone = field_validator("finished_at")(_validate_aware_timestamp)
+
+    @field_serializer("observed_at", "finished_at", when_used="json")
+    def serialize_time(self, value: datetime) -> str:
+        return _serialize_timestamp(value) or ""
+
+
 class AITradingStateResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -518,12 +536,21 @@ class AITradingStateResponse(BaseModel):
     updated_at: datetime = Field(alias="updatedAt")
     executions: list[PaperOrderResult] = Field(default_factory=list)
     promotion_bypass: bool = Field(default=False, alias="promotionBypass")
+    observed_at: datetime | None = Field(default=None, alias="observedAt")
+    latest_automation_cycle: LatestAutomationCycle | None = Field(
+        default=None, alias="latestAutomationCycle"
+    )
 
     _updated_at_timezone = field_validator("updated_at")(_validate_aware_timestamp)
+    _observed_at_timezone = field_validator("observed_at")(_validate_aware_timestamp)
 
     @field_serializer("updated_at", when_used="json")
     def serialize_updated_at(self, value: datetime) -> str:
         return _serialize_timestamp(value) or ""
+
+    @field_serializer("observed_at", when_used="json")
+    def serialize_observed_at(self, value: datetime | None) -> str | None:
+        return _serialize_timestamp(value)
 
 
 class PromotionBypassRequest(BaseModel):
@@ -668,6 +695,7 @@ __all__ = [
     "AITradingStateResponse",
     "AITradingStateUpdate",
     "AITradingUsageResponse",
+    "LatestAutomationCycle",
     "PaperOrderResult",
     "PaperExecutionResult",
     "PromotionBypassRequest",

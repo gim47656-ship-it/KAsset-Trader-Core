@@ -23,7 +23,11 @@ from app.extensions.kasset.api.paper_schemas import (
     RiskAssessment,
 )
 from app.extensions.kasset.api.runtime_state import runtime_state
-from app.extensions.kasset.models import AndroidPaperAccount, AndroidPaperOrder
+from app.extensions.kasset.models import (
+    AndroidPaperAccount,
+    AndroidPaperOrder,
+    KAssetPaperPositionState,
+)
 from app.models.paper_trading import PaperAccount, PaperPosition, PaperTrade
 from app.models.trading import InstrumentType, User
 from app.services.exchange_rate_service import UsdKrwExchangeRateQuote
@@ -433,6 +437,210 @@ def _prepare_positions(
         "_position_names",
         AsyncMock(return_value={}),
     )
+
+
+@pytest.mark.asyncio
+async def test_position_identity_is_only_returned_to_opted_in_internal_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper_position = SimpleNamespace(
+        id=21,
+        symbol="005930",
+        instrument_type=InstrumentType.equity_kr,
+        quantity=Decimal("1"),
+        avg_price=Decimal("70000"),
+        total_invested=Decimal("70000"),
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: [paper_position])
+            )
+        )
+    )
+    service = PaperTradingService(db)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        service, "_fetch_quote", AsyncMock(side_effect=RuntimeError("offline"))
+    )
+    assert "position_id" not in (await service.get_positions(1))[0]
+    opted_in = await service.get_positions(1, include_position_id=True)
+    assert opted_in[0]["position_id"] == 21
+
+
+@pytest.mark.asyncio
+async def test_positions_project_only_current_owner_account_market_and_cycle(
+    db_session: AsyncSession,
+    user: User,
+    other_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_at = datetime(2026, 9, 22, 6, 0, tzinfo=UTC)
+    opened_at = datetime(2026, 9, 1, tzinfo=UTC)
+    account = PaperAccount(
+        name=f"state-owner-{uuid4().hex}",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+    other_account = PaperAccount(
+        name=f"state-other-{uuid4().hex}",
+        initial_capital=Decimal("10000000"),
+        cash_krw=Decimal("10000000"),
+        cash_usd=Decimal("0"),
+        is_active=True,
+    )
+    db_session.add_all([account, other_account])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            AndroidPaperAccount(owner_user_id=user.id, paper_account_id=account.id),
+            AndroidPaperAccount(
+                owner_user_id=other_user.id, paper_account_id=other_account.id
+            ),
+        ]
+    )
+    positions = [
+        PaperPosition(
+            account_id=account.id,
+            symbol=symbol,
+            instrument_type=kind,
+            quantity=Decimal("1"),
+            avg_price=Decimal("70000"),
+            total_invested=Decimal("70000"),
+        )
+        for symbol, kind in [
+            ("005930", InstrumentType.equity_kr),
+            ("AAPL", InstrumentType.equity_us),
+            ("000660", InstrumentType.equity_kr),
+        ]
+    ]
+    other_positions = [
+        PaperPosition(
+            account_id=other_account.id,
+            symbol=symbol,
+            instrument_type=kind,
+            quantity=Decimal("1"),
+            avg_price=Decimal("70000"),
+            total_invested=Decimal("70000"),
+        )
+        for symbol, kind in [
+            ("005930", InstrumentType.equity_kr),
+            ("AAPL", InstrumentType.equity_us),
+        ]
+    ]
+    db_session.add_all(positions + other_positions)
+    await db_session.flush()
+
+    def state(
+        owner_id: int,
+        account_id: int,
+        market: str,
+        symbol: str,
+        cycle_id: int,
+        paper_id: int | None,
+        stop: str,
+    ) -> KAssetPaperPositionState:
+        return KAssetPaperPositionState(
+            position_cycle_id=cycle_id,
+            paper_position_id=paper_id,
+            owner_user_id=owner_id,
+            paper_account_id=account_id,
+            market=market,
+            symbol=symbol,
+            entry_price=Decimal("70000"),
+            initial_atr=Decimal("1000"),
+            initial_stop=Decimal("67000"),
+            current_stop=Decimal(stop),
+            highest_close=Decimal("80000"),
+            partial_exit_completed=stop == "77777.25",
+            opened_at=opened_at,
+            closed_at=None if paper_id is not None else saved_at,
+            strategy_version="1.0.0",
+            updated_at=saved_at,
+        )
+
+    db_session.add_all(
+        [
+            state(
+                user.id,
+                account.id,
+                "KRX",
+                "005930",
+                positions[0].id,
+                positions[0].id,
+                "77777.25",
+            ),
+            state(
+                user.id,
+                account.id,
+                "KRX",
+                "005930",
+                10**12 + positions[0].id,
+                None,
+                "33333",
+            ),
+            state(
+                user.id,
+                account.id,
+                "US",
+                "AAPL",
+                10**12 + positions[1].id,
+                None,
+                "15",
+            ),
+            state(
+                other_user.id,
+                other_account.id,
+                "KRX",
+                "005930",
+                other_positions[0].id,
+                other_positions[0].id,
+                "55555",
+            ),
+            state(
+                other_user.id,
+                other_account.id,
+                "US",
+                "AAPL",
+                other_positions[1].id,
+                other_positions[1].id,
+                "44444",
+            ),
+        ]
+    )
+    await db_session.flush()
+    monkeypatch.setattr(
+        PaperTradingService,
+        "_fetch_quote",
+        AsyncMock(side_effect=RuntimeError("offline")),
+    )
+    monkeypatch.setattr(
+        paper_account_adapter, "_position_names", AsyncMock(return_value={})
+    )
+    try:
+        response = await paper_account_adapter.positions(
+            db_session, owner_user_id=user.id
+        )
+        by_symbol = {item.symbol: item for item in response.positions}
+        current = by_symbol["005930"]
+        assert current.management_record == "current"
+        assert current.current_stop == "77777.25000000"
+        assert current.partial_exit_completed is True
+        assert current.management_saved_at == "2026-09-22T06:00:00Z"
+        stale = by_symbol["AAPL"]
+        assert stale.management_record == "stale"
+        assert stale.current_stop is None and stale.partial_exit_completed is None
+        assert stale.management_saved_at == "2026-09-22T06:00:00Z"
+        missing = by_symbol["000660"]
+        assert missing.management_record == "missing"
+        assert missing.management_saved_at is None and missing.current_stop is None
+        assert all(
+            "positionId" not in item
+            for item in response.model_dump(mode="json", by_alias=True)["positions"]
+        )
+    finally:
+        await db_session.rollback()
 
 
 @pytest.mark.asyncio

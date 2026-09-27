@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.extensions.kasset.api.router import _ai_trading_state_response
+from app.extensions.kasset.api.router import (
+    _ai_trading_state_response,
+    ai_trading_state,
+)
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingSnapshot,
@@ -16,6 +22,8 @@ from app.extensions.kasset.automation.policy import (
     OperatingMode,
     PaperExecutionView,
 )
+from app.models.kasset_automation_cycle_events import KAssetAutomationCycleEvent
+from app.models.trading import User
 from app.schemas.ai_recommendations import AITradingStateUpdate
 
 
@@ -215,3 +223,102 @@ def test_router_response_exposes_order_execution_origin() -> None:
         ]
         == "AUTO_PAPER"
     )
+
+
+@pytest.mark.asyncio
+async def test_trading_state_reads_latest_owner_cycle_without_rewriting_settings_time(
+    db_session: AsyncSession,
+    user: User,
+    other_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_time = datetime(2026, 9, 1, tzinfo=UTC)
+    cycle_time = datetime(2026, 9, 22, 1, tzinfo=UTC)
+    db_session.add_all(
+        [
+            KAssetAutomationCycleEvent(
+                owner_user_id=user.id,
+                observed_at=cycle_time - timedelta(hours=1),
+                finished_at=cycle_time - timedelta(hours=1),
+                status="completed",
+                candidate_count=8,
+                recommendation_count=2,
+            ),
+            KAssetAutomationCycleEvent(
+                owner_user_id=user.id,
+                observed_at=cycle_time,
+                finished_at=cycle_time + timedelta(seconds=18),
+                status="skipped",
+                skipped_reason="no_regular_market_open",
+                candidate_count=2,
+                recommendation_count=0,
+            ),
+            KAssetAutomationCycleEvent(
+                owner_user_id=other_user.id,
+                observed_at=cycle_time + timedelta(hours=1),
+                finished_at=cycle_time + timedelta(hours=1),
+                status="failed",
+                candidate_count=99,
+                recommendation_count=0,
+            ),
+        ]
+    )
+    await db_session.flush()
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=AITradingLimits(),
+        usage=AITradingUsage(),
+        usage_by_currency={"KRW": AITradingUsage(), "USD": AITradingUsage()},
+        kill_switch=False,
+        updated_at=settings_time,
+    )
+    get_snapshot = AsyncMock(return_value=snapshot)
+    monkeypatch.setattr(
+        "app.extensions.kasset.api.router.AITradingPolicyService.get_snapshot",
+        get_snapshot,
+    )
+    try:
+        response = await ai_trading_state(
+            SimpleNamespace(user=user),
+            db_session,  # type: ignore[arg-type]
+        )
+        payload = response.model_dump(mode="json", by_alias=True)
+        assert payload["updatedAt"] == "2026-09-01T00:00:00Z"
+        assert payload["observedAt"].endswith("Z")
+        assert payload["latestAutomationCycle"] == {
+            "observedAt": "2026-09-22T01:00:00Z",
+            "finishedAt": "2026-09-22T01:00:18Z",
+            "status": "skipped",
+            "skippedReason": "no_regular_market_open",
+            "candidateCount": 2,
+            "recommendationCount": 0,
+        }
+        get_snapshot.assert_awaited_once()
+    finally:
+        await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_trading_state_missing_cycle_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.extensions.kasset.api.router.AITradingPolicyService.get_snapshot",
+        AsyncMock(
+            return_value=AITradingSnapshot(
+                mode=OperatingMode.APPROVAL,
+                limits=AITradingLimits(),
+                usage=AITradingUsage(),
+                usage_by_currency={"KRW": AITradingUsage(), "USD": AITradingUsage()},
+                kill_switch=False,
+                updated_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+        ),
+    )
+    db = SimpleNamespace(scalar=AsyncMock(return_value=None))
+    response = await ai_trading_state(
+        SimpleNamespace(user=SimpleNamespace(id=102)),
+        db,  # type: ignore[arg-type]
+    )
+    assert response.latest_automation_cycle is None
+    db.scalar.assert_awaited_once()

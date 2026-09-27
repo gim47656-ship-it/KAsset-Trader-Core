@@ -9,7 +9,7 @@ from math import ceil
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.web_router import limiter
@@ -105,6 +105,7 @@ from app.extensions.kasset.automation.policy import (
     OperatingMode,
 )
 from app.extensions.kasset.daily_routine_service import daily_routine_service
+from app.models.kasset_automation_cycle_events import KAssetAutomationCycleEvent
 from app.models.trading import UserRole
 from app.schemas.ai_recommendations import (
     AITradingDerivedLimits,
@@ -112,6 +113,7 @@ from app.schemas.ai_recommendations import (
     AITradingStateResponse,
     AITradingStateUpdate,
     AITradingUsageResponse,
+    LatestAutomationCycle,
     PaperOrderResult,
     PromotionBypassRequest,
 )
@@ -964,6 +966,9 @@ async def update_risk_policy(
 
 def _ai_trading_state_response(
     snapshot: AITradingSnapshot,
+    *,
+    observed_at: datetime | None = None,
+    latest_cycle: KAssetAutomationCycleEvent | None = None,
 ) -> AITradingStateResponse:
     limits = snapshot.limits
     usage = snapshot.usage
@@ -1028,6 +1033,19 @@ def _ai_trading_state_response(
             for item in snapshot.executions
         ],
         promotionBypass=snapshot.promotion_bypass,
+        observedAt=observed_at,
+        latestAutomationCycle=(
+            LatestAutomationCycle(
+                observedAt=latest_cycle.observed_at,
+                finishedAt=latest_cycle.finished_at,
+                status=latest_cycle.status,
+                skippedReason=latest_cycle.skipped_reason,
+                candidateCount=latest_cycle.candidate_count,
+                recommendationCount=latest_cycle.recommendation_count,
+            )
+            if latest_cycle is not None
+            else None
+        ),
     )
 
 
@@ -1036,12 +1054,20 @@ async def ai_trading_state(
     session: Annotated[MobileSession, Depends(get_mobile_session)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AITradingStateResponse:
-    snapshot = await AITradingPolicyService().get_snapshot(
-        db,
-        session.user.id,
-        now=datetime.now(UTC),
+    now = datetime.now(UTC)
+    snapshot = await AITradingPolicyService().get_snapshot(db, session.user.id, now=now)
+    latest_cycle = await db.scalar(
+        select(KAssetAutomationCycleEvent)
+        .where(KAssetAutomationCycleEvent.owner_user_id == session.user.id)
+        .order_by(
+            KAssetAutomationCycleEvent.observed_at.desc(),
+            KAssetAutomationCycleEvent.id.desc(),
+        )
+        .limit(1)
     )
-    return _ai_trading_state_response(snapshot)
+    return _ai_trading_state_response(
+        snapshot, observed_at=now, latest_cycle=latest_cycle
+    )
 
 
 @router.put("/ai/trading/state", response_model=AITradingStateResponse)

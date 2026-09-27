@@ -673,7 +673,11 @@ class PaperTradingService:
     # Query tools
     # ------------------------------------------------------------------ #
     async def get_positions(
-        self, account_id: int, *, market: str | None = None
+        self,
+        account_id: int,
+        *,
+        market: str | None = None,
+        include_position_id: bool = False,
     ) -> list[dict[str, Any]]:
         """Live positions with per-row valuation and quote provenance.
 
@@ -710,6 +714,8 @@ class PaperTradingService:
                 "quote_is_stale": None,
                 "valuation_error": None,
             }
+            if include_position_id:
+                item["position_id"] = p.id
             out.append(item)
 
             try:
