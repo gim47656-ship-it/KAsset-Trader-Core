@@ -1,11 +1,12 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-27 (DART 공시 목록 백필·일일 수집 연결·최대주주 변경 필터 보류·codex 재로그인·Jev OpenRouter 이전·예약 작업 자연 실행 확인)
+갱신: 2026-09-28 (단타 청산 보유기간 10→2 bars 채택, 서버 옛 Docker 이미지 정리)
 
 ## 현재 목표·운영 상태
 - **2026-09-27 앱 운용 조회 보완(미배포)**: `feat/app-operational-state`에서 자동 점검 기록·조회시각과 현재 보유 사이클의 저장 보호선·부분익절 여부를 조회 응답에 추가했다. 격리 서버 집중 테스트 63건과 Ruff·ty를 통과했다. 기존 전략·주문·중지 동작과 DB 스키마는 바꾸지 않았다. 응답 의미와 미계측 경계는 `docs/API-CONTRACT.md` 「AI PAPER 운용 설정」「PAPER 보유 보호 상태」가 정본이다. Android 연결 검수 뒤 PR/CI 및 사용자 배포 승인이 필요하다. 기록: [maker-CoreAppStatus](doc/history/2026/09/27-app-operational-state/maker-CoreAppStatus.md).
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
 - **2026-09-22 사용자 승인 변경(매도 규칙 전권 위임)**: 진입은 단타인데 청산이 스윙 기준이라 2026-09-22 보유 6종목이 장중 최대 +3.81%까지 가고도 SELL 0건이었다. 익절을 계단으로 나눠 장중에 닿게 고쳤다. **초기 손절 `진입가 - 3 ATR`은 유지**한다.
-- **현재 청산 사다리 (5단)**: ① 초기 손절 `진입가 - 3 ATR` ② 진전폭 `+1 ATR` 뒤 켜지는 `최고종가 - 2 ATR` 조기 보호선 ③ `+0.5 ATR` 1차 익절 30% ④ 부분익절 뒤 `max(진입가, 최고종가 - 3 ATR)` 바닥 ⑤ TIME_STOP 진전폭을 **현재 종가** 기준으로 판정(과거 최고 종가 latch 제거). 백테스트 근거는 [22-sell-strategy-app-surface](doc/history/2026/09/22-sell-strategy-app-surface/main.md).
+- **현재 청산 사다리 (5단)**: ① 초기 손절 `진입가 - 3 ATR` ② 진전폭 `+1 ATR` 뒤 켜지는 `최고종가 - 2 ATR` 조기 보호선 ③ `+0.5 ATR` 1차 익절 30% ④ 부분익절 뒤 `max(진입가, 최고종가 - 3 ATR)` 바닥 ⑤ TIME_STOP: 진입일 포함 **3거래일째**(`max_holding_bars=2`) 현재 종가 진전폭이 `+0.5 ATR` 미만이면 청산(조건부, 2026-09-28 10→2 사용자 승인). 백테스트 근거는 [22-sell-strategy-app-surface](doc/history/2026/09/22-sell-strategy-app-surface/main.md), 보유기간은 [28-scalp-exit-research](doc/history/2026/09/28-scalp-exit-research/main.md)(일봉 +12.57%→+20.27%, 손익비 1.77→2.56; 2차 익절·추격선·손절 −2 ATR·무조건 N일 청산은 성과가 나빠 미채택).
+- **2026-09-28 서버 디스크 정리(사용자 승인)**: 디스크는 100GB(파티션 99GB)다. 빌드 캐시와 `kasset-trader-core` 옛 이미지 113개·dangling을 지워 29.35GB를 회수했다(사용 56→34GB). 운영 `9af66f554`와 최근 `742f27134`·`8b27dc2da`만 남겨 그 이전 버전은 즉시 롤백 이미지가 없다. `deploy.sh`는 옛 이미지를 지우지 않으므로 배포마다 다시 쌓인다.
 - **2026-09-23 사다리 결함 수정(PR #72, 운영 배포 `c9c4db89f`)**: ① KRX 2주 이상은 1차 익절을 최소 1주·최대 보유-1주로 잡는다. 1주 보유는 팔지 않고 도달 bucket부터 본전 바닥만 올린다(`partial_exit_completed`는 false 유지). ② 부분익절 `SUCCEEDED`를 화해하는 tick에서 잔량 손절선을 즉시 본전 바닥으로 올린다(`effective_at=now`, 소급 없음). 수정 전에는 3주 보유의 30%가 0주로 내림돼 신호가 버려졌고, 부분익절 뒤 잔량이 다음 일봉까지 `-3 ATR`로만 보호됐다. 근거는 [23-intraday-exit-ladder](doc/history/2026/09/23-intraday-exit-ladder/main.md).
 - **장중 추가 익절·추격선은 미판정·미도입**: 장중 분봉 원본이 2026-08-27부터라 유효 사이클이 7개뿐이었고, arm 간 방향도 엇갈렸다. 같은 코호트의 장중 이력이 3개월 이상이고 결측을 뺀 완료 사이클이 30개 이상일 때 [arm 비교](doc/history/2026/09/23-intraday-exit-ladder/evidence/intraday-arm-comparison.md)를 같은 방법으로 다시 돌린다. `position_manager.py`를 바꾸면 전략 fingerprint가 달라져 PAPER 주문이 재승격 전까지 막힌다.
 - **추천 유효기간 80분**(`_OWNER_BUY_COOLDOWN` 60분 + `_PRODUCER_TICK` 10분 × 2). 이전 60분은 배치 간격 70분을 못 덮어 모든 추천이 다음 배치 전에 만료됐고, 그래서 같은 종목이 매 배치 새로 추천됐다. 같은 종목 재진입 한도(`same_symbol_reentry_limit`)를 추천 생성 단계에도 적용하되 **체결 성공 + 미만료 PENDING만** 세고 예산 소진 실패는 세지 않는다(재시도 경로 보존).

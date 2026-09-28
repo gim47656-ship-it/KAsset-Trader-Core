@@ -1,0 +1,4 @@
+Command: ssh kasset-server 'docker run --rm --name kasset-scalp-second-trail-smoke --network none --cpus=1.0 --memory=3g --mount type=bind,src=/tmp/kasset-scalp-exit-20260928/repo,dst=/work,readonly -e PYTHONPATH=/work -e PYTHONDONTWRITEBYTECODE=1 -e OPENDART_API_KEY=offline-research -e DATABASE_URL=postgresql+asyncpg://offline:offline@127.0.0.1:5432/offline -e SECRET_KEY=OfflineResearchOnly1234567890abcdefghijklmno -w /work --entrypoint /app/.venv/bin/python kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 smoke-second-trail.py'
+Exit: 0
+[('PARTIAL_SELL', '30'), ('SECOND_PARTIAL_SELL', '21'), ('TRAILING_STOP', '49')]
+second_and_trail_ok

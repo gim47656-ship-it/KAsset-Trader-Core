@@ -42,7 +42,12 @@ class PositionManagerConfig:
     #: ``0``은 본전이다. 고정 퍼센트가 아니라 ATR 배수이며 손절선은 계속
     #: 단조 상승만 한다.
     post_partial_floor_atr: Decimal = Decimal("0")
-    max_holding_bars: int = 10
+    #: 단타 보유 상한. ``bars_held``는 진입일 다음 완료 일봉부터 세므로 ``2``는
+    #: 진입일을 포함해 3거래일째 종가에 진전폭(``no_progress_atr``)을 판정한다.
+    #: 2026-09-28 일봉 백테스트(``doc/history/2026/09/28-scalp-exit-research``)에서
+    #: 10일 대비 총수익·손익비가 가장 크게 개선된 값이다. 진전이 있으면 청산하지
+    #: 않는 조건부 상한이며, 무조건 N일 청산은 성과가 나빠 채택하지 않았다.
+    max_holding_bars: int = 2
     no_progress_atr: Decimal = Decimal("0.5")
 
     def __post_init__(self) -> None:
