@@ -1,0 +1,5 @@
+Command: ssh kasset-server 'docker run --rm --name kasset-scalp-deadline-smoke --network none --cpus=1.0 --memory=3g --mount type=bind,src=/tmp/kasset-scalp-exit-20260928/repo,dst=/work,readonly --mount type=bind,src=/tmp/kasset-scalp-exit-20260928,dst=/source,readonly -e PYTHONPATH=/work -e PYTHONDONTWRITEBYTECODE=1 -e OPENDART_API_KEY=offline-research -e DATABASE_URL=postgresql+asyncpg://offline:offline@127.0.0.1:5432/offline -e SECRET_KEY=OfflineResearchOnly1234567890abcdefghijklmno -w /work --entrypoint /app/.venv/bin/python kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 /source/smoke-deadline.py'
+Exit: 0
+s3-h2C-p0-t0 [('PARTIAL_SELL', '2026-09-23 00:00:00+00:00', '3', '100.8990')]
+s3-h2F-p0-t0 [('TIME_LIMIT', '2026-09-23 00:00:00+00:00', '10', '100.8990')]
+deadline_collision_ok

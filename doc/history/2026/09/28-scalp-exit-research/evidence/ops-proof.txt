@@ -1,0 +1,13 @@
+[before] ssh kasset-server 'docker exec kasset-trader-db-1 sh -c '\''psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SET default_transaction_read_only=on; SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname=current_schema()"'\'''; exit 0
+102
+[before] ssh kasset-server 'docker ps --filter name=kasset-trader- --format "{{.Names}} {{.Image}} {{.Status}}"'; exit 0
+kasset-trader-scheduler-1 kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 Up 17 hours
+kasset-trader-api-1 kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 Up 17 hours (healthy)
+kasset-trader-mcp-1 kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 Up 17 hours (healthy)
+kasset-trader-worker-1 kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 Up 17 hours
+kasset-trader-ai-mcp-1 kasset-trader-core:9af66f554609110c4aed79a1478c59b9ab1ca152 Up 17 hours (healthy)
+kasset-trader-caddy-1 caddy:2.11.4-alpine Up 3 weeks
+kasset-trader-db-1 timescale/timescaledb-ha:pg17 Up 3 weeks (healthy)
+kasset-trader-redis-1 redis:7-alpine Up 3 weeks (healthy)
+[mid] same SQL read-only table count, exit 0: 102
+[after] Pending final research process completion.
