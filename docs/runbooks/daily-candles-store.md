@@ -25,7 +25,7 @@ Cron entries are registered in `app/tasks/daily_candles_tasks.py` using
 |---------|-------------------------|------------------|--------------------------------------------------------|
 | KR      | `30 16 * * 1-5`         | 16:30 KST Mon-Fri | 1 h after KOSPI close (15:30 KST)                   |
 | US      | `0 7 * * 2-6`           | 07:00 KST Tue-Sat | ~1 h after NYSE close (05:xx KST) on the prior US trading day |
-| Crypto  | `0 9 * * *`             | 09:00 KST daily  | Upbit 24/7; daily snapshot at a quiet hour            |
+| Crypto  | None                    | Manual only      | Automatic daily collection disabled for the stock app |
 
 **Note:** The plan document mentions UTC cron times — those are superseded by
 the Asia/Seoul-local times shown above, which are what the code actually uses.

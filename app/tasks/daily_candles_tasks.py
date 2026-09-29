@@ -3,7 +3,7 @@
 Schedules (Asia/Seoul):
 - KR: 16:30 KST Mon-Fri (1h after KOSPI close).
 - US: 07:00 KST Tue-Sat (~1h after NYSE close on the corresponding US trading day).
-- Crypto: 09:00 KST daily.
+- Crypto: manual invocation only; no recurring schedule.
 
 Cron times are offset from intraday sync (which runs every 10 minutes)
 to keep KIS rate-limit keys uncontended.
@@ -37,7 +37,6 @@ async def sync_us_daily_task() -> dict[str, object]:
 
 @broker.task(
     task_name="candles.daily.crypto.sync",
-    schedule=[{"cron": "0 9 * * *", "cron_offset": "Asia/Seoul"}],
 )
 async def sync_crypto_daily_task() -> dict[str, object]:
     return await run_daily_candles_sync(market="crypto")
