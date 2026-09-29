@@ -82,9 +82,6 @@ async def _cleanup(db_session: AsyncSession, username: str) -> None:
     [
         (1, "0.3", "0.5", "0.0025", "0.10", 3, 1, 1, 2, 6, 12, 1),
         (2, "0.5", "1.0", "0.005", "0.15", 4, 2, 1, 3, 8, 16, 1),
-        (3, "0.8", "1.5", "0.0075", "0.20", 5, 3, 2, 5, 10, 20, 1),
-        (4, "1.2", "2.5", "0.01", "0.25", 5, 5, 3, 8, 10, 20, 1),
-        (5, "2.0", "4.0", "0.015", "0.30", 6, 8, 4, 12, 24, 30, 2),
     ],
 )
 def test_risk_level_uses_single_preset_for_all_hidden_limits(
@@ -116,6 +113,31 @@ def test_risk_level_uses_single_preset_for_all_hidden_limits(
     assert limits.max_custom_orders_per_day == max_custom_buys + max_custom_sells
     assert limits.same_symbol_reentry_limit == reentry
     assert limits.min_ai_confidence == Decimal("0.50")
+
+
+@pytest.mark.parametrize("risk_level", [3, 4, 5])
+def test_non_beginner_levels_have_no_daily_or_reentry_count_limits(
+    risk_level: int,
+) -> None:
+    # 사용자 횟수가 저장돼 있어도 무제한 등급에서는 적용하지 않고 정규화한다.
+    limits = AITradingLimits(
+        risk_level=risk_level,
+        custom_max_buys_per_day=3,
+        custom_max_sells_per_day=3,
+    )
+
+    assert limits.max_buys_per_day is None
+    assert limits.max_sells_per_day is None
+    assert limits.max_orders_per_day is None
+    assert limits.max_custom_buys_per_day is None
+    assert limits.max_custom_sells_per_day is None
+    assert limits.max_custom_orders_per_day is None
+    assert limits.same_symbol_reentry_limit is None
+    assert limits.custom_max_buys_per_day is None
+    assert limits.custom_max_sells_per_day is None
+    stored = limits.to_storage()
+    assert "custom_max_buys_per_day" not in stored
+    assert "custom_max_sells_per_day" not in stored
 
 
 def test_default_limits_are_stable_level_two() -> None:
@@ -172,19 +194,19 @@ def test_custom_daily_limits_reject_values_outside_server_hard_maximum(
     value: object,
 ) -> None:
     with pytest.raises(ValueError):
-        AITradingLimits(risk_level=4, **{field: value})  # type: ignore[arg-type]
+        AITradingLimits(risk_level=2, **{field: value})  # type: ignore[arg-type]
 
 
 def test_invalid_persisted_custom_daily_limit_fails_closed() -> None:
     with pytest.raises(
         ValueError,
-        match="custom_max_sells_per_day must be between 1 and 20",
+        match="custom_max_sells_per_day must be between 1 and 16",
     ):
         _decode_setting(
             {
                 "mode": "APPROVAL",
                 "settings": {
-                    "risk_level": 4,
+                    "risk_level": 2,
                     "custom_max_sells_per_day": 21,
                 },
             }
@@ -237,12 +259,12 @@ async def test_settings_round_trip_writes_only_canonical_fields(
         max_symbol_ratio=Decimal("1"),
     )
     limits = AITradingLimits(
-        risk_level=4,
+        risk_level=2,
         operating_budget_krw=Decimal("9000000"),
         daily_target_rate_pct=Decimal("0.7"),
         max_daily_loss_rate_pct=Decimal("1.8"),
         custom_max_buys_per_day=7,
-        custom_max_sells_per_day=18,
+        custom_max_sells_per_day=12,
         kill_switch=False,
         currency="KRW",
     )
@@ -285,14 +307,14 @@ async def test_settings_round_trip_writes_only_canonical_fields(
             operating_budget_usd=Decimal("20000"),
         )
         assert loaded.limits.max_buys_per_day == 7
-        assert loaded.limits.max_sells_per_day == 18
-        assert loaded.limits.max_orders_per_day == 25
+        assert loaded.limits.max_sells_per_day == 12
+        assert loaded.limits.max_orders_per_day == 19
         assert Decimal(state.max_order_ratio) == Decimal("0.35")
         assert Decimal(state.max_symbol_ratio) == Decimal("1")
         assert loaded.executions == ()
         assert row is not None
         assert row.value["settings"] == {
-            "risk_level": 4,
+            "risk_level": 2,
             "operating_budget_krw": "9000000",
             "operating_budget_usd": "20000",
             "daily_target_rate_pct": "0.7",
@@ -300,7 +322,7 @@ async def test_settings_round_trip_writes_only_canonical_fields(
             "kill_switch": False,
             "currency": "KRW",
             "custom_max_buys_per_day": 7,
-            "custom_max_sells_per_day": 18,
+            "custom_max_sells_per_day": 12,
         }
     finally:
         await _cleanup(db_session, username)
@@ -828,6 +850,77 @@ async def test_order_count_gate_separates_buy_sell_and_total_limits(
     assert "sellsToday=" in order_count.detail
     assert "hardMaxBuys=8" in order_count.detail
     assert "hardMaxSells=16" in order_count.detail
+
+
+class _HeldPositionDb(_EmptyRiskDb):
+    """보유 1주 + 같은 종목 오늘 BUY 주문 수 조회(count)에만 값을 돌려준다."""
+
+    def __init__(self, same_symbol_buys: int) -> None:
+        self._same_symbol_buys = same_symbol_buys
+
+    async def scalar(self, statement: object) -> object:
+        text = str(statement).lower()
+        if "count(" in text:
+            return self._same_symbol_buys
+        if "paper_positions" in text:
+            return SimpleNamespace(quantity=Decimal("1"), total_invested=Decimal("0"))
+        if "kasset_android_paper_accounts" in text:
+            return 1
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["BUY", "SELL"])
+@pytest.mark.parametrize(
+    ("risk_level", "expected"),
+    [(1, False), (2, False), (3, True), (4, True), (5, True)],
+)
+async def test_order_count_gate_only_limits_beginner_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    risk_level: int,
+    expected: bool,
+) -> None:
+    limits = AITradingLimits(risk_level=risk_level)
+    usage = AITradingUsage(buys_today=500, sells_today=500, orders_today=1000)
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=limits,
+        usage=usage,
+        usage_by_currency={"KRW": usage, "USD": AITradingUsage()},
+        kill_switch=False,
+        updated_at=_NOW,
+    )
+    service = AITradingPolicyService()
+    monkeypatch.setattr(
+        service,
+        "get_snapshot",
+        AsyncMock(return_value=snapshot),
+    )
+
+    result = await service.evaluate_hard_risk(
+        _HeldPositionDb(50),  # type: ignore[arg-type]
+        101,
+        action=action,
+        market="KRX",
+        symbol="005930",
+        quantity=Decimal("1"),
+        reference_price=Decimal("70000"),
+        ai_confidence=Decimal("0.90"),
+        now=_NOW,
+    )
+
+    order_count = next(check for check in result.checks if check.rule == "ORDER_COUNT")
+    assert order_count.passed is expected
+    if expected:
+        assert "ordersToday=1000/unlimited" in order_count.detail
+        assert "buysToday=500/unlimited" in order_count.detail
+        assert "sellsToday=500/unlimited" in order_count.detail
+        assert "sameSymbolBuys=50/unlimited" in order_count.detail
+    # 보유 SELL은 횟수만 다르고 POSITION 관문은 등급과 무관하게 통과한다.
+    if action == "SELL":
+        position = next(check for check in result.checks if check.rule == "POSITION")
+        assert position.passed is True
 
 
 @pytest.mark.asyncio

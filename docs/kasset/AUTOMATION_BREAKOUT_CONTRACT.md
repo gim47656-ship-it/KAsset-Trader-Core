@@ -95,6 +95,23 @@ ATR을 만들 완료 일봉이 부족하거나 일봉이 stale/future면 **상�
 
 백테스트의 stop gap은 stop 가격 체결로 소급하지 않는다. 다음 거래 가능 봉 시가와 설정된 보수적 slippage를 적용한다.
 
+### KRX 실시간 단타 관찰(NH PLUG, PAPER)
+
+2026-09-29 사용자 승인 범위: 국내(KRX) 읽기 전용 실시간 시세로 PAPER 신규 진입을 한 번 더 확인하고, 평가익 보유분을 흐름 악화 때 먼저 정리한다. 실거래 주문, NXT(`mc`/`mb`), 해외 실시간(RC/RH, 유료 신청 필요)은 범위 밖이다. 미국 수집·추천·집행 경로는 바꾸지 않는다.
+
+- **수신** — `nh-stream` 프로세스(`app/extensions/kasset/nhplug/runner.py`)가 KRX 정규장에만 `wss://api.nhplug.com:7070/websocket`에 붙어 보유 종목 → 실시간 관문을 요구한 KRX BUY 추천 종목 순으로 `oc`(체결)·`ob`(호가)를 구독한다. 공식 SDK 한도(세션 2, 세션당 등록 30, 초당 등록 10 미만)에 맞춰 최대 30종목·0.2초 간격으로 보내고, 넘치는 종목은 경고 로그와 함께 구독하지 않는다. Redis lease `kasset:nh:owner`로 프로세스 하나만 연결하며, 기존 Toss 스트림(`api/stream/*`)과 키·세션을 공유하지 않는다. 주문·DB 쓰기는 없다.
+- **토큰** — `KASSET_NHPLUG_TOKEN_CACHE_PATH`(compose 기본 `/var/lib/kasset-nhplug/token.json`)의 `{access_token, expires_at}`를 먼저 쓰고, 만료 60초 전부터만 파일 잠금 아래 한 번 발급한다. 캐시를 못 읽거나 발급이 429·거절이면 재발급하지 않고 멈춘다. TLS는 `ssl.create_default_context()`만 쓴다.
+- **관찰창** — `realtime_tape.py` `TapeWindow`는 연결 이후 체결과 호가가 모두 들어온 시각부터 60초를 센다. 체결 간격 15초·호가 간격 5초 초과, 누적 매수/매도 체결량 역행, 세션 날짜 변경, 재연결은 창을 비우고 다시 센다. 누적 거래량이 늘지 않은 중복·늦게 도착한 프레임과 거래소 시각이 수신 시각과 60초 넘게 벌어진 프레임은 버린다. 매수호가가 매도호가 이상(locked/crossed)이거나 한쪽이 빈 호가는 무효 프레임으로 센다.
+- **10호가 물량 관측** — 공식 `ob`의 1단계 `bid/offer/bidrem/offerrem`, 2단계 `P_`, 3단계 `S_`, 4~10단계 `S4_`~`S10_` 가격·잔량을 snapshot `bookDepth`에 단계 순서대로 보존한다. 총잔량 `T_bidrem/T_offerrem`은 `totalBidSize/totalAskSize`이며 `(매수총잔량-매도총잔량)/(매수총잔량+매도총잔량)`을 `bookImbalance`로 남긴다. 이는 **체결강도가 아닌 호가 잔량의 관측 evidence**다. 매수우위 임계값이나 별도 매매 gate를 만들지 않는다. 빠진 가격·잔량은 `null`, 총잔량 부재 또는 합계 0이면 불균형은 `null`/`UNAVAILABLE`이다.
+- **체결강도** — 창 시작 직전 체결과 마지막 체결의 누적 매수(`bidvolall`)·매도(`offvolall`) 체결량 증분 비율 × 100이다. 매도 증분 0·매수 증분 > 0은 `BUY_ONLY`(진입 중립 이상, 청산 악화 아님), 둘 다 0이거나 누적값이 없으면 `UNAVAILABLE`이다. 공식 `oc` push 예시에서 `volpower = bidvolall/offvolall×100`(109.75), `bidrate = bidvolall/volume×100`(52.09), `avgprice ≈ value_won/volume`(당일 VWAP)이 성립함을 확인했다. `oc` 필드의 한국어 정의는 스펙에 없고 REST `currentExecution`의 `shnu_cntg_smtn`(누적매수체결량)·`seln_cntg_smtn`(누적매도체결량)·`cttr`(체결강도)과 대응시킨 해석이다.
+- **진입 확인** — 적용 대상은 evidence marker와 무관하게 `source=kasset-automation`, `market=KRX`, `action=BUY`인 모든 추천이다. 배포 전에 생성돼 marker가 없는 미만료 추천도 수신 대상에 포함하고 같은 관문을 적용한다. producer의 `kind=realtime_entry, required=true`는 설명 evidence이며 권한 판정 기준이 아니다. US와 수동 주문은 이 관문 대상이 아니다. 기존 Daily Setup·Intraday Trigger·Hard Risk에 더해 60초 관찰 완료, snapshot 3초·호가 3초·체결 15초 이내, 체결 10건 이상, 무효 호가 0, **중앙 스프레드와 최신 best bid/ask 스프레드 모두 동일 설정 30bp 이하**, 체결강도 100 이상(또는 `BUY_ONLY`), 60초 가격 비하락, 현재가 ≥ 당일 VWAP여야 한다. 선택 때 준비되지 않은 BUY는 건너뛰고 추천을 남긴다. 선택된 BUY는 Hard Risk 다음·`paper_orders.submit` 바로 앞에서 재확인한다. 실패하면 `submit_rejected:REALTIME_ENTRY_NOT_CONFIRMED`로 `FAILED` 처리하고 주문을 만들지 않는다. snapshot 부재·형식 오류는 해당 KRX 자동매수만 막는다.
+- **흐름 악화 조기 청산** — 실시간 가변 손절이 아니다. 기존 ATR 손절·부분익절·trailing 사다리와 저장된 손절선은 바꾸지 않고 소급하지 않는다. 현재가 ≥ 진입가이고 현재가 > 저장된 보호선인 KRX 보유분에서 60초 체결강도 < 100, 60초 가격 하락, 현재가 < 당일 VWAP, 현재가 < 완료 5분봉 종가 MA5가 **모두** 맞을 때만 전량 SELL 추천(`exitKind=REALTIME_TREND_EXIT`, `evaluationHorizon=realtime`, 유효 10분, id `kasset-realtime-exit:{position_id}:{분}`)을 만든다. 손실 구간은 기존 손절이 맡는다. 같은 cycle에 끝나지 않은 청산 추천이 있으면 만들지 않고, 아직 claim되지 않은 흐름 청산은 기존 사다리의 전량 보호 신호가 대신한다. 이 추천에는 `barAsOf`를 두지 않아 실패해도 손절 재판정 bucket을 건너뛰지 않는다. 지수·거래대금 조건은 쓰지 않는다(지수 상대강도는 기존 Toss 경로 그대로).
+- **주기** — `kasset.realtime.kr.run`(`* 9-15 * * 1-5` Asia/Seoul, advisory single-flight 키 4)이 KRX 정규장에만 AUTO_PAPER·kill switch off owner마다 기존 보호 평가 `run_owner(markets={"KRX"})` → 흐름 악화 청산 → KRX 추천만 집행(`run_paper_automation_once(markets={"KRX"})`) 순으로 돈다. 5분 전체 sweep과 같은 owner를 동시에 집행하지 않도록 owner별 PostgreSQL advisory lock을 잡고, 잡지 못하면 `owner_execution_in_progress`로 건너뛴다. 보호 평가가 매분 돌므로 보유 KRX 종목의 5분봉 조회가 늘어난다.
+- **수치의 성격** — 위 60초·15초·5초·3초·10건·30bp·체결강도 100·MA5는 PAPER 초기 실험값이며 수익성 검증을 거친 값이 아니다. 값은 `RealtimeTapeConfig`에 있고 `realtime_tape.py`가 strategy artifact fingerprint에 포함되므로 값·코드 변경은 새 fingerprint가 된다(promotion bypass owner는 영향 없음).
+- **검증 상태** — 공식 스펙 push 예시와 합성 replay로 판정을 검증했다. 장중 실제 틱 수신은 이 문서 작성 시점에 확인되지 않았다(인증·REST 시세·`oc`/`ob` 구독 ACK `00000`은 확인, 장 마감 뒤라 틱 0건).
+- **켜기/끄기** — `nh-stream` 컨테이너는 `.env.nhplug`(없어도 compose는 실패하지 않음)의 `KASSET_NH_STREAM_ENABLED=true`일 때만 연결하고, 아니면 연결 없이 대기한다. 토큰 캐시 디렉터리는 `KASSET_NHPLUG_RUNTIME_DIR`(기본 `./.env.nhplug.runtime`, uid 10001·700, 파일 600)다. 끄면 실시간 관문을 요구하는 KRX BUY만 막히고 보호 청산과 US 경로는 그대로다.
+- **이전 버전 롤백** — 새 compose를 읽을 수 있을 때 `nh-stream`을 먼저 중단하고, 이전 revision의 compose 서비스 목록과 배포 대상의 교집합만 복원한다. 이전 compose에 `nh-stream`이 없어도 기존 5개 서비스 복원이 실패하지 않는다. 중단·복원 오류는 숨기지 않으며 DB migration 자동 롤백 정책은 바꾸지 않는다.
+
 ### Portfolio Backtest, readiness와 Promotion
 
 백테스트는 Candidate Ranker, 기존 Strategy/Regime/Ensemble, Position Sizer, Position Manager의 같은 pure 계산 함수를 호출한다. 런타임과 동일하게 `family=StrategyFamily.BREAKOUT`으로 앙상블을 구성하므로 Mean Reversion은 백테스트 신호에도 투표하지 않는다. 신호 bar까지의 데이터만 전달하고 다음 거래 가능 bar에서 체결한다. KRX/US별 수수료·slippage, 1x/2x/3x stress, walk-forward, 기간·Regime 성과, 거래수·승률·기대값·MDD·회전율·benchmark 초과성과, 종목 제거와 1-bar 지연 민감도를 계산한다.
@@ -148,6 +165,8 @@ submit 결과가 불명확하면 즉시 실패나 재전송으로 단정하지 �
 ## 참고 출처와 라이선스
 
 알고리즘 아이디어는 MIT License의 [VladPetrariu/Qullamaggie-breakout-scanner](https://github.com/VladPetrariu/Qullamaggie-breakout-scanner)를 참고했다. 재사용 아이디어는 multi-factor breakout ranking, relative strength, HH/HL, ATR compression, volume contraction/expansion, weekly confluence, ATR risk sizing, partial profit/trailing/time stop, walk-forward·stress·counterfactual 검증이다. 소스 파일을 복사하지 않고 KAsset의 Decimal·timezone·owner scope·PAPER safety 계약에 맞게 독립 구현한다.
+
+NH PLUG 프로토콜·한도·ACK 판별(`header`에 `tr_type`/`rsp_cd`가 있으면 구독 응답)은 MIT License의 공식 [PLUG-OpenAPI/nhplug-sdk](https://github.com/PLUG-OpenAPI/nhplug-sdk)와 `krstock/openapi.json`을 따랐다. 흐름 악화 청산의 "VWAP·MA5 이탈과 약화 신호 조합" 아이디어는 라이선스가 없는 [minwoopg/KIWOOM-AUTO-TRADER](https://github.com/minwoopg/KIWOOM-AUTO-TRADER)를 참고만 했고 코드·수치는 가져오지 않았다.
 
 ## 2026-08-31 SHADOW 확장 상태
 

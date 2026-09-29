@@ -3,7 +3,7 @@
 #
 # 지금까지 수동으로 하던 절차를 그대로 옮겼다:
 #   git checkout <sha> → .env.kasset의 CORE_IMAGE_TAG/VCS_REF 갱신 → docker compose build api
-#   → (alembic 변경이 있으면 DB 백업 후 migration) → up -d 5개 서비스 → /health 200 확인
+#   → (alembic 변경이 있으면 DB 백업 후 migration) → up -d 6개 서비스 → /health 200 확인
 #   → 실패 시 이전 SHA로 롤백.
 #
 # 사용: deploy/kasset/deploy.sh <target-sha>
@@ -15,7 +15,7 @@ TARGET_SHA="${1:?usage: deploy.sh <target-sha>}"
 ALLOW_MIGRATION="${ALLOW_MIGRATION:-0}"
 REPO_DIR="${KASSET_REPO_DIR:-/opt/kasset-trader-core}"
 ENV_FILE=".env.kasset"
-SERVICES=(api worker scheduler mcp ai-mcp)
+SERVICES=(api worker scheduler mcp ai-mcp nh-stream)
 HEALTH_TIMEOUT_SEC="${HEALTH_TIMEOUT_SEC:-180}"
 
 log() { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -63,11 +63,26 @@ log "checkout $TARGET_SHA, env 갱신 (백업: $BACKUP_ENV)"
 
 rollback() {
   log "롤백 시작 → $CURRENT_SHA"
+  # 이전 compose에는 새 collector가 없을 수 있다. 새 compose를 읽을 수 있을 때
+  # 먼저 중단해 구버전 worker와 새 시세 프로세스가 함께 남지 않게 한다.
+  compose stop nh-stream || fail "롤백 전 nh-stream 중단 실패"
   cp "$BACKUP_ENV" "$ENV_FILE"
   if [ -n "$CURRENT_SHA" ] && git cat-file -e "${CURRENT_SHA}^{commit}" 2>/dev/null; then
     git checkout -q "$CURRENT_SHA"
   fi
-  compose up -d --no-build "${SERVICES[@]}" || true
+  local available service candidate
+  local restore_services=()
+  available="$(compose --profile '*' config --services)" || fail "롤백 compose 서비스 조회 실패"
+  for service in "${SERVICES[@]}"; do
+    while IFS= read -r candidate; do
+      if [ "$candidate" = "$service" ]; then
+        restore_services+=("$service")
+        break
+      fi
+    done <<< "$available"
+  done
+  [ "${#restore_services[@]}" -gt 0 ] || fail "롤백 대상 서비스가 없다"
+  compose up -d --no-build "${restore_services[@]}" || fail "이전 서비스 복원 실패"
   log "롤백 완료(이미지 $(env_value CORE_IMAGE_TAG)). DB migration은 자동으로 되돌리지 않는다."
 }
 
@@ -120,4 +135,4 @@ fi
 
 log "OK: $TARGET_SHA 배포 완료, /health 200, 컨테이너 ${#SERVICES[@]}개 새 이미지"
 docker ps --format '{{.Names}}\t{{.Status}}' | grep kasset-trader-core >/dev/null || true
-docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "kasset-trader-(api|worker|scheduler|mcp|ai-mcp)" | sed "s/kasset-trader-core://"
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "kasset-trader-(api|worker|scheduler|mcp|ai-mcp|nh-stream)" | sed "s/kasset-trader-core://"

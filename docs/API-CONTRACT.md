@@ -294,10 +294,18 @@
   nullable 양의 정수 `customMaxBuysPerDay`, `customMaxSellsPerDay`다.
 - `derivedLimits`는 서버 계산값이다. `maxBuysPerDay`, `maxSellsPerDay`,
   `maxOrdersPerDay`, `maxCustomBuysPerDay`, `maxCustomSellsPerDay`,
-  `maxCustomOrdersPerDay`와 종목 비중·동시보유·재진입·AI 확신도 한도를 포함한다.
-- 기본 `하루 매수/매도/전체 주문`은 `1단계 1/1/2`, `2단계 2/1/3`,
-  `3단계 3/2/5`, `4단계 5/3/8`, `5단계 8/4/12`다. 사용자 횟수가 `null`이면
-  이 기본값을 쓰고, 값이 있으면 각 side의 `maxCustom*` 상한을 넘을 수 없다.
+  `maxCustomOrdersPerDay`, `sameSymbolReentryLimit`와 종목 비중·동시보유·AI 확신도
+  한도를 포함한다.
+- 하루 `매수/매도/전체 주문` 기본값은 `1단계 1/1/2`, `2단계 2/1/3`이고
+  같은 종목 하루 재진입은 두 단계 모두 1회다. 사용자 횟수가 `null`이면 이 기본값을
+  쓰고, 값이 있으면 각 side의 `maxCustom*` 상한을 넘을 수 없다.
+- `3·4·5단계`(앱의 중수·고수)는 하루 매수·매도·전체 주문 횟수와 같은 종목 재진입
+  횟수를 제한하지 않는다. 이때 위 `derivedLimits`의 횟수 필드
+  (`maxBuysPerDay`, `maxSellsPerDay`, `maxOrdersPerDay`, `maxCustom*`,
+  `sameSymbolReentryLimit`)는 모두 `null`이고 `customMaxBuysPerDay`,
+  `customMaxSellsPerDay` 입력은 저장하지 않고 `null`로 돌려준다. `null`은 "한도 없음"이며
+  0이 아니다. 종목 비중·동시보유·예산·kill switch·시세 검증과 같은 종목의 대기 중
+  BUY 추천 중복 제외·BUY 쿨다운은 그대로다.
 - `usage`는 `buysToday`, `sellsToday`, `ordersToday`, `concurrentHoldings`,
   `budgetUsed`, 당일 실현 손익을 반환한다. 목표수익률은 계좌 상태 게이트의
   신규 BUY 축소·중지에 쓰지만 `maxDailyLossRatePct`와 파생 손실 금액은

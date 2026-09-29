@@ -8,15 +8,16 @@ TaskIQ (or any other) scheduler can run one bounded automation sweep.
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Sequence
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator, Collection, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -48,10 +49,12 @@ from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
     OperatingMode,
 )
+from app.extensions.kasset.automation.realtime_tape import requires_realtime_entry
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
 )
 from app.extensions.kasset.fcm_push_service import dispatch_order_execution_pushes
+from app.extensions.kasset.nhplug.tape_store import RealtimeEntryGate, RedisTapeStore
 from app.jobs.watch_market_data import is_market_open
 from app.models.ai_recommendations import (
     AIRecommendation,
@@ -67,6 +70,54 @@ logger = logging.getLogger(__name__)
 #: 실행 원장에 남기는 출처. 무인 sweep과 사람이 누른 승인 실행을 구분한다.
 AUTO_PAPER_EXECUTION_ORIGIN = "AUTO_PAPER"
 APPROVAL_EXECUTION_ORIGIN = "APPROVAL"
+#: 두 sweep(5분 전체 시장, 1분 KRX 전용)이 같은 owner를 동시에 집행하지 않게
+#: 잡는 세션 advisory lock namespace. 키는 owner id다.
+_OWNER_EXECUTION_LOCK_NAMESPACE = 1_263_498_068
+#: 제출 직전 실시간 재확인 실패 코드.
+REALTIME_ENTRY_NOT_CONFIRMED = "REALTIME_ENTRY_NOT_CONFIRMED"
+
+
+@asynccontextmanager
+async def realtime_entry_gate() -> AsyncIterator[RealtimeEntryGate]:
+    """실행 경로용 실시간 관문. Redis 연결은 첫 조회 때만 열린다."""
+
+    store = RedisTapeStore.from_settings()
+    try:
+        yield RealtimeEntryGate(store)
+    finally:
+        with contextlib.suppress(Exception):
+            await store.aclose()
+
+
+@asynccontextmanager
+async def _owner_execution_lock(owner_user_id: int) -> AsyncIterator[bool]:
+    """owner 하나의 집행을 프로세스·sweep 사이에서 직렬화한다."""
+
+    async with _session() as session:
+        acquired = bool(
+            await session.scalar(
+                text("SELECT pg_try_advisory_lock(:namespace, :key)"),
+                {"namespace": _OWNER_EXECUTION_LOCK_NAMESPACE, "key": owner_user_id},
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    await session.scalar(
+                        text("SELECT pg_advisory_unlock(:namespace, :key)"),
+                        {
+                            "namespace": _OWNER_EXECUTION_LOCK_NAMESPACE,
+                            "key": owner_user_id,
+                        },
+                    )
+                except Exception:
+                    # 연결이 닫히면 세션 advisory lock도 풀린다.
+                    logger.exception(
+                        "kasset owner execution unlock failed: owner_user_id=%s",
+                        owner_user_id,
+                    )
 
 
 async def _record_execution_event(
@@ -312,11 +363,20 @@ class OwnerScopedRecommendationService:
         *,
         recommendation_id: str | None = None,
         require_promotion: bool = False,
+        markets: Collection[str] | None = None,
+        realtime_gate: RealtimeEntryGate | None = None,
     ) -> None:
         self._db = db
         self._service = AIRecommendationService(db)
         self._recommendation_id = recommendation_id
         self._require_promotion = require_promotion
+        self._markets = (
+            None
+            if markets is None
+            else frozenset(market.strip().upper() for market in markets)
+        )
+        # 없으면 실시간 관문을 요구하는 BUY는 준비되지 않은 것으로 본다.
+        self._realtime_gate = realtime_gate
 
     async def authorize_next_for_auto_execution(
         self,
@@ -329,6 +389,8 @@ class OwnerScopedRecommendationService:
             AIRecommendation.action.in_(("BUY", "SELL")),
             AIRecommendation.source == "kasset-automation",
         )
+        if self._markets is not None:
+            base = base.where(AIRecommendation.market.in_(sorted(self._markets)))
         approved_rows = list(
             (
                 await self._db.scalars(
@@ -405,6 +467,26 @@ class OwnerScopedRecommendationService:
             if promotion_service is not None:
                 approval = await promotion_service.approval_for_recommendation(row)
                 if not approval.approved:
+                    continue
+            if requires_realtime_entry(
+                source=row.source, market=row.market, action=row.action
+            ):
+                # 관찰이 준비되지 않은 실시간 BUY가 이 tick의 슬롯을 차지하지
+                # 않게 건너뛴다. 추천은 그대로 남아 다음 tick에 다시 본다.
+                check = (
+                    await self._realtime_gate.check(str(row.symbol))
+                    if self._realtime_gate is not None
+                    else None
+                )
+                if check is None or not check.ready:
+                    logger.info(
+                        "kasset realtime entry not ready; skipping BUY: "
+                        "owner_user_id=%s recommendation_id=%s symbol=%s reasons=%s",
+                        owner_id,
+                        row.id,
+                        row.symbol,
+                        list(check.reasons) if check is not None else ["gate_absent"],
+                    )
                     continue
             if row.decision == RecommendationDecision.PENDING:
                 row = await self._service.decide(
@@ -527,9 +609,11 @@ class OwnerScopedPaperOrders:
         *,
         now: datetime | None = None,
         require_promotion: bool = False,
+        realtime_gate: RealtimeEntryGate | None = None,
     ) -> None:
         self._now = (now or datetime.now(UTC)).replace(microsecond=0)
         self._require_promotion = require_promotion
+        self._realtime_gate = realtime_gate
 
     async def preview(
         self,
@@ -614,7 +698,49 @@ class OwnerScopedPaperOrders:
                     "checks": [check.as_evidence() for check in hard_risk.checks],
                 },
             )
+        await self._confirm_realtime_entry(db, owner_user_id, request)
         return await paper_orders.submit(db, int(owner_user_id), request)
+
+    async def _confirm_realtime_entry(
+        self,
+        db: AsyncSession,
+        owner_user_id: str,
+        request: OrderRequest,
+    ) -> None:
+        """실시간 관문을 요구한 BUY는 제출 바로 앞에서 관찰을 다시 판정한다."""
+
+        if request.side != "BUY":
+            return
+        recommendation = await AIRecommendationService(db).get_recommendation(
+            int(owner_user_id),
+            _recommendation_id_from_client_order(request.client_order_id),
+        )
+        if not requires_realtime_entry(
+            source=recommendation.source,
+            market=recommendation.market,
+            action=recommendation.action,
+        ):
+            return
+        check = (
+            await self._realtime_gate.check(request.symbol)
+            if self._realtime_gate is not None
+            else None
+        )
+        if check is not None and check.ready:
+            return
+        raise MobileApiError(
+            409,
+            REALTIME_ENTRY_NOT_CONFIRMED,
+            "제출 직전 실시간 체결·호가 재확인에서 PAPER 매수가 차단되었습니다.",
+            {
+                "reasons": (
+                    list(check.reasons)
+                    if check is not None
+                    else ["realtime_gate_unavailable"]
+                ),
+                "realtime": dict(check.evidence) if check is not None else None,
+            },
+        )
 
     async def _hard_risk(
         self,
@@ -725,7 +851,16 @@ class OwnerScopedPaperOrders:
         )
 
 
-async def _claimable_owner_ids(db: AsyncSession, now: datetime) -> list[int]:
+async def _claimable_owner_ids(
+    db: AsyncSession,
+    now: datetime,
+    markets: Collection[str] | None = None,
+) -> list[int]:
+    market_filter = (
+        ()
+        if markets is None
+        else (AIRecommendation.market.in_(sorted({m.upper() for m in markets})),)
+    )
     rows = await db.execute(
         select(AIRecommendation.owner_user_id)
         .distinct()
@@ -750,6 +885,7 @@ async def _claimable_owner_ids(db: AsyncSession, now: datetime) -> list[int]:
                 ),
             ),
             AIRecommendation.source == "kasset-automation",
+            *market_filter,
         )
         .order_by(AIRecommendation.owner_user_id)
     )
@@ -774,6 +910,8 @@ def _session() -> AbstractAsyncContextManager[AsyncSession]:
 async def run_paper_automation_once(
     *,
     now: datetime | None = None,
+    markets: Collection[str] | None = None,
+    realtime_gate: RealtimeEntryGate | None = None,
 ) -> dict[str, object]:
     """Run one bounded automation sweep: at most one execution per owner.
 
@@ -782,6 +920,10 @@ async def run_paper_automation_once(
     failure never aborts the other owners' sweeps.  During a regular session a
     degraded reference quote blocks the owner before any order is built; see
     ``_stale_quote_block_reason``.
+
+    ``markets``를 주면 그 시장의 추천만 본다(1분 KRX sweep은 ``{"KRX"}``).
+    같은 owner를 두 sweep이 동시에 집행하지 않도록 owner advisory lock을 잡고,
+    잡지 못하면 그 owner는 이번 sweep에서 건너뛴다.
     """
 
     current = (now or datetime.now(UTC)).replace(microsecond=0)
@@ -789,163 +931,184 @@ async def run_paper_automation_once(
         return {"enabled": False, "owners": 0, "outcomes": []}
 
     async with _session() as db:
-        owner_ids = await _claimable_owner_ids(db, current)
+        owner_ids = await _claimable_owner_ids(db, current, markets)
 
     outcomes: list[dict[str, object]] = []
-    for owner_id in owner_ids:
-        try:
-            async with _session() as db:
-                snapshot = await AITradingPolicyService().get_snapshot(
-                    db,
-                    owner_id,
-                    now=current,
-                    execution_limit=0,
+    async with contextlib.AsyncExitStack() as stack:
+        gate = (
+            realtime_gate
+            if realtime_gate is not None
+            else await stack.enter_async_context(realtime_entry_gate())
+        )
+        for owner_id in owner_ids:
+            try:
+                async with _owner_execution_lock(owner_id) as locked:
+                    outcome = (
+                        await _run_owner_sweep(
+                            owner_id,
+                            current=current,
+                            markets=markets,
+                            realtime_gate=gate,
+                        )
+                        if locked
+                        else PaperExecutionOutcome(
+                            status="BLOCKED",
+                            reason="owner_execution_in_progress",
+                        )
+                    )
+            except Exception as exc:  # one owner's failure must not stop the sweep
+                outcome = PaperExecutionOutcome(
+                    status="FAILED",
+                    reason=f"owner_sweep_failed:{type(exc).__name__}",
                 )
-                if snapshot.mode != OperatingMode.AUTO_PAPER:
-                    outcome = PaperExecutionOutcome(
-                        status="BLOCKED",
-                        reason="auto_paper_mode_required",
-                    )
-                elif snapshot.kill_switch:
-                    outcome = PaperExecutionOutcome(
-                        status="BLOCKED",
-                        reason="global_kill_switch_enabled",
-                    )
-                else:
-                    # 여기까지 왔으면 AUTO_PAPER이고 kill switch는 꺼져 있다.
-                    # override는 승격 근거 요구 하나만 면제하며, PAPER 판정과
-                    # kill switch는 snapshot.promotion_bypass 계산에서 이미
-                    # 반영됐다.
-                    promotion_bypassed = snapshot.promotion_bypass
-                    if promotion_bypassed:
-                        logger.warning(
-                            "kasset paper automation runs without promotion "
-                            "evidence: owner_user_id=%s reason=%s",
-                            owner_id,
-                            PROMOTION_BYPASSED_BY_OWNER,
-                        )
-                    recommendation_service = OwnerScopedRecommendationService(
-                        db,
-                        require_promotion=not promotion_bypassed,
-                    )
-                    recommendation_id = (
-                        await recommendation_service.authorize_next_for_auto_execution(
-                            str(owner_id),
-                            current,
-                        )
-                    )
-                    # 주문을 만들기 전에 정규장 여부와 기준 시세 신선도를
-                    # 검사한다. 후보가 없으면 검사할 종목도 없다.
-                    out_of_session_reason = (
-                        None
-                        if recommendation_id is None
-                        else await _out_of_session_block_reason(
-                            db,
-                            recommendation_id,
-                            now=current,
-                        )
-                    )
-                    stale_quote_reason = (
-                        None
-                        if recommendation_id is None
-                        or out_of_session_reason is not None
-                        else await _stale_quote_block_reason(
-                            db,
-                            recommendation_id,
-                            now=current,
-                        )
-                    )
-                    if recommendation_id is None:
-                        outcome = PaperExecutionOutcome(
-                            status="BLOCKED",
-                            reason=(
-                                "no_eligible_recommendation"
-                                if promotion_bypassed
-                                else "strategy_promotion_required"
-                            ),
-                        )
-                    elif out_of_session_reason is not None:
-                        logger.info(
-                            "kasset paper automation blocked outside the regular "
-                            "session: owner_user_id=%s recommendation_id=%s "
-                            "reason=%s",
-                            owner_id,
-                            recommendation_id,
-                            out_of_session_reason,
-                        )
-                        outcome = PaperExecutionOutcome(
-                            status="BLOCKED",
-                            reason=out_of_session_reason,
-                            recommendation_id=recommendation_id,
-                        )
-                    elif stale_quote_reason is not None:
-                        logger.warning(
-                            "kasset paper automation blocked on a stale reference "
-                            "quote: owner_user_id=%s recommendation_id=%s reason=%s",
-                            owner_id,
-                            recommendation_id,
-                            stale_quote_reason,
-                        )
-                        outcome = PaperExecutionOutcome(
-                            status="BLOCKED",
-                            reason=stale_quote_reason,
-                            recommendation_id=recommendation_id,
-                        )
-                    else:
-                        consumer = PaperAutomationConsumer(
-                            owner_user_id=str(owner_id),
-                            safety_gate=RuntimeStateSafetyGate(
-                                db,
-                                automatic=True,
-                                recommendation_id=recommendation_id,
-                            ),
-                            recommendation_service=recommendation_service,
-                            paper_orders=OwnerScopedPaperOrders(
-                                now=current,
-                                require_promotion=not promotion_bypassed,
-                            ),
-                            db=db,
-                        )
-                        outcome = await consumer.run_once(now=current)
-                        if promotion_bypassed:
-                            # 승격 근거 없이 나간 실행임을 결과에 남긴다.
-                            outcome = replace(
-                                outcome,
-                                promotion_bypass_reason=PROMOTION_BYPASSED_BY_OWNER,
-                            )
-        except Exception as exc:  # one owner's failure must not stop the sweep
-            outcome = PaperExecutionOutcome(
-                status="FAILED",
-                reason=f"owner_sweep_failed:{type(exc).__name__}",
+            await _record_execution_event(
+                owner_user_id=owner_id,
+                origin=AUTO_PAPER_EXECUTION_ORIGIN,
+                outcome=outcome,
+                now=current,
             )
-        await _record_execution_event(
-            owner_user_id=owner_id,
-            origin=AUTO_PAPER_EXECUTION_ORIGIN,
-            outcome=outcome,
-            now=current,
-        )
-        await _dispatch_auto_paper_execution_push(
-            owner_user_id=owner_id,
-            outcome=outcome,
-            now=current,
-        )
-        outcomes.append(
-            {
-                "owner_user_id": owner_id,
-                "status": outcome.status,
-                "reason": outcome.reason,
-                "recommendation_id": outcome.recommendation_id,
-                "replayed": outcome.replayed,
-                "promotion_bypass_reason": outcome.promotion_bypass_reason,
-            }
-        )
+            await _dispatch_auto_paper_execution_push(
+                owner_user_id=owner_id,
+                outcome=outcome,
+                now=current,
+            )
+            outcomes.append(
+                {
+                    "owner_user_id": owner_id,
+                    "status": outcome.status,
+                    "reason": outcome.reason,
+                    "recommendation_id": outcome.recommendation_id,
+                    "replayed": outcome.replayed,
+                    "promotion_bypass_reason": outcome.promotion_bypass_reason,
+                }
+            )
     result = {"enabled": True, "owners": len(owner_ids), "outcomes": outcomes}
     logger.info(
-        "kasset paper automation sweep done: owners=%d outcomes=%s",
+        "kasset paper automation sweep done: owners=%d outcomes=%s markets=%s",
         len(owner_ids),
         outcomes,
+        sorted(markets) if markets is not None else "ALL",
     )
     return result
+
+
+async def _run_owner_sweep(
+    owner_id: int,
+    *,
+    current: datetime,
+    markets: Collection[str] | None,
+    realtime_gate: RealtimeEntryGate,
+) -> PaperExecutionOutcome:
+    async with _session() as db:
+        snapshot = await AITradingPolicyService().get_snapshot(
+            db,
+            owner_id,
+            now=current,
+            execution_limit=0,
+        )
+        if snapshot.mode != OperatingMode.AUTO_PAPER:
+            return PaperExecutionOutcome(
+                status="BLOCKED",
+                reason="auto_paper_mode_required",
+            )
+        if snapshot.kill_switch:
+            return PaperExecutionOutcome(
+                status="BLOCKED",
+                reason="global_kill_switch_enabled",
+            )
+        # 여기까지 왔으면 AUTO_PAPER이고 kill switch는 꺼져 있다. override는
+        # 승격 근거 요구 하나만 면제하며, PAPER 판정과 kill switch는
+        # snapshot.promotion_bypass 계산에서 이미 반영됐다.
+        promotion_bypassed = snapshot.promotion_bypass
+        if promotion_bypassed:
+            logger.warning(
+                "kasset paper automation runs without promotion "
+                "evidence: owner_user_id=%s reason=%s",
+                owner_id,
+                PROMOTION_BYPASSED_BY_OWNER,
+            )
+        recommendation_service = OwnerScopedRecommendationService(
+            db,
+            require_promotion=not promotion_bypassed,
+            markets=markets,
+            realtime_gate=realtime_gate,
+        )
+        recommendation_id = (
+            await recommendation_service.authorize_next_for_auto_execution(
+                str(owner_id),
+                current,
+            )
+        )
+        if recommendation_id is None:
+            return PaperExecutionOutcome(
+                status="BLOCKED",
+                reason=(
+                    "no_eligible_recommendation"
+                    if promotion_bypassed
+                    else "strategy_promotion_required"
+                ),
+            )
+        # 주문을 만들기 전에 정규장 여부와 기준 시세 신선도를 검사한다.
+        out_of_session_reason = await _out_of_session_block_reason(
+            db,
+            recommendation_id,
+            now=current,
+        )
+        if out_of_session_reason is not None:
+            logger.info(
+                "kasset paper automation blocked outside the regular "
+                "session: owner_user_id=%s recommendation_id=%s "
+                "reason=%s",
+                owner_id,
+                recommendation_id,
+                out_of_session_reason,
+            )
+            return PaperExecutionOutcome(
+                status="BLOCKED",
+                reason=out_of_session_reason,
+                recommendation_id=recommendation_id,
+            )
+        stale_quote_reason = await _stale_quote_block_reason(
+            db,
+            recommendation_id,
+            now=current,
+        )
+        if stale_quote_reason is not None:
+            logger.warning(
+                "kasset paper automation blocked on a stale reference "
+                "quote: owner_user_id=%s recommendation_id=%s reason=%s",
+                owner_id,
+                recommendation_id,
+                stale_quote_reason,
+            )
+            return PaperExecutionOutcome(
+                status="BLOCKED",
+                reason=stale_quote_reason,
+                recommendation_id=recommendation_id,
+            )
+        consumer = PaperAutomationConsumer(
+            owner_user_id=str(owner_id),
+            safety_gate=RuntimeStateSafetyGate(
+                db,
+                automatic=True,
+                recommendation_id=recommendation_id,
+            ),
+            recommendation_service=recommendation_service,
+            paper_orders=OwnerScopedPaperOrders(
+                now=current,
+                require_promotion=not promotion_bypassed,
+                realtime_gate=realtime_gate,
+            ),
+            db=db,
+        )
+        outcome = await consumer.run_once(now=current)
+        if promotion_bypassed:
+            # 승격 근거 없이 나간 실행임을 결과에 남긴다.
+            outcome = replace(
+                outcome,
+                promotion_bypass_reason=PROMOTION_BYPASSED_BY_OWNER,
+            )
+        return outcome
 
 
 async def run_approved_recommendation_once(
@@ -957,7 +1120,7 @@ async def run_approved_recommendation_once(
     """Synchronously execute one explicit APPROVAL decision in PAPER only."""
 
     current = (now or datetime.now(UTC)).replace(microsecond=0)
-    async with _session() as db:
+    async with _session() as db, realtime_entry_gate() as gate:
         consumer = PaperAutomationConsumer(
             owner_user_id=str(owner_user_id),
             safety_gate=RuntimeStateSafetyGate(db, automatic=False),
@@ -965,7 +1128,7 @@ async def run_approved_recommendation_once(
                 db,
                 recommendation_id=recommendation_id,
             ),
-            paper_orders=OwnerScopedPaperOrders(now=current),
+            paper_orders=OwnerScopedPaperOrders(now=current, realtime_gate=gate),
             db=db,
         )
         outcome = await consumer.run_once(now=current)
@@ -986,6 +1149,7 @@ __all__ = [
     "STALE_QUOTE_UNRESOLVED_REASON",
     "APPROVAL_EXECUTION_ORIGIN",
     "AUTO_PAPER_EXECUTION_ORIGIN",
+    "REALTIME_ENTRY_NOT_CONFIRMED",
     "OwnerScopedPaperOrders",
     "OwnerScopedRecommendationService",
     "RuntimeStateSafetyGate",

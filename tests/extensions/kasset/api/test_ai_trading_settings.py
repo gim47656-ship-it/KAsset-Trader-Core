@@ -124,13 +124,13 @@ def test_request_rejects_client_hidden_limit_overrides(hidden_field: str) -> Non
 
 def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
     limits = AITradingLimits(
-        risk_level=4,
+        risk_level=2,
         operating_budget_krw=Decimal("2500000"),
         operating_budget_usd=Decimal("12500"),
         daily_target_rate_pct=Decimal("0.7"),
         max_daily_loss_rate_pct=Decimal("1.8"),
-        custom_max_buys_per_day=10,
-        custom_max_sells_per_day=18,
+        custom_max_buys_per_day=6,
+        custom_max_sells_per_day=12,
         currency="KRW",
     )
     response = _ai_trading_state_response(
@@ -162,26 +162,26 @@ def test_router_response_exposes_only_canonical_and_derived_settings() -> None:
         "customMaxSellsPerDay",
         "derivedLimits",
     }
-    assert settings["riskLevel"] == 4
+    assert settings["riskLevel"] == 2
     assert settings["operatingBudget"] == "2500000"
     assert settings["operatingBudgetKrw"] == "2500000"
     assert settings["operatingBudgetUsd"] == "12500"
-    assert settings["customMaxBuysPerDay"] == 10
-    assert settings["customMaxSellsPerDay"] == 18
+    assert settings["customMaxBuysPerDay"] == 6
+    assert settings["customMaxSellsPerDay"] == 12
     assert settings["dailyTargetRatePct"] == "0.7"
     assert settings["maxDailyLossRatePct"] == "1.8"
     derived = settings["derivedLimits"]
     assert Decimal(derived["dailyTargetAmount"]) == Decimal("17500")
     assert Decimal(derived["maxDailyLossAmount"]) == Decimal("45000")
-    assert Decimal(derived["maxSymbolAllocationPct"]) == Decimal("25")
-    assert derived["maxConcurrentHoldings"] == 5
-    assert derived["maxBuysPerDay"] == 10
-    assert derived["maxSellsPerDay"] == 18
-    assert derived["maxOrdersPerDay"] == 28
-    assert derived["maxCustomBuysPerDay"] == 10
-    assert derived["maxCustomSellsPerDay"] == 20
-    assert derived["maxCustomOrdersPerDay"] == 30
-    assert derived["riskPerTradeRate"] == "0.01"
+    assert Decimal(derived["maxSymbolAllocationPct"]) == Decimal("15")
+    assert derived["maxConcurrentHoldings"] == 4
+    assert derived["maxBuysPerDay"] == 6
+    assert derived["maxSellsPerDay"] == 12
+    assert derived["maxOrdersPerDay"] == 18
+    assert derived["maxCustomBuysPerDay"] == 8
+    assert derived["maxCustomSellsPerDay"] == 16
+    assert derived["maxCustomOrdersPerDay"] == 24
+    assert derived["riskPerTradeRate"] == "0.005"
     assert derived["sameSymbolReentryLimit"] == 1
     assert derived["minAiConfidence"] == "0.50"
     assert payload["usage"]["sellsToday"] == 3

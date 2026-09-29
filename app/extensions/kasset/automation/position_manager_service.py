@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal, DecimalException
@@ -15,7 +16,10 @@ from app.extensions.kasset.automation.intraday_data import (
     CompletedIntradayBars,
     load_completed_session_bars,
 )
-from app.extensions.kasset.automation.market_session import current_regular_session
+from app.extensions.kasset.automation.market_session import (
+    RegularSession,
+    current_regular_session,
+)
 from app.extensions.kasset.automation.policy import AITradingPolicyService
 from app.extensions.kasset.automation.position_manager import (
     ExitKind,
@@ -28,6 +32,13 @@ from app.extensions.kasset.automation.position_manager import (
     evaluate_position,
     evaluate_position_intraday,
     initialize_position,
+)
+from app.extensions.kasset.automation.realtime_tape import (
+    DEFAULT_REALTIME_TAPE_CONFIG,
+    REALTIME_TREND_EXIT_KIND,
+    RealtimeTapeConfig,
+    TapeSnapshot,
+    evaluate_realtime_trend_exit,
 )
 from app.extensions.kasset.automation.strategy_promotion import (
     DEFAULT_PAPER_STRATEGY_KEY,
@@ -57,6 +68,12 @@ _HISTORY_BARS = 40
 _TREND_WINDOW = 20
 _SIGNAL_LIFETIME = timedelta(days=4)
 _MAX_BAR_AGE = timedelta(days=4)
+#: 실시간 흐름 청산 추천의 유효기간. 1분 task가 매분 집행하므로 짧게 둔다.
+_REALTIME_EXIT_LIFETIME = timedelta(minutes=10)
+#: MA5 조회 전에 먼저 확인하는, 호가·체결 snapshot만으로 판정되는 조건.
+_REALTIME_TAPE_CONDITIONS = frozenset(
+    {"volume_power_weak", "price_falling", "below_session_vwap"}
+)
 _ZERO = Decimal("0")
 
 
@@ -333,6 +350,15 @@ def _stored_exit_kind(row: AIRecommendation) -> ExitKind | None:
     return None
 
 
+def _is_realtime_trend_exit(row: AIRecommendation) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "position_exit"
+        and item.get("exitKind") == REALTIME_TREND_EXIT_KIND
+        for item in row.evidence or []
+    )
+
+
 def _stored_exit_bar_as_of(row: AIRecommendation) -> datetime | None:
     """종료된 보호 추천이 어느 완료 bucket을 근거로 나왔는지 돌려준다."""
 
@@ -379,7 +405,24 @@ class PaperPositionManagerService:
         self._strategy_fingerprint = normalized_fingerprint
         self._policy = AITradingPolicyService()
 
-    async def run_owner(self, owner_user_id: int) -> tuple[str, ...]:
+    async def run_owner(
+        self,
+        owner_user_id: int,
+        *,
+        markets: Collection[str] | None = None,
+    ) -> tuple[str, ...]:
+        """보유 보호 청산을 평가한다. ``markets``를 주면 그 시장 보유만 본다."""
+
+        instrument_types = tuple(
+            instrument
+            for market, instrument in (
+                ("KRX", InstrumentType.equity_kr),
+                ("US", InstrumentType.equity_us),
+            )
+            if markets is None or market in {m.upper() for m in markets}
+        )
+        if not instrument_types:
+            return ()
         position_rows = (
             await self._db.execute(
                 select(PaperPosition, AndroidPaperAccount.paper_account_id)
@@ -390,9 +433,7 @@ class PaperPositionManagerService:
                 .where(
                     AndroidPaperAccount.owner_user_id == owner_user_id,
                     PaperPosition.quantity > 0,
-                    PaperPosition.instrument_type.in_(
-                        (InstrumentType.equity_kr, InstrumentType.equity_us)
-                    ),
+                    PaperPosition.instrument_type.in_(instrument_types),
                 )
                 .order_by(PaperPosition.instrument_type, PaperPosition.symbol)
                 .with_for_update(of=PaperPosition)
@@ -753,11 +794,19 @@ class PaperPositionManagerService:
             return None
         if (
             pending_active
-            and pending_kind is ExitKind.PARTIAL_SELL
+            and (
+                pending_kind is ExitKind.PARTIAL_SELL
+                or (
+                    previous_recommendation is not None
+                    and _is_realtime_trend_exit(previous_recommendation)
+                )
+            )
             and signal.kind is not ExitKind.PARTIAL_SELL
             and previous_recommendation is not None
             and previous_recommendation.paper_execution_status is None
         ):
+            # 아직 claim되지 않은 부분익절·실시간 흐름 청산은 기존 손절 사다리의
+            # 전량 보호 신호가 대신한다. 보호 청산이 우선이다.
             previous_recommendation.valid_until = self._now
             previous_recommendation.updated_at = self._now
             pending_active = False
@@ -899,3 +948,228 @@ class PaperPositionManagerService:
         self._db.add(row)
         await self._db.flush()
         return row.id
+
+    async def run_realtime_trend_exits(
+        self,
+        owner_user_id: int,
+        *,
+        snapshots: Mapping[str, TapeSnapshot],
+        config: RealtimeTapeConfig = DEFAULT_REALTIME_TAPE_CONFIG,
+    ) -> tuple[str, ...]:
+        """평가익 KRX 보유분의 흐름 악화 조기 청산 추천을 만든다.
+
+        ``run_owner``(기존 보호 청산) 다음에 부른다. 같은 사이클에 아직 끝나지
+        않은 청산 추천이 있으면 만들지 않는다. 손절선·부분익절 상태·이력은
+        바꾸지 않고, 추천만 만든다(브로커 호출 없음).
+        """
+
+        session = current_regular_session("KRX", self._now)
+        if session is None or not snapshots:
+            return ()
+        position_rows = (
+            await self._db.execute(
+                select(PaperPosition, AndroidPaperAccount.paper_account_id)
+                .join(
+                    AndroidPaperAccount,
+                    AndroidPaperAccount.paper_account_id == PaperPosition.account_id,
+                )
+                .where(
+                    AndroidPaperAccount.owner_user_id == owner_user_id,
+                    PaperPosition.quantity > 0,
+                    PaperPosition.instrument_type == InstrumentType.equity_kr,
+                )
+                .order_by(PaperPosition.symbol)
+                .with_for_update(of=PaperPosition)
+            )
+        ).all()
+        created: list[str] = []
+        for position, account_id in position_rows:
+            snapshot = snapshots.get(str(position.symbol))
+            if snapshot is None:
+                continue
+            try:
+                async with self._db.begin_nested():
+                    recommendation_id = await self._realtime_trend_exit(
+                        owner_user_id=owner_user_id,
+                        account_id=int(account_id),
+                        position=position,
+                        snapshot=snapshot,
+                        session=session,
+                        config=config,
+                    )
+            except (DecimalException, TypeError, ValueError) as exc:
+                logger.warning(
+                    "PAPER 실시간 흐름 청산 데이터 오류를 건너뜁니다: "
+                    "owner=%s symbol=%s exception=%s",
+                    owner_user_id,
+                    position.symbol,
+                    type(exc).__name__,
+                )
+                continue
+            if recommendation_id is not None:
+                created.append(recommendation_id)
+        await self._db.commit()
+        return tuple(created)
+
+    async def _realtime_trend_exit(
+        self,
+        *,
+        owner_user_id: int,
+        account_id: int,
+        position: PaperPosition,
+        snapshot: TapeSnapshot,
+        session: RegularSession,
+        config: RealtimeTapeConfig,
+    ) -> str | None:
+        position_id = int(position.id)
+        state_row = await self._db.scalar(
+            select(KAssetPaperPositionState)
+            .where(
+                KAssetPaperPositionState.paper_position_id == position_id,
+                KAssetPaperPositionState.closed_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if state_row is None or not _state_matches_position_cycle(
+            state_row,
+            owner_user_id=owner_user_id,
+            account_id=account_id,
+            market="KRX",
+            position=position,
+        ):
+            # 보호선이 없는 보유분에는 조기 청산 근거(진입가·손절선)도 없다.
+            return None
+        if await self._exit_pending(state_row.last_exit_signal_key):
+            return None
+        state = _state_from_row(state_row)
+        # 호가·체결만으로 정해지는 조건이 먼저 다 맞아야 5분봉을 읽는다.
+        preliminary = evaluate_realtime_trend_exit(
+            snapshot,
+            now=self._now,
+            entry_price=state.entry_price,
+            current_stop=state.current_stop,
+            completed_closes=(),
+            config=config,
+        )
+        if not _REALTIME_TAPE_CONDITIONS <= set(preliminary.reasons):
+            return None
+        bars = await load_completed_session_bars(
+            symbol=str(position.symbol),
+            market="KRX",
+            as_of=self._now,
+            session=session,
+        )
+        if not isinstance(bars, CompletedIntradayBars):
+            return None
+        decision = evaluate_realtime_trend_exit(
+            snapshot,
+            now=self._now,
+            entry_price=state.entry_price,
+            current_stop=state.current_stop,
+            completed_closes=[_decimal(bar.close) for bar in bars.bars],
+            config=config,
+        )
+        if not decision.triggered or decision.reference_price is None:
+            return None
+        quantity = Decimal(position.quantity).quantize(
+            Decimal("1"), rounding=ROUND_DOWN
+        )
+        if quantity <= _ZERO:
+            return None
+        recommendation_id = position_recommendation_id(
+            f"kasset-realtime-exit:{position_id}:{self._now:%Y%m%dT%H%M}",
+            owner_user_id,
+        )
+        if await self._db.get(AIRecommendation, recommendation_id) is not None:
+            return None
+        hard_risk = await self._policy.evaluate_hard_risk(
+            self._db,
+            owner_user_id,
+            action="SELL",
+            market="KRX",
+            symbol=str(position.symbol),
+            quantity=quantity,
+            reference_price=decision.reference_price,
+            ai_confidence=Decimal("1"),
+            now=self._now,
+        )
+        exit_evidence: dict[str, object] = {
+            "title": "Deterministic PAPER realtime trend exit",
+            "source": "position_manager",
+            "kind": "position_exit",
+            "exitKind": REALTIME_TREND_EXIT_KIND,
+            "idempotencyKey": recommendation_id,
+            "paperPositionId": position_id,
+            "positionCycleId": state.position_cycle_id,
+            "quantityFraction": "1",
+            "initialAtr": str(state.initial_atr),
+            "initialStop": str(state.initial_stop),
+            "currentStop": str(state.current_stop),
+            # 손절 사다리의 완료 bucket 근거가 아니므로 ``barAsOf``를 두지 않는다.
+            # 두면 이 추천이 실패했을 때 그 시각까지의 손절 판정이 건너뛰어진다.
+            "evaluationHorizon": "realtime",
+            "movingAverageSource": bars.source,
+            "movingAverageDataAsOf": bars.data_as_of.isoformat(),
+            "realtimeTape": dict(decision.evidence),
+        }
+        row = AIRecommendation(
+            id=recommendation_id,
+            owner_user_id=owner_user_id,
+            action="SELL",
+            decision=RecommendationDecision.PENDING.value,
+            market="KRX",
+            symbol=str(position.symbol),
+            name=None,
+            currency="KRW",
+            headline=f"{position.symbol} 실시간 흐름 악화 청산 검토",
+            rationale=[
+                "평가익 구간에서 60초 체결강도가 100 아래로 내려가고 가격이 "
+                "하락하며 당일 VWAP와 완료 5분봉 MA5 아래로 내려가 먼저 "
+                "정리합니다. 기존 손절선은 바꾸지 않습니다."
+            ],
+            risks=[check.detail for check in hard_risk.checks if not check.passed],
+            evidence=[
+                exit_evidence,
+                {
+                    "title": "PAPER exit Hard Risk",
+                    "source": "kasset_hard_risk",
+                    "kind": "hard_risk",
+                    **hard_risk.as_evidence(),
+                },
+                _strategy_provenance_evidence(state_row),
+            ],
+            confidence="1",
+            reference_price=str(decision.reference_price),
+            suggested_quantity=str(quantity),
+            source="kasset-automation",
+            created_at=self._now,
+            valid_until=self._now + _REALTIME_EXIT_LIFETIME,
+            updated_at=self._now,
+        )
+        self._db.add(row)
+        # 기존 보호 평가가 이 추천을 대기 중 청산으로 보도록 사이클에 연결한다.
+        state_row.last_exit_signal_key = recommendation_id
+        await self._db.flush()
+        return row.id
+
+    async def _exit_pending(self, signal_key: str | None) -> bool:
+        """사이클에 연결된 청산 추천이 아직 끝나지 않았는지."""
+
+        if signal_key is None:
+            return False
+        previous = await self._db.scalar(
+            select(AIRecommendation)
+            .where(AIRecommendation.id == signal_key)
+            .with_for_update()
+        )
+        if previous is None:
+            return False
+        status = previous.paper_execution_status
+        if status == "CLAIMED":
+            return True
+        if status in {"SUCCEEDED", "FAILED"} or previous.decision == "REJECTED":
+            return False
+        try:
+            return _aware_utc(previous.valid_until) > self._now
+        except (TypeError, ValueError):
+            return False

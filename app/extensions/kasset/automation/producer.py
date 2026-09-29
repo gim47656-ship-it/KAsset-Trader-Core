@@ -22,6 +22,9 @@ from app.extensions.kasset.automation.contracts import (
     strategies_in_family,
     utc_datetime,
 )
+from app.extensions.kasset.automation.realtime_tape import (
+    realtime_entry_requirement_evidence,
+)
 
 _EXPECTED_STRATEGIES = frozenset(StrategyName)
 _CONFIDENCE_TEXT = {
@@ -673,6 +676,10 @@ class RecommendationProducer:
             evidence.append(normalized_ai_shadow)
         if normalized_strategy_promotion is not None:
             evidence.append(normalized_strategy_promotion)
+        if candidate is Action.BUY and normalized_market == "KRX":
+            # 기존 setup·trigger를 통과한 KRX BUY에만 60초 실시간 관찰과 제출
+            # 직전 재확인을 추가로 요구한다. 진입 임계값은 바꾸지 않는다.
+            evidence.append(realtime_entry_requirement_evidence())
 
         draft = RecommendationDraft(
             owner_user_id=self._owner_user_id,
