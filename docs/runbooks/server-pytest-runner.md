@@ -3,7 +3,7 @@
 Run Linux-only and KAsset tests in a disposable container on the production
 host. The container uses the deployed application image for its interpreter and
 `/app/.venv`, mounts the checkout under test read-only, installs the test-only
-dependency group into a Docker volume, and has one CPU.
+dependency group and static-check tools into a Docker volume, and has one CPU.
 
 It never touches the production database. It targets the separate
 `kasset-test-db` container and lets the harness create its own run-owned
@@ -56,7 +56,7 @@ set -eu
 
 export KASSET_TEST_COMMIT="$(git -C /opt/kasset-trader-core rev-parse HEAD)"
 export KASSET_TEST_IMAGE="kasset-trader-core:${KASSET_TEST_COMMIT}"
-export KASSET_TEST_DEPS_VOLUME='kasset-pytest-deps-4e6329d1'
+export KASSET_TEST_DEPS_VOLUME="kasset-pytest-deps-${KASSET_TEST_COMMIT:0:8}"
 
 docker image inspect "$KASSET_TEST_IMAGE" >/dev/null
 docker inspect kasset-test-db >/dev/null
@@ -66,18 +66,19 @@ docker inspect kasset-test-db >/dev/null
 The application image ships no `tests/` directory, so section 3 mounts a
 checkout instead.
 
-## 2. Install the locked test-only dependencies
+## 2. Install the locked verification dependencies
 
-`/app/.venv` contains `pytest` itself but omits the rest of the `test`
-dependency group. Install the versions this checkout's `uv.lock` records into a
-Docker volume. The application image stays unchanged.
+The production image uses `uv sync --frozen --no-dev`: it contains neither
+`pytest` nor the development scanners and lint tools. Install the locked test
+dependencies and `ruff`/`ty` into a separate Docker volume. Do not restore the
+dev group to the production image to run checks.
 
-The volume name carries the image SHA it was first built against, but its
-contract is the `uv.lock` pin set, not that image. Reuse it as long as the
-versions still match; create a new volume when a lock bump changes them.
+The volume name identifies the application revision, but its contract is the
+`uv.lock` pin set. Reuse a volume only while its dependency and tool versions
+match; create a new volume when these pins change.
 
 ```bash
-# Current pins (verified against uv.lock on 2026-09-23)
+# Current pins (verified against uv.lock on 2026-09-30)
 docker volume inspect "$KASSET_TEST_DEPS_VOLUME" >/dev/null 2>&1 || \
   docker volume create "$KASSET_TEST_DEPS_VOLUME"
 
@@ -87,7 +88,7 @@ docker run --rm --name kasset-pytest-deps-init \
   --mount type=volume,src="$KASSET_TEST_DEPS_VOLUME",dst=/test-deps \
   --entrypoint /usr/local/bin/pip \
   "$KASSET_TEST_IMAGE" \
-  install --disable-pip-version-check --no-cache-dir --upgrade \
+  install --disable-pip-version-check --no-cache-dir --no-deps \
   --target /test-deps \
   pytest==9.1.1 \
   pytest-asyncio==1.3.0 \
@@ -96,17 +97,31 @@ docker run --rm --name kasset-pytest-deps-init \
   pytest-xdist==3.8.0 \
   fakeredis==2.34.1 \
   aiosqlite==0.22.1 \
-  pytest-split==0.11.0
+  pytest-split==0.11.0 \
+  ruff==0.15.9 \
+  ty==0.0.29 \
+  coverage==7.13.5 \
+  execnet==2.1.2 \
+  iniconfig==2.3.0 \
+  packaging==26.0 \
+  pluggy==1.6.0 \
+  pygments==2.20.0 \
+  redis==7.4.0 \
+  sortedcontainers==2.4.0
 ```
 
 `--user 0:0` is required because Docker creates the named volume with root
 ownership. Test containers mount the completed volume read-only.
+The list includes the verification tools' transitive dependencies; `--no-deps`
+prevents an unconstrained test install from shadowing the application's locked
+runtime packages (for example, fakeredis otherwise pulls a newer Redis client).
+Use a fresh volume when the pin set changes rather than overlaying versions.
 
 Confirm the volume still matches the lock before trusting an existing one:
 
 ```bash
 awk '/^name = "/{n=$3; gsub(/"/,"",n)} /^version = "/{v=$3; gsub(/"/,"",v);
-  if (n ~ /^(pytest|pytest-asyncio|pytest-cov|pytest-mock|pytest-xdist|fakeredis|aiosqlite|pytest-split)$/)
+  if (n ~ /^(pytest|pytest-asyncio|pytest-cov|pytest-mock|pytest-xdist|fakeredis|aiosqlite|pytest-split|ruff|ty|coverage|execnet|iniconfig|packaging|pluggy|pygments|redis|sortedcontainers)$/)
   print n"=="v}' /opt/kasset-trader-core/uv.lock | sort
 
 docker run --rm \
@@ -157,9 +172,9 @@ run_server_pytest() {
     -e PYTHONPATH=/work:/test-deps \
     -e PYTHONDONTWRITEBYTECODE=1 \
     -w /work \
-    --entrypoint /app/.venv/bin/pytest \
+    --entrypoint /app/.venv/bin/python \
     "$KASSET_TEST_IMAGE" \
-    -q --tb=short -p no:cacheprovider "$@"
+    -m pytest -q --tb=short -p no:cacheprovider "$@"
 }
 ```
 
@@ -218,15 +233,18 @@ and executed the file rather than applying the Windows collection exclusion.
 
 ## 7. Static checks on the same checkout
 
+`ruff` and `ty` come from the verification volume, not the application image.
 `ruff` needs `--no-cache` because `/work` is read-only.
 
 ```bash
-docker run --rm \
+docker run --rm --cpus=1.0 --network none \
   --mount type=bind,src="$KASSET_TEST_SRC",dst=/work,readonly \
+  --mount type=volume,src="$KASSET_TEST_DEPS_VOLUME",dst=/test-deps,readonly \
+  -e PYTHONPATH=/work:/test-deps \
   -w /work --entrypoint sh "$KASSET_TEST_IMAGE" -c \
-  '/app/.venv/bin/ruff check --no-cache <files>;
-   /app/.venv/bin/ruff format --no-cache --check <files>;
-   /app/.venv/bin/ty check --error-on-warning <files>'
+  '/test-deps/bin/ruff check --no-cache <files> &&
+   /test-deps/bin/ruff format --no-cache --check <files> &&
+   /test-deps/bin/ty check --error-on-warning <files>'
 ```
 
 ## 8. Prove production isolation and service health
