@@ -437,14 +437,22 @@ class AITradingDerivedLimits(BaseModel):
         gt=0, le=100, alias="maxSymbolAllocationPct"
     )
     max_concurrent_holdings: int = Field(ge=0, alias="maxConcurrentHoldings")
-    max_buys_per_day: int = Field(ge=0, alias="maxBuysPerDay")
-    max_orders_per_day: int = Field(ge=0, alias="maxOrdersPerDay")
-    max_sells_per_day: int = Field(ge=0, alias="maxSellsPerDay")
-    max_custom_buys_per_day: int = Field(ge=1, alias="maxCustomBuysPerDay")
-    max_custom_sells_per_day: int = Field(ge=1, alias="maxCustomSellsPerDay")
-    max_custom_orders_per_day: int = Field(ge=2, alias="maxCustomOrdersPerDay")
+    max_buys_per_day: int | None = Field(
+        ge=0,
+        alias="maxBuysPerDay",
+        description="null이면 하루 매수 횟수 제한 없음(3~5단계).",
+    )
+    max_orders_per_day: int | None = Field(ge=0, alias="maxOrdersPerDay")
+    max_sells_per_day: int | None = Field(ge=0, alias="maxSellsPerDay")
+    max_custom_buys_per_day: int | None = Field(ge=1, alias="maxCustomBuysPerDay")
+    max_custom_sells_per_day: int | None = Field(ge=1, alias="maxCustomSellsPerDay")
+    max_custom_orders_per_day: int | None = Field(ge=2, alias="maxCustomOrdersPerDay")
     risk_per_trade_rate: Decimal = Field(ge=0, le=1, alias="riskPerTradeRate")
-    same_symbol_reentry_limit: int = Field(ge=0, alias="sameSymbolReentryLimit")
+    same_symbol_reentry_limit: int | None = Field(
+        ge=0,
+        alias="sameSymbolReentryLimit",
+        description="null이면 같은 종목 재진입 횟수 제한 없음.",
+    )
     min_ai_confidence: Decimal = Field(
         ge=0,
         le=1,

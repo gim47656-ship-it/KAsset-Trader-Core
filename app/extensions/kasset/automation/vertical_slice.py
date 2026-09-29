@@ -211,6 +211,9 @@ _REVIEW_WINDOW_MULTIPLIER = 2
 #: owner가 정한 같은 종목 재진입 한도를 이미 다 쓴 후보.
 _SAME_SYMBOL_REENTRY_EXHAUSTED = "same_symbol_reentry_exhausted"
 
+#: 재진입 횟수는 무제한이지만 같은 종목 BUY 추천이 아직 집행 중이거나 대기 중인 후보.
+_SAME_SYMBOL_PENDING_RECOMMENDATION = "same_symbol_pending_recommendation"
+
 #: 앙상블 합의가 진입가를 내놓지 못해 사이징 자체가 불가능한 행.
 _PRESIZING_NO_REFERENCE_PRICE = "presizing_reference_price_unavailable"
 _PRESIZING_ZERO_QUANTITY = "presizing_zero_quantity"
@@ -810,9 +813,11 @@ class AIRecommendationVerticalSlice:
             session_by_market=session_by_market,
         )
         news_health_by_market = await self._news_source_health(allowed_markets)
+        reentry_limit = snapshot.limits.same_symbol_reentry_limit
         reentry_used = await self._open_same_symbol_buys(
             owner_user_id,
             recommendation_candidates,
+            pending_only=reentry_limit is None,
         )
 
         for candidate_key in (
@@ -933,9 +938,26 @@ class AIRecommendationVerticalSlice:
             # owner가 정한 같은 종목 재진입 한도를 추천 생성 단계에서도 지킨다.
             # 이미 체결된 추천과 아직 만료되지 않은 미집행 추천만 세므로, 예산
             # 소진처럼 집행에 실패한 종목은 다음 cycle에 다시 후보가 된다.
-            reentry_limit = snapshot.limits.same_symbol_reentry_limit
             open_buys = reentry_used.get(candidate.ranker_key, 0)
-            if effective_action is Action.BUY and open_buys >= reentry_limit:
+            if effective_action is Action.BUY and reentry_limit is None:
+                # 횟수는 세지 않는다. 같은 종목의 대기·집행 중 추천만 중복으로 막는다.
+                if open_buys > 0:
+                    pre_ai_exclusions[_SAME_SYMBOL_PENDING_RECOMMENDATION] += 1
+                    pre_ai_exclusion_evidence.append(
+                        {
+                            "source": "same_symbol_reentry",
+                            "symbol": candidate.symbol,
+                            "market": candidate.ranker_market,
+                            "reason": _SAME_SYMBOL_PENDING_RECOMMENDATION,
+                            "detail": (
+                                f"pendingSameSymbolBuys={open_buys}; "
+                                "counts unexpired pending or claimed "
+                                "recommendations only"
+                            ),
+                        }
+                    )
+                    continue
+            elif effective_action is Action.BUY and open_buys >= reentry_limit:
                 pre_ai_exclusions[_SAME_SYMBOL_REENTRY_EXHAUSTED] += 1
                 pre_ai_exclusion_evidence.append(
                     {
@@ -2588,6 +2610,8 @@ class AIRecommendationVerticalSlice:
         self,
         owner_user_id: int,
         candidates: Sequence[TradingCandidate],
+        *,
+        pending_only: bool = False,
     ) -> dict[CandidateKey, int]:
         """Count today's BUY recommendations that still hold a re-entry slot.
 
@@ -2595,7 +2619,19 @@ class AIRecommendationVerticalSlice:
         추천은 재진입 기회를 쓰지 않았으므로 세지 않으며, 그래서 예산 소진으로
         막힌 종목은 예산이 풀리면 다시 추천된다. 거래일 경계는 주문 단계 hard
         risk가 쓰는 ``trading_day_start``와 같다.
+
+        ``pending_only``이면 체결 완료 추천은 세지 않고 집행 중이거나 아직 유효한
+        미집행 추천만 센다. 횟수 제한이 없는 등급에서 중복 신호만 막기 위한 모드다.
         """
+
+        counted_statuses = (
+            (RecommendationExecutionStatus.CLAIMED.value,)
+            if pending_only
+            else (
+                RecommendationExecutionStatus.SUCCEEDED.value,
+                RecommendationExecutionStatus.CLAIMED.value,
+            )
+        )
 
         symbols_by_market: dict[str, set[str]] = {}
         for candidate in candidates:
@@ -2619,10 +2655,7 @@ class AIRecommendationVerticalSlice:
                         ),
                         or_(
                             AIRecommendation.paper_execution_status.in_(
-                                (
-                                    RecommendationExecutionStatus.SUCCEEDED.value,
-                                    RecommendationExecutionStatus.CLAIMED.value,
-                                )
+                                counted_statuses
                             ),
                             and_(
                                 AIRecommendation.paper_execution_status.is_(None),

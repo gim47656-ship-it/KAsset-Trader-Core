@@ -2923,6 +2923,18 @@ async def test_failed_buy_recommendation_keeps_the_symbol_retryable(
         )
 
         assert used == {("KR", "005930"): 2, ("KR", "000660"): 1}
+
+        pending = await instance._open_same_symbol_buys(  # noqa: SLF001
+            owner_user_id,
+            (
+                TradingCandidate("005930", "KRX", None, "tvscreener_kr"),
+                TradingCandidate("000660", "KRX", None, "tvscreener_kr"),
+            ),
+            pending_only=True,
+        )
+
+        # 체결 완료된 추천은 세지 않고 아직 유효한 미집행 추천만 중복으로 센다.
+        assert pending == {("KR", "005930"): 1, ("KR", "000660"): 1}
     finally:
         await db_session.rollback()
         await db_session.execute(
@@ -2971,4 +2983,30 @@ async def test_exhausted_reentry_symbol_produces_no_new_buy_recommendation(
     assert exclusion["symbol"] == "005930"
     assert exclusion["reason"] == "same_symbol_reentry_exhausted"
     assert exclusion["detail"].startswith("openSameSymbolBuys=1/1")
+    persist_recommendation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unlimited_reentry_level_only_dedupes_pending_buy_recommendations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """횟수 제한이 없는 등급은 체결 이력으로 막히지 않고 대기 중 추천만 중복 제외한다."""
+
+    instance, _analyze, _plan, persist_recommendation = _stub_review_cycle(
+        monkeypatch,
+        ranked_symbols=("005930", "005935"),
+        unaffordable=frozenset(),
+        ranker_config=CandidateRankerConfig(),
+    )
+    snapshot = await instance._policy.get_snapshot()  # noqa: SLF001
+    snapshot.limits.same_symbol_reentry_limit = None
+    open_buys = AsyncMock(return_value={("KR", "005930"): 1})
+    instance._open_same_symbol_buys = open_buys  # type: ignore[method-assign]
+
+    result = await instance.run_owner(7)
+
+    assert open_buys.await_args.kwargs["pending_only"] is True
+    assert result["recommendationIds"] == ["rec:005935"]
+    assert result["preAiExclusions"] == {"same_symbol_pending_recommendation": 1}
+    assert result["candidateExclusions"][0]["symbol"] == "005930"
     persist_recommendation.assert_awaited_once()

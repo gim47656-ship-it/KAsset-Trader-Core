@@ -73,9 +73,9 @@ class _RiskPreset:
     risk_per_trade_rate: Decimal
     max_symbol_allocation: Decimal
     max_concurrent_holdings: int
-    max_buys_per_day: int
-    max_sells_per_day: int
-    same_symbol_reentry_limit: int
+    max_buys_per_day: int | None
+    max_sells_per_day: int | None
+    same_symbol_reentry_limit: int | None
 
 
 _RISK_PRESETS = {
@@ -105,9 +105,9 @@ _RISK_PRESETS = {
         Decimal("0.0075"),
         Decimal("0.20"),
         5,
-        3,
-        2,
-        1,
+        None,
+        None,
+        None,
     ),
     4: _RiskPreset(
         Decimal("1.2"),
@@ -115,9 +115,9 @@ _RISK_PRESETS = {
         Decimal("0.01"),
         Decimal("0.25"),
         5,
-        5,
-        3,
-        1,
+        None,
+        None,
+        None,
     ),
     5: _RiskPreset(
         Decimal("2.0"),
@@ -125,17 +125,29 @@ _RISK_PRESETS = {
         Decimal("0.015"),
         Decimal("0.30"),
         6,
-        8,
-        4,
-        2,
+        None,
+        None,
+        None,
     ),
 }
 _LEGACY_PRESET_DAILY_LIMITS = {
     1: {"max_buys_per_day": 1, "max_orders_per_day": 2},
     2: {"max_buys_per_day": 2, "max_orders_per_day": 3},
-    3: {"max_buys_per_day": 3, "max_orders_per_day": 5},
-    4: {"max_buys_per_day": 5, "max_orders_per_day": 8},
-    5: {"max_buys_per_day": 8, "max_orders_per_day": 12},
+    3: {
+        "max_buys_per_day": 3,
+        "max_orders_per_day": 5,
+        "same_symbol_reentry_limit": 1,
+    },
+    4: {
+        "max_buys_per_day": 5,
+        "max_orders_per_day": 8,
+        "same_symbol_reentry_limit": 1,
+    },
+    5: {
+        "max_buys_per_day": 8,
+        "max_orders_per_day": 12,
+        "same_symbol_reentry_limit": 2,
+    },
 }
 _DEFAULT_RISK_LEVEL = 2
 
@@ -159,15 +171,15 @@ class AITradingLimits:
     risk_per_trade_rate: Decimal = field(init=False)
     custom_max_buys_per_day: int | None = None
     custom_max_sells_per_day: int | None = None
-    max_buys_per_day: int = field(init=False)
-    max_sells_per_day: int = field(init=False)
-    max_orders_per_day: int = field(init=False)
-    max_custom_buys_per_day: int = field(init=False)
-    max_custom_sells_per_day: int = field(init=False)
-    max_custom_orders_per_day: int = field(init=False)
+    max_buys_per_day: int | None = field(init=False)
+    max_sells_per_day: int | None = field(init=False)
+    max_orders_per_day: int | None = field(init=False)
+    max_custom_buys_per_day: int | None = field(init=False)
+    max_custom_sells_per_day: int | None = field(init=False)
+    max_custom_orders_per_day: int | None = field(init=False)
     max_symbol_allocation: Decimal = field(init=False)
     max_concurrent_holdings: int = field(init=False)
-    same_symbol_reentry_limit: int = field(init=False)
+    same_symbol_reentry_limit: int | None = field(init=False)
     kill_switch: bool = False
     currency: Literal["KRW", "USD"] = "KRW"
 
@@ -233,36 +245,46 @@ class AITradingLimits:
             "same_symbol_reentry_limit",
             preset.same_symbol_reentry_limit,
         )
-        max_custom_buys = preset.max_concurrent_holdings * max(
-            2, preset.same_symbol_reentry_limit * 2
-        )
-        max_custom_sells = preset.max_concurrent_holdings * (
-            preset.same_symbol_reentry_limit + 3
-        )
-        effective_buys = _optional_daily_limit(
-            custom_max_buys_per_day,
-            "custom_max_buys_per_day",
-            maximum=max_custom_buys,
-            default=preset.max_buys_per_day,
-        )
-        effective_sells = _optional_daily_limit(
-            custom_max_sells_per_day,
-            "custom_max_sells_per_day",
-            maximum=max_custom_sells,
-            default=preset.max_sells_per_day,
-        )
+        effective_buys: int | None
+        effective_sells: int | None
+        max_custom_buys: int | None
+        max_custom_sells: int | None
+        if preset.max_buys_per_day is None or preset.max_sells_per_day is None:
+            # 3~5단계 PAPER는 하루 매수·매도·전체 주문 횟수와 같은 종목 재진입 횟수를
+            # 제한하지 않는다. 사용자 횟수는 적용할 곳이 없어 저장하지 않는다.
+            custom_max_buys_per_day = None
+            custom_max_sells_per_day = None
+            effective_buys = effective_sells = None
+            max_custom_buys = max_custom_sells = None
+            effective_orders = max_custom_orders = None
+        else:
+            reentry = preset.same_symbol_reentry_limit
+            if reentry is None:
+                raise ValueError("bounded daily limits require a re-entry limit")
+            max_custom_buys = preset.max_concurrent_holdings * max(2, reentry * 2)
+            max_custom_sells = preset.max_concurrent_holdings * (reentry + 3)
+            effective_buys = _optional_daily_limit(
+                custom_max_buys_per_day,
+                "custom_max_buys_per_day",
+                maximum=max_custom_buys,
+                default=preset.max_buys_per_day,
+            )
+            effective_sells = _optional_daily_limit(
+                custom_max_sells_per_day,
+                "custom_max_sells_per_day",
+                maximum=max_custom_sells,
+                default=preset.max_sells_per_day,
+            )
+            effective_orders = effective_buys + effective_sells
+            max_custom_orders = max_custom_buys + max_custom_sells
         object.__setattr__(self, "custom_max_buys_per_day", custom_max_buys_per_day)
         object.__setattr__(self, "custom_max_sells_per_day", custom_max_sells_per_day)
         object.__setattr__(self, "max_buys_per_day", effective_buys)
         object.__setattr__(self, "max_sells_per_day", effective_sells)
-        object.__setattr__(self, "max_orders_per_day", effective_buys + effective_sells)
+        object.__setattr__(self, "max_orders_per_day", effective_orders)
         object.__setattr__(self, "max_custom_buys_per_day", max_custom_buys)
         object.__setattr__(self, "max_custom_sells_per_day", max_custom_sells)
-        object.__setattr__(
-            self,
-            "max_custom_orders_per_day",
-            max_custom_buys + max_custom_sells,
-        )
+        object.__setattr__(self, "max_custom_orders_per_day", max_custom_orders)
         object.__setattr__(
             self, "kill_switch", _strict_bool(kill_switch, "kill_switch")
         )
@@ -832,12 +854,15 @@ class AITradingPolicyService:
         )
         side_count_passed = (
             is_buy
-            and usage.buys_today < limits.max_buys_per_day
-            and same_symbol_buys < limits.same_symbol_reentry_limit
-        ) or (action == "SELL" and usage.sells_today < limits.max_sells_per_day)
+            and _below_limit(usage.buys_today, limits.max_buys_per_day)
+            and _below_limit(same_symbol_buys, limits.same_symbol_reentry_limit)
+        ) or (
+            action == "SELL"
+            and _below_limit(usage.sells_today, limits.max_sells_per_day)
+        )
         order_count_passed = (
             valid_shape
-            and usage.orders_today < limits.max_orders_per_day
+            and _below_limit(usage.orders_today, limits.max_orders_per_day)
             and side_count_passed
         )
         loss_streak = await loss_streak_gate.evaluate(
@@ -910,13 +935,14 @@ class AITradingPolicyService:
                 "ORDER_COUNT",
                 order_count_passed,
                 (
-                    f"ordersToday={usage.orders_today}/{limits.max_orders_per_day}; "
-                    f"buysToday={usage.buys_today}/{limits.max_buys_per_day}; "
-                    f"sellsToday={usage.sells_today}/{limits.max_sells_per_day}; "
-                    f"hardMaxBuys={limits.max_custom_buys_per_day}; "
-                    f"hardMaxSells={limits.max_custom_sells_per_day}; "
-                    f"hardMaxOrders={limits.max_custom_orders_per_day}; "
-                    f"sameSymbolBuys={same_symbol_buys}/{limits.same_symbol_reentry_limit}"
+                    f"ordersToday={usage.orders_today}/{_limit_text(limits.max_orders_per_day)}; "
+                    f"buysToday={usage.buys_today}/{_limit_text(limits.max_buys_per_day)}; "
+                    f"sellsToday={usage.sells_today}/{_limit_text(limits.max_sells_per_day)}; "
+                    f"hardMaxBuys={_limit_text(limits.max_custom_buys_per_day)}; "
+                    f"hardMaxSells={_limit_text(limits.max_custom_sells_per_day)}; "
+                    f"hardMaxOrders={_limit_text(limits.max_custom_orders_per_day)}; "
+                    "sameSymbolBuys="
+                    f"{same_symbol_buys}/{_limit_text(limits.same_symbol_reentry_limit)}"
                 ),
             ),
             HardRiskCheck(
@@ -1327,6 +1353,16 @@ def _optional_daily_limit(
     if value < 1 or value > maximum:
         raise ValueError(f"{field} must be between 1 and {maximum}")
     return value
+
+
+def _below_limit(used: int, limit: int | None) -> bool:
+    """``limit``이 ``None``이면 횟수 제한이 없으므로 항상 통과한다."""
+
+    return limit is None or used < limit
+
+
+def _limit_text(limit: int | None) -> str:
+    return "unlimited" if limit is None else str(limit)
 
 
 def _strict_bool(value: object, field: str) -> bool:
