@@ -1,7 +1,8 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-29 (국내 NH 실시간 단타 구현·재생 검증 완료, PR #102 통합)
+갱신: 2026-09-30 (보안 의존성·bcrypt 호환 정리, 운영 배포 승인 대기)
 
 ## 현재 목표·운영 상태
+- **보안 의존성 정리(2026-09-30, 미배포)**: `fix/security-runtime-dependencies`에서 운영 이미지를 `--no-dev`로 분리하고 이전 Safety 63건의 런타임 관련 패키지와 AnyIO를 패치했다. CI 스캐너·advisory 설정은 유지한다. `passlib`를 제거하고 bcrypt 4.3 직접 호출로 전환했으며 기존 저장 해시·UTF-8·72바이트 의미와 NUL/과대 입력 거부를 유지한다. 운영에는 `$2b$` 해시만 있었고, 미사용 레거시 `$2$`는 별도 호환 계층 없이 거부한다. 격리 인증 검사와 실제 이미지의 API·MCP·worker·scheduler·NH 비활성 기동을 통과했으며 개발 도구 및 passlib 제외를 확인했다. 서버 검증 도구 실행은 [server-pytest-runner](docs/runbooks/server-pytest-runner.md)처럼 별도 볼륨을 사용한다. 다음 행동은 해당 PR의 Test 결과 확인 후 운영자 승인에 따른 merge·배포이며, NH 실제 틱 수신은 아래 장중 관찰 경계를 유지한다.
 - **초보 제외 PAPER 횟수 제한 해제(2026-09-29 사용자 승인)**: 초보(서버 1·2단계)는 기존 제한을 유지하고 중수·고수(3·4·5단계)는 일일 매수·매도·전체 주문 및 동일종목 재진입 횟수로 차단하지 않는다. API는 `null=한도 없음`, 사용량 기록은 유지한다. 일손실은 참고값이며 예산·동시보유·종목비중·kill switch·시세 검증·대기 추천 중복 방지·BUY 쿨다운은 그대로다. PR #102에 아래 국내 실시간 경로를 함께 반영하며 사용자 승인에 따라 CI 통과 후 배포한다.
 - **국내 NH 실시간 단타(2026-09-29 구현)**: KRX `oc`·`ob`를 60초 관찰한 뒤 국내 자동매수 추천을 선택하고 제출 직전에 재확인한다(배포 전 미집행 추천도 포함). 국내 정규장 매분 기존 보호청산 → 평가익 구간 흐름 약화 조기청산 → 국내 전용 집행 순서다. 기존 -3ATR 손절·부분익절·보호선 이력은 유지하며 손절폭을 넓히지 않는다. 10호가 잔량·불균형은 관측 근거이고 새 잔량 비율 gate는 없다. 기준·제약은 [AUTOMATION_BREAKOUT_CONTRACT.md](docs/kasset/AUTOMATION_BREAKOUT_CONTRACT.md)의 실시간 단타 절이 정본이다. 참고 저장소 [KIWOOM-AUTO-TRADER](https://github.com/minwoopg/KIWOOM-AUTO-TRADER)의 아이디어를 독립 구현했으며 수익성 입증은 아니다. 미국 데이터 수집은 유지하고 새 경로의 미국 주문은 금지한다.
 - **NH 운영 준비·미확인 경계**: NH API는 이 프로그램 전용이다. 서버 `.env.nhplug`는 `ghrunner:600`, 기존 토큰을 재발급 없이 복사한 `.env.nhplug.runtime/token.json`은 UID10001·폴더700·파일600이며 모두 Git 제외다. `KASSET_NH_STREAM_ENABLED=true`로 새 수집기를 활성화해야 국내 신규 BUY가 warmup 뒤 가능하다. 인증·국내 REST 10호가·WS 구독 ACK는 성공했지만 장외라 실제 장중 틱 수신은 미확인이다. 공식 형태의 재생→실제 격리 Redis→진입/청산 smoke, 집중 검사 및 롤백 모의 재현을 통과했다. 다음 정규장에는 틱 증가·snapshot 신선도·토큰 재발급 반복 없음·국내 주문 경로를 관찰한다. 해외 NH는 유료권한 `WSS10013`으로 사용하지 않는다.
