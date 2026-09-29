@@ -36,6 +36,9 @@ from app.extensions.kasset.automation.position_manager import PositionManagerCon
 from app.extensions.kasset.automation.position_sizing import (
     DEFAULT_POSITION_SIZING_CONFIG,
 )
+from app.extensions.kasset.automation.realtime_tape import (
+    DEFAULT_REALTIME_TAPE_CONFIG,
+)
 from app.extensions.kasset.automation.regime import MarketRegime, weights_for_regime
 from app.extensions.kasset.automation.strategies import STRATEGIES
 from app.extensions.kasset.automation.strategy_promotion import (
@@ -63,6 +66,7 @@ STRATEGY_CODE_PATHS: tuple[str, ...] = (
     "app/extensions/kasset/automation/position_manager.py",
     "app/extensions/kasset/automation/position_sizing.py",
     "app/extensions/kasset/automation/producer.py",
+    "app/extensions/kasset/automation/realtime_tape.py",
     "app/extensions/kasset/automation/regime.py",
     "app/extensions/kasset/automation/strategies.py",
     "app/extensions/kasset/automation/strategy_promotion.py",
@@ -168,6 +172,7 @@ def effective_strategy_config() -> dict[str, object]:
             "walkForward": walk_forward,
             "positionSizer": DEFAULT_POSITION_SIZING_CONFIG,
             "positionManager": PositionManagerConfig(),
+            "realtimeTape": DEFAULT_REALTIME_TAPE_CONFIG,
             "strategyRegistry": strategy_registry,
             "regimeWeights": regime_weights,
             "promotionEvidenceSchemaVersion": PROMOTION_EVIDENCE_SCHEMA_VERSION,

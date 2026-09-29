@@ -138,6 +138,8 @@ async def test_producer_persists_owner_scoped_consensus_without_order_side_effec
     assert draft.reference_price == Decimal("100")  # type: ignore[attr-defined]
     assert draft.source == "kasset-automation"  # type: ignore[attr-defined]
     assert len(draft.evidence) == 7  # type: ignore[attr-defined]
+    # 미국 BUY에는 국내 실시간 관문 marker가 붙지 않는다.
+    assert not any(item.get("kind") == "realtime_entry" for item in draft.evidence)  # type: ignore[attr-defined]
     assert draft.name == "Apple Inc."  # type: ignore[attr-defined]
     assert draft.headline == "Apple Inc. 매수 검토 의견"  # type: ignore[attr-defined]
     assert draft.rationale == (  # type: ignore[attr-defined]
@@ -239,6 +241,11 @@ async def test_detector_only_buy_omits_breakout_family_and_strategy_votes() -> N
 
     _owner_user_id, draft = persistence.calls[0]
     assert draft.action is Action.BUY  # type: ignore[attr-defined]
+    # KRX BUY는 실시간 관찰·제출 직전 재확인을 요구한다.
+    assert any(
+        item.get("kind") == "realtime_entry" and item.get("required") is True
+        for item in draft.evidence
+    )  # type: ignore[attr-defined]
     assert not any(  # type: ignore[attr-defined]
         item["kind"] == "strategy" for item in draft.evidence
     )

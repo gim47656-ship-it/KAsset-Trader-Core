@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.automation import position_manager_service
 from app.extensions.kasset.automation.contracts import PriceBar
+from app.extensions.kasset.automation.decision_evidence import (
+    is_deterministic_position_exit,
+)
 from app.extensions.kasset.automation.intraday_data import (
     CompletedIntradayBars,
     IntradayBarsUnavailable,
@@ -38,6 +41,13 @@ from app.extensions.kasset.automation.position_manager_service import (
     _state_from_row,
     _state_matches_position_cycle,
     position_recommendation_id,
+)
+from app.extensions.kasset.automation.realtime_tape import (
+    DEFAULT_REALTIME_TAPE_CONFIG,
+    KST,
+    REALTIME_TREND_EXIT_KIND,
+    TapeSnapshot,
+    VolumePowerState,
 )
 from app.extensions.kasset.automation.strategy_promotion_service import (
     recommendation_strategy_identity,
@@ -2375,3 +2385,220 @@ async def test_intraday_load_is_bounded_to_open_markets_and_held_symbols(
         ("KRX", "000660"),
     ]
     assert all(used is session for _m, _s, used in calls)
+
+
+def _tape_snapshot(
+    now: datetime,
+    *,
+    last: str = "105",
+    vwap: str = "106",
+    power: str | None = "40",
+    change: str = "-2",
+) -> TapeSnapshot:
+    """흐름 악화(체결강도 40, 60초 하락, VWAP 아래) 관찰 snapshot."""
+
+    return TapeSnapshot(
+        symbol="005930",
+        as_of=now,
+        session_date=now.astimezone(KST).date(),
+        coverage_started_at=now - timedelta(seconds=90),
+        last_trade_at=now - timedelta(seconds=1),
+        last_book_at=now - timedelta(seconds=1),
+        trade_count=40,
+        book_count=80,
+        invalid_book_count=0,
+        median_spread_bps=D("10"),
+        volume_power_state=VolumePowerState.RATIO,
+        volume_power=D(power) if power is not None else None,
+        buy_volume_delta=100,
+        sell_volume_delta=250,
+        price_change=D(change),
+        last_price=D(last),
+        session_vwap=D(vwap),
+        best_bid=D("104.9"),
+        best_ask=D("105.1"),
+        dropped_frames=0,
+        resets=0,
+        last_reset_reason=None,
+    )
+
+
+_REALTIME_NOW = ENTRY_AT + timedelta(days=1, hours=1)  # 2026-08-04 10:00 KST
+
+
+def _ma_bars() -> CompletedIntradayBars:
+    """완료 5분봉 5개, 종가 108 → MA5 108(현재가 105보다 위)."""
+
+    return _intraday(
+        [(minute, "108", "109", "107", "108") for minute in (0, 5, 10, 15, 20)],
+        day=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_realtime_trend_exit_is_a_linked_deterministic_full_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """평가익 보유분의 흐름 악화는 전량 SELL 추천이 되고 손절선은 그대로다."""
+
+    loads: list[str] = []
+
+    async def _load(**kwargs: object) -> CompletedIntradayBars:
+        loads.append(str(kwargs["symbol"]))
+        return _ma_bars()
+
+    monkeypatch.setattr(position_manager_service, "load_completed_session_bars", _load)
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row])
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=_REALTIME_NOW)
+
+    recommendation_id = await service._realtime_trend_exit(
+        owner_user_id=23,
+        account_id=17,
+        position=_paper_position(),
+        snapshot=_tape_snapshot(_REALTIME_NOW),
+        session=_ma_bars().session,
+        config=DEFAULT_REALTIME_TAPE_CONFIG,
+    )
+
+    assert recommendation_id is not None
+    assert loads == ["005930"]
+    row = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    assert row.id == recommendation_id
+    assert row.action == "SELL"
+    assert row.suggested_quantity == "10"
+    assert row.reference_price == "105"
+    assert row.valid_until == _REALTIME_NOW + timedelta(minutes=10)
+    exit_evidence = row.evidence[0]
+    assert exit_evidence["exitKind"] == REALTIME_TREND_EXIT_KIND
+    assert "barAsOf" not in exit_evidence
+    assert is_deterministic_position_exit(row.evidence)
+    # 기존 보호 평가가 이 추천을 대기 중 청산으로 보도록 사이클에 연결된다.
+    assert state_row.last_exit_signal_key == recommendation_id
+    assert state_row.current_stop == D("70")
+    assert state_row.initial_stop == D("70")
+
+
+@pytest.mark.asyncio
+async def test_realtime_trend_exit_waits_for_an_unfinished_protective_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _forbidden(**_kwargs: object) -> CompletedIntradayBars:
+        raise AssertionError("pending exit must not load intraday bars")
+
+    monkeypatch.setattr(
+        position_manager_service, "load_completed_session_bars", _forbidden
+    )
+    key = "position-exit:stop:23"
+    state_row = _state_row(last_exit_signal_key=key)
+    pending_stop = _exit_recommendation(
+        key,
+        kind="STOP",
+        decision="PENDING",
+        valid_until=_REALTIME_NOW + timedelta(days=1),
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row, pending_stop])
+    db.add = MagicMock()
+    service = _manager(db, now=_REALTIME_NOW)
+
+    assert (
+        await service._realtime_trend_exit(
+            owner_user_id=23,
+            account_id=17,
+            position=_paper_position(),
+            snapshot=_tape_snapshot(_REALTIME_NOW),
+            session=_ma_bars().session,
+            config=DEFAULT_REALTIME_TAPE_CONFIG,
+        )
+        is None
+    )
+    assert state_row.last_exit_signal_key == key
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "snapshot_kwargs",
+    (
+        {"power": "150"},  # 매수 우위: 흐름 악화 아님
+        {"last": "99", "vwap": "100"},  # 진입가(100) 아래: 기존 손절 담당
+    ),
+)
+async def test_realtime_trend_exit_skips_without_touching_intraday_bars(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_kwargs: dict[str, str],
+) -> None:
+    async def _forbidden(**_kwargs: object) -> CompletedIntradayBars:
+        raise AssertionError("tape conditions failed; no bar load")
+
+    monkeypatch.setattr(
+        position_manager_service, "load_completed_session_bars", _forbidden
+    )
+    state_row = _state_row()
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row])
+    db.add = MagicMock()
+    service = _manager(db, now=_REALTIME_NOW)
+
+    assert (
+        await service._realtime_trend_exit(
+            owner_user_id=23,
+            account_id=17,
+            position=_paper_position(),
+            snapshot=_tape_snapshot(_REALTIME_NOW, **snapshot_kwargs),
+            session=_ma_bars().session,
+            config=DEFAULT_REALTIME_TAPE_CONFIG,
+        )
+        is None
+    )
+    assert state_row.last_exit_signal_key is None
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_protective_stop_supersedes_an_unclaimed_realtime_exit() -> None:
+    """흐름 청산이 대기 중이어도 손절이 닿으면 기존 보호 청산이 대신 나간다."""
+
+    key = "kasset-realtime-exit:101:20260806T1000:23"
+    state_row = _state_row(last_exit_signal_key=key)
+    realtime = _exit_recommendation(
+        key,
+        kind=REALTIME_TREND_EXIT_KIND,
+        decision="PENDING",
+        valid_until=ENTRY_AT + timedelta(days=3, hours=1, minutes=5),
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[state_row, realtime])
+    db.get = AsyncMock(return_value=None)
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    now = ENTRY_AT + timedelta(days=3, hours=1)
+    service = _manager(db, now=now)
+
+    recommendation_id = await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(),
+        rows=[],
+        intraday=_intraday([(0, "95", "96", "69", "71")], day=3),
+    )
+
+    assert recommendation_id is not None
+    assert realtime.valid_until == now
+    stop = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], AIRecommendation)
+    )
+    assert stop.evidence[0]["exitKind"] == ExitKind.STOP.value
+    assert state_row.last_exit_signal_key == recommendation_id

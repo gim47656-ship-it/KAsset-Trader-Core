@@ -191,6 +191,38 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # NH PLUG 국내(KRX) 실시간 체결·호가 수신 전용 프로세스. 주문·DB 쓰기가 없다.
+  # 보유·실시간 BUY 대상 종목만 oc/ob로 구독해 Redis `kasset:nh:tape:*`에 관찰
+  # snapshot을 남긴다. 이 프로세스가 없거나 꺼져 있으면 실시간 관문을 요구하는
+  # KRX BUY만 막히고, 보유 청산 경로는 그대로 동작한다.
+  #
+  # 켜기: `.env.nhplug`에 NHPLUG_APP_KEY / NHPLUG_APP_SECRET와
+  # KASSET_NH_STREAM_ENABLED=true. 파일이 없거나 값이 false면 연결 없이 대기한다.
+  # 토큰 캐시는 `${KASSET_NHPLUG_RUNTIME_DIR}/token.json`(uid 10001, dir 700,
+  # file 600)이며, 유효한 캐시가 있으면 새로 발급하지 않는다.
+  nh-stream:
+    image: kasset-trader-core:${CORE_IMAGE_TAG:-latest}
+    env_file:
+      - *kasset-runtime-env-file
+      - path: .env.nhplug
+        required: false
+    environment:
+      KASSET_NHPLUG_TOKEN_CACHE_PATH: /var/lib/kasset-nhplug/token.json
+    command: ["python", "-m", "app.extensions.kasset.nhplug.runner"]
+    volumes:
+      - ${KASSET_NHPLUG_RUNTIME_DIR:-./.env.nhplug.runtime}:/var/lib/kasset-nhplug
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    # 종료 때 구독 해제(최대 60건, 0.2초 간격)와 lease 반납을 마칠 시간을 준다.
+    stop_grace_period: 30s
+    logging: *default-logging
+    restart: unless-stopped
+
   # 오리진 직접 TLS 엣지. Cloudflare 프록시를 벗어나면 오리진이 스스로
   # 인증서를 제시해야 한다. Caddyfile은 deploy/kasset/Caddyfile 공용본을 쓴다.
   # KASSET_DOMAIN 은 쉼표로 여러 호스트를 넣을 수 있다(전환 중 병행 운용).

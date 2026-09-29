@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import get_password_hash
@@ -21,6 +23,7 @@ from app.extensions.kasset.api.toss_market_data import TOSS_QUOTE_SOURCE
 from app.extensions.kasset.automation import job
 from app.extensions.kasset.automation.contracts import PROMOTION_BYPASSED_BY_OWNER
 from app.extensions.kasset.automation.job import (
+    REALTIME_ENTRY_NOT_CONFIRMED,
     OwnerScopedRecommendationService,
     RuntimeStateSafetyGate,
     run_approved_recommendation_once,
@@ -30,6 +33,11 @@ from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
     OperatingMode,
+)
+from app.extensions.kasset.automation.realtime_tape import (
+    RealtimeEntryCheck,
+    RealtimeEntryStatus,
+    realtime_entry_requirement_evidence,
 )
 from app.extensions.kasset.automation.strategy_promotion import PaperApprovalDecision
 from app.extensions.kasset.automation.strategy_promotion_service import (
@@ -130,7 +138,9 @@ def _owner_scoped_service(
     확인한다. 운영에서는 두 값이 같은 실제 시각이지만, 고정 시각 픽스처에서는
     갈라진다. 운영 API를 바꾸지 않고 생성자 clock 주입으로 맞춘다.
     """
-    service = OwnerScopedRecommendationService(db_session)
+    service = OwnerScopedRecommendationService(
+        db_session, realtime_gate=_ScriptedRealtimeGate(True)
+    )
     service._service = AIRecommendationService(db_session, clock=lambda: now)
     return service
 
@@ -288,7 +298,9 @@ async def test_enabled_empty_sweep_reports_completion(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    async def _no_claimable_owners(_db: object, _now: datetime) -> list[int]:
+    async def _no_claimable_owners(
+        _db: object, _now: datetime, _markets: object = None
+    ) -> list[int]:
         return []
 
     monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
@@ -1452,3 +1464,318 @@ async def test_the_ledger_never_reads_another_owners_execution_state(
         await _cleanup_execution_events(db_session, owner_b_id)
         await _cleanup_owner(db_session, username_a)
         await _cleanup_owner(db_session, username_b)
+
+
+class _ScriptedRealtimeGate:
+    """호출 순서대로 준비 여부를 돌려준다. 마지막 값은 이후에도 반복된다."""
+
+    def __init__(self, *ready: bool) -> None:
+        self._script = list(ready)
+        self.calls: list[str] = []
+
+    async def check(self, symbol: str) -> RealtimeEntryCheck:
+        self.calls.append(symbol)
+        ready = self._script.pop(0) if len(self._script) > 1 else self._script[0]
+        return RealtimeEntryCheck(
+            RealtimeEntryStatus.READY if ready else RealtimeEntryStatus.NOT_READY,
+            () if ready else ("book_stale",),
+            {"scripted": True},
+        )
+
+
+def _realtime_buy(owner_user_id: int, *, now: datetime) -> AIRecommendation:
+    recommendation = _approved_recommendation(owner_user_id, now=now)
+    recommendation.reference_price = "70000"
+    recommendation.evidence = [
+        *recommendation.evidence,
+        realtime_entry_requirement_evidence(),
+    ]
+    return recommendation
+
+
+@pytest.fixture(autouse=True)
+def _ready_default_tape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """기존 비실시간 계약 테스트의 외부 시세는 READY로 고정한다.
+
+    준비 실패·cutover 테스트는 명시적으로 별도 gate를 주입한다.
+    """
+
+    @asynccontextmanager
+    async def _gate() -> AsyncIterator[_ScriptedRealtimeGate]:
+        yield _ScriptedRealtimeGate(True)
+
+    monkeypatch.setattr(job, "realtime_entry_gate", _gate)
+
+
+@pytest.mark.asyncio
+async def test_unready_realtime_buy_does_not_take_the_owner_slot(
+    db_session: AsyncSession,
+) -> None:
+    """관찰이 덜 된 실시간 BUY는 건너뛰고, 준비되면 그때 선택된다."""
+
+    owner_id, username = await _seed_owner(db_session)
+    realtime_buy = _approved_recommendation(owner_id, now=_NOW)
+    realtime_buy.decided_at = _NOW - timedelta(minutes=3)
+    plain_buy = _approved_recommendation(owner_id)
+    plain_buy.symbol = "000660"
+    plain_buy.market = "US"
+    try:
+        db_session.add_all([realtime_buy, plain_buy])
+        await db_session.commit()
+
+        waiting = _ScriptedRealtimeGate(False)
+        service = OwnerScopedRecommendationService(
+            db_session,
+            realtime_gate=waiting,  # type: ignore[arg-type]
+        )
+        service._service = AIRecommendationService(db_session, clock=lambda: _NOW)
+        assert (
+            await service.authorize_next_for_auto_execution(str(owner_id), _NOW)
+            == plain_buy.id
+        )
+        assert waiting.calls == ["005930"]
+
+        ready = _ScriptedRealtimeGate(True)
+        service = OwnerScopedRecommendationService(
+            db_session,
+            realtime_gate=ready,  # type: ignore[arg-type]
+        )
+        service._service = AIRecommendationService(db_session, clock=lambda: _NOW)
+        assert (
+            await service.authorize_next_for_auto_execution(str(owner_id), _NOW)
+            == realtime_buy.id
+        )
+
+        # 관문이 없으면 실시간 BUY는 선택되지 않는다(fail-closed).
+        no_gate = OwnerScopedRecommendationService(db_session)
+        no_gate._service = AIRecommendationService(db_session, clock=lambda: _NOW)
+        assert (
+            await no_gate.authorize_next_for_auto_execution(str(owner_id), _NOW)
+            == plain_buy.id
+        )
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+async def _prepare_realtime_sweep(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    marked: bool = True,
+) -> tuple[int, str, str]:
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = (
+        _realtime_buy(owner_id, now=_NOW_IN_SESSION)
+        if marked
+        else _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    )
+    recommendation.reference_price = "70000"
+    db_session.add(recommendation)
+    await db_session.commit()
+    await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+    await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+    monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+    _record_quote_for_market(
+        monkeypatch,
+        _krx_quote(source=TOSS_QUOTE_SOURCE, as_of=_NOW_IN_SESSION),
+    )
+    return owner_id, username, recommendation.id
+
+
+async def _sweep_outcome(
+    owner_id: int,
+    gate: _ScriptedRealtimeGate,
+    **kwargs: object,
+) -> dict[str, object] | None:
+    report = await run_paper_automation_once(
+        now=_NOW_IN_SESSION,
+        realtime_gate=gate,  # type: ignore[arg-type]
+        **kwargs,  # type: ignore[arg-type]
+    )
+    return next(
+        (
+            item
+            for item in report["outcomes"]  # type: ignore[union-attr]
+            if item["owner_user_id"] == owner_id
+        ),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marked", [False, True])
+async def test_realtime_buy_invalidated_right_before_submit_places_no_order(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    marked: bool,
+) -> None:
+    """선택 때는 준비됐지만 제출 직전 재확인에서 흐름이 깨지면 주문하지 않는다."""
+
+    owner_id, username, recommendation_id = await _prepare_realtime_sweep(
+        db_session, monkeypatch, marked=marked
+    )
+    try:
+        gate = _ScriptedRealtimeGate(True, False)
+        outcome = await _sweep_outcome(owner_id, gate)
+
+        assert outcome is not None
+        assert outcome["status"] == "REJECTED"
+        assert outcome["reason"] == f"submit_rejected:{REALTIME_ENTRY_NOT_CONFIRMED}"
+        assert gate.calls == ["005930", "005930"]
+        assert await _owner_order_count(db_session, owner_id) == 0
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "FAILED"
+
+        # 무효화된 추천은 다시 집행되지 않는다.
+        assert await _sweep_outcome(owner_id, _ScriptedRealtimeGate(True)) is None
+        assert await _owner_order_count(db_session, owner_id) == 0
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marked", [False, True])
+async def test_confirmed_realtime_buy_places_exactly_one_order(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    marked: bool,
+) -> None:
+    owner_id, username, recommendation_id = await _prepare_realtime_sweep(
+        db_session, monkeypatch, marked=marked
+    )
+    try:
+        gate = _ScriptedRealtimeGate(True)
+        outcome = await _sweep_outcome(owner_id, gate, markets={"KRX"})
+
+        assert outcome is not None
+        assert outcome["status"] == "SUBMITTED"
+        assert outcome["recommendation_id"] == recommendation_id
+        # 선택 1회 + 제출 직전 재확인 1회.
+        assert gate.calls == ["005930", "005930"]
+        assert await _owner_order_count(db_session, owner_id) == 1
+
+        # 5분 sweep과 1분 sweep이 다시 돌아도 두 번째 주문은 없다.
+        assert await _sweep_outcome(owner_id, gate) is None
+        assert await _sweep_outcome(owner_id, gate, markets={"KRX"}) is None
+        assert await _owner_order_count(db_session, owner_id) == 1
+    finally:
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_krx_only_sweep_never_executes_a_us_recommendation(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id, username = await _seed_owner(db_session)
+    us_buy = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    us_buy.market = "US"
+    us_buy.symbol = "NVDA"
+    us_buy.currency = "USD"
+    us_buy_id = us_buy.id
+    try:
+        db_session.add(us_buy)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+
+        outcome = await _sweep_outcome(
+            owner_id, _ScriptedRealtimeGate(True), markets={"KRX"}
+        )
+
+        assert outcome is None
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == us_buy_id
+            )
+        )
+        assert stored is None
+    finally:
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_owner_already_executing_in_another_sweep_is_skipped(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """두 sweep이 같은 owner를 동시에 집행하지 않는다(예산 경쟁 방지)."""
+
+    owner_id, username, recommendation_id = await _prepare_realtime_sweep(
+        db_session, monkeypatch
+    )
+    lock_args = {"namespace": job._OWNER_EXECUTION_LOCK_NAMESPACE, "key": owner_id}
+    try:
+        assert await db_session.scalar(
+            text("SELECT pg_try_advisory_lock(:namespace, :key)"), lock_args
+        )
+        outcome = await _sweep_outcome(owner_id, _ScriptedRealtimeGate(True))
+
+        assert outcome is not None
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "owner_execution_in_progress"
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored is None
+        assert await _owner_order_count(db_session, owner_id) == 0
+    finally:
+        await db_session.scalar(
+            text("SELECT pg_advisory_unlock(:namespace, :key)"), lock_args
+        )
+        await _cleanup_execution_events(db_session, owner_id)
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_markerless_pending_buy_is_observed_before_authorization(
+    db_session: AsyncSession,
+) -> None:
+    from app.extensions.kasset.nhplug.runner import demand_symbols
+
+    owner_id, username = await _seed_owner(db_session)
+    row = _approved_recommendation(owner_id, now=_NOW)
+    row.decision = "PENDING"
+    row.decided_at = None
+    try:
+        db_session.add(row)
+        await db_session.commit()
+        assert "005930" in await demand_symbols(db_session, now=_NOW)
+        gate = _ScriptedRealtimeGate(False, True)
+        service = OwnerScopedRecommendationService(db_session, realtime_gate=gate)
+        service._service = AIRecommendationService(db_session, clock=lambda: _NOW)
+        assert (
+            await service.authorize_next_for_auto_execution(str(owner_id), _NOW) is None
+        )
+        assert (
+            await db_session.scalar(
+                select(AIRecommendation.decision).where(
+                    AIRecommendation.owner_user_id == owner_id
+                )
+            )
+            == "PENDING"
+        )
+        selected = await service.authorize_next_for_auto_execution(str(owner_id), _NOW)
+        assert selected is not None
+        assert gate.calls == ["005930", "005930"]
+        assert (
+            await db_session.scalar(
+                select(AIRecommendation.decision).where(AIRecommendation.id == selected)
+            )
+            == "APPROVED"
+        )
+    finally:
+        await _cleanup_owner(db_session, username)

@@ -1,10 +1,10 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-29 (PAPER 횟수 제한 PR 보류, NH 시세 인증·구독 확인)
+갱신: 2026-09-29 (국내 NH 실시간 단타 구현·재생 검증 완료, PR #102 통합)
 
 ## 현재 목표·운영 상태
-- **초보 제외 PAPER 횟수 제한 해제(2026-09-29 사용자 승인, 미배포)**: 앱 초보(서버 1·2단계)는 기존 제한을 유지하고 중수·고수(3·4·5단계)는 일일 매수·매도·전체 주문 및 동일종목 재진입 횟수로 차단하지 않는다. API 횟수 제한은 `null=한도 없음`이며 사용량 기록은 유지한다. 일손실은 참고값이고 예산·동시보유·종목비중·kill switch·시세 검증·대기 추천 중복 방지·BUY 쿨다운은 그대로다. 격리 서버 집중 테스트 119건과 BUY/SELL 정책·API 직렬화 smoke를 확인했다. 다음 행동은 PR CI 확인 후 별도 배포 승인이다.
-- **단타 전략 참고 대상(2026-09-29 사용자 지정)**: [minwoopg/KIWOOM-AUTO-TRADER](https://github.com/minwoopg/KIWOOM-AUTO-TRADER)의 장세별 진입·진입 직후 관찰·추세 약화 청산 구조를 비교한다. 참고 코드는 키움 조건검색 WebSocket + REST 폴링이며 10호가·체결강도 기반 전략이나 검증된 수익 성과로 간주하지 않는다. 현재 전략에는 이식하지 않았다.
-- **NH PLUG 시세 연결 준비(2026-09-29 사용자 승인)**: NH API는 이 프로그램 전용이다. 서버 `/opt/kasset-trader-core/.env.nhplug`에 인증정보, `.env.nhplug.token.json`에 만료시각 포함 토큰을 보관했다(둘 다 `ghrunner:600`, Git 제외). 값은 문서·로그·Git에 남기지 않는다. 인증 200·삼성전자 KRX REST 시세 200 및 10호가/잔량 필드, WebSocket `oc`·`ob` 구독 정상 응답을 확인했다. 22:15 KST 장외 20초 관측에서 틱 0건이므로 장중 수신·체결강도/회전율 의미·신선도는 미검증이다. 확인 연결은 종료했고 주문·계좌 조회·상시 수집은 하지 않았다. 다음 행동은 정규장에 저장 토큰을 재사용해 시세 전용 수신을 확인한 뒤 단타 관측/진입/청산 계약을 확정하는 것이다. PR #102는 사용자가 실시간 단타 전략과 함께 배포하도록 요청해 미머지·미배포로 유지한다.
+- **초보 제외 PAPER 횟수 제한 해제(2026-09-29 사용자 승인)**: 초보(서버 1·2단계)는 기존 제한을 유지하고 중수·고수(3·4·5단계)는 일일 매수·매도·전체 주문 및 동일종목 재진입 횟수로 차단하지 않는다. API는 `null=한도 없음`, 사용량 기록은 유지한다. 일손실은 참고값이며 예산·동시보유·종목비중·kill switch·시세 검증·대기 추천 중복 방지·BUY 쿨다운은 그대로다. PR #102에 아래 국내 실시간 경로를 함께 반영하며 사용자 승인에 따라 CI 통과 후 배포한다.
+- **국내 NH 실시간 단타(2026-09-29 구현)**: KRX `oc`·`ob`를 60초 관찰한 뒤 국내 자동매수 추천을 선택하고 제출 직전에 재확인한다(배포 전 미집행 추천도 포함). 국내 정규장 매분 기존 보호청산 → 평가익 구간 흐름 약화 조기청산 → 국내 전용 집행 순서다. 기존 -3ATR 손절·부분익절·보호선 이력은 유지하며 손절폭을 넓히지 않는다. 10호가 잔량·불균형은 관측 근거이고 새 잔량 비율 gate는 없다. 기준·제약은 [AUTOMATION_BREAKOUT_CONTRACT.md](docs/kasset/AUTOMATION_BREAKOUT_CONTRACT.md)의 실시간 단타 절이 정본이다. 참고 저장소 [KIWOOM-AUTO-TRADER](https://github.com/minwoopg/KIWOOM-AUTO-TRADER)의 아이디어를 독립 구현했으며 수익성 입증은 아니다. 미국 데이터 수집은 유지하고 새 경로의 미국 주문은 금지한다.
+- **NH 운영 준비·미확인 경계**: NH API는 이 프로그램 전용이다. 서버 `.env.nhplug`는 `ghrunner:600`, 기존 토큰을 재발급 없이 복사한 `.env.nhplug.runtime/token.json`은 UID10001·폴더700·파일600이며 모두 Git 제외다. `KASSET_NH_STREAM_ENABLED=true`로 새 수집기를 활성화해야 국내 신규 BUY가 warmup 뒤 가능하다. 인증·국내 REST 10호가·WS 구독 ACK는 성공했지만 장외라 실제 장중 틱 수신은 미확인이다. 공식 형태의 재생→실제 격리 Redis→진입/청산 smoke, 집중 검사 및 롤백 모의 재현을 통과했다. 다음 정규장에는 틱 증가·snapshot 신선도·토큰 재발급 반복 없음·국내 주문 경로를 관찰한다. 해외 NH는 유료권한 `WSS10013`으로 사용하지 않는다.
 - **코인 일봉 자동수집 중지(2026-09-29 사용자 승인)**: `candles.daily.crypto.sync`의 반복 예약을 제거한다. 국장·미국장 일봉 예약과 코인 수동 task·저장 데이터는 유지한다. 운영 반영은 이 변경 PR의 Test 및 Deploy 성공 기준이다.
 - **2026-09-27 앱 운용 조회 보완(미배포)**: `feat/app-operational-state`에서 자동 점검 기록·조회시각과 현재 보유 사이클의 저장 보호선·부분익절 여부를 조회 응답에 추가했다. 격리 서버 집중 테스트 63건과 Ruff·ty를 통과했다. 기존 전략·주문·중지 동작과 DB 스키마는 바꾸지 않았다. 응답 의미와 미계측 경계는 `docs/API-CONTRACT.md` 「AI PAPER 운용 설정」「PAPER 보유 보호 상태」가 정본이다. Android 연결 검수 뒤 PR/CI 및 사용자 배포 승인이 필요하다. 기록: [maker-CoreAppStatus](doc/history/2026/09/27-app-operational-state/maker-CoreAppStatus.md).
 - 사용자 확정 전략은 **장중 돌파 단기매매**다. 손절 조건을 장중에 평가하고 손절·실현손실 자체가 다음 매수 후보를 막지 않도록 한다. 당일 강제청산은 추가하지 않는다.
@@ -44,7 +44,7 @@
 - **codex 구독 인증 만료(2026-09-27 복구)**: 09:00 KST부터 sidecar 호출이 전부 `provider_unavailable: subscription CLI exited non-zero (exit_code=1)`였다(09시대 요약 23/23 실패). 컨테이너 안 단건 `codex exec`에서 `Failed to refresh token`·`workspace routing discovery unauthorized (401)`를 확인했다. `auth.json`을 `/root/kasset-codex-auth.json.bak-20260927`에 백업하고 `codex login --device-auth`로 다시 로그인했다. 처음에는 계정 보안 설정에서 기기 코드 로그인이 꺼져 있어 거부됐고, 사용자가 켠 뒤 성공했다. `codex login status`=`Logged in using ChatGPT`, 단건 `ok`를 확인했다. 인증 실패 호출도 요약 일일 한도를 깎아 당일 32회를 잃었다. 절차는 `docs/kasset/AI_DUAL_PROVIDER.md` 「구독 CLI 인증 만료」.
 
 ### 유지 중인 계약·경계 (이관한 기록에서 통합)
-- 10분 producer + 5분 execution sweep이며 틱 즉시 손절이 아니다. 장중 조건 발생 후 봉 완료·다음 평가·다음 집행을 기다린다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후의 체결은 보장하지 않는다. 장외 강제 주문은 하지 않는다.
+- 후보 producer는 10분 주기를 유지한다. 기존 전체 시장 5분 집행에 더해 국내 정규장에는 보호평가·흐름 청산·KRX 전용 집행이 매분 실행된다. 틱 즉시 주문은 아니며 기존 보호선 도달 판정은 완료 분봉 기준이다. 장 마감 직전 bucket, provider 지연/실패, 시장 종료 후 체결은 보장하지 않고 장외 강제 주문은 하지 않는다.
 - 초기 ATR 손절 폭(`-3 ATR`), 일봉 추세/기간 판정, 목표 수익 EXIT_ONLY, STAGED_REDUCTION의 BUY 수량×0.75, BUY 1시간 중복 방지는 보존했다. 일일 주문·동일종목 재진입 횟수 제한은 2026-09-29 변경에서 초보만 유지한다. 손실 원인 veto 제거를 다른 제한의 제거로 해석하지 않는다. **부분익절선과 trailing 구조는 2026-09-22에 위 5단 사다리로 바뀌었다.**
 - 기존 일봉 백테스트 수익률은 새 장중 집행 전략의 성과 검증이 아니다. 실시간 체결·장마감 경계·운영 rollout은 별도 승인/관찰 대상이다.
 - maxDailyLossRatePct/maxDailyLossAmount는 앱 wire에 남으며 참고값이다. 앱이 이를 강제 매수중단/종목손절로 표현하지 않는지 소비자 문구를 별도로 검토해야 한다.
