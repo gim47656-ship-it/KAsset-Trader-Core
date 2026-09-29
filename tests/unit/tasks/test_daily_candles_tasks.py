@@ -23,13 +23,12 @@ def test_cron_schedules_are_registered():
 
 
 def test_cron_schedules_use_asia_seoul_timezone():
-    """Verify all three tasks use Asia/Seoul cron_offset, matching project convention."""
+    """Verify scheduled equity tasks use Asia/Seoul cron_offset."""
     from app.tasks import daily_candles_tasks
 
     for attr_name in (
         "sync_kr_daily_task",
         "sync_us_daily_task",
-        "sync_crypto_daily_task",
     ):
         task = getattr(daily_candles_tasks, attr_name)
         # task.labels is the correct attribute on AsyncTaskiqDecoratedTask
@@ -51,7 +50,6 @@ def test_cron_expressions_match_spec():
     expected = {
         "sync_kr_daily_task": "30 16 * * 1-5",
         "sync_us_daily_task": "0 7 * * 2-6",
-        "sync_crypto_daily_task": "0 9 * * *",
     }
     for attr_name, expected_cron in expected.items():
         task = getattr(daily_candles_tasks, attr_name)
