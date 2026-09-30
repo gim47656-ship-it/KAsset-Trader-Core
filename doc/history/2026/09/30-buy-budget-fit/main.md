@@ -4,7 +4,7 @@ RECORD:
 DATE: 2026-09-30
 SCOPE: Hard Risk BUDGET, 종목 비중, max_buy_notional, 제출 수량 축소
 PATHS: app/extensions/kasset/automation/job.py, app/extensions/kasset/automation/policy.py
-STATUS: partial
+STATUS: accepted
 
 ## 관측
 
@@ -20,4 +20,9 @@ STATUS: partial
 ## 남은 경계
 
 - 추천의 `suggestedQuantity`는 그대로 두므로 주문 수량이 추천보다 작을 수 있다. 앱에서 "추천 229주 / 주문 228주"로 보일 수 있다.
-- CI와 배포 뒤 worker 로그 `kasset BUY quantity fitted to budget`이 찍히고, 이어서 BUY가 체결되는지 관찰한다.
+
+## 운영 관찰 (2026-09-30)
+
+- PR #106(`bbac54a3`)은 11:33 KST에 배포됐다. 11:30에 생성된 owner 4의 005940 BUY 추천(`suggestedQuantity` 229)은 11:41에 **228주 26,300원 FILLED**로 체결됐다. 229주 × 26,300원은 6,022,700원이라 종목 한도 600만 원을 넘는다.
+- worker 로그 `kasset BUY quantity fitted to budget`은 확인하지 못했다. 11:45 PR #107 배포로 worker 컨테이너가 교체되면서 이전 컨테이너 로그가 사라졌다. 수량 축소의 근거는 추천 수량과 체결 수량의 차이다.
+- 배포 뒤 `risk_preview_rejected:BUDGET`은 0건이다(당일 1건은 배포 전인 10:20).
