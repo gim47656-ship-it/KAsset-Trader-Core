@@ -261,7 +261,7 @@ def _manager(db: MagicMock, *, now: datetime) -> PaperPositionManagerService:
 
 
 @pytest.mark.unit
-def test_initialize_position_uses_three_atr_stop() -> None:
+def test_initialize_position_uses_two_atr_stop() -> None:
     state = initialize_position(
         market="US",
         symbol="NVDA",
@@ -271,14 +271,14 @@ def test_initialize_position_uses_three_atr_stop() -> None:
         strategy_version="breakout-portfolio-v1",
     )
 
-    assert state.initial_stop == D("105")
-    assert state.current_stop == D("105")
+    assert state.initial_stop == D("110")
+    assert state.current_stop == D("110")
     assert state.highest_close == D("120")
 
 
 @pytest.mark.unit
 def test_low_volatility_atr_stop_is_used_as_stored() -> None:
-    """3 ATR이 진입가 -3%보다 좁으면 더 타이트한 ATR 손절선으로 청산한다."""
+    """저변동 종목도 ATR 손절선(진입가 - 2 ATR)을 저장된 그대로 쓴다."""
 
     quiet = initialize_position(
         market="KRX",
@@ -289,7 +289,7 @@ def test_low_volatility_atr_stop_is_used_as_stored() -> None:
         strategy_version="breakout-portfolio-v1",
         position_cycle_id=101,
     )
-    bars = _intraday([(0, "99", "100", "98", "98.5")], day=3)
+    bars = _intraday([(0, "99.5", "100", "98", "98.5")], day=3)
 
     signal = evaluate_position_intraday(
         quiet,
@@ -297,10 +297,10 @@ def test_low_volatility_atr_stop_is_used_as_stored() -> None:
         bar_interval=bars.bar_interval,
     )
 
-    assert quiet.initial_stop == D("98.5")
+    assert quiet.initial_stop == D("99")
     assert signal is not None
     assert signal.kind is ExitKind.STOP
-    assert signal.reference_price == D("98.5")
+    assert signal.reference_price == D("99")
 
 
 @pytest.mark.unit
@@ -1008,9 +1008,9 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
     assert state_row.entry_price == position.avg_price
     assert state_row.entry_price != _atr_candles()[-1].close
     assert state_row.initial_atr == D("4")
-    # ATR 손절선은 진입가 - 3 ATR 하나뿐이다.
-    assert state_row.initial_stop == D("88")
-    assert state_row.current_stop == D("88")
+    # ATR 손절선은 진입가 - 2 ATR 하나뿐이다.
+    assert state_row.initial_stop == D("92")
+    assert state_row.current_stop == D("92")
     assert state_row.strategy_key == "qullamaggie_breakout_portfolio"
     assert state_row.strategy_version == "1.0.0"
     assert state_row.strategy_fingerprint == _ARTIFACT_FINGERPRINT
@@ -1042,7 +1042,7 @@ async def test_first_management_does_not_backdate_a_bootstrap_stop() -> None:
         if isinstance(call_.args[0], KAssetPaperPositionState)
     )
     assert state_row.exit_levels_effective_at == bootstrap_at
-    assert state_row.current_stop == D("88")
+    assert state_row.current_stop == D("92")
     assert state_row.last_evaluated_at == _candle(1).time_utc
     assert not any(
         isinstance(call_.args[0], AIRecommendation) for call_ in db.add.call_args_list
@@ -1056,7 +1056,7 @@ async def test_first_management_does_not_backdate_a_bootstrap_stop() -> None:
         market="KRX",
         position=position,
         rows=[],
-        intraday=_intraday([(0, "90", "91", "87", "88")], day=4),
+        intraday=_intraday([(0, "94", "95", "91", "92")], day=4),
     )
 
     assert protected is not None
@@ -1065,7 +1065,7 @@ async def test_first_management_does_not_backdate_a_bootstrap_stop() -> None:
         for call_ in db.add.call_args_list
         if isinstance(call_.args[0], AIRecommendation)
     )
-    assert recommendation.reference_price == "88"
+    assert recommendation.reference_price == "92"
 
 
 @pytest.mark.asyncio
