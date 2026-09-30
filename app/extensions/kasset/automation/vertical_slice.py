@@ -191,16 +191,19 @@ from app.services.symbol_news_store import load_symbol_news
 logger = logging.getLogger(__name__)
 _RECOMMENDATION_LIMIT = 5
 #: 같은 owner에게 BUY 추천을 반복 생성하지 않도록 두는 중복 방지 창.
-_OWNER_BUY_COOLDOWN = timedelta(hours=1)
+#: 2026-09-30 사용자 요청으로 1시간 → 5분. producer tick(10분)보다 짧아 매
+#: tick 새 후보를 검토하고, 같은 tick 재실행만 막는다. 같은 종목 중복은
+#: ``_open_same_symbol_buys``의 미만료 PENDING·CLAIMED 제외가 계속 막는다.
+_OWNER_BUY_COOLDOWN = timedelta(minutes=5)
 
 #: producer tick 간격. ``kasset_market_events.run``이 정규장 중 10분마다 돈다.
 _PRODUCER_TICK = timedelta(minutes=10)
 
-#: 추천 유효기간 상한. owner 쿨다운 때문에 다음 배치는 빨라야 쿨다운 + tick
-#: 1회 뒤에 나온다. 상한이 그 간격을 덮지 못하면 직전 배치 추천이 다음 배치가
-#: 시작되기 전에 만료된다. 집행은 owner당 한 tick에 한 건뿐이라 배치당 여러
-#: 추천 중 뒤쪽은 쓰이지도 못한 채 사라지고, 같은 종목이 매 배치 새 추천으로
-#: 다시 나간다. tick 한 번의 여유만 더해 그 창을 덮는 최소값으로 둔다.
+#: 추천 유효기간 상한. 다음 배치는 빨라야 max(쿨다운, tick) 뒤에 나온다. 상한이
+#: 그 간격을 덮지 못하면 직전 배치 추천이 다음 배치가 시작되기 전에 만료된다.
+#: 집행은 owner당 한 tick에 한 건뿐이라 배치당 여러 추천 중 뒤쪽은 쓰이지도
+#: 못한 채 사라지고, 같은 종목이 매 배치 새 추천으로 다시 나간다. 쿨다운 + tick
+#: 2회(5분 쿨다운에서 25분)로 두어 그 창과 여유 한 tick을 덮는다.
 _RECOMMENDATION_VALIDITY = _OWNER_BUY_COOLDOWN + 2 * _PRODUCER_TICK
 
 #: 순위 상위 검토 창을 ``strategy_review_limit``의 몇 배까지 열어둘지. AI 앞단
