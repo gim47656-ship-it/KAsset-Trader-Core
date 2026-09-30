@@ -965,6 +965,7 @@ async def test_new_symbol_buy_holdings_cap_only_limits_beginner_levels(
     if expected:
         assert "holdings=50; limit=unlimited" in position.detail
 
+
 @pytest.mark.asyncio
 async def test_executions_enrich_missing_names_in_one_master_query() -> None:
     moment = datetime(2026, 9, 3, tzinfo=UTC)
