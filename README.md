@@ -7,7 +7,7 @@
 
 ## 무엇을 하나
 
-- **PAPER 자동매매**: 장중 스캔 → 후보 선정 → AI 검토 → PAPER 주문 → 5단 청산 사다리(초기 손절 `진입가 − 3 ATR` 등). 현재 규칙과 근거는 [`HANDOFF.md`](HANDOFF.md).
+- **PAPER 자동매매**: 장중 스캔 → 후보 선정 → AI 검토 → PAPER 주문 → 5단 청산 사다리(초기 손절 `진입가 − 2 ATR` 등). 현재 규칙과 근거는 [`HANDOFF.md`](HANDOFF.md).
 - **Android 앱 API**: `app/extensions/kasset/api/` — 로그인(Google), 관심종목·종목 검색, 시세·차트·호가 스트림, 추천 승인/거절, PAPER 주문·체결, 푸시(FCM).
 - **데이터 적재**: KR/US 일봉, 투자자 수급(네이버 모바일 API), DART 재무, 종목 마스터, 뉴스·공시.
 

@@ -507,6 +507,26 @@ def test_trend_exit_needs_all_four_conditions_in_profit_above_stop() -> None:
     assert not losing.triggered
     assert "below_entry_price" in losing.reasons
 
+    # 2026-09-30: 진입가 바로 위 흐름 청산이 왕복 비용(0.21%)으로 손실이 됐다.
+    # 69840은 진입가 69700의 +0.2%라 최소 평가익 0.3% 미만이다.
+    thin_profit = evaluate_realtime_trend_exit(
+        snapshot,
+        now=_at(62.5),
+        entry_price=D("69700"),
+        current_stop=D("67000"),
+        completed_closes=ma_above,
+    )
+    assert not thin_profit.triggered
+    assert thin_profit.reasons == ("below_min_profit",)
+    # 최소 평가익을 넘으면(69600의 +0.34%) 같은 흐름에서 청산한다.
+    assert evaluate_realtime_trend_exit(
+        snapshot,
+        now=_at(62.5),
+        entry_price=D("69600"),
+        current_stop=D("67000"),
+        completed_closes=ma_above,
+    ).triggered
+
     # 현재가가 저장된 보호선 이하면 손절이 먼저다(경쟁 금지).
     stop_first = evaluate_realtime_trend_exit(
         snapshot,

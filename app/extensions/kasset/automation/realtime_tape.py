@@ -79,6 +79,10 @@ class RealtimeTapeConfig:
     #: 400원 이상 KRX 종목의 호가단위 1틱은 최대 25bp이고, 50bp는 2틱이다.
     max_median_spread_bps: Decimal = Decimal("50")
     exit_max_volume_power: Decimal = Decimal("100")
+    #: 흐름 악화 청산의 최소 평가익률. KRX PAPER 왕복 비용(매수·매도 수수료
+    #: 0.015%씩 + 매도세 0.18% = 0.21%)을 넘겨야 청산이 손실로 끝나지 않는다.
+    #: 2026-09-30 사용자 요청(진입가 바로 위 청산이 수수료로 소폭 손실이 된 사례).
+    exit_min_profit_rate: Decimal = Decimal("0.003")
     ma_bars: int = 5
 
 
@@ -758,8 +762,9 @@ def evaluate_realtime_trend_exit(
 
     네 조건이 모두 동시에 맞아야 한다: 60초 체결강도 < 100, 60초 가격 하락,
     당일 VWAP 아래, 완료 5분봉 종가 MA5 아래. 현재가가 진입가보다 낮으면
-    기존 손절선이 담당하므로 이 신호를 내지 않는다. 현재가가 저장된 보호선
-    이하이면 기존 손절이 먼저이므로 역시 내지 않는다.
+    기존 손절선이 담당하므로 이 신호를 내지 않는다. 진입가 위라도 평가익이
+    ``exit_min_profit_rate``(왕복 비용 + 여유) 미만이면 청산해도 손실이라 내지
+    않는다. 현재가가 저장된 보호선 이하이면 기존 손절이 먼저이므로 역시 내지 않는다.
     """
 
     current = _aware_utc(now, "now")
@@ -769,6 +774,7 @@ def evaluate_realtime_trend_exit(
         "currentStop": format(current_stop, "f"),
         "movingAverageBars": config.ma_bars,
         "movingAverage": format(ma, "f") if ma is not None else None,
+        "minProfitRate": format(config.exit_min_profit_rate, "f"),
     }
     if snapshot is None:
         reasons = ["snapshot_unavailable"]
@@ -785,6 +791,8 @@ def evaluate_realtime_trend_exit(
     else:
         if last < entry_price:
             blockers.append("below_entry_price")
+        elif last < entry_price * (1 + config.exit_min_profit_rate):
+            blockers.append("below_min_profit")
         if last <= current_stop:
             blockers.append("protective_stop_owns_exit")
     conditions: list[str] = []

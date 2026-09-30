@@ -25,7 +25,12 @@ class ExitKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PositionManagerConfig:
-    initial_stop_atr: Decimal = Decimal("3")
+    #: 신규 사이클의 초기 손절 ``진입가 - 이 배수 * ATR``. 2026-09-30 사용자 요청으로
+    #: 3 → 2. 장중 단타에서 -3 ATR은 도달 전에 TIME_STOP·추세 이탈이 먼저 나와
+    #: 손실 매매를 가장 오래 들고 있게 했다(2026-09-22~30 손실 2건 모두 3거래일
+    #: 보유). 2026-09-28 일봉 백테스트에서는 -2 ATR이 -3 ATR보다 나빴으므로 장중
+    #: 성과는 관찰로 확인한다. 이미 저장된 사이클의 손절선은 바꾸지 않는다.
+    initial_stop_atr: Decimal = Decimal("2")
     #: 1차 익절 도달선. KR 후보의 ATR 중앙값이 진입가의 3~5%라 +3 ATR은 하루
     #: 안에 닿지 않는다. 장중 평가(:func:`evaluate_position_intraday`)가 실제로
     #: 판정할 수 있는 구간으로 내리고, 대신 일부 수량만 턴다.
