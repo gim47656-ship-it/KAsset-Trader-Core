@@ -116,7 +116,7 @@ def test_risk_level_uses_single_preset_for_all_hidden_limits(
 
 
 @pytest.mark.parametrize("risk_level", [3, 4, 5])
-def test_non_beginner_levels_have_no_daily_or_reentry_count_limits(
+def test_non_beginner_levels_have_no_count_or_holdings_limits(
     risk_level: int,
 ) -> None:
     # 사용자 횟수가 저장돼 있어도 무제한 등급에서는 적용하지 않고 정규화한다.
@@ -133,6 +133,7 @@ def test_non_beginner_levels_have_no_daily_or_reentry_count_limits(
     assert limits.max_custom_sells_per_day is None
     assert limits.max_custom_orders_per_day is None
     assert limits.same_symbol_reentry_limit is None
+    assert limits.max_concurrent_holdings is None
     assert limits.custom_max_buys_per_day is None
     assert limits.custom_max_sells_per_day is None
     stored = limits.to_storage()
@@ -921,6 +922,48 @@ async def test_order_count_gate_only_limits_beginner_levels(
     if action == "SELL":
         position = next(check for check in result.checks if check.rule == "POSITION")
         assert position.passed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("risk_level", "expected"),
+    [(1, False), (2, False), (3, True), (4, True), (5, True)],
+)
+async def test_new_symbol_buy_holdings_cap_only_limits_beginner_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    risk_level: int,
+    expected: bool,
+) -> None:
+    # 보유 종목이 옛 상한(3~6)을 훨씬 넘은 계좌의 새 종목 BUY.
+    limits = AITradingLimits(risk_level=risk_level)
+    usage = AITradingUsage(concurrent_holdings=50)
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=limits,
+        usage=usage,
+        usage_by_currency={"KRW": usage, "USD": AITradingUsage()},
+        kill_switch=False,
+        updated_at=_NOW,
+    )
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+
+    result = await service.evaluate_hard_risk(
+        _EmptyRiskDb(),  # type: ignore[arg-type]
+        101,
+        action="BUY",
+        market="KRX",
+        symbol="005930",
+        quantity=Decimal("1"),
+        reference_price=Decimal("70000"),
+        ai_confidence=Decimal("0.90"),
+        now=_NOW,
+    )
+
+    position = next(check for check in result.checks if check.rule == "POSITION")
+    assert position.passed is expected
+    if expected:
+        assert "holdings=50; limit=unlimited" in position.detail
 
 
 @pytest.mark.asyncio

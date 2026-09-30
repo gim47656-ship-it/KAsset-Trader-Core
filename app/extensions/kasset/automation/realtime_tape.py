@@ -56,20 +56,28 @@ _BPS: Final = Decimal("10000")
 
 @dataclass(frozen=True, slots=True)
 class RealtimeTapeConfig:
-    """PAPER 초기 실험값(2026-09-29 승인). 수익성 검증을 거친 값이 아니다."""
+    """PAPER 실험값(2026-09-29 승인, 2026-09-30 중·소형주용 완화).
+
+    수익성 검증을 거친 값이 아니다.
+
+    NH는 바뀐 체결·호가만 보낸다. 거래가 뜸한 종목의 침묵은 끊김이 아니므로 종목별
+    프레임 간격으로 창을 비우지 않는다. 연결 끊김·세션 60초 침묵은 ``nh-stream``이
+    그 세션의 창을 통째로 버려 다시 세고, 발행 프로세스 생존은 snapshot 나이로 본다.
+    """
 
     observation_seconds: int = 60
-    max_book_gap_seconds: int = 5
-    max_trade_gap_seconds: int = 15
-    minimum_trades: int = 10
-    max_book_age_seconds: int = 3
-    max_trade_age_seconds: int = 15
+    minimum_trades: int = 3
+    #: 마지막 호가·체결이 관찰창(60초) 안에 있어야 한다. 조용한 종목의 호가는
+    #: 바뀌지 않았을 뿐 현재 호가다.
+    max_book_age_seconds: int = 60
+    max_trade_age_seconds: int = 60
     #: 발행 프로세스가 살아 있는지 보는 snapshot 자체의 최대 나이.
     max_snapshot_age_seconds: int = 3
     #: 거래소 시각(HH:MM:SS)과 수신 시각이 이보다 벌어진 프레임은 버린다.
     max_exchange_clock_skew_seconds: int = 60
     entry_min_volume_power: Decimal = Decimal("100")
-    max_median_spread_bps: Decimal = Decimal("30")
+    #: 400원 이상 KRX 종목의 호가단위 1틱은 최대 25bp이고, 50bp는 2틱이다.
+    max_median_spread_bps: Decimal = Decimal("50")
     exit_max_volume_power: Decimal = Decimal("100")
     ma_bars: int = 5
 
@@ -354,8 +362,8 @@ class TapeWindow:
     """한 종목의 연속 관찰창.
 
     연속성은 "마지막 리셋 이후 체결과 호가가 모두 들어온 첫 시각"부터 센다.
-    프레임 간격이 한도를 넘거나, 누적값이 거꾸로 가거나, 세션 날짜가 바뀌거나,
-    연결을 다시 맺으면 창을 비우고 다음 프레임부터 다시 센다.
+    누적 매수/매도 체결량이 거꾸로 가거나 세션 날짜가 바뀌면 창을 비우고 다음
+    프레임부터 다시 센다. 재연결·세션 침묵은 소유 프로세스가 창을 새로 만든다.
     """
 
     symbol: str
@@ -425,10 +433,6 @@ class TapeWindow:
                 previous.cumulative_sell_volume, tick.cumulative_sell_volume
             ):
                 self.reset("cumulative_counter_reset")
-            elif (
-                received_at - previous.received_at
-            ).total_seconds() > self.config.max_trade_gap_seconds:
-                self.reset("trade_gap")
         sample = _TradeSample(
             received_at=received_at,
             price=tick.price,
@@ -456,17 +460,12 @@ class TapeWindow:
             return False
         self._enter_session(received_at)
         previous = self._last_book
-        if previous is not None:
-            if (
-                received_at < previous.received_at
-                or tick.exchange_time < previous.exchange_time
-            ):
-                self._dropped += 1
-                return False
-            if (
-                received_at - previous.received_at
-            ).total_seconds() > self.config.max_book_gap_seconds:
-                self.reset("book_gap")
+        if previous is not None and (
+            received_at < previous.received_at
+            or tick.exchange_time < previous.exchange_time
+        ):
+            self._dropped += 1
+            return False
         valid, spread_bps = _book_quality(tick.best_bid, tick.best_ask)
         sample = _BookSample(
             received_at=received_at,

@@ -290,22 +290,31 @@ def test_buy_only_window_is_neutral_but_empty_flow_is_unavailable() -> None:
 
 
 @pytest.mark.unit
-def test_trade_or_book_gap_resets_the_window_and_restarts_warmup() -> None:
-    window = _ready_window()
-    # 20초 동안 체결이 끊겼다가 돌아온다(한도 15초).
-    for second in range(63, 84):
-        window.on_book(_book(second))
-    window.on_trade(_trade(84, price="70200", volume=20_000, buy=6_000, sell=5_000))
-    after_trade_gap = window.snapshot(_at(84.5))
-    assert after_trade_gap.last_reset_reason == "trade_gap"
-    assert (
-        "warmup_incomplete"
-        in evaluate_realtime_entry(after_trade_gap, now=_at(84.5)).reasons
-    )
+def test_quiet_thin_name_keeps_its_window_and_can_pass_entry() -> None:
+    # 2026-09-30 장중: 중·소형주는 호가 5초·체결 15초 공백 리셋으로 60초를
+    # 채우지 못했다. 2만원대(호가단위 50원) 종목의 2틱 스프레드, 8초 간격 호가,
+    # 20초 간격 체결도 흐름 조건이 맞으면 통과해야 한다.
+    window = TapeWindow(SYMBOL)
+    for second in range(0, 65, 8):
+        window.on_book(_book(second, bid="20000", ask="20100"))
+    for index, second in enumerate(range(0, 61, 20)):
+        window.on_trade(
+            _trade(
+                second,
+                price=str(20050 + index * 50),
+                volume=10_000 + index * 50,
+                buy=5_000 + index * 30,
+                sell=4_000 + index * 20,
+                vwap="20000",
+            )
+        )
 
-    book_gap = _ready_window()
-    book_gap.on_book(_book(70))  # 마지막 호가 62초 → 8초 공백
-    assert book_gap.snapshot(_at(70.5)).last_reset_reason == "book_gap"
+    for moment in (_at(64.5), _at(75)):
+        snapshot = window.snapshot(moment)
+        assert snapshot.resets == 0
+        assert snapshot.last_reset_reason is None
+        decision = evaluate_realtime_entry(snapshot, now=moment)
+        assert decision.ready, decision.reasons
 
 
 @pytest.mark.unit
@@ -377,7 +386,13 @@ def test_stale_publisher_or_book_and_invalid_book_block_immediately() -> None:
     # 4초 뒤 재확인: 발행이 멈췄고 마지막 호가도 오래됐다.
     later = evaluate_realtime_entry(snapshot, now=_at(66.6))
     assert later.status is RealtimeEntryStatus.NOT_READY
-    assert {"snapshot_stale", "book_stale"} <= set(later.reasons)
+    assert "snapshot_stale" in later.reasons
+
+    # 발행은 살아 있어도 호가·체결이 관찰창(60초) 밖이면 판단하지 않는다.
+    quiet_too_long = _ready_window().snapshot(_at(130))
+    assert {"book_stale", "trade_stale", "trades_sparse"} <= set(
+        evaluate_realtime_entry(quiet_too_long, now=_at(130)).reasons
+    )
 
     crossed = _ready_window()
     crossed.on_book(_book(62.8, bid="70200", ask="70100"))
