@@ -72,7 +72,7 @@ class _RiskPreset:
     max_daily_loss_rate_pct: Decimal
     risk_per_trade_rate: Decimal
     max_symbol_allocation: Decimal
-    max_concurrent_holdings: int
+    max_concurrent_holdings: int | None
     max_buys_per_day: int | None
     max_sells_per_day: int | None
     same_symbol_reentry_limit: int | None
@@ -104,7 +104,7 @@ _RISK_PRESETS = {
         Decimal("1.5"),
         Decimal("0.0075"),
         Decimal("0.20"),
-        5,
+        None,
         None,
         None,
         None,
@@ -114,7 +114,7 @@ _RISK_PRESETS = {
         Decimal("2.5"),
         Decimal("0.01"),
         Decimal("0.25"),
-        5,
+        None,
         None,
         None,
         None,
@@ -124,29 +124,34 @@ _RISK_PRESETS = {
         Decimal("4.0"),
         Decimal("0.015"),
         Decimal("0.30"),
-        6,
+        None,
         None,
         None,
         None,
     ),
 }
-_LEGACY_PRESET_DAILY_LIMITS = {
+# 저장된 옛 설정에서 가장 가까운 단계를 고를 때 쓰는 해제 전 값이다. 현재 한도가
+# 아니며, 3~5단계의 동시보유 5·5·6종목은 2026-09-30 해제 전 preset 값이다.
+_LEGACY_PRESET_LIMITS = {
     1: {"max_buys_per_day": 1, "max_orders_per_day": 2},
     2: {"max_buys_per_day": 2, "max_orders_per_day": 3},
     3: {
         "max_buys_per_day": 3,
         "max_orders_per_day": 5,
         "same_symbol_reentry_limit": 1,
+        "max_concurrent_holdings": 5,
     },
     4: {
         "max_buys_per_day": 5,
         "max_orders_per_day": 8,
         "same_symbol_reentry_limit": 1,
+        "max_concurrent_holdings": 5,
     },
     5: {
         "max_buys_per_day": 8,
         "max_orders_per_day": 12,
         "same_symbol_reentry_limit": 2,
+        "max_concurrent_holdings": 6,
     },
 }
 _DEFAULT_RISK_LEVEL = 2
@@ -178,7 +183,7 @@ class AITradingLimits:
     max_custom_sells_per_day: int | None = field(init=False)
     max_custom_orders_per_day: int | None = field(init=False)
     max_symbol_allocation: Decimal = field(init=False)
-    max_concurrent_holdings: int = field(init=False)
+    max_concurrent_holdings: int | None = field(init=False)
     same_symbol_reentry_limit: int | None = field(init=False)
     kill_switch: bool = False
     currency: Literal["KRW", "USD"] = "KRW"
@@ -250,8 +255,9 @@ class AITradingLimits:
         max_custom_buys: int | None
         max_custom_sells: int | None
         if preset.max_buys_per_day is None or preset.max_sells_per_day is None:
-            # 3~5단계 PAPER는 하루 매수·매도·전체 주문 횟수와 같은 종목 재진입 횟수를
-            # 제한하지 않는다. 사용자 횟수는 적용할 곳이 없어 저장하지 않는다.
+            # 3~5단계 PAPER는 하루 매수·매도·전체 주문 횟수, 같은 종목 재진입 횟수,
+            # 동시 보유 종목 수를 제한하지 않는다. 사용자 횟수는 적용할 곳이 없어
+            # 저장하지 않는다. 예산·종목 비중이 노출을 계속 제한한다.
             custom_max_buys_per_day = None
             custom_max_sells_per_day = None
             effective_buys = effective_sells = None
@@ -259,10 +265,13 @@ class AITradingLimits:
             effective_orders = max_custom_orders = None
         else:
             reentry = preset.same_symbol_reentry_limit
-            if reentry is None:
-                raise ValueError("bounded daily limits require a re-entry limit")
-            max_custom_buys = preset.max_concurrent_holdings * max(2, reentry * 2)
-            max_custom_sells = preset.max_concurrent_holdings * (reentry + 3)
+            holdings = preset.max_concurrent_holdings
+            if reentry is None or holdings is None:
+                raise ValueError(
+                    "bounded daily limits require re-entry and holdings limits"
+                )
+            max_custom_buys = holdings * max(2, reentry * 2)
+            max_custom_sells = holdings * (reentry + 3)
             effective_buys = _optional_daily_limit(
                 custom_max_buys_per_day,
                 "custom_max_buys_per_day",
@@ -846,7 +855,9 @@ class AITradingPolicyService:
                     is_buy
                     and (
                         position is not None
-                        or usage.concurrent_holdings < limits.max_concurrent_holdings
+                        or _below_limit(
+                            usage.concurrent_holdings, limits.max_concurrent_holdings
+                        )
                     )
                 )
                 or (action == "SELL" and current_quantity >= quantity)
@@ -927,7 +938,7 @@ class AITradingPolicyService:
                 (
                     f"action={action}; market={market}; currency={currency or 'INVALID'}; "
                     f"held={current_quantity}; holdings={usage.concurrent_holdings}; "
-                    f"limit={limits.max_concurrent_holdings}; "
+                    f"limit={_limit_text(limits.max_concurrent_holdings)}; "
                     f"paperRisk={'; '.join(base_risk_details) or 'clear'}"
                 ),
             ),
@@ -1311,7 +1322,7 @@ def _nearest_risk_level(raw: dict[object, object], budget: Decimal) -> int:
 
     def score(level: int) -> Decimal:
         preset = _RISK_PRESETS[level]
-        legacy_limits = _LEGACY_PRESET_DAILY_LIMITS[level]
+        legacy_limits = _LEGACY_PRESET_LIMITS[level]
 
         def expected(field_name: str) -> object:
             if field_name in legacy_limits:

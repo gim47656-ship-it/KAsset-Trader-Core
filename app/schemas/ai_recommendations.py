@@ -436,7 +436,11 @@ class AITradingDerivedLimits(BaseModel):
     max_symbol_allocation_pct: Decimal = Field(
         gt=0, le=100, alias="maxSymbolAllocationPct"
     )
-    max_concurrent_holdings: int = Field(ge=0, alias="maxConcurrentHoldings")
+    max_concurrent_holdings: int | None = Field(
+        ge=0,
+        alias="maxConcurrentHoldings",
+        description="null이면 동시 보유 종목 수 제한 없음(3~5단계).",
+    )
     max_buys_per_day: int | None = Field(
         ge=0,
         alias="maxBuysPerDay",
