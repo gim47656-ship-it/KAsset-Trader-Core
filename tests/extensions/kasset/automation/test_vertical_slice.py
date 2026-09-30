@@ -2619,7 +2619,7 @@ def test_krx_detector_entry_paths_signal_on_the_last_completed_session_bar(
     session_bar_at = bars[-1].timestamp.isoformat().replace("+00:00", "Z")
     for signal in signals:
         # 추천 유효시각은 완료 세션이 아니라 실제 cycle 시각을 따른다.
-        assert signal.valid_until == as_of + timedelta(minutes=80)
+        assert signal.valid_until == as_of + _RECOMMENDATION_VALIDITY
         assert signal.evidence["signalAt"] == session_bar_at
 
 
