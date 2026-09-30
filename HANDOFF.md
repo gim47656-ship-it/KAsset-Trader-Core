@@ -1,7 +1,8 @@
 # HANDOFF — KAsset-Trader-Core
-갱신: 2026-09-30 (실시간 관문 중·소형주 완화·3~5단계 보유 상한 해제, PR #104 운영 배포)
+갱신: 2026-09-30 (제출 시점 BUDGET 초과 BUY 수량 축소 — PR·배포 진행)
 
 ## 현재 목표·운영 상태
+- **제출 시점 BUDGET 초과 BUY 수량 축소(2026-09-30 사용자 선택 ①, `feat/buy-budget-fit`)**: 추천 수량이 종목 한도를 거의 채워 제출 시점 시세 상승만으로 `BUDGET`에 걸리면, 한도 안 최대 lot으로 줄여 Hard Risk를 다시 통과할 때만 제출한다. 다른 관문이 함께 실패하면 줄이지 않고 거절한다. 정본은 [AUTOMATION_BREAKOUT_CONTRACT.md](docs/kasset/AUTOMATION_BREAKOUT_CONTRACT.md) 「Position Sizer」이고 근거는 [30-buy-budget-fit](doc/history/2026/09/30-buy-budget-fit/main.md)이다. **다음 행동**: 배포 뒤 worker 로그 `kasset BUY quantity fitted to budget`과 이어지는 BUY 체결을 관찰한다.
 - **실시간 관문 중·소형주 완화·보유 상한 해제(2026-09-30 사용자 요청, PR #104 운영 배포 `4a2851c4`, 09:53 KST)**: 종목별 공백 리셋을 제거하고 체결 3건·60초 신선도·스프레드 50bp로 완화했다. 방향 조건은 유지했다. 3·4·5단계는 동시 보유 종목 수를 제한하지 않는다(`maxConcurrentHoldings=null`, 1·2단계는 3·4종목 유지). 데이터 품질 기준은 흐름 악화 청산과 공유하므로 거래가 뜸한 보유 종목에도 흐름 청산이 나간다(배포 직후 066575 전량 SELL 두 계정). 기준은 [AUTOMATION_BREAKOUT_CONTRACT.md](docs/kasset/AUTOMATION_BREAKOUT_CONTRACT.md) 실시간 단타 절과 `docs/API-CONTRACT.md` 「AI PAPER 운용 설정」이 정본이다. 근거: [30-realtime-thin-names-holdings](doc/history/2026/09/30-realtime-thin-names-holdings/main.md). **다음 행동**: 중·소형주 BUY가 방향 조건으로만 판정되는지, 5·6종목 초과 보유에서 POSITION이 통과하는지, `nh-stream demand exceeds registration budget` 경고가 나오는지 읽기 전용으로 본다. 세 가지가 확인되면 이 줄을 닫는다.
 - **보안 의존성 정리(2026-09-30, PR #103 운영 배포 `82e2de88`)**: 운영 이미지를 `--no-dev`로 분리하고 런타임 패키지를 패치했다. `passlib`를 제거하고 bcrypt 4.3 직접 호출로 전환했다. 기존 `$2b$` 해시·UTF-8·72바이트 의미는 유지하고 레거시 `$2$`는 거부한다. 서버 검증 도구 실행은 [server-pytest-runner](docs/runbooks/server-pytest-runner.md)처럼 별도 볼륨을 사용한다.
 - **초보 제외 PAPER 횟수 제한 해제(2026-09-29 사용자 승인, PR #102 운영 배포)**: 초보(서버 1·2단계)는 기존 제한을 유지하고 중수·고수(3·4·5단계)는 일일 매수·매도·전체 주문 및 동일종목 재진입 횟수로 차단하지 않는다. API는 `null=한도 없음`, 사용량 기록은 유지한다. 일손실은 참고값이며 예산·종목비중·kill switch·시세 검증·대기 추천 중복 방지·BUY 쿨다운은 그대로다(동시 보유는 위 2026-09-30 변경).

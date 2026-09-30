@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import cast
 
 from sqlalchemy import and_, or_, select, text
@@ -47,8 +47,10 @@ from app.extensions.kasset.automation.decision_evidence import (
 )
 from app.extensions.kasset.automation.policy import (
     AITradingPolicyService,
+    HardRiskResult,
     OperatingMode,
 )
+from app.extensions.kasset.automation.position_sizing import PositionSizingConfig
 from app.extensions.kasset.automation.realtime_tape import requires_realtime_entry
 from app.extensions.kasset.automation.strategy_promotion_service import (
     StrategyPromotionService,
@@ -621,14 +623,7 @@ class OwnerScopedPaperOrders:
         owner_user_id: str,
         request: OrderRequest,
     ) -> RiskAssessment:
-        base = await paper_orders.preview(db, int(owner_user_id), request)
-        hard_risk = await self._hard_risk(
-            db,
-            owner_user_id,
-            request,
-            reference_price=base.reference_price,
-            base_reasons=base.reasons,
-        )
+        request, base, hard_risk = await self._assess(db, owner_user_id, request)
         failed = [
             RiskReason(code=check.rule, message=check.detail)
             for check in hard_risk.checks
@@ -680,14 +675,7 @@ class OwnerScopedPaperOrders:
         owner_user_id: str,
         request: OrderRequest,
     ) -> tuple[object, bool]:
-        base = await paper_orders.preview(db, int(owner_user_id), request)
-        hard_risk = await self._hard_risk(
-            db,
-            owner_user_id,
-            request,
-            reference_price=base.reference_price,
-            base_reasons=base.reasons,
-        )
+        request, base, hard_risk = await self._assess(db, owner_user_id, request)
         if not hard_risk.passed:
             raise MobileApiError(
                 409,
@@ -700,6 +688,54 @@ class OwnerScopedPaperOrders:
             )
         await self._confirm_realtime_entry(db, owner_user_id, request)
         return await paper_orders.submit(db, int(owner_user_id), request)
+
+    async def _assess(
+        self,
+        db: AsyncSession,
+        owner_user_id: str,
+        request: OrderRequest,
+    ) -> tuple[OrderRequest, RiskAssessment, HardRiskResult]:
+        """Hard Risk를 적용하고, BUY가 BUDGET만 넘으면 한도 안 수량으로 줄인다.
+
+        추천 수량은 추천 시점 가격으로 종목 비중을 거의 채운다. 제출 시점 시세가
+        조금 오르면 BUDGET만 넘으므로 그 순간 가격으로 들어가는 최대 lot으로
+        줄여 다시 판정한다. 다른 관문이 실패하거나 1 lot도 안 들어가면 원래
+        수량의 판정을 그대로 돌려준다. 수량을 늘리지는 않는다.
+        """
+
+        base = await paper_orders.preview(db, int(owner_user_id), request)
+        hard_risk = await self._hard_risk(
+            db,
+            owner_user_id,
+            request,
+            reference_price=base.reference_price,
+            base_reasons=base.reasons,
+        )
+        fitted = _budget_fitted_quantity(request, base, hard_risk)
+        if fitted is None:
+            return request, base, hard_risk
+        fitted_request = request.model_copy(update={"quantity": fitted})
+        fitted_base = await paper_orders.preview(db, int(owner_user_id), fitted_request)
+        fitted_risk = await self._hard_risk(
+            db,
+            owner_user_id,
+            fitted_request,
+            reference_price=fitted_base.reference_price,
+            base_reasons=fitted_base.reasons,
+        )
+        if not fitted_risk.passed:
+            return request, base, hard_risk
+        logger.info(
+            "kasset BUY quantity fitted to budget: owner_user_id=%s "
+            "client_order_id=%s symbol=%s requested=%s fitted=%s price=%s",
+            owner_user_id,
+            request.client_order_id,
+            request.symbol,
+            request.quantity,
+            fitted,
+            fitted_base.reference_price,
+        )
+        return fitted_request, fitted_base, fitted_risk
 
     async def _confirm_realtime_entry(
         self,
@@ -849,6 +885,37 @@ class OwnerScopedPaperOrders:
             account_state=account_state,
             snapshot=risk_snapshot,
         )
+
+
+def _budget_fitted_quantity(
+    request: OrderRequest,
+    base: RiskAssessment,
+    hard_risk: HardRiskResult,
+) -> Decimal | None:
+    """BUDGET 하나만 실패한 BUY의 한도 안 최대 수량. 줄일 수 없으면 ``None``."""
+
+    if hard_risk.passed or request.side != "BUY":
+        return None
+    if request.market not in {"KRX", "US"}:
+        return None
+    failed = {check.rule for check in hard_risk.checks if not check.passed}
+    if failed != {"BUDGET"} or hard_risk.max_buy_notional is None:
+        return None
+    try:
+        price = Decimal(str(base.reference_price))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not price.is_finite() or price <= 0:
+        return None
+    sizing = PositionSizingConfig()
+    lot = sizing.krx_lot_size if request.market == "KRX" else sizing.us_lot_size
+    units = (hard_risk.max_buy_notional / price / lot).to_integral_value(
+        rounding=ROUND_DOWN
+    )
+    fitted = units * lot
+    if fitted <= 0 or fitted >= request.quantity:
+        return None
+    return fitted
 
 
 async def _claimable_owner_ids(
