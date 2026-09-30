@@ -1014,7 +1014,6 @@ async def test_max_buy_notional_is_the_tighter_budget_remainder(
     assert result.max_buy_notional == expected
 
 
-
 @pytest.mark.asyncio
 async def test_executions_enrich_missing_names_in_one_master_query() -> None:
     moment = datetime(2026, 9, 3, tzinfo=UTC)
