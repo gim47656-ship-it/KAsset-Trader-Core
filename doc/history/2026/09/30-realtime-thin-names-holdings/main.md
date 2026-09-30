@@ -4,7 +4,7 @@ RECORD:
 DATE: 2026-09-30
 SCOPE: NH 실시간 관문, RealtimeTapeConfig, 동시 보유 상한, max_concurrent_holdings
 PATHS: app/extensions/kasset/automation/realtime_tape.py, app/extensions/kasset/automation/policy.py, app/schemas/ai_recommendations.py
-STATUS: partial
+STATUS: accepted
 
 ## 관측 (첫 정규장, 읽기 전용)
 
@@ -22,4 +22,10 @@ STATUS: partial
 ## 남은 경계
 
 - 보유 종목과 실시간 BUY 후보의 합이 NH 구독 한도 30종목을 넘으면, 넘친 종목은 구독되지 않는다.
-- 이 PR의 CI와 사용자 배포 승인이 남았다. 배포 뒤 첫 정규장에서 중·소형주 BUY가 `warmup_incomplete` 없이 방향 조건으로만 판정되는지, owner 4·7의 보유 수가 5·6을 넘을 때 POSITION이 통과하는지 읽기 전용으로 관찰한다.
+- 배포 뒤 관찰이 남았다. 중·소형주 BUY가 방향 조건으로만 판정되는지, owner 4·7의 보유 수가 5·6을 넘을 때 POSITION이 통과하는지 읽기 전용으로 본다.
+
+## 배포 (2026-09-30)
+
+- 사용자 지시("곧바로해줘")로 장중에 PR #104를 merge했다(`4a2851c4`). main의 `Test`(run 36651687669)와 `Deploy`(run 36652309370)가 09:53 KST에 성공했다.
+- 09:55에 6개 서비스가 새 이미지로 떠 있었다. 구독 7종목(010955·003555·090435 포함)의 `resets`는 모두 0이었다. 090435의 사유는 재시작 뒤 49초라 `warmup_incomplete`였고, 나머지는 방향 조건뿐이었다.
+- 같은 분에 흐름 악화 청산이 066575(LG전자우)를 owner 4는 54주, owner 7은 12주 전량 74,100원에 체결했다(60초 체결강도 3.25). 데이터 품질 완화가 청산 쪽에도 적용된 결과다.
