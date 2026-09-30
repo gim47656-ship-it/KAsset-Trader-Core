@@ -83,6 +83,8 @@ BUY 수량은 다음 상한의 최솟값이다.
 
 손절가 없음·역전, ATR 없음/비정상, stale/future 가격, 비정상 가격/수량, 예산 없음은 수량 0과 구조화 사유를 반환한다. AI 출력은 수량·손절가를 입력하거나 덮어쓸 수 없다. SELL은 실제 PAPER 보유수량까지만 허용한다.
 
+수량은 추천 시점 기준가로 정해지므로 2·3번 상한을 거의 채운 BUY는 제출 시점 시세가 조금만 올라도 Hard Risk `BUDGET`을 넘는다. 2026-09-30부터(사용자 승인) 집행 `OwnerScopedPaperOrders`는 BUY가 **`BUDGET` 하나만** 실패하면 `HardRiskResult.max_buy_notional`(운영예산 잔액과 종목 비중 잔액 중 작은 값)을 그 순간 기준가로 나눠 시장 lot 단위로 내림한 수량으로 줄이고, Hard Risk를 다시 통과할 때만 제출한다. 수량을 늘리지 않으며, 다른 관문이 함께 실패하거나 1 lot도 들어가지 않으면 원래 판정대로 `risk_preview_rejected`다. 추천의 `suggestedQuantity`는 바꾸지 않으므로 주문 수량이 그보다 작을 수 있다. 줄인 사실은 worker 로그 `kasset BUY quantity fitted to budget`에 남는다. 이전에는 이 경우 BUY 전체가 거절됐다(2026-09 BUY 체결 31건 대비 `BUDGET` 거절 18건).
+
 ### Position Manager와 position cycle
 
 owner/account/market/symbol별 활성 상태는 실제 `PaperPosition.id`와 immutable `position_cycle_id`에 결합한다. 신규 BUY 체결 시 체결가·추천 ATR/stop·entry order·strategy identity/fingerprint로 새 cycle을 만들고, 재시작 시 PAPER 보유량과 reconcile한다. 수량 0이 되면 상태를 삭제하지 않고 `closed_at`으로 닫아 감사 이력을 보존한다.

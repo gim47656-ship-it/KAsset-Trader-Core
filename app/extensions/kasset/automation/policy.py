@@ -433,6 +433,9 @@ class HardRiskResult:
     blocked_reason: str | None
     account_state: Mapping[str, object] | None = None
     loss_streak: Mapping[str, object] | None = None
+    #: BUY만. BUDGET 관문(운영 예산 잔액·종목 비중 잔액)이 허용하는 최대 주문
+    #: 금액이다. 집행은 제출 시점 시세로 BUDGET만 넘으면 이 안으로 수량을 줄인다.
+    max_buy_notional: Decimal | None = None
 
     def as_evidence(self) -> dict[str, object]:
         evidence: dict[str, object] = {
@@ -847,6 +850,17 @@ class AITradingPolicyService:
             and current_invested + order_notional
             <= operating_budget * limits.max_symbol_allocation
         )
+        max_buy_notional = (
+            max(
+                Decimal("0"),
+                min(
+                    operating_budget - usage.budget_used,
+                    operating_budget * limits.max_symbol_allocation - current_invested,
+                ),
+            )
+            if is_buy and currency is not None
+            else None
+        )
         position_passed = (
             valid_shape
             and not base_risk_details
@@ -995,6 +1009,7 @@ class AITradingPolicyService:
             ),
             account_state=account_state_gate.evidence,
             loss_streak=loss_streak.evidence,
+            max_buy_notional=max_buy_notional,
         )
 
     async def _setting_row(

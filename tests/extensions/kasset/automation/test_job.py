@@ -17,13 +17,14 @@ from app.auth.security import get_password_hash
 from app.core.config import settings
 from app.extensions.kasset.api import krx_quotes
 from app.extensions.kasset.api.errors import MobileApiError
-from app.extensions.kasset.api.paper_schemas import Quote
+from app.extensions.kasset.api.paper_schemas import OrderRequest, Quote, RiskAssessment
 from app.extensions.kasset.api.runtime_state import runtime_state
 from app.extensions.kasset.api.toss_market_data import TOSS_QUOTE_SOURCE
 from app.extensions.kasset.automation import job
 from app.extensions.kasset.automation.contracts import PROMOTION_BYPASSED_BY_OWNER
 from app.extensions.kasset.automation.job import (
     REALTIME_ENTRY_NOT_CONFIRMED,
+    OwnerScopedPaperOrders,
     OwnerScopedRecommendationService,
     RuntimeStateSafetyGate,
     run_approved_recommendation_once,
@@ -32,6 +33,8 @@ from app.extensions.kasset.automation.job import (
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
+    HardRiskCheck,
+    HardRiskResult,
     OperatingMode,
 )
 from app.extensions.kasset.automation.realtime_tape import (
@@ -1779,3 +1782,134 @@ async def test_markerless_pending_buy_is_observed_before_authorization(
         )
     finally:
         await _cleanup_owner(db_session, username)
+
+
+class _ScriptedBudgetRisk:
+    """종목 한도 600만원에서 수량·제출 시점 가격별 Hard Risk를 재현한다."""
+
+    def __init__(self, *, extra_failure: str | None = None) -> None:
+        self.extra_failure = extra_failure
+        self.quantities: list[Decimal] = []
+
+    async def __call__(
+        self,
+        _db: object,
+        _owner_user_id: str,
+        request: object,
+        *,
+        reference_price: str | None,
+        base_reasons: object,
+    ) -> HardRiskResult:
+        quantity = request.quantity  # type: ignore[attr-defined]
+        self.quantities.append(quantity)
+        cap = Decimal("6000000")
+        checks = [
+            HardRiskCheck(
+                "BUDGET", quantity * Decimal(str(reference_price)) <= cap, "budget"
+            )
+        ]
+        if self.extra_failure is not None:
+            checks.append(HardRiskCheck(self.extra_failure, False, "scripted"))
+        passed = all(check.passed for check in checks)
+        return HardRiskResult(
+            passed=passed,
+            checks=tuple(checks),
+            blocked_reason=None if passed else "blocked",
+            max_buy_notional=cap,
+        )
+
+
+def _budget_fit_orders(
+    monkeypatch: pytest.MonkeyPatch,
+    risk: _ScriptedBudgetRisk,
+) -> tuple[OwnerScopedPaperOrders, list[Decimal]]:
+    submitted: list[Decimal] = []
+
+    async def preview(_db: object, _owner: int, _request: object) -> RiskAssessment:
+        return RiskAssessment(decision="APPROVED", reasons=[], reference_price="26250")
+
+    async def submit(_db: object, _owner: int, request: object) -> tuple[object, bool]:
+        submitted.append(request.quantity)  # type: ignore[attr-defined]
+        return object(), False
+
+    async def confirmed(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(job.paper_orders, "preview", preview)
+    monkeypatch.setattr(job.paper_orders, "submit", submit)
+    orders = OwnerScopedPaperOrders(now=_NOW_IN_SESSION)
+    monkeypatch.setattr(orders, "_hard_risk", risk)
+    monkeypatch.setattr(orders, "_confirm_realtime_entry", confirmed)
+    return orders, submitted
+
+
+def _buy_request(quantity: str) -> OrderRequest:
+    return OrderRequest(
+        clientOrderId="ai-rec:rec-budget-fit",
+        broker="PAPER",
+        accountId=None,
+        market="KRX",
+        symbol="005940",
+        side="BUY",
+        orderType="MARKET",
+        quantity=Decimal(quantity),
+    )
+
+
+@pytest.mark.asyncio
+async def test_buy_over_symbol_cap_at_submit_price_is_reduced_to_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 2026-09-30: 26,150원 기준 229주(5,988,350원)로 종목 한도 600만원을 채운
+    # 추천이 제출 시 시세 상승으로 BUDGET에 걸려 통째 거절됐다. 26,250원이면
+    # 229주는 6,011,250원이라 넘고, 한도 안 최대인 228주로 줄여 제출한다.
+    risk = _ScriptedBudgetRisk()
+    orders, submitted = _budget_fit_orders(monkeypatch, risk)
+
+    assessment = await orders.preview(None, "4", _buy_request("229"))  # type: ignore[arg-type]
+    assert assessment.decision == "APPROVED"
+
+    await orders.submit(None, "4", _buy_request("229"))  # type: ignore[arg-type]
+    assert submitted == [Decimal("228")]
+    assert submitted[0] * Decimal("26250") <= Decimal("6000000")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_failure", ["POSITION", "ACCOUNT_STATE"])
+async def test_budget_fit_does_not_bypass_other_failed_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_failure: str,
+) -> None:
+    risk = _ScriptedBudgetRisk(extra_failure=extra_failure)
+    orders, submitted = _budget_fit_orders(monkeypatch, risk)
+
+    assessment = await orders.preview(None, "4", _buy_request("229"))  # type: ignore[arg-type]
+    assert assessment.decision == "REJECTED"
+    assert {reason.code for reason in assessment.reasons} == {"BUDGET", extra_failure}
+    with pytest.raises(MobileApiError) as rejected:
+        await orders.submit(None, "4", _buy_request("229"))  # type: ignore[arg-type]
+    assert rejected.value.code == "HARD_RISK_REJECTED"
+    assert submitted == []
+    assert set(risk.quantities) == {Decimal("229")}
+
+
+@pytest.mark.asyncio
+async def test_buy_that_fits_is_not_resized_and_no_lot_fits_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    risk = _ScriptedBudgetRisk()
+    orders, submitted = _budget_fit_orders(monkeypatch, risk)
+    await orders.submit(None, "4", _buy_request("100"))  # type: ignore[arg-type]
+    assert submitted == [Decimal("100")]
+
+    no_room = _ScriptedBudgetRisk()
+
+    async def zero_room(*args: object, **kwargs: object) -> HardRiskResult:
+        result = await no_room(*args, **kwargs)  # type: ignore[arg-type]
+        return replace(result, max_buy_notional=Decimal("20000"))
+
+    orders, submitted = _budget_fit_orders(monkeypatch, no_room)
+    monkeypatch.setattr(orders, "_hard_risk", zero_room)
+    with pytest.raises(MobileApiError):
+        await orders.submit(None, "4", _buy_request("229"))  # type: ignore[arg-type]
+    assert submitted == []

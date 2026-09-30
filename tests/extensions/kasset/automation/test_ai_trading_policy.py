@@ -967,6 +967,54 @@ async def test_new_symbol_buy_holdings_cap_only_limits_beginner_levels(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "budget_used", "expected"),
+    [
+        # 운영 예산 잔액 500만 < 종목 비중 잔액 600만(2천만 × 30%).
+        ("BUY", Decimal("15000000"), Decimal("5000000")),
+        ("BUY", Decimal("0"), Decimal("6000000")),
+        # 예산을 이미 넘겨 쓴 계좌도 음수가 아니라 0이다.
+        ("BUY", Decimal("21000000"), Decimal("0")),
+        ("SELL", Decimal("0"), None),
+    ],
+)
+async def test_max_buy_notional_is_the_tighter_budget_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    budget_used: Decimal,
+    expected: Decimal | None,
+) -> None:
+    limits = AITradingLimits(
+        risk_level=5, operating_budget_krw=Decimal("20000000"), currency="KRW"
+    )
+    usage = AITradingUsage(budget_used=budget_used)
+    snapshot = AITradingSnapshot(
+        mode=OperatingMode.AUTO_PAPER,
+        limits=limits,
+        usage=usage,
+        usage_by_currency={"KRW": usage, "USD": AITradingUsage()},
+        kill_switch=False,
+        updated_at=_NOW,
+    )
+    service = AITradingPolicyService()
+    monkeypatch.setattr(service, "get_snapshot", AsyncMock(return_value=snapshot))
+
+    result = await service.evaluate_hard_risk(
+        _EmptyRiskDb(),  # type: ignore[arg-type]
+        101,
+        action=action,
+        market="KRX",
+        symbol="005940",
+        quantity=Decimal("1"),
+        reference_price=Decimal("26200"),
+        ai_confidence=Decimal("0.90"),
+        now=_NOW,
+    )
+
+    assert result.max_buy_notional == expected
+
+
+@pytest.mark.asyncio
 async def test_executions_enrich_missing_names_in_one_master_query() -> None:
     moment = datetime(2026, 9, 3, tzinfo=UTC)
 
