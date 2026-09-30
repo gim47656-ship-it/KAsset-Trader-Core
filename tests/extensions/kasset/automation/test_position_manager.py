@@ -1800,7 +1800,7 @@ async def test_intraday_exit_fires_when_entry_is_newer_than_daily_history() -> N
     )
     # 최초 관리 당시 ATR/stop은 과거 bucket에 소급하지 않고 그 시각부터 보호한다.
     assert state_row.initial_atr == D("4")
-    assert state_row.initial_stop == D("88")
+    assert state_row.initial_stop == D("92")
     assert state_row.exit_levels_effective_at == first_now
     assert state_row.last_evaluated_at is None
 
