@@ -1,0 +1,1700 @@
+diff --git a/app/jobs/financial_fundamentals_snapshots.py b/app/jobs/financial_fundamentals_snapshots.py
+index e339030e6..c2c73e538 100644
+--- a/app/jobs/financial_fundamentals_snapshots.py
++++ b/app/jobs/financial_fundamentals_snapshots.py
+@@ -11,12 +11,16 @@ from decimal import Decimal
+ import sqlalchemy as sa
+ 
+ from app.core.db import AsyncSessionLocal
++from app.core.timezone import KST
+ from app.mcp_server.tooling.screening.instrument_type import classify_kr_instrument
+ from app.models.financial_fundamentals_snapshot import FinancialFundamentalsSnapshot
+ from app.services.financial_fundamentals_snapshots.builder import (
++    DartFetchPlan,
+     FundamentalsFetcher,
+     build_financial_fundamentals_for_symbols,
++    dart_fetch_plan,
+     default_dart_fetcher,
++    latest_completed_period,
+ )
+ from app.services.financial_fundamentals_snapshots.repository import (
+     FinancialFundamentalsSnapshotsRepository,
+@@ -39,10 +43,16 @@ class FinancialFundamentalsSnapshotBuildRequest:
+     allow_partial: bool = False
+     # ROB-441/433: DART budget-split. Skip symbols that already have a snapshot so
+     # daily re-runs advance through uncollected DART-eligible common stocks (the
+-    # full KR active common-stock universe × 11 req exceeds the 18k daily budget →
+-    # must be split across days). With --limit N this selects the NEXT N uncollected
++    # full KR active common-stock universe exceeds the 18k daily budget → must be
++    # split across days). With --limit N this selects the NEXT N uncollected
+     # symbols after excluding preferred/ETF/REIT/SPAC/non-6-digit universe rows.
++    # One-shot backfill mode: a collected symbol is never revisited here.
+     skip_existing: bool = False
++    # Continuous refresh mode (exclusive with skip_existing): pick the symbols
++    # whose stored rows are missing the newest ended period, carry partial rows,
++    # were never collected, or are due for a correction sweep — see
++    # select_refresh_due — and fit them into the daily DART budget.
++    refresh_due: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -68,7 +78,17 @@ class FinancialFundamentalsSnapshotBuildResult:
+     idempotency: dict[str, int] = field(default_factory=dict)
+     samples: tuple[FinancialFundamentalsSnapshotSample, ...] = ()
+     warnings: tuple[str, ...] = ()
++    # Upper bound of DART calls for the selected symbols (DartFetchPlan.max_requests).
+     projected_requests: int | None = None
++    # Due symbols left for a later run because --limit or the daily budget was full.
++    deferred_symbols: int = 0
++    # Selected symbols per refresh reason (refresh_due mode only).
++    selection: dict[str, int] = field(default_factory=dict)
++    # The metered budget ran out mid-fetch; nothing was committed. Not a success.
++    budget_exhausted: bool = False
++    # Symbols were fetched but every fetch failed or came back empty: no row was
++    # built, so nothing was collected. Not a success (no-due runs never fetch).
++    no_rows_collected: bool = False
+ 
+ 
+ _KR_DART_SYMBOL_RE = re.compile(r"^\d{6}$")
+@@ -81,7 +101,12 @@ def _validate_market(market: str) -> str:
+     return market_norm
+ 
+ 
+-def _is_kr_dart_common_symbol(symbol: object, name: object) -> bool:
++def _is_kr_dart_common_symbol(
++    symbol: object,
++    name: object,
++    security_type: object = None,
++    is_common_share: object = None,
++) -> bool:
+     """Return whether a KR universe row is suitable for OpenDART common-stock fetches.
+ 
+     The DART backfill uses stock-code lookups. The active KR universe can contain
+@@ -90,51 +115,66 @@ def _is_kr_dart_common_symbol(symbol: object, name: object) -> bool:
+     rows should not consume OpenDART budget in the default backfill candidate path.
+     Explicit ``--symbol`` overrides remain operator-controlled and are not filtered
+     here.
++
++    ``security_type``/``is_common_share`` come from the Toss master columns of
++    ``kr_symbol_universe`` and are authoritative when present (an ETF whose name
++    carries no ETF token used to slip through, and a confirmed common share
++    whose code ends in 5/7/9 used to be dropped as preferred). Rows the master
++    has not classified yet fall back to the name rules. REIT/SPAC names stay
++    excluded either way.
+     """
+     symbol_text = str(symbol or "").strip().upper()
+     if not _KR_DART_SYMBOL_RE.fullmatch(symbol_text):
+         return False
+-    return classify_kr_instrument(symbol_text, name, None) == "common"
++    if security_type is not None and str(security_type).strip().upper() != "STOCK":
++        return False
++    if is_common_share is False:
++        return False
++    kind = classify_kr_instrument(symbol_text, name, security_type)
++    if kind == "preferred" and is_common_share is True:
++        return True
++    return kind == "common"
+ 
+ 
+-def _filter_kr_dart_common_symbols(rows: list[tuple[str, str]]) -> list[str]:
++def _filter_kr_dart_common_symbols(
++    rows: list[tuple[str, str, str | None, bool | None]],
++) -> list[str]:
+     return [
+         str(symbol).strip().upper()
+-        for symbol, name in rows
+-        if _is_kr_dart_common_symbol(symbol, name)
++        for symbol, name, security_type, is_common_share in rows
++        if _is_kr_dart_common_symbol(symbol, name, security_type, is_common_share)
+     ]
+ 
+ 
+-async def resolve_symbols(market: str, override: list[str], limit: int) -> list[str]:
+-    _validate_market(market)
+-    if override:
+-        return [s.strip().upper() for s in override if s.strip()]
+-    async with AsyncSessionLocal() as session:
+-        from app.models.kr_symbol_universe import KRSymbolUniverse
++async def _kr_dart_common_universe() -> list[str]:
++    from app.models.kr_symbol_universe import KRSymbolUniverse
+ 
++    async with AsyncSessionLocal() as session:
+         stmt = (
+-            sa.select(KRSymbolUniverse.symbol, KRSymbolUniverse.name)
++            sa.select(
++                KRSymbolUniverse.symbol,
++                KRSymbolUniverse.name,
++                KRSymbolUniverse.security_type,
++                KRSymbolUniverse.is_common_share,
++            )
+             .where(KRSymbolUniverse.is_active.is_(True))
+             .order_by(KRSymbolUniverse.symbol)
+         )
+         result = await session.execute(stmt)
+-        rows = [(r[0], r[1]) for r in result.all()]
+-        return _filter_kr_dart_common_symbols(rows)[:limit]
++        rows = [(r[0], r[1], r[2], r[3]) for r in result.all()]
++        return _filter_kr_dart_common_symbols(rows)
+ 
+ 
+-async def resolve_active_universe(market: str) -> list[str]:
++async def resolve_symbols(market: str, override: list[str], limit: int) -> list[str]:
+     _validate_market(market)
+-    async with AsyncSessionLocal() as session:
+-        from app.models.kr_symbol_universe import KRSymbolUniverse
++    if override:
++        return [s.strip().upper() for s in override if s.strip()]
++    return (await _kr_dart_common_universe())[:limit]
+ 
+-        stmt = (
+-            sa.select(KRSymbolUniverse.symbol, KRSymbolUniverse.name)
+-            .where(KRSymbolUniverse.is_active.is_(True))
+-            .order_by(KRSymbolUniverse.symbol)
+-        )
+-        result = await session.execute(stmt)
+-        rows = [(r[0], r[1]) for r in result.all()]
+-        return _filter_kr_dart_common_symbols(rows)
++
++async def resolve_active_universe(market: str) -> list[str]:
++    _validate_market(market)
++    return await _kr_dart_common_universe()
+ 
+ 
+ async def _already_collected_symbols(market: str) -> set[str]:
+@@ -149,6 +189,193 @@ async def _already_collected_symbols(market: str) -> set[str]:
+         return {r[0] for r in result.all()}
+ 
+ 
++@dataclass(frozen=True)
++class SymbolCollectionEvidence:
++    """What the stored DART rows already prove about one symbol."""
++
++    # Newest source_collected_at: rows are only written by a fetch that
++    # succeeded, so a failed fetch never advances this.
++    last_collected_at: dt.datetime
++    has_latest_period: bool
++    earliest_partial_period_end: dt.date | None
++
++
++async def _collection_evidence(
++    market: str, latest_period: str, *, partial_since: dt.date
++) -> dict[str, SymbolCollectionEvidence]:
++    """One aggregate per symbol. Partial rows before ``partial_since`` (outside
++    the 5-year fetch window) are ignored: no plan can ever re-fetch them."""
++    f = FinancialFundamentalsSnapshot
++    partial_in_window = sa.and_(
++        f.data_state == "partial", f.period_end_date >= partial_since
++    )
++    async with AsyncSessionLocal() as session:
++        result = await session.execute(
++            sa.select(
++                f.symbol,
++                sa.func.max(f.source_collected_at),
++                sa.func.bool_or(f.fiscal_period == latest_period),
++                sa.func.min(sa.case((partial_in_window, f.period_end_date))),
++            )
++            .where(f.market == market, f.source == "dart")
++            .group_by(f.symbol)
++        )
++        return {
++            symbol: SymbolCollectionEvidence(
++                last_collected_at=last,
++                has_latest_period=bool(has_latest),
++                earliest_partial_period_end=partial_end,
++            )
++            for symbol, last, has_latest, partial_end in result.all()
++        }
++
++
++@dataclass(frozen=True)
++class FundamentalsCollectionTarget:
++    symbol: str
++    reason: str
++    plan: DartFetchPlan
++
++
++# Conservative defaults against the shared 20k/day OpenDART key: an ended period
++# that is still unfiled is rechecked weekly, and every collected symbol is
++# re-fetched at least monthly so 정정 filings replace the stored figures.
++REFRESH_RECHECK_INTERVAL = dt.timedelta(days=7)
++REFRESH_CORRECTION_INTERVAL = dt.timedelta(days=30)
++_FULL_ANNUAL_YEARS = 5
++_RECENT_ANNUAL_YEARS = 1
++
++
++class _BudgetAllocator:
++    """Greedy fit of targets under a symbol cap and the metered request budget.
++
++    Uses each plan's worst-case call count, so a run that stays inside the
++    allocation cannot trip the fail-stop in increment_and_check_budget.
++    """
++
++    def __init__(self, *, limit: int | None, budget: int) -> None:
++        self.limit = limit
++        self.budget = budget
++        self.selected: list[FundamentalsCollectionTarget] = []
++        self.spent = 0
++        self.deferred = 0
++
++    def room_for(self, cost: int) -> int:
++        slots = [] if self.limit is None else [self.limit - len(self.selected)]
++        if self.budget > 0:
++            slots.append((self.budget - self.spent) // max(1, cost))
++        return max(0, min(slots)) if slots else -1
++
++    def offer(self, target: FundamentalsCollectionTarget) -> None:
++        cost = target.plan.max_requests
++        if self.limit is not None and len(self.selected) >= self.limit:
++            self.deferred += 1
++        elif self.budget > 0 and self.spent + cost > self.budget:
++            self.deferred += 1
++        else:
++            self.selected.append(target)
++            self.spent += cost
++
++
++def select_refresh_due(
++    pool: list[str],
++    evidence: dict[str, SymbolCollectionEvidence],
++    *,
++    now: dt.datetime,
++    include_quarterly: bool,
++    limit: int | None,
++    budget: int,
++) -> _BudgetAllocator:
++    """Order due symbols by reason and fit them into ``limit`` and ``budget``.
++
++    1. missing_latest — the newest ended period is not stored and either nobody
++       looked since it ended or the last look is a week old (unfiled yet).
++    2. partial — a row in the fetch window has no resolvable filing date;
++       retried weekly.
++    3. uncollected — no row at all; full 5-year backfill.
++    4. stale — the correction sweep, oldest collection first.
++
++    Failed fetches write no rows, so a failing symbol stays due and keeps its
++    place. To keep such failures from starving everything behind them, a
++    fairness slice of the sorted pool is served first: it holds as many
++    symbols as always fit (worst-case plan) and advances by its own size each
++    day, so every due symbol is selected within ceil(len(pool) / slice) days.
++    The rest of the budget then goes to the priority order above.
++    """
++    today = now.astimezone(KST).date()
++    latest_period, latest_end = latest_completed_period(
++        today, include_quarterly=include_quarterly
++    )
++    latest_ended_at = dt.datetime.combine(
++        latest_end + dt.timedelta(days=1), dt.time.min, tzinfo=KST
++    )
++    full = dart_fetch_plan(
++        today=today,
++        include_quarterly=include_quarterly,
++        annual_years=_FULL_ANNUAL_YEARS,
++    )
++    recent = dart_fetch_plan(
++        today=today,
++        include_quarterly=include_quarterly,
++        annual_years=_RECENT_ANNUAL_YEARS,
++    )
++    recent_first_year = min(y.year for y in recent.years)
++    recheck_before = now - REFRESH_RECHECK_INTERVAL
++    correction_before = now - REFRESH_CORRECTION_INTERVAL
++
++    missing: list[tuple[dt.datetime, str, DartFetchPlan]] = []
++    partial: list[tuple[dt.datetime, str, DartFetchPlan]] = []
++    stale: list[tuple[dt.datetime, str, DartFetchPlan]] = []
++    uncollected: list[tuple[dt.datetime, str, DartFetchPlan]] = []
++    for symbol in pool:
++        ev = evidence.get(symbol)
++        if ev is None:
++            uncollected.append((now, symbol, full))
++            continue
++        # Partial rows older than the recent window need the full window again.
++        plan = (
++            full
++            if ev.earliest_partial_period_end is not None
++            and ev.earliest_partial_period_end.year < recent_first_year
++            else recent
++        )
++        entry = (ev.last_collected_at, symbol, plan)
++        rechecked = ev.last_collected_at <= recheck_before
++        if not ev.has_latest_period and (
++            ev.last_collected_at < latest_ended_at or rechecked
++        ):
++            missing.append(entry)
++        elif ev.earliest_partial_period_end is not None and rechecked:
++            partial.append(entry)
++        elif ev.last_collected_at <= correction_before:
++            stale.append(entry)
++
++    ordered = [
++        FundamentalsCollectionTarget(symbol, reason, plan)
++        for reason, entries in (
++            ("missing_latest", missing),
++            ("partial", partial),
++            ("uncollected", uncollected),
++            ("stale", stale),
++        )
++        for _, symbol, plan in sorted(entries, key=lambda e: (e[0], e[1]))
++    ]
++    alloc = _BudgetAllocator(limit=limit, budget=budget)
++    slice_size = alloc.room_for(full.max_requests)
++    head: set[str] = set()
++    if 0 < slice_size < len(ordered):
++        ring = sorted(set(pool))
++        start = (today.toordinal() * slice_size) % len(ring)
++        head = {ring[(start + i) % len(ring)] for i in range(slice_size)}
++    for target in ordered:
++        if target.symbol in head:
++            alloc.offer(target)
++    for target in ordered:
++        if target.symbol not in head:
++            alloc.offer(target)
++    return alloc
++
++
+ def _payload_key(p: FinancialFundamentalsUpsert) -> tuple[str, str, str, str]:
+     return (
+         p.market.strip().lower(),
+@@ -236,32 +463,79 @@ async def run_financial_fundamentals_snapshot_build(
+         reset_request_count,
+     )
+ 
++    if request.refresh_due and request.skip_existing:
++        raise ValueError("refresh_due and skip_existing are mutually exclusive")
+     market = _validate_market(request.market)
+     started_at = dt.datetime.now(dt.UTC)
+     collected_at = request.collected_at or started_at
+     use_fetcher = fetcher or default_dart_fetcher
+-    skipped_existing = 0
+-    if request.skip_existing:
+-        # Budget-split: resolve the DART-eligible common-stock candidate pool,
+-        # drop already-collected symbols, then (for --limit) slice the NEXT N
+-        # uncollected symbols so each daily run stays under budget.
+-        if request.symbols:
+-            pool = [s.strip().upper() for s in request.symbols if s.strip()]
+-        else:
+-            pool = await resolve_active_universe(market)
+-        done = await _already_collected_symbols(market)
+-        remaining = [s for s in pool if s not in done]
+-        skipped_existing = len(pool) - len(remaining)
+-        symbols = (
+-            remaining
+-            if (request.all_symbols or request.symbols)
+-            else remaining[: (request.limit or 20)]
++    budget = settings.opendart_daily_request_budget
++    full_plan = dart_fetch_plan(
++        today=collected_at.astimezone(KST).date(),
++        include_quarterly=request.include_quarterly,
++        annual_years=_FULL_ANNUAL_YEARS,
++    )
++    requested = [s.strip().upper() for s in request.symbols if s.strip()]
++    selection_notes: list[str] = []
++    selection: dict[str, int] = {}
++    if request.refresh_due:
++        pool = requested or await resolve_active_universe(market)
++        latest_period, _ = latest_completed_period(
++            collected_at.astimezone(KST).date(),
++            include_quarterly=request.include_quarterly,
++        )
++        alloc = select_refresh_due(
++            pool,
++            await _collection_evidence(
++                market, latest_period, partial_since=full_plan.listing_start
++            ),
++            now=collected_at,
++            include_quarterly=request.include_quarterly,
++            limit=None if (request.all_symbols or requested) else request.limit or 20,
++            budget=budget,
++        )
++        selection = dict(Counter(t.reason for t in alloc.selected))
++        reasons = ", ".join(f"{k}={v}" for k, v in sorted(selection.items()))
++        not_due = len(pool) - len(alloc.selected) - alloc.deferred
++        selection_notes.append(
++            f"refresh_due: latest ended period {latest_period}; "
++            f"selected {reasons or 'none'}; {not_due} not due"
+         )
+     else:
+-        symbols = await (
+-            resolve_active_universe(market)
+-            if request.all_symbols
+-            else resolve_symbols(market, list(request.symbols), request.limit or 20)
++        explicit = bool(requested)
++        if request.skip_existing:
++            # Budget-split: resolve the DART-eligible common-stock candidate pool,
++            # drop already-collected symbols, then (for --limit) take the NEXT N
++            # uncollected symbols that fit the daily budget.
++            pool = requested or await resolve_active_universe(market)
++            done = await _already_collected_symbols(market)
++            remaining = [s for s in pool if s not in done]
++            skipped_existing = len(pool) - len(remaining)
++            if skipped_existing:
++                selection_notes.append(
++                    f"skip_existing: {skipped_existing} already-collected symbols "
++                    f"skipped; {len(remaining)} uncollected remain"
++                )
++            limit = None if (request.all_symbols or explicit) else request.limit or 20
++        else:
++            remaining = await (
++                resolve_active_universe(market)
++                if request.all_symbols
++                else resolve_symbols(market, requested, request.limit or 20)
++            )
++            limit = None
++        # Explicit --symbol lists stay operator-controlled: projected, not trimmed.
++        alloc = _BudgetAllocator(limit=limit, budget=0 if explicit else budget)
++        for symbol in remaining:
++            alloc.offer(FundamentalsCollectionTarget(symbol, "backfill", full_plan))
++    targets = alloc.selected
++    symbols = [t.symbol for t in targets]
++    plans = {t.symbol: t.plan for t in targets}
++    projected = alloc.spent
++    if alloc.deferred:
++        selection_notes.append(
++            f"deferred: {alloc.deferred} due symbols left for a later run "
++            f"(limit/daily budget {budget})"
+         )
+     if not symbols:
+         finished_at = dt.datetime.now(dt.UTC)
+@@ -269,20 +543,22 @@ async def run_financial_fundamentals_snapshot_build(
+             market=market,
+             symbols_resolved=0,
+             snapshots_built=0,
+-            committed=request.commit,
++            committed=False,
+             started_at=started_at,
+             finished_at=finished_at,
+             idempotency={"wouldInsert": 0, "wouldUpdate": 0, "duplicatePayloadKeys": 0},
+-            warnings=("no symbols resolved",),
++            warnings=(*selection_notes, "no symbols resolved"),
++            projected_requests=0,
++            deferred_symbols=alloc.deferred,
++            selection=selection,
+         )
+ 
+-    projected = len(symbols) * (41 if request.include_quarterly else 11)
+     logger.info(
+         "Projected DART requests for %d symbols (include_quarterly=%s): %d (budget: %d)",
+         len(symbols),
+         request.include_quarterly,
+         projected,
+-        settings.opendart_daily_request_budget,
++        budget,
+     )
+ 
+     if request.estimate_only:
+@@ -296,18 +572,13 @@ async def run_financial_fundamentals_snapshot_build(
+             finished_at=finished_at,
+             idempotency={"wouldInsert": 0, "wouldUpdate": 0, "duplicatePayloadKeys": 0},
+             warnings=(
+-                (
+-                    f"skip_existing: {skipped_existing} already-collected skipped; "
+-                    f"{len(symbols)} uncollected remain",
+-                )
+-                if skipped_existing
+-                else ()
+-            )
+-            + (
++                *selection_notes,
+                 f"estimate-only: projected {projected} DART requests; "
+                 "no fetch performed",
+             ),
+             projected_requests=projected,
++            deferred_symbols=alloc.deferred,
++            selection=selection,
+         )
+ 
+     if request.commit and not request.allow_partial:
+@@ -322,6 +593,7 @@ async def run_financial_fundamentals_snapshot_build(
+ 
+     reset_request_count()
+     should_commit = request.commit
++    budget_exhausted = False
+     try:
+         build = await build_financial_fundamentals_for_symbols(
+             market=market,
+@@ -330,6 +602,7 @@ async def run_financial_fundamentals_snapshot_build(
+             fetcher=use_fetcher,
+             include_quarterly=request.include_quarterly,
+             concurrency=request.concurrency,
++            plans=plans,
+         )
+         payloads = list(build.payloads)
+         warnings = build.warnings
+@@ -338,6 +611,7 @@ async def run_financial_fundamentals_snapshot_build(
+         payloads = list(exc.payloads)
+         warnings = exc.warnings
+         should_commit = False
++        budget_exhausted = True
+ 
+     idempotency = (
+         await _classify_idempotency(payloads)
+@@ -347,21 +621,19 @@ async def run_financial_fundamentals_snapshot_build(
+     if should_commit and payloads:
+         await _commit_payloads(payloads)
+     finished_at = dt.datetime.now(dt.UTC)
+-    final_warnings = list(warnings)
+-    if skipped_existing:
+-        final_warnings.insert(
+-            0,
+-            f"skip_existing: {skipped_existing} already-collected symbols skipped; "
+-            f"{len(symbols)} uncollected processed (budget-split)",
+-        )
+     return FinancialFundamentalsSnapshotBuildResult(
+         market=market,
+         symbols_resolved=len(symbols),
+         snapshots_built=len(payloads),
+-        committed=should_commit,
++        committed=should_commit and bool(payloads),
+         started_at=started_at,
+         finished_at=finished_at,
+         idempotency=idempotency,
+         samples=tuple(_sample(p) for p in payloads[:10]),
+-        warnings=tuple(final_warnings),
++        warnings=(*selection_notes, *warnings),
++        projected_requests=projected,
++        deferred_symbols=alloc.deferred,
++        selection=selection,
++        budget_exhausted=budget_exhausted,
++        no_rows_collected=not payloads and not budget_exhausted,
+     )
+diff --git a/app/services/financial_fundamentals_snapshots/builder.py b/app/services/financial_fundamentals_snapshots/builder.py
+index 4f79ff05f..f969c57c8 100644
+--- a/app/services/financial_fundamentals_snapshots/builder.py
++++ b/app/services/financial_fundamentals_snapshots/builder.py
+@@ -4,7 +4,7 @@ import asyncio
+ import datetime as dt
+ import logging
+ import threading
+-from collections.abc import Awaitable, Callable, Iterable
++from collections.abc import Awaitable, Callable, Iterable, Mapping
+ from dataclasses import dataclass
+ from decimal import Decimal, InvalidOperation
+ from typing import Any
+@@ -217,6 +217,92 @@ FundamentalsFetcher = Callable[..., Awaitable[RawFundamentalsBundle]]
+ _REPRT_CODE_BY_QUARTER = {1: "11013", 2: "11012", 3: "11014", 4: "11011"}
+ 
+ 
++@dataclass(frozen=True)
++class DartFiscalYearRequest:
++    """One fiscal year's DART statements to request.
++
++    ``quarters`` lists the interim reports (1..3). Q4 is never requested on its
++    own: it is differenced from the annual report against Q3.
++    """
++
++    year: int
++    annual: bool
++    quarters: tuple[int, ...] = ()
++
++
++@dataclass(frozen=True)
++class DartFetchPlan:
++    """Fiscal periods to request for one symbol, newest year first."""
++
++    years: tuple[DartFiscalYearRequest, ...]
++
++    @property
++    def max_requests(self) -> int:
++        """Upper bound on metered DART calls this plan can make.
++
++        Annual: CFS + OFS fallback + 배당 report. Interim: CFS + OFS fallback.
++        Plus one disclosure-list call for filing dates.
++        """
++        return sum(3 * int(y.annual) + 2 * len(y.quarters) for y in self.years) + 1
++
++    @property
++    def listing_start(self) -> dt.date:
++        # Every filing for a fiscal year is made on or after Jan 1 of that year.
++        return dt.date(min(y.year for y in self.years), 1, 1)
++
++
++def latest_completed_quarter(today: dt.date) -> tuple[int, int]:
++    """(year, quarter) of the most recent quarter that ended before ``today``."""
++    current = (today.month - 1) // 3 + 1
++    if current == 1:
++        return today.year - 1, 4
++    return today.year, current - 1
++
++
++def latest_completed_period(
++    today: dt.date, *, include_quarterly: bool
++) -> tuple[str, dt.date]:
++    """(fiscal_period, period_end_date) of the newest ended period, filed or not."""
++    year, quarter = latest_completed_quarter(today)
++    if quarter == 4:
++        return f"{year}A", dt.date(year, 12, 31)
++    if include_quarterly:
++        return f"{year}Q{quarter}", _quarter_end_date(year, quarter)
++    return f"{year - 1}A", dt.date(year - 1, 12, 31)
++
++
++def dart_fetch_plan(
++    *, today: dt.date, include_quarterly: bool, annual_years: int = 5
++) -> DartFetchPlan:
++    """Ended fiscal periods only: never the running quarter or unfinished year.
++
++    ``annual_years`` counts the most recent ended fiscal years requested in full
++    (annual + Q1..Q3). The current year's ended quarters are added on top so
++    this year's 분기/반기 reports are collected as soon as DART has them.
++    """
++    year, quarter = latest_completed_quarter(today)
++    latest_annual_year = year if quarter == 4 else year - 1
++    interim = (1, 2, 3) if include_quarterly else ()
++    years = [
++        DartFiscalYearRequest(year=y, annual=True, quarters=interim)
++        for y in range(latest_annual_year, latest_annual_year - annual_years, -1)
++    ]
++    if include_quarterly and quarter < 4:
++        years.insert(
++            0,
++            DartFiscalYearRequest(
++                year=year, annual=False, quarters=tuple(range(1, quarter + 1))
++            ),
++        )
++    return DartFetchPlan(years=tuple(years))
++
++
++def _today_kst() -> dt.date:
++    from app.core.timezone import KST
++
++    return dt.datetime.now(KST).date()
++
++
+ def _payload_from_annual(
+     *,
+     market: str,
+@@ -333,6 +419,7 @@ async def build_financial_fundamentals_for_symbols(
+     fetcher: FundamentalsFetcher,
+     include_quarterly: bool = False,
+     concurrency: int = 4,
++    plans: Mapping[str, DartFetchPlan] | None = None,
+ ) -> FinancialFundamentalsBuildResult:
+     market_norm = market.strip().lower()
+     if market_norm != "kr":
+@@ -345,7 +432,14 @@ async def build_financial_fundamentals_for_symbols(
+     async def _one(symbol: str) -> None:
+         async with sem:
+             try:
+-                bundle = await fetcher(symbol, include_quarterly=include_quarterly)
++                if plans is None:
++                    bundle = await fetcher(symbol, include_quarterly=include_quarterly)
++                else:
++                    bundle = await fetcher(
++                        symbol,
++                        include_quarterly=include_quarterly,
++                        plan=plans[symbol],
++                    )
+             except DartDailyRequestBudgetExceeded:
+                 raise
+             except Exception as exc:  # noqa: BLE001
+@@ -390,12 +484,18 @@ async def build_financial_fundamentals_for_symbols(
+ 
+ 
+ async def default_dart_fetcher(
+-    symbol: str, *, include_quarterly: bool, years_back: int = 5
++    symbol: str,
++    *,
++    include_quarterly: bool,
++    years_back: int = 5,
++    plan: DartFetchPlan | None = None,
+ ) -> RawFundamentalsBundle:
+     """Live DART fetcher: activates the dormant finstate_all + report('배당') methods.
+ 
+     fs_div='CFS' (consolidated) first, falling back to 'OFS' (separate) when CFS is empty.
+     filing dates resolved by joining each rcept_no to the disclosure-list endpoint.
++    Without ``plan`` it requests ``years_back`` ended fiscal years plus this
++    year's ended quarters (see ``dart_fetch_plan``).
+     """
+     from app.core.config import settings
+     from app.services.disclosures.dart import _get_client
+@@ -406,8 +506,11 @@ async def default_dart_fetcher(
+     if client is None:
+         raise RuntimeError("DART functionality not available")
+ 
+-    today = dt.date.today()
+-    years = list(range(today.year - 1, today.year - 1 - years_back, -1))
++    today = _today_kst()
++    if plan is None:
++        plan = dart_fetch_plan(
++            today=today, include_quarterly=include_quarterly, annual_years=years_back
++        )
+ 
+     def fetch_sync() -> RawFundamentalsBundle:
+         class BudgetedClient:
+@@ -430,7 +533,10 @@ async def default_dart_fetcher(
+         client_to_use = b_client
+ 
+         annual: list[RawAnnualFiling] = []
+-        for year in years:
++        for year_req in plan.years:
++            if not year_req.annual:
++                continue
++            year = year_req.year
+             stmt = client_to_use.finstate_all(symbol, year, "11011", fs_div="CFS")
+             if stmt is None or stmt.empty:
+                 stmt = client_to_use.finstate_all(symbol, year, "11011", fs_div="OFS")
+@@ -455,7 +561,8 @@ async def default_dart_fetcher(
+         quarterly: list[RawQuarterlyFiling] = []
+         if include_quarterly:
+             annual_by_year = {a.bsns_year: a for a in annual}
+-            for year in years:
++            for year_req in plan.years:
++                year = year_req.year
+                 stmts_by_q: dict[int, tuple[str, pd.DataFrame]] = {}
+                 for q in (1, 2, 3, 4):
+                     reprt_code = _REPRT_CODE_BY_QUARTER[q]
+@@ -466,7 +573,7 @@ async def default_dart_fetcher(
+                                 ann_filing.rcept_no,
+                                 ann_filing.income_statement,
+                             )
+-                    else:
++                    elif q in year_req.quarters:
+                         q_stmt = client_to_use.finstate_all(
+                             symbol, year, reprt_code, fs_div="CFS"
+                         )
+@@ -511,7 +618,7 @@ async def default_dart_fetcher(
+         # Resolve filing dates via the disclosure-list endpoint (carries rcept_dt).
+         listing = client_to_use.list(
+             corp=symbol,
+-            start=(today - dt.timedelta(days=365 * (years_back + 1))).isoformat(),
++            start=plan.listing_start.isoformat(),
+             end=today.isoformat(),
+             kind="A",  # 정기보고서
+             final=True,
+diff --git a/scripts/build_financial_fundamentals_snapshots.py b/scripts/build_financial_fundamentals_snapshots.py
+index 578405f0c..6a34fb068 100755
+--- a/scripts/build_financial_fundamentals_snapshots.py
++++ b/scripts/build_financial_fundamentals_snapshots.py
+@@ -74,10 +74,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+         dest="skip_existing",
+         action="store_true",
+         help=(
+-            "DART budget-split: skip symbols that already have a snapshot so daily "
+-            "re-runs advance through uncollected DART-eligible common stocks. With "
+-            "--limit N selects the NEXT N uncollected (keep N*11 under the daily "
+-            "budget, e.g. --limit 1500)."
++            "One-shot backfill: skip symbols that already have a snapshot so "
++            "re-runs advance through uncollected DART-eligible common stocks. "
++            "A collected symbol is never revisited in this mode; use "
++            "--refresh-due for continuous collection."
++        ),
++    )
++    parser.add_argument(
++        "--refresh-due",
++        dest="refresh_due",
++        action="store_true",
++        help=(
++            "Continuous collection: re-fetch symbols missing the newest ended "
++            "period (weekly recheck while unfiled), with partial rows, never "
++            "collected, or older than the 30-day correction sweep. Selection "
++            "is fitted to the daily DART budget (worst-case calls per symbol); "
++            "with --all the budget is the only bound. Exclusive with "
++            "--skip-existing and --symbol."
+         ),
+     )
+     args = parser.parse_args(argv)
+@@ -85,6 +98,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+         parser.error("--all is mutually exclusive with --symbol and --limit")
+     if args.estimate_only and args.commit:
+         parser.error("--estimate-only is mutually exclusive with --commit")
++    if args.refresh_due and (args.skip_existing or args.symbol):
++        parser.error(
++            "--refresh-due is mutually exclusive with --skip-existing and --symbol"
++        )
+     if args.limit is None:
+         args.limit = 20
+     if args.concurrency < 1:
+@@ -93,8 +110,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+     return args
+ 
+ 
+-def _print_result(result) -> None:
+-    if result.projected_requests is not None:
++def _print_result(result, *, estimate_only: bool) -> None:
++    if estimate_only:
+         print(
+             f"\n--estimate-only: projected {result.projected_requests} DART "
+             f"requests for {result.symbols_resolved} {result.market.upper()} "
+@@ -106,7 +123,8 @@ def _print_result(result) -> None:
+     print(
+         f"\nbuilt {result.snapshots_built} fundamentals snapshots "
+         f"for {result.symbols_resolved} {result.market.upper()} symbols "
+-        f"(dry_run={not result.committed}):"
++        f"(dry_run={not result.committed}, projected DART requests "
++        f"<= {result.projected_requests}):"
+     )
+     print("idempotency:")
+     for key in ("wouldInsert", "wouldUpdate", "duplicatePayloadKeys"):
+@@ -119,39 +137,34 @@ def _print_result(result) -> None:
+         print("warnings:")
+         for warning in result.warnings:
+             print(f"  - {warning}")
+-    if not result.committed:
++    if result.budget_exhausted:
++        print(
++            "\nDART BUDGET EXHAUSTED: fetch stopped early and nothing was "
++            "written. Not a successful run.\n"
++        )
++    elif result.no_rows_collected:
++        print(
++            f"\nNO ROWS COLLECTED: {result.symbols_resolved} symbols were fetched "
++            "but every fetch failed or came back empty; nothing was written. "
++            "Not a successful run.\n"
++        )
++    elif result.symbols_resolved == 0:
++        print("\nnothing due: no fetch, no rows written.\n")
++    elif not result.committed:
+         print("\n--dry-run: no rows written.\n")
+     else:
+         print(f"\ncommitted {result.snapshots_built} rows.\n")
+ 
+ 
+ async def run(args: argparse.Namespace) -> int:
+-    from app.core.config import settings
+     from app.jobs import financial_fundamentals_snapshots as snapshot_job
++    from app.services.snapshot_commit_guard import PartialCommitBlocked
+ 
+-    symbols = await (
+-        snapshot_job.resolve_active_universe(args.market)
+-        if args.all
+-        else snapshot_job.resolve_symbols(
+-            args.market, list(args.symbol), args.limit or 20
+-        )
+-    )
+-    projected = len(symbols) * (41 if args.include_quarterly else 11)
+-    budget = settings.opendart_daily_request_budget
+-    if args.estimate_only:
++    if not args.estimate_only:
+         print(
+-            f"--estimate-only: projected {projected} DART requests for "
+-            f"{len(symbols)} symbols (daily budget: {budget}); no fetch performed."
++            "NOTE: --dry-run still fetches from DART and consumes the daily "
++            "request budget; use --estimate-only for a no-fetch projection."
+         )
+-    else:
+-        print(
+-            f"Projected DART requests for {len(symbols)} symbols: {projected} "
+-            f"(daily budget: {budget}). NOTE: --dry-run still fetches from DART "
+-            f"and consumes ~{projected} requests."
+-        )
+-
+-    from app.services.snapshot_commit_guard import PartialCommitBlocked
+-
+     try:
+         result = await snapshot_job.run_financial_fundamentals_snapshot_build(
+             snapshot_job.FinancialFundamentalsSnapshotBuildRequest(
+@@ -165,13 +178,16 @@ async def run(args: argparse.Namespace) -> int:
+                 estimate_only=args.estimate_only,
+                 allow_partial=args.allow_partial,
+                 skip_existing=args.skip_existing,
++                refresh_due=args.refresh_due,
+             )
+         )
+     except PartialCommitBlocked as exc:
+         print(f"\nCOMMIT BLOCKED: {exc}\n")
+         return 2
+-    _print_result(result)
+-    return 0
++    _print_result(result, estimate_only=args.estimate_only)
++    if result.budget_exhausted:
++        return 3
++    return 4 if result.no_rows_collected else 0
+ 
+ 
+ async def main() -> int:
+diff --git a/tests/test_build_financial_fundamentals_cli.py b/tests/test_build_financial_fundamentals_cli.py
+index 134d64000..5355bb2f5 100644
+--- a/tests/test_build_financial_fundamentals_cli.py
++++ b/tests/test_build_financial_fundamentals_cli.py
+@@ -1,7 +1,10 @@
+ from __future__ import annotations
+ 
++import datetime as dt
++
+ import pytest
+ 
++from scripts import build_financial_fundamentals_snapshots as cli
+ from scripts.build_financial_fundamentals_snapshots import parse_args
+ 
+ 
+@@ -47,3 +50,92 @@ def test_skip_existing_flag() -> None:
+     args = parse_args(["--limit", "1500", "--skip-existing"])
+     assert args.skip_existing is True
+     assert args.limit == 1500
++
++
++@pytest.mark.unit
++def test_refresh_due_is_a_separate_mode() -> None:
++    assert parse_args(["--symbol", "005930"]).refresh_due is False
++    args = parse_args(["--with-quarterly", "--refresh-due", "--all", "--commit"])
++    assert args.refresh_due is True and args.skip_existing is False
++    # Continuous refresh and the one-shot backfill mode never combine.
++    with pytest.raises(SystemExit):
++        parse_args(["--refresh-due", "--skip-existing"])
++    with pytest.raises(SystemExit):
++        parse_args(["--refresh-due", "--symbol", "005930"])
++
++
++@pytest.mark.asyncio
++async def test_run_reports_budget_exhaustion_as_failure(monkeypatch, capsys) -> None:
++    from app.jobs import financial_fundamentals_snapshots as job
++
++    seen = {}
++
++    async def _fake_run(request, **kwargs):
++        seen["request"] = request
++        now = dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC)
++        return job.FinancialFundamentalsSnapshotBuildResult(
++            market="kr",
++            symbols_resolved=3,
++            snapshots_built=10,
++            committed=False,
++            started_at=now,
++            finished_at=now,
++            projected_requests=84,
++            budget_exhausted=True,
++        )
++
++    monkeypatch.setattr(job, "run_financial_fundamentals_snapshot_build", _fake_run)
++    argv = ["--with-quarterly", "--refresh-due", "--all", "--commit"]
++    argv.append("--allow-partial")
++    code = await cli.run(parse_args(argv))
++    assert code == 3
++    assert seen["request"].refresh_due is True
++    assert seen["request"].all_symbols is True
++    assert "DART BUDGET EXHAUSTED" in capsys.readouterr().out
++
++
++def _result(**overrides):
++    from app.jobs import financial_fundamentals_snapshots as job
++
++    now = dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC)
++    values = {
++        "market": "kr",
++        "symbols_resolved": 0,
++        "snapshots_built": 0,
++        "committed": False,
++        "started_at": now,
++        "finished_at": now,
++        "projected_requests": 0,
++    }
++    return job.FinancialFundamentalsSnapshotBuildResult(**{**values, **overrides})
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("result", "expected_code", "expected_text"),
++    [
++        # Symbols were requested and every fetch failed: a failed run.
++        (
++            _result(symbols_resolved=2, no_rows_collected=True),
++            4,
++            "NO ROWS COLLECTED",
++        ),
++        # Nothing was due today: no fetch, still a successful run.
++        (_result(warnings=("no symbols resolved",)), 0, "nothing due"),
++    ],
++)
++async def test_run_separates_all_failed_from_nothing_due(
++    monkeypatch, capsys, result, expected_code, expected_text
++) -> None:
++    from app.jobs import financial_fundamentals_snapshots as job
++
++    async def _fake_run(request, **kwargs):
++        return result
++
++    monkeypatch.setattr(job, "run_financial_fundamentals_snapshot_build", _fake_run)
++    argv = ["--with-quarterly", "--refresh-due", "--all", "--commit"]
++    code = await cli.run(parse_args([*argv, "--allow-partial"]))
++    out = capsys.readouterr().out
++    assert code == expected_code
++    assert expected_text in out
++    assert "committed " not in out  # never reported as a successful commit
+diff --git a/tests/test_financial_fundamentals_builder_orchestration.py b/tests/test_financial_fundamentals_builder_orchestration.py
+index 64b85b942..e4158cf09 100644
+--- a/tests/test_financial_fundamentals_builder_orchestration.py
++++ b/tests/test_financial_fundamentals_builder_orchestration.py
+@@ -10,6 +10,8 @@ from app.services.financial_fundamentals_snapshots.builder import (
+     RawAnnualFiling,
+     RawFundamentalsBundle,
+     build_financial_fundamentals_for_symbols,
++    dart_fetch_plan,
++    latest_completed_period,
+ )
+ 
+ 
+@@ -171,7 +173,13 @@ async def test_default_dart_fetcher_quarterly(monkeypatch):
+         default_dart_fetcher,
+     )
+ 
+-    bundle = await default_dart_fetcher("005930", include_quarterly=True, years_back=1)
++    bundle = await default_dart_fetcher(
++        "005930",
++        include_quarterly=True,
++        plan=dart_fetch_plan(
++            today=dt.date(2026, 1, 15), include_quarterly=True, annual_years=1
++        ),
++    )
+ 
+     assert bundle.symbol == "005930"
+     assert bundle.currency == "KRW"
+@@ -193,6 +201,133 @@ async def test_default_dart_fetcher_quarterly(monkeypatch):
+     assert len(calls_11011) == 1
+ 
+ 
++def test_fetch_plan_requests_only_ended_periods():
++    # 2026-10-03: Q3 ended 09-30, so 2026 Q1..Q3 are requestable; the 2026
++    # annual has not ended and the running Q4 is never requested.
++    plan = dart_fetch_plan(
++        today=dt.date(2026, 10, 3), include_quarterly=True, annual_years=5
++    )
++    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
++        (2026, False, (1, 2, 3)),
++        (2025, True, (1, 2, 3)),
++        (2024, True, (1, 2, 3)),
++        (2023, True, (1, 2, 3)),
++        (2022, True, (1, 2, 3)),
++        (2021, True, (1, 2, 3)),
++    ]
++    # 3 interim CFS+OFS + 5 x (annual CFS+OFS + 배당 + 3 interim CFS+OFS) + list
++    assert plan.max_requests == 52
++    assert plan.listing_start == dt.date(2021, 1, 1)
++    assert latest_completed_period(dt.date(2026, 10, 3), include_quarterly=True) == (
++        "2026Q3",
++        dt.date(2026, 9, 30),
++    )
++
++    # On the quarter-end day itself the quarter is still running.
++    plan = dart_fetch_plan(
++        today=dt.date(2026, 9, 30), include_quarterly=True, annual_years=1
++    )
++    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
++        (2026, False, (1, 2)),
++        (2025, True, (1, 2, 3)),
++    ]
++
++    # January: the fiscal year that just ended is the newest annual.
++    plan = dart_fetch_plan(
++        today=dt.date(2026, 1, 2), include_quarterly=True, annual_years=1
++    )
++    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
++        (2025, True, (1, 2, 3)),
++    ]
++    assert latest_completed_period(dt.date(2026, 1, 2), include_quarterly=True) == (
++        "2025A",
++        dt.date(2025, 12, 31),
++    )
++
++    annual_only = dart_fetch_plan(
++        today=dt.date(2026, 10, 3), include_quarterly=False, annual_years=5
++    )
++    assert [y.year for y in annual_only.years] == [2025, 2024, 2023, 2022, 2021]
++    assert all(not y.quarters for y in annual_only.years)
++    assert annual_only.max_requests == 16
++    assert latest_completed_period(dt.date(2026, 10, 3), include_quarterly=False) == (
++        "2025A",
++        dt.date(2025, 12, 31),
++    )
++
++
++@pytest.mark.asyncio
++async def test_default_dart_fetcher_collects_current_year_quarters(monkeypatch):
++    class FakeCurrentYear:
++        def __init__(self):
++            self.calls = []
++
++        def finstate_all(self, symbol, year, reprt_code, fs_div="CFS"):
++            self.calls.append(("finstate_all", year, reprt_code, fs_div))
++            if year == 2026 and reprt_code == "11014":
++                return pd.DataFrame()  # 3분기보고서 not filed yet
++            cumulative = {"11013": "100", "11012": "250", "11014": "450"}
++            frame = _is_frame("1000", cumulative.get(reprt_code, "600"))
++            frame["rcept_no"] = f"r{year}{reprt_code}"
++            return frame
++
++        def report(self, *args, **kwargs):
++            self.calls.append(("report",))
++            return None
++
++        def list(self, corp, start, end, kind="A", final=True):
++            self.calls.append(("list", start))
++            return pd.DataFrame(
++                [
++                    {"rcept_no": "r202611013", "rcept_dt": "20260514"},
++                    {"rcept_no": "r202611012", "rcept_dt": "20260813"},
++                ]
++            )
++
++    fake = FakeCurrentYear()
++
++    async def mock_get_client():
++        return fake
++
++    monkeypatch.setattr("app.services.disclosures.dart._get_client", mock_get_client)
++    monkeypatch.setattr("app.core.config.settings.opendart_api_key", "dummy")
++
++    from app.services.financial_fundamentals_snapshots.builder import (
++        default_dart_fetcher,
++        reset_request_count,
++    )
++
++    plan = dart_fetch_plan(
++        today=dt.date(2026, 10, 3), include_quarterly=True, annual_years=1
++    )
++    reset_request_count()
++    result = await build_financial_fundamentals_for_symbols(
++        market="kr",
++        symbols=["005930"],
++        collected_at=dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC),
++        fetcher=default_dart_fetcher,
++        include_quarterly=True,
++        plans={"005930": plan},
++    )
++
++    finstate = [c for c in fake.calls if c[0] == "finstate_all"]
++    # The unfinished 2026 annual is never requested; an unfiled Q3 costs CFS+OFS.
++    assert not [c for c in finstate if c[1] == 2026 and c[2] == "11011"]
++    assert ("finstate_all", 2026, "11014", "OFS") in finstate
++    assert len(fake.calls) <= plan.max_requests
++    assert ("list", "2025-01-01") in fake.calls
++
++    by_period = {p.fiscal_period: p for p in result.payloads}
++    assert by_period["2026Q1"].discrete_net_income == Decimal("100")
++    assert by_period["2026Q2"].discrete_net_income == Decimal("150")  # 250 - 100
++    assert by_period["2026Q2"].filing_date == dt.date(2026, 8, 13)
++    assert by_period["2026Q2"].raw_payload["rcept_no"] == "r202611012"
++    # Unfiled quarter: no row at all rather than an empty/fake one.
++    assert "2026Q3" not in by_period
++    assert "2026A" not in by_period
++    assert by_period["2025Q4"].discrete_net_income == Decimal("150")  # 600 - 450
++
++
+ @pytest.mark.asyncio
+ async def test_default_dart_fetcher_annual_only(monkeypatch):
+     fake_client = FakeOpenDartClient()
+@@ -325,7 +460,13 @@ async def test_quarterly_skips_quarter_when_prior_missing(monkeypatch):
+     )
+ 
+     reset_request_count()
+-    bundle = await default_dart_fetcher("005930", include_quarterly=True, years_back=1)
++    bundle = await default_dart_fetcher(
++        "005930",
++        include_quarterly=True,
++        plan=dart_fetch_plan(
++            today=dt.date(2026, 1, 15), include_quarterly=True, annual_years=1
++        ),
++    )
+     quarters = {q.quarter for q in bundle.quarterly}
+     assert 2 not in quarters  # Q2 frame empty -> not collected
+     assert 3 not in quarters  # Q3 prior (Q2) missing -> skipped, NOT faked
+diff --git a/tests/test_financial_fundamentals_job.py b/tests/test_financial_fundamentals_job.py
+index a2636d0e1..508b58545 100644
+--- a/tests/test_financial_fundamentals_job.py
++++ b/tests/test_financial_fundamentals_job.py
+@@ -31,7 +31,7 @@ def bind_job_session(monkeypatch, db_session):
+ 
+ 
+ async def _fake_fetcher(
+-    symbol: str, *, include_quarterly: bool
++    symbol: str, *, include_quarterly: bool, plan=None
+ ) -> RawFundamentalsBundle:
+     df = pd.DataFrame(
+         [
+@@ -73,31 +73,6 @@ async def test_dry_run_builds_but_writes_nothing(bind_job_session, monkeypatch):
+     assert any(s.fiscal_period == "2024A" for s in result.samples)
+ 
+ 
+-@pytest.mark.integration
+-@pytest.mark.asyncio
+-async def test_dry_run_logs_projected_request_estimate(
+-    bind_job_session, monkeypatch, caplog
+-):
+-    import logging
+-
+-    monkeypatch.setattr(job, "resolve_symbols", _async_return(["005930"]))
+-    with caplog.at_level(
+-        logging.INFO, logger="app.jobs.financial_fundamentals_snapshots"
+-    ):
+-        await job.run_financial_fundamentals_snapshot_build(
+-            job.FinancialFundamentalsSnapshotBuildRequest(
+-                market="kr",
+-                symbols=("005930",),
+-                commit=False,
+-                include_quarterly=True,
+-            ),
+-            fetcher=_fake_fetcher,
+-        )
+-    msgs = [r.getMessage() for r in caplog.records]
+-    # 1 symbol * 41 (quarterly multiplier) — pins the estimate formula.
+-    assert any("Projected DART requests" in m and "41" in m for m in msgs)
+-
+-
+ @pytest.mark.asyncio
+ async def test_job_budget_exceeded_fail_stops_and_does_not_commit(
+     bind_job_session, monkeypatch
+@@ -148,6 +123,7 @@ async def test_job_budget_exceeded_fail_stops_and_does_not_commit(
+     )
+ 
+     assert result.committed is False
++    assert result.budget_exhausted is True
+     assert result.snapshots_built == 1
+     assert any(s.fiscal_period == "2024A" for s in result.samples)
+     assert any(
+@@ -168,7 +144,7 @@ async def test_estimate_only_does_not_fetch_or_commit():
+     # BEFORE any AsyncSessionLocal use, so this test proves it never touches DB.
+     calls: list[str] = []
+ 
+-    async def _spy_fetcher(symbol: str, *, include_quarterly: bool):
++    async def _spy_fetcher(symbol: str, *, include_quarterly: bool, plan=None):
+         calls.append(symbol)
+         raise AssertionError("fetcher must not be called in estimate-only mode")
+ 
+@@ -178,11 +154,13 @@ async def test_estimate_only_does_not_fetch_or_commit():
+             symbols=("005930",),
+             estimate_only=True,
+             include_quarterly=False,
++            collected_at=dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC),
+         ),
+         fetcher=_spy_fetcher,
+     )
+     assert calls == []
+-    assert result.projected_requests == 11  # 1 symbol * 11 (annual-only)
++    # 5 annual years x (CFS + OFS + 배당) + 1 disclosure list
++    assert result.projected_requests == 16
+     assert result.committed is False
+     assert result.snapshots_built == 0
+     assert any("estimate-only" in w for w in result.warnings)
+@@ -227,11 +205,15 @@ async def test_skip_existing_budget_split(bind_job_session, db_session, monkeypa
+ 
+     result = await job.run_financial_fundamentals_snapshot_build(
+         job.FinancialFundamentalsSnapshotBuildRequest(
+-            market="kr", all_symbols=True, estimate_only=True, skip_existing=True
++            market="kr",
++            all_symbols=True,
++            estimate_only=True,
++            skip_existing=True,
++            collected_at=dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC),
+         )
+     )
+     assert result.symbols_resolved == 2  # 900001 skipped (already collected)
+-    assert result.projected_requests == 2 * 11  # only uncollected projected
++    assert result.projected_requests == 2 * 16  # only uncollected projected
+     assert any(
+         "skip_existing" in w and "1 already-collected" in w for w in result.warnings
+     )
+@@ -313,6 +295,359 @@ def test_kr_dart_common_symbol_filter_excludes_non_dart_universe_rows() -> None:
+     assert job._is_kr_dart_common_symbol("999980", "테스트스팩") is False
+     assert job._is_kr_dart_common_symbol("999960", "테스트리츠") is False
+ 
++    # Toss master classification wins over the name rules: an ETF whose brand
++    # carries no ETF token (2026-10 ETF 118 candidates) and a 우선주 flagged by
++    # is_common_share stay out; classified common stocks stay in.
++    assert job._is_kr_dart_common_symbol("999940", "삼성 미국테크", "ETF") is False
++    assert job._is_kr_dart_common_symbol("999930", "어떤증권", "ETN") is False
++    assert job._is_kr_dart_common_symbol("005935", "삼성전자", "STOCK", False) is False
++    assert job._is_kr_dart_common_symbol("005930", "삼성전자", "STOCK", True) is True
++    # A master-confirmed common share whose code ends in 5/7/9 is not a 우선주.
++    assert job._is_kr_dart_common_symbol("123455", "테스트지주", "STOCK", True) is True
++    assert job._is_kr_dart_common_symbol("123455", "테스트지주", None, None) is False
++    assert job._is_kr_dart_common_symbol("999985", "테스트스팩", "STOCK", True) is False
++    # Not yet classified by the master: name rules decide (no common-stock loss).
++    assert job._is_kr_dart_common_symbol("005380", "현대차", None, None) is True
++
++
++_NOW = dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC)  # 18:30 KST cron slot
++
++
++def _ev(last: dt.datetime, *, has_latest: bool, partial_end=None):
++    return job.SymbolCollectionEvidence(
++        last_collected_at=last,
++        has_latest_period=has_latest,
++        earliest_partial_period_end=partial_end,
++    )
++
++
++def test_select_refresh_due_orders_reasons_and_skips_fresh_symbols() -> None:
++    utc = dt.UTC
++    evidence = {
++        # Collected before 2026Q3 ended (2026-10-01 KST): due now.
++        "000001": _ev(dt.datetime(2026, 9, 28, tzinfo=utc), has_latest=False),
++        "000002": _ev(dt.datetime(2026, 10, 2, tzinfo=utc), has_latest=True),
++        # Looked after Q3 ended and it was unfiled: wait for the weekly recheck.
++        "000003": _ev(dt.datetime(2026, 10, 2, tzinfo=utc), has_latest=False),
++        "000004": _ev(dt.datetime(2026, 9, 25, tzinfo=utc), has_latest=False),
++        # Partial inside the 5-year window but before the recent 2 years.
++        "000005": _ev(
++            dt.datetime(2026, 9, 20, tzinfo=utc),
++            has_latest=True,
++            partial_end=dt.date(2022, 12, 31),
++        ),
++        "000006": _ev(dt.datetime(2026, 8, 1, tzinfo=utc), has_latest=True),
++        # Partial but re-fetched yesterday: not yet.
++        "000009": _ev(
++            dt.datetime(2026, 10, 2, tzinfo=utc),
++            has_latest=True,
++            partial_end=dt.date(2026, 6, 30),
++        ),
++    }
++    pool = sorted([*evidence, "000007", "000008"])
++
++    alloc = job.select_refresh_due(
++        pool, evidence, now=_NOW, include_quarterly=True, limit=None, budget=18000
++    )
++    assert [(t.symbol, t.reason) for t in alloc.selected] == [
++        ("000004", "missing_latest"),
++        ("000001", "missing_latest"),
++        ("000005", "partial"),
++        ("000007", "uncollected"),
++        ("000008", "uncollected"),
++        ("000006", "stale"),
++    ]
++    plans = {t.symbol: t.plan for t in alloc.selected}
++    # Collected symbols re-fetch only 2025 + 2026's ended quarters (16 calls max);
++    # a partial row older than that window and new symbols get the full window.
++    assert [y.year for y in plans["000001"].years] == [2026, 2025]
++    assert plans["000001"].max_requests == 16
++    assert plans["000005"].max_requests == 52
++    assert plans["000007"].max_requests == 52
++    assert alloc.spent == 16 * 3 + 52 * 3
++    assert alloc.deferred == 0
++
++
++def test_select_refresh_due_fits_daily_budget_in_priority_order() -> None:
++    evidence = {
++        s: _ev(dt.datetime(2026, 9, 1, tzinfo=dt.UTC), has_latest=False)
++        for s in ("000001", "000002", "000003")
++    }
++    alloc = job.select_refresh_due(
++        [*evidence, "000004"],
++        evidence,
++        now=_NOW,
++        include_quarterly=True,
++        limit=None,
++        budget=16 * 2 + 10,
++    )
++    assert [t.symbol for t in alloc.selected] == ["000001", "000002"]
++    assert alloc.spent <= 16 * 2 + 10
++    assert alloc.deferred == 2  # one refresh + the 52-call new symbol wait
++
++
++def _seen_over_days(pool, evidence, *, days: int, limit, budget) -> list[set[str]]:
++    # Every fetch keeps failing: evidence never changes between days.
++    return [
++        {
++            t.symbol
++            for t in job.select_refresh_due(
++                pool,
++                evidence,
++                now=_NOW + dt.timedelta(days=day),
++                include_quarterly=True,
++                limit=limit,
++                budget=budget,
++            ).selected
++        }
++        for day in range(days)
++    ]
++
++
++def test_refresh_fairness_reaches_lower_tiers_when_a_failure_fills_the_run() -> None:
++    # A failing missing_latest symbol alone fills --limit 1 every day; the
++    # uncollected and stale symbols behind it must still get their turn.
++    evidence = {
++        "000001": _ev(dt.datetime(2026, 9, 1, tzinfo=dt.UTC), has_latest=False),
++        "000003": _ev(dt.datetime(2026, 8, 1, tzinfo=dt.UTC), has_latest=True),
++    }
++    pool = ["000001", "000002", "000003"]
++    daily = _seen_over_days(pool, evidence, days=3, limit=1, budget=18000)
++    assert all(len(day) == 1 for day in daily)
++    assert set().union(*daily) == set(pool)
++
++
++def test_refresh_fairness_survives_many_failing_high_tier_symbols() -> None:
++    # 20 failing missing_latest symbols already exceed the daily budget; the
++    # 52-call uncollected symbol and the stale one still come up in time.
++    failing = [f"2000{i:02d}" for i in range(20)]
++    evidence = {
++        s: _ev(dt.datetime(2026, 9, 1, tzinfo=dt.UTC), has_latest=False)
++        for s in failing
++    }
++    evidence["300001"] = _ev(dt.datetime(2026, 8, 1, tzinfo=dt.UTC), has_latest=True)
++    pool = [*failing, "300000", "300001"]
++    budget = 52 * 2  # fairness slice of 2 symbols/day over a ring of 22
++    daily = _seen_over_days(pool, evidence, days=11, limit=None, budget=budget)
++    assert set().union(*daily) == set(pool)
++
++
++@pytest.mark.asyncio
++async def test_run_flags_fetches_that_all_fail_as_no_rows() -> None:
++    async def _failing(symbol, *, include_quarterly, plan=None):
++        raise RuntimeError("DART 013")
++
++    result = await job.run_financial_fundamentals_snapshot_build(
++        job.FinancialFundamentalsSnapshotBuildRequest(
++            market="kr", symbols=("005930", "000660"), collected_at=_NOW
++        ),
++        fetcher=_failing,
++    )
++    assert result.symbols_resolved == 2
++    assert result.snapshots_built == 0
++    assert result.no_rows_collected is True
++    assert result.committed is False
++    assert result.budget_exhausted is False
++
++
++async def _seed_rows(db_session, rows) -> None:
++    from app.models.financial_fundamentals_snapshot import (
++        FinancialFundamentalsSnapshot,
++    )
++
++    for symbol, period, period_end, collected, state in rows:
++        db_session.add(
++            FinancialFundamentalsSnapshot(
++                market="kr",
++                symbol=symbol,
++                fiscal_period=period,
++                period_type="annual" if period.endswith("A") else "quarterly",
++                period_end_date=period_end,
++                source="dart",
++                source_collected_at=collected,
++                data_state=state,
++            )
++        )
++    await db_session.commit()
++
++
++@pytest.mark.integration
++@pytest.mark.asyncio
++async def test_refresh_due_refetches_stale_symbols_without_faking_failures(
++    bind_job_session, db_session, monkeypatch
++):
++    import sqlalchemy as sa
++
++    from app.models.financial_fundamentals_snapshot import (
++        FinancialFundamentalsSnapshot,
++    )
++
++    syms = ["900011", "900012", "900013", "900014"]
++    old = dt.datetime(2026, 9, 27, 9, 30, tzinfo=dt.UTC)
++    await db_session.execute(
++        sa.delete(FinancialFundamentalsSnapshot).where(
++            FinancialFundamentalsSnapshot.symbol.in_(syms)
++        )
++    )
++    await _seed_rows(
++        db_session,
++        [
++            # Stopped at 2025Q4 like production on 2026-10-02.
++            ("900011", "2025A", dt.date(2025, 12, 31), old, "fresh"),
++            ("900012", "2025A", dt.date(2025, 12, 31), old, "fresh"),
++            # Already has the newest ended period and is recent: not due.
++            ("900013", "2026Q3", dt.date(2026, 9, 30), _NOW, "fresh"),
++        ],
++    )
++    monkeypatch.setattr(job, "resolve_active_universe", _async_return(list(syms)))
++
++    async def _fetcher(symbol, *, include_quarterly, plan=None):
++        assert plan is not None and plan.years[0].year == 2026
++        if symbol == "900012":
++            raise RuntimeError("DART 013 no data")
++        base = await _fake_fetcher(symbol, include_quarterly=include_quarterly)
++        return RawFundamentalsBundle(
++            symbol=symbol,
++            annual=(
++                RawAnnualFiling(
++                    bsns_year=2025,
++                    rcept_no="r1",
++                    income_statement=base.annual[0].income_statement,
++                ),
++            ),
++            filing_dates=base.filing_dates,
++        )
++
++    try:
++        estimate = await job.run_financial_fundamentals_snapshot_build(
++            job.FinancialFundamentalsSnapshotBuildRequest(
++                market="kr",
++                all_symbols=True,
++                include_quarterly=True,
++                refresh_due=True,
++                estimate_only=True,
++                collected_at=_NOW,
++            ),
++            fetcher=_fetcher,
++        )
++        assert estimate.selection == {"missing_latest": 2, "uncollected": 1}
++        assert estimate.projected_requests == 16 * 2 + 52
++        assert estimate.snapshots_built == 0
++
++        result = await job.run_financial_fundamentals_snapshot_build(
++            job.FinancialFundamentalsSnapshotBuildRequest(
++                market="kr",
++                all_symbols=True,
++                include_quarterly=True,
++                refresh_due=True,
++                commit=True,
++                allow_partial=True,
++                collected_at=_NOW,
++            ),
++            fetcher=_fetcher,
++        )
++        assert result.committed is True
++        assert result.budget_exhausted is False
++        assert any("900012: fetch failed" in w for w in result.warnings)
++
++        rows = (
++            await db_session.execute(
++                sa.select(
++                    FinancialFundamentalsSnapshot.symbol,
++                    sa.func.max(FinancialFundamentalsSnapshot.source_collected_at),
++                )
++                .where(FinancialFundamentalsSnapshot.symbol.in_(syms))
++                .group_by(FinancialFundamentalsSnapshot.symbol)
++            )
++        ).all()
++        last = dict(rows)
++        assert last["900011"] == _NOW
++        assert last["900014"] == _NOW  # first backfill landed
++        assert last["900012"] == old  # failure never stamps a success time
++
++        # Next day: the failed symbol is still due; the refreshed ones wait.
++        again = await job.run_financial_fundamentals_snapshot_build(
++            job.FinancialFundamentalsSnapshotBuildRequest(
++                market="kr",
++                all_symbols=True,
++                include_quarterly=True,
++                refresh_due=True,
++                estimate_only=True,
++                collected_at=_NOW + dt.timedelta(days=1),
++            ),
++            fetcher=_fetcher,
++        )
++        assert again.selection == {"missing_latest": 1}
++        assert again.symbols_resolved == 1
++    finally:
++        await db_session.execute(
++            sa.delete(FinancialFundamentalsSnapshot).where(
++                FinancialFundamentalsSnapshot.symbol.in_(syms)
++            )
++        )
++        await db_session.commit()
++
++
++@pytest.mark.integration
++@pytest.mark.asyncio
++async def test_collection_evidence_ignores_partials_outside_fetch_window(
++    bind_job_session, db_session
++):
++    import sqlalchemy as sa
++
++    from app.models.financial_fundamentals_snapshot import (
++        FinancialFundamentalsSnapshot,
++    )
++
++    syms = ["900021", "900022"]
++    # Within the 30-day sweep but past the 7-day partial recheck.
++    collected = dt.datetime(2026, 9, 20, tzinfo=dt.UTC)
++    await db_session.execute(
++        sa.delete(FinancialFundamentalsSnapshot).where(
++            FinancialFundamentalsSnapshot.symbol.in_(syms)
++        )
++    )
++    await _seed_rows(
++        db_session,
++        [
++            # 2019 is outside the 2021+ window: no plan can fix it, so not due.
++            ("900021", "2019A", dt.date(2019, 12, 31), collected, "partial"),
++            ("900021", "2026Q3", dt.date(2026, 9, 30), collected, "fresh"),
++            # The older out-of-window partial must not hide the 2023 one.
++            ("900022", "2019A", dt.date(2019, 12, 31), collected, "partial"),
++            ("900022", "2023A", dt.date(2023, 12, 31), collected, "partial"),
++            ("900022", "2026Q3", dt.date(2026, 9, 30), collected, "fresh"),
++        ],
++    )
++    try:
++        evidence = await job._collection_evidence(
++            "kr", "2026Q3", partial_since=dt.date(2021, 1, 1)
++        )
++        assert evidence["900021"].earliest_partial_period_end is None
++        assert evidence["900022"].earliest_partial_period_end == dt.date(2023, 12, 31)
++        alloc = job.select_refresh_due(
++            syms, evidence, now=_NOW, include_quarterly=True, limit=None, budget=18000
++        )
++        picked = [(t.symbol, t.reason, t.plan.max_requests) for t in alloc.selected]
++        assert picked == [("900022", "partial", 52)]
++    finally:
++        await db_session.execute(
++            sa.delete(FinancialFundamentalsSnapshot).where(
++                FinancialFundamentalsSnapshot.symbol.in_(syms)
++            )
++        )
++        await db_session.commit()
++
++
++@pytest.mark.asyncio
++async def test_refresh_due_rejects_skip_existing() -> None:
++    with pytest.raises(ValueError, match="mutually exclusive"):
++        await job.run_financial_fundamentals_snapshot_build(
++            job.FinancialFundamentalsSnapshotBuildRequest(
++                market="kr", refresh_due=True, skip_existing=True
++            )
++        )
++
+ 
+ @pytest.mark.integration
+ @pytest.mark.asyncio
+@@ -323,7 +658,17 @@ async def test_resolve_active_universe_filters_to_dart_common_stocks(
+ 
+     from app.models.kr_symbol_universe import KRSymbolUniverse
+ 
+-    symbols = ["999990", "999995", "99A990", "999970", "999980", "999960", "999950"]
++    symbols = [
++        "999990",
++        "999995",
++        "99A990",
++        "999970",
++        "999980",
++        "999960",
++        "999950",
++        "999940",
++        "999920",
++    ]
+     await db_session.execute(
+         sa.delete(KRSymbolUniverse).where(KRSymbolUniverse.symbol.in_(symbols))
+     )
+@@ -350,6 +695,21 @@ async def test_resolve_active_universe_filters_to_dart_common_stocks(
+             KRSymbolUniverse(
+                 symbol="999950", name="비활성보통", exchange="STK", is_active=False
+             ),
++            KRSymbolUniverse(
++                symbol="999940",
++                name="삼성 미국테크",
++                exchange="STK",
++                is_active=True,
++                security_type="ETF",
++            ),
++            KRSymbolUniverse(
++                symbol="999920",
++                name="테스트지주",
++                exchange="STK",
++                is_active=True,
++                security_type="STOCK",
++                is_common_share=True,
++            ),
+         ]
+     )
+     await db_session.commit()
+@@ -357,12 +717,14 @@ async def test_resolve_active_universe_filters_to_dart_common_stocks(
+     try:
+         resolved = await job.resolve_active_universe("kr")
+         assert "999990" in resolved
++        assert "999920" in resolved
+         assert "999995" not in resolved
+         assert "99A990" not in resolved
+         assert "999970" not in resolved
+         assert "999980" not in resolved
+         assert "999960" not in resolved
+         assert "999950" not in resolved
++        assert "999940" not in resolved  # ETF by master, no ETF token in name
+     finally:
+         await db_session.execute(
+             sa.delete(KRSymbolUniverse).where(KRSymbolUniverse.symbol.in_(symbols))

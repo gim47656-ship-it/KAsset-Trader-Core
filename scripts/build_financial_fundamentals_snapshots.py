@@ -74,10 +74,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="skip_existing",
         action="store_true",
         help=(
-            "DART budget-split: skip symbols that already have a snapshot so daily "
-            "re-runs advance through uncollected DART-eligible common stocks. With "
-            "--limit N selects the NEXT N uncollected (keep N*11 under the daily "
-            "budget, e.g. --limit 1500)."
+            "One-shot backfill: skip symbols that already have a snapshot so "
+            "re-runs advance through uncollected DART-eligible common stocks. "
+            "A collected symbol is never revisited in this mode; use "
+            "--refresh-due for continuous collection."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-due",
+        dest="refresh_due",
+        action="store_true",
+        help=(
+            "Continuous collection: re-fetch symbols missing the newest ended "
+            "period (weekly recheck while unfiled), with partial rows, never "
+            "collected, or older than the 30-day correction sweep. Selection "
+            "is fitted to the daily DART budget (worst-case calls per symbol); "
+            "with --all the budget is the only bound. Exclusive with "
+            "--skip-existing and --symbol."
         ),
     )
     args = parser.parse_args(argv)
@@ -85,6 +98,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--all is mutually exclusive with --symbol and --limit")
     if args.estimate_only and args.commit:
         parser.error("--estimate-only is mutually exclusive with --commit")
+    if args.refresh_due and (args.skip_existing or args.symbol):
+        parser.error(
+            "--refresh-due is mutually exclusive with --skip-existing and --symbol"
+        )
     if args.limit is None:
         args.limit = 20
     if args.concurrency < 1:
@@ -93,8 +110,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _print_result(result) -> None:
-    if result.projected_requests is not None:
+def _print_result(result, *, estimate_only: bool) -> None:
+    if estimate_only:
         print(
             f"\n--estimate-only: projected {result.projected_requests} DART "
             f"requests for {result.symbols_resolved} {result.market.upper()} "
@@ -106,7 +123,8 @@ def _print_result(result) -> None:
     print(
         f"\nbuilt {result.snapshots_built} fundamentals snapshots "
         f"for {result.symbols_resolved} {result.market.upper()} symbols "
-        f"(dry_run={not result.committed}):"
+        f"(dry_run={not result.committed}, projected DART requests "
+        f"<= {result.projected_requests}):"
     )
     print("idempotency:")
     for key in ("wouldInsert", "wouldUpdate", "duplicatePayloadKeys"):
@@ -119,39 +137,34 @@ def _print_result(result) -> None:
         print("warnings:")
         for warning in result.warnings:
             print(f"  - {warning}")
-    if not result.committed:
+    if result.budget_exhausted:
+        print(
+            "\nDART BUDGET EXHAUSTED: fetch stopped early and nothing was "
+            "written. Not a successful run.\n"
+        )
+    elif result.no_rows_collected:
+        print(
+            f"\nNO ROWS COLLECTED: {result.symbols_resolved} symbols were fetched "
+            "but every fetch failed or came back empty; nothing was written. "
+            "Not a successful run.\n"
+        )
+    elif result.symbols_resolved == 0:
+        print("\nnothing due: no fetch, no rows written.\n")
+    elif not result.committed:
         print("\n--dry-run: no rows written.\n")
     else:
         print(f"\ncommitted {result.snapshots_built} rows.\n")
 
 
 async def run(args: argparse.Namespace) -> int:
-    from app.core.config import settings
     from app.jobs import financial_fundamentals_snapshots as snapshot_job
-
-    symbols = await (
-        snapshot_job.resolve_active_universe(args.market)
-        if args.all
-        else snapshot_job.resolve_symbols(
-            args.market, list(args.symbol), args.limit or 20
-        )
-    )
-    projected = len(symbols) * (41 if args.include_quarterly else 11)
-    budget = settings.opendart_daily_request_budget
-    if args.estimate_only:
-        print(
-            f"--estimate-only: projected {projected} DART requests for "
-            f"{len(symbols)} symbols (daily budget: {budget}); no fetch performed."
-        )
-    else:
-        print(
-            f"Projected DART requests for {len(symbols)} symbols: {projected} "
-            f"(daily budget: {budget}). NOTE: --dry-run still fetches from DART "
-            f"and consumes ~{projected} requests."
-        )
-
     from app.services.snapshot_commit_guard import PartialCommitBlocked
 
+    if not args.estimate_only:
+        print(
+            "NOTE: --dry-run still fetches from DART and consumes the daily "
+            "request budget; use --estimate-only for a no-fetch projection."
+        )
     try:
         result = await snapshot_job.run_financial_fundamentals_snapshot_build(
             snapshot_job.FinancialFundamentalsSnapshotBuildRequest(
@@ -165,13 +178,16 @@ async def run(args: argparse.Namespace) -> int:
                 estimate_only=args.estimate_only,
                 allow_partial=args.allow_partial,
                 skip_existing=args.skip_existing,
+                refresh_due=args.refresh_due,
             )
         )
     except PartialCommitBlocked as exc:
         print(f"\nCOMMIT BLOCKED: {exc}\n")
         return 2
-    _print_result(result)
-    return 0
+    _print_result(result, estimate_only=args.estimate_only)
+    if result.budget_exhausted:
+        return 3
+    return 4 if result.no_rows_collected else 0
 
 
 async def main() -> int:

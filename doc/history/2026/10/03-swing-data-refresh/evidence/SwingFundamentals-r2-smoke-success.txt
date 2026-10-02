@@ -1,0 +1,122 @@
+e4d3585bca40633c32fc13b76ba162f8c626e818628a35b03b089db91481bd92  /tmp/swingfund-smoke.py
+smoke db: swingfund_smoke_7c9564d8
+rows before: {'100001': (1, '2026-09-27T09:30:00+00:00', '2025A'), '100002': (1, '2026-10-02T23:09:30.209546+00:00', '2026Q3'), '100010': (1, '2026-08-01T00:00:00+00:00', '2026Q3')}
+
+=== estimate: --with-quarterly --refresh-due --all --estimate-only
+
+--estimate-only: projected 188 DART requests for 5 KR symbols; no fetch, no rows written.
+
+  - refresh_due: latest ended period 2026Q3; selected missing_latest=1, stale=1, uncollected=3; 1 not due
+  - estimate-only: projected 188 DART requests; no fetch performed
+fake DART calls this step: 0
+EXIT=0
+
+=== refresh-commit: --with-quarterly --refresh-due --all --commit --allow-partial
+NOTE: --dry-run still fetches from DART and consumes the daily request budget; use --estimate-only for a no-fetch projection.
+fundamentals fetch failed symbol=100004: fake DART outage for this symbol
+
+built 68 fundamentals snapshots for 5 KR symbols (dry_run=False, projected DART requests <= 188):
+idempotency:
+  wouldInsert: 67
+  wouldUpdate: 1
+  duplicatePayloadKeys: 0
+samples:
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2025A', period_type='annual', filing_date=datetime.date(2026, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2026Q1', period_type='quarterly', filing_date=datetime.date(2026, 5, 14), revenue=Decimal('1000'), net_income=Decimal('100'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2026Q2', period_type='quarterly', filing_date=datetime.date(2026, 8, 13), revenue=Decimal('1000'), net_income=Decimal('250'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2025Q1', period_type='quarterly', filing_date=datetime.date(2025, 5, 14), revenue=Decimal('1000'), net_income=Decimal('100'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2025Q2', period_type='quarterly', filing_date=datetime.date(2025, 8, 13), revenue=Decimal('1000'), net_income=Decimal('250'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2025Q3', period_type='quarterly', filing_date=datetime.date(2025, 11, 13), revenue=Decimal('1000'), net_income=Decimal('450'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100001', fiscal_period='2025Q4', period_type='quarterly', filing_date=datetime.date(2026, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100010', fiscal_period='2025A', period_type='annual', filing_date=datetime.date(2026, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100010', fiscal_period='2026Q1', period_type='quarterly', filing_date=datetime.date(2026, 5, 14), revenue=Decimal('1000'), net_income=Decimal('100'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100010', fiscal_period='2026Q2', period_type='quarterly', filing_date=datetime.date(2026, 8, 13), revenue=Decimal('1000'), net_income=Decimal('250'), payout_ratio=None, data_state='fresh')
+warnings:
+  - refresh_due: latest ended period 2026Q3; selected missing_latest=1, stale=1, uncollected=3; 1 not due
+  - 100004: fetch failed (fake DART outage for this symbol)
+
+committed 68 rows.
+
+fake DART calls this step: 81
+EXIT=0
+rows after refresh: {'100001': (7, '2026-10-02T23:09:33.817965+00:00', '2026Q2,2026Q1,2025Q4,2025A'), '100002': (1, '2026-10-02T23:09:30.209546+00:00', '2026Q3'), '100005': (27, '2026-10-02T23:09:33.817965+00:00', '2026Q2,2026Q1,2025Q4,2025A'), '100008': (27, '2026-10-02T23:09:33.817965+00:00', '2026Q2,2026Q1,2025A,2025Q4'), '100010': (8, '2026-10-02T23:09:33.817965+00:00', '2026Q3,2026Q2,2026Q1,2025Q4,2025A')}
+100001 2025Q4..2026: [('2025A', '600.00', '2026-03-20', 'fresh', '100001-2025-11011'), ('2025Q4', '150.00', '2026-03-20', 'fresh', '100001-2025-11011'), ('2026Q1', '100.00', '2026-05-14', 'fresh', '100001-2026-11013'), ('2026Q2', '150.00', '2026-08-13', 'fresh', '100001-2026-11012')]
+100005 2025Q4..2026: [('2025A', '600.00', '2026-03-20', 'fresh', '100005-2025-11011'), ('2025Q4', '150.00', '2026-03-20', 'fresh', '100005-2025-11011'), ('2026Q1', '100.00', '2026-05-14', 'fresh', '100005-2026-11013'), ('2026Q2', '150.00', '2026-08-13', 'fresh', '100005-2026-11012')]
+
+=== refresh-again-same-day: --with-quarterly --refresh-due --all --estimate-only
+
+--estimate-only: projected 52 DART requests for 1 KR symbols; no fetch, no rows written.
+
+  - refresh_due: latest ended period 2026Q3; selected uncollected=1; 5 not due
+  - estimate-only: projected 52 DART requests; no fetch performed
+fake DART calls this step: 0
+EXIT=0
+
+=== refresh-again-commit: --with-quarterly --refresh-due --all --commit --allow-partial
+NOTE: --dry-run still fetches from DART and consumes the daily request budget; use --estimate-only for a no-fetch projection.
+
+built 0 fundamentals snapshots for 1 KR symbols (dry_run=False, projected DART requests <= 52):
+idempotency:
+  wouldInsert: 0
+  wouldUpdate: 0
+  duplicatePayloadKeys: 0
+warnings:
+  - refresh_due: latest ended period 2026Q3; selected uncollected=1; 5 not due
+  - 100004: fetch failed (fake DART outage for this symbol)
+
+committed 0 rows.
+
+fake DART calls this step: 1
+EXIT=0
+fundamentals fetch failed symbol=100004: fake DART outage for this symbol
+
+=== explicit-rerun-idempotence: --symbol 100005 --with-quarterly --commit --allow-partial
+NOTE: --dry-run still fetches from DART and consumes the daily request budget; use --estimate-only for a no-fetch projection.
+
+built 27 fundamentals snapshots for 1 KR symbols (dry_run=False, projected DART requests <= 52):
+idempotency:
+  wouldInsert: 0
+  wouldUpdate: 27
+  duplicatePayloadKeys: 0
+samples:
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2025A', period_type='annual', filing_date=datetime.date(2026, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2024A', period_type='annual', filing_date=datetime.date(2025, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2023A', period_type='annual', filing_date=datetime.date(2024, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2022A', period_type='annual', filing_date=datetime.date(2023, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2021A', period_type='annual', filing_date=datetime.date(2022, 3, 20), revenue=Decimal('1000'), net_income=Decimal('600'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2026Q1', period_type='quarterly', filing_date=datetime.date(2026, 5, 14), revenue=Decimal('1000'), net_income=Decimal('100'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2026Q2', period_type='quarterly', filing_date=datetime.date(2026, 8, 13), revenue=Decimal('1000'), net_income=Decimal('250'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2025Q1', period_type='quarterly', filing_date=datetime.date(2025, 5, 14), revenue=Decimal('1000'), net_income=Decimal('100'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2025Q2', period_type='quarterly', filing_date=datetime.date(2025, 8, 13), revenue=Decimal('1000'), net_income=Decimal('250'), payout_ratio=None, data_state='fresh')
+  FinancialFundamentalsSnapshotSample(symbol='100005', fiscal_period='2025Q3', period_type='quarterly', filing_date=datetime.date(2025, 11, 13), revenue=Decimal('1000'), net_income=Decimal('450'), payout_ratio=None, data_state='fresh')
+
+committed 27 rows.
+
+fake DART calls this step: 30
+EXIT=0
+row counts unchanged by rerun: True
+
+=== budget-exhaustion: --symbol 100002 --with-quarterly --commit --allow-partial
+NOTE: --dry-run still fetches from DART and consumes the daily request budget; use --estimate-only for a no-fetch projection.
+
+built 0 fundamentals snapshots for 1 KR symbols (dry_run=True, projected DART requests <= 52):
+idempotency:
+  wouldInsert: 0
+  wouldUpdate: 0
+  duplicatePayloadKeys: 0
+warnings:
+  - DART daily request budget of 5 exceeded (attempted to make 6 requests)
+
+DART BUDGET EXHAUSTED: fetch stopped early and nothing was written. Not a successful run.
+
+fake DART calls this step: 5
+EXIT=3
+DART daily request budget exceeded during build: DART daily request budget of 5 exceeded (attempted to make 6 requests)
+100002 after exhaustion: (1, '2026-10-02T23:09:30.209546+00:00', '2026Q3')
+
+=== selection 8 days later (pure select_refresh_due on DB evidence)
+pool: ['100001', '100002', '100004', '100005', '100008', '100010']
+selected: [('100001', 'missing_latest', 16), ('100008', 'missing_latest', 16), ('100005', 'missing_latest', 16), ('100004', 'uncollected', 52)]
+dropped: swingfund_smoke_7c9564d8
+CLI_EXITS= [('estimate', 0), ('refresh-commit', 0), ('refresh-again-same-day', 0), ('refresh-again-commit', 0), ('explicit-rerun-idempotence', 0), ('budget-exhaustion', 3)]
+SMOKE_EXIT=0

@@ -1,0 +1,52 @@
+smoke db: swingfund_smoke_5db1b50e
+rows before: {'100001': ('2026-09-27T09:30:00+00:00', 1), '100002': ('2026-10-02T23:00:36.016898+00:00', 1), '100003': ('2026-09-27T09:30:00+00:00', 3), '100007': ('2026-08-01T00:00:00+00:00', 1)}
+
+$ -m scripts.build_financial_fundamentals_snapshots --with-quarterly --refresh-due --all --estimate-only
+--estimate-only: projected 68 DART requests for 2 KR symbols; no fetch, no rows written.
+
+  - refresh_due: latest ended period 2026Q3; selected missing_latest=1, uncollected=1; 2 not due
+  - estimate-only: projected 68 DART requests; no fetch performed
+log: 2026-10-02 23:00:46,694 - app.jobs.financial_fundamentals_snapshots - INFO - Projected DART requests for 2 symbols (include_quarterly=True): 68 (budget: 18000)
+EXIT=0
+
+$ -m scripts.build_financial_fundamentals_snapshots --with-quarterly --skip-existing --all --estimate-only
+--estimate-only: projected 52 DART requests for 1 KR symbols; no fetch, no rows written.
+
+  - skip_existing: 3 already-collected symbols skipped; 1 uncollected remain
+  - estimate-only: projected 52 DART requests; no fetch performed
+log: 2026-10-02 23:00:58,603 - app.jobs.financial_fundamentals_snapshots - INFO - Projected DART requests for 1 symbols (include_quarterly=True): 52 (budget: 18000)
+EXIT=0
+
+$ -m scripts.build_financial_fundamentals_snapshots --refresh-due --skip-existing
+
+EXIT=2
+
+$ -m scripts.build_financial_fundamentals_snapshots --with-quarterly --refresh-due --all --commit --allow-partial
+NOTE: --dry-run still fetches from DART and consumes the daily request budget; use --estimate-only for a no-fetch projection.
+
+built 0 fundamentals snapshots for 2 KR symbols (dry_run=False, projected DART requests <= 68):
+idempotency:
+  wouldInsert: 0
+  wouldUpdate: 0
+  duplicatePayloadKeys: 0
+warnings:
+  - refresh_due: latest ended period 2026Q3; selected missing_latest=1, uncollected=1; 2 not due
+  - 100001: fetch failed (OPENDART_API_KEY not set)
+  - 100004: fetch failed (OPENDART_API_KEY not set)
+
+committed 0 rows.
+log: 2026-10-02 23:01:10,803 - app.jobs.financial_fundamentals_snapshots - INFO - Projected DART requests for 2 symbols (include_quarterly=True): 68 (budget: 18000)
+EXIT=0
+rows after: {'100001': ('2026-09-27T09:30:00+00:00', 1), '100002': ('2026-10-02T23:00:36.016898+00:00', 1), '100003': ('2026-09-27T09:30:00+00:00', 3), '100007': ('2026-08-01T00:00:00+00:00', 1)}
+unchanged_after_failed_fetch: True
+
+$ -m scripts.build_financial_fundamentals_snapshots --with-quarterly --refresh-due --all --estimate-only
+--estimate-only: projected 68 DART requests for 2 KR symbols; no fetch, no rows written.
+
+  - refresh_due: latest ended period 2026Q3; selected missing_latest=1, uncollected=1; 2 not due
+  - estimate-only: projected 68 DART requests; no fetch performed
+log: 2026-10-02 23:01:22,818 - app.jobs.financial_fundamentals_snapshots - INFO - Projected DART requests for 2 symbols (include_quarterly=True): 68 (budget: 18000)
+EXIT=0
+dropped: swingfund_smoke_5db1b50e
+CLI_EXITS= [0, 0, 2, 0, 0]
+SMOKE_EXIT=0

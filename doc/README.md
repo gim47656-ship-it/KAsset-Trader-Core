@@ -49,6 +49,12 @@ STATUS: accepted | pending-user-device-check | partial | superseded-by <path>
 
 ## 월별 목록
 
+### 2026-10
+
+| 날짜 | 주제 | 기록 |
+|---|---|---|
+| 03 | 스윙 자료 지속 수집(올해 분기·재무 순환 갱신·전종목 수급) 보완 | [03-swing-data-refresh](history/2026/10/03-swing-data-refresh/main.md) |
+
 ### 2026-09
 
 | 날짜 | 주제 | 기록 |

@@ -1,0 +1,51 @@
+26b7f4565d444ffca20315c1fd594b258f0788d26423b1a4d44109ff74acb809  app/jobs/financial_fundamentals_snapshots.py
+43e5493ed35c9e9bc51212bccc7aa7413cc6a312e765199e97e0e7722d6094f5  scripts/build_financial_fundamentals_snapshots.py
+17e7569a3481a801fc7d1547912402999ec7a81a464e3af205895ca624749acf  tests/test_build_financial_fundamentals_cli.py
+98871a0ddcf2e6444fa74fc4b74dc888fa0e49a377103220fdcfecdc2d4daaba  /tmp/swingfund-smoke.py
+== pytest
+........................................                                 [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.75 database_seconds=0.18
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+40 passed in 12.48s
+PYTEST_EXIT=0
+== ruff check
+All checks passed!
+RUFF_CHECK_EXIT=0
+== ruff format --check
+3 files already formatted
+RUFF_FORMAT_EXIT=0
+== ty
+All checks passed!
+TY_EXIT=0
+== smoke
+smoke db: swingfund_smoke_b76c478a
+=== estimate: --with-quarterly --refresh-due --all --estimate-only
+EXIT=0
+=== refresh-commit: --with-quarterly --refresh-due --all --commit --allow-partial
+committed 68 rows.
+EXIT=0
+=== refresh-again-same-day: --with-quarterly --refresh-due --all --estimate-only
+EXIT=0
+=== refresh-again-commit-all-fail: --with-quarterly --refresh-due --all --commit --allow-partial
+NO ROWS COLLECTED: 1 symbols were fetched but every fetch failed or came back empty; nothing was written. Not a successful run.
+EXIT=4
+=== explicit-rerun-idempotence: --symbol 100005 --with-quarterly --commit --allow-partial
+committed 27 rows.
+EXIT=0
+row counts unchanged by rerun: True
+=== budget-exhaustion: --symbol 100002 --with-quarterly --commit --allow-partial
+DART BUDGET EXHAUSTED: fetch stopped early and nothing was written. Not a successful run.
+EXIT=3
+=== refresh-after-recovery: --with-quarterly --refresh-due --all --commit --allow-partial
+committed 27 rows.
+EXIT=0
+=== nothing-due: --with-quarterly --refresh-due --all --commit --allow-partial
+nothing due: no fetch, no rows written.
+EXIT=0
+=== selection 8 days later (pure select_refresh_due on DB evidence)
+100003 partial in window: None
+selected: [('100001', 'missing_latest', 16), ('100008', 'missing_latest', 16), ('100005', 'missing_latest', 16), ('100004', 'missing_latest', 16)]
+dropped: swingfund_smoke_b76c478a
+CLI_EXITS= [('estimate', 0), ('refresh-commit', 0), ('refresh-again-same-day', 0), ('refresh-again-commit-all-fail', 4), ('explicit-rerun-idempotence', 0), ('budget-exhaustion', 3), ('refresh-after-recovery', 0), ('nothing-due', 0)]
+SMOKE_EXIT=0

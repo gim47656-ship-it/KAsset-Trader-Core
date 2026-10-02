@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,7 @@ async def test_task_wrapper_defaults_to_dry_run_and_returns_camel_case(monkeypat
             market="kr",
             symbols_resolved=1,
             snapshots_built=1,
+            symbols_with_rows=1,
             committed=request.commit,
             batches=1,
             started_at=dt.datetime(2026, 5, 12, 7, 0, tzinfo=dt.UTC),
@@ -80,6 +82,7 @@ async def test_task_wrapper_defaults_to_dry_run_and_returns_camel_case(monkeypat
     assert payload["committed"] is False
     assert payload["idempotency"]["wouldInsert"] == 1
     assert payload["samples"][0]["snapshotDate"] == "2026-05-12"
+    assert payload["status"] == "ok" and payload["symbolsWithRows"] == 1
     assert payload["samples"][0]["doubleBuy"] is True
 
 
@@ -103,9 +106,70 @@ def test_recurring_schedule_is_default_off():
         ]
 
 
-def test_scheduled_cron_is_next_morning_kst():
-    """ROB-512 갭4: Naver frgn 일별 수급 확정 행은 당일 저녁엔 부분 발행
-    (2026-06-10 18:10 KST 실측 144/3,909 종목 = thin 파티션 → older_fallback)이고
-    익일 아침에 완성된다(2026-06-11 오전 라이브 검증). 구 ROB-438의 16:40 KST는
-    구조적으로 당일 데이터를 못 잡으므로 등록 cron은 익일 아침(개장 전)이어야 한다."""
-    assert tasks._KR_FLOW_CRON == "30 8 * * 1-5"
+def _result(resolved: int, with_rows: int) -> InvestorFlowSnapshotBuildResult:
+    return InvestorFlowSnapshotBuildResult(
+        market="kr",
+        symbols_resolved=resolved,
+        snapshots_built=with_rows * 20,
+        committed=False,
+        batches=1,
+        started_at=dt.datetime(2026, 10, 3, tzinfo=dt.UTC),
+        finished_at=dt.datetime(2026, 10, 3, tzinfo=dt.UTC),
+        symbols_with_rows=with_rows,
+    )
+
+
+def test_flow_status_reports_real_row_coverage():
+    assert tasks._flow_status(_result(3944, 3944)) == "ok"
+    assert tasks._flow_status(_result(3944, 3900)) == "partial"
+    assert tasks._flow_status(_result(3944, 0)) == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("now_utc", "expect_run"),
+    [
+        # Sat 08:30 KST, Fri session
+        (dt.datetime(2026, 10, 2, 23, 30, tzinfo=dt.UTC), True),
+        # Tue 08:30 KST after substitute-holiday Mon
+        (dt.datetime(2026, 10, 5, 23, 30, tzinfo=dt.UTC), True),
+        # Sun: Sat not session
+        (dt.datetime(2026, 10, 3, 23, 30, tzinfo=dt.UTC), False),
+        # Fri 10/9 holiday, Thu session
+        (dt.datetime(2026, 10, 8, 23, 30, tzinfo=dt.UTC), True),
+        # Sat after holiday Fri
+        (dt.datetime(2026, 10, 9, 23, 30, tzinfo=dt.UTC), False),
+    ],
+)
+async def test_scheduled_gate_runs_when_today_or_yesterday_is_session(
+    monkeypatch, now_utc, expect_run
+):
+    calls = []
+
+    async def fake_build(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    class _FrozenDT(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now_utc
+
+    monkeypatch.setattr(tasks, "build_investor_flow_snapshots", fake_build)
+    monkeypatch.setattr(
+        tasks,
+        "dt",
+        SimpleNamespace(datetime=_FrozenDT, UTC=dt.UTC, timedelta=dt.timedelta),
+    )
+    monkeypatch.setattr(tasks.settings, "investor_flow_snapshots_commit_enabled", False)
+    raw = getattr(
+        tasks.scheduled_kr_investor_flow,
+        "original_func",
+        tasks.scheduled_kr_investor_flow,
+    )
+    result = await raw()
+    assert bool(calls) is expect_run
+    if not expect_run:
+        assert result == {"status": "skipped_holiday", "market": "kr"}
+    else:
+        assert calls[0]["all_symbols"] is True and calls[0]["commit"] is False

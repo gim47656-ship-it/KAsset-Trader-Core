@@ -1,0 +1,40 @@
+Isolated checkout /tmp/kasset-swing-20261003-01a0fead; revision SwingFundamentals-r2
+import os,datetime as dt
+os.environ['SECRET_KEY']='Swing-Test-Only-2026-Collector-Validation-Key'
+os.environ['OPENDART_API_KEY']=''
+os.environ['DATABASE_URL']=os.environ['AUTO_TRADER_TEST_DATABASE_URL']
+from app.jobs.financial_fundamentals_snapshots import SymbolCollectionEvidence,select_refresh_due
+start=dt.datetime(2026,10,3,9,30,tzinfo=dt.UTC)
+ev={'000001':SymbolCollectionEvidence(dt.datetime(2026,9,1,tzinfo=dt.UTC),False,None),'000003':SymbolCollectionEvidence(dt.datetime(2026,8,1,tzinfo=dt.UTC),True,None)}
+seen=set()
+for i in range(14):
+ a=select_refresh_due(['000001','000002','000003'],ev,now=start+dt.timedelta(days=i),include_quarterly=True,limit=1,budget=18000)
+ picks=[(x.symbol,x.reason) for x in a.selected]
+ seen.update(x.symbol for x in a.selected)
+ print(i,picks,a.spent,a.deferred)
+print('seen_after_14_daily_runs=',sorted(seen))
+assert seen=={'000001','000002','000003'},'persistent high-priority failure starves other due symbols'
+
+STDOUT
+0 [('000001', 'missing_latest')] 16 2
+1 [('000001', 'missing_latest')] 16 2
+2 [('000001', 'missing_latest')] 16 2
+3 [('000001', 'missing_latest')] 16 2
+4 [('000001', 'missing_latest')] 16 2
+5 [('000001', 'missing_latest')] 16 2
+6 [('000001', 'missing_latest')] 16 2
+7 [('000001', 'missing_latest')] 16 2
+8 [('000001', 'missing_latest')] 16 2
+9 [('000001', 'missing_latest')] 16 2
+10 [('000001', 'missing_latest')] 16 2
+11 [('000001', 'missing_latest')] 16 2
+12 [('000001', 'missing_latest')] 16 2
+13 [('000001', 'missing_latest')] 16 2
+seen_after_14_daily_runs= ['000001']
+
+STDERR
+Traceback (most recent call last):
+  File "<stdin>", line 15, in <module>
+AssertionError: persistent high-priority failure starves other due symbols
+
+EXIT=1

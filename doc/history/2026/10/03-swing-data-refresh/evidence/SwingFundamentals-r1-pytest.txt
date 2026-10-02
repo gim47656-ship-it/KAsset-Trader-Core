@@ -1,0 +1,56 @@
+....................................................                     [100%]
+=============================== warnings summary ===============================
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:107: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['text'\][ =]+\"(.*?)\"\;"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:108: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['id'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:109: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:110: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:111: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['eleId'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:112: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['offset'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:113: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['length'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:114: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dtd'\][ =]+\"(.*?)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:115: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['tocNo'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:132: SyntaxWarning: invalid escape sequence '\('
+    single_page_re = "\t\tviewDoc\('(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\S+)',''\)\;"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:184: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+tests/test_financial_fundamentals_builder_orchestration.py::test_default_dart_fetcher_quarterly
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:185: SyntaxWarning: invalid escape sequence '\s'
+    + "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";", r.text)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.76 database_seconds=0.20
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+52 passed, 12 warnings in 14.46s
+EXIT=0
