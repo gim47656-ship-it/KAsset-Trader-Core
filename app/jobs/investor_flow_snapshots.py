@@ -66,6 +66,7 @@ class InvestorFlowSnapshotBuildResult:
     idempotency: dict[str, int] = field(default_factory=dict)
     samples: tuple[InvestorFlowSnapshotSample, ...] = ()
     warnings: tuple[str, ...] = ()
+    symbols_with_rows: int = 0
 
 
 def _validate_market(market: str) -> None:
@@ -259,6 +260,7 @@ async def run_investor_flow_snapshot_build(
         {"wouldInsert": 0, "wouldUpdate": 0, "duplicatePayloadKeys": 0}
     )
     date_distribution: Counter[str] = Counter()
+    symbols_with_rows: set[str] = set()
     samples: list[InvestorFlowSnapshotSample] = []
 
     effective_batch_size = request.batch_size if request.all_symbols else len(symbols)
@@ -279,6 +281,7 @@ async def run_investor_flow_snapshot_build(
             f"batch {batch_count}: {warning}" for warning in build_result.warnings
         )
         total_built += len(payloads)
+        symbols_with_rows.update(p.symbol for p in payloads)
         _merge_date_distribution(date_distribution, payloads)
         idempotency.update(await _classify_idempotency(payloads))
         remaining_sample_slots = max(0, 10 - len(samples))
@@ -300,4 +303,5 @@ async def run_investor_flow_snapshot_build(
         idempotency=dict(idempotency),
         samples=tuple(samples),
         warnings=tuple(warnings),
+        symbols_with_rows=len(symbols_with_rows),
     )

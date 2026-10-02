@@ -4,7 +4,7 @@ import asyncio
 import datetime as dt
 import logging
 import threading
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -217,6 +217,92 @@ FundamentalsFetcher = Callable[..., Awaitable[RawFundamentalsBundle]]
 _REPRT_CODE_BY_QUARTER = {1: "11013", 2: "11012", 3: "11014", 4: "11011"}
 
 
+@dataclass(frozen=True)
+class DartFiscalYearRequest:
+    """One fiscal year's DART statements to request.
+
+    ``quarters`` lists the interim reports (1..3). Q4 is never requested on its
+    own: it is differenced from the annual report against Q3.
+    """
+
+    year: int
+    annual: bool
+    quarters: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class DartFetchPlan:
+    """Fiscal periods to request for one symbol, newest year first."""
+
+    years: tuple[DartFiscalYearRequest, ...]
+
+    @property
+    def max_requests(self) -> int:
+        """Upper bound on metered DART calls this plan can make.
+
+        Annual: CFS + OFS fallback + 배당 report. Interim: CFS + OFS fallback.
+        Plus one disclosure-list call for filing dates.
+        """
+        return sum(3 * int(y.annual) + 2 * len(y.quarters) for y in self.years) + 1
+
+    @property
+    def listing_start(self) -> dt.date:
+        # Every filing for a fiscal year is made on or after Jan 1 of that year.
+        return dt.date(min(y.year for y in self.years), 1, 1)
+
+
+def latest_completed_quarter(today: dt.date) -> tuple[int, int]:
+    """(year, quarter) of the most recent quarter that ended before ``today``."""
+    current = (today.month - 1) // 3 + 1
+    if current == 1:
+        return today.year - 1, 4
+    return today.year, current - 1
+
+
+def latest_completed_period(
+    today: dt.date, *, include_quarterly: bool
+) -> tuple[str, dt.date]:
+    """(fiscal_period, period_end_date) of the newest ended period, filed or not."""
+    year, quarter = latest_completed_quarter(today)
+    if quarter == 4:
+        return f"{year}A", dt.date(year, 12, 31)
+    if include_quarterly:
+        return f"{year}Q{quarter}", _quarter_end_date(year, quarter)
+    return f"{year - 1}A", dt.date(year - 1, 12, 31)
+
+
+def dart_fetch_plan(
+    *, today: dt.date, include_quarterly: bool, annual_years: int = 5
+) -> DartFetchPlan:
+    """Ended fiscal periods only: never the running quarter or unfinished year.
+
+    ``annual_years`` counts the most recent ended fiscal years requested in full
+    (annual + Q1..Q3). The current year's ended quarters are added on top so
+    this year's 분기/반기 reports are collected as soon as DART has them.
+    """
+    year, quarter = latest_completed_quarter(today)
+    latest_annual_year = year if quarter == 4 else year - 1
+    interim = (1, 2, 3) if include_quarterly else ()
+    years = [
+        DartFiscalYearRequest(year=y, annual=True, quarters=interim)
+        for y in range(latest_annual_year, latest_annual_year - annual_years, -1)
+    ]
+    if include_quarterly and quarter < 4:
+        years.insert(
+            0,
+            DartFiscalYearRequest(
+                year=year, annual=False, quarters=tuple(range(1, quarter + 1))
+            ),
+        )
+    return DartFetchPlan(years=tuple(years))
+
+
+def _today_kst() -> dt.date:
+    from app.core.timezone import KST
+
+    return dt.datetime.now(KST).date()
+
+
 def _payload_from_annual(
     *,
     market: str,
@@ -333,6 +419,7 @@ async def build_financial_fundamentals_for_symbols(
     fetcher: FundamentalsFetcher,
     include_quarterly: bool = False,
     concurrency: int = 4,
+    plans: Mapping[str, DartFetchPlan] | None = None,
 ) -> FinancialFundamentalsBuildResult:
     market_norm = market.strip().lower()
     if market_norm != "kr":
@@ -345,7 +432,14 @@ async def build_financial_fundamentals_for_symbols(
     async def _one(symbol: str) -> None:
         async with sem:
             try:
-                bundle = await fetcher(symbol, include_quarterly=include_quarterly)
+                if plans is None:
+                    bundle = await fetcher(symbol, include_quarterly=include_quarterly)
+                else:
+                    bundle = await fetcher(
+                        symbol,
+                        include_quarterly=include_quarterly,
+                        plan=plans[symbol],
+                    )
             except DartDailyRequestBudgetExceeded:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -390,12 +484,18 @@ async def build_financial_fundamentals_for_symbols(
 
 
 async def default_dart_fetcher(
-    symbol: str, *, include_quarterly: bool, years_back: int = 5
+    symbol: str,
+    *,
+    include_quarterly: bool,
+    years_back: int = 5,
+    plan: DartFetchPlan | None = None,
 ) -> RawFundamentalsBundle:
     """Live DART fetcher: activates the dormant finstate_all + report('배당') methods.
 
     fs_div='CFS' (consolidated) first, falling back to 'OFS' (separate) when CFS is empty.
     filing dates resolved by joining each rcept_no to the disclosure-list endpoint.
+    Without ``plan`` it requests ``years_back`` ended fiscal years plus this
+    year's ended quarters (see ``dart_fetch_plan``).
     """
     from app.core.config import settings
     from app.services.disclosures.dart import _get_client
@@ -406,8 +506,11 @@ async def default_dart_fetcher(
     if client is None:
         raise RuntimeError("DART functionality not available")
 
-    today = dt.date.today()
-    years = list(range(today.year - 1, today.year - 1 - years_back, -1))
+    today = _today_kst()
+    if plan is None:
+        plan = dart_fetch_plan(
+            today=today, include_quarterly=include_quarterly, annual_years=years_back
+        )
 
     def fetch_sync() -> RawFundamentalsBundle:
         class BudgetedClient:
@@ -430,7 +533,10 @@ async def default_dart_fetcher(
         client_to_use = b_client
 
         annual: list[RawAnnualFiling] = []
-        for year in years:
+        for year_req in plan.years:
+            if not year_req.annual:
+                continue
+            year = year_req.year
             stmt = client_to_use.finstate_all(symbol, year, "11011", fs_div="CFS")
             if stmt is None or stmt.empty:
                 stmt = client_to_use.finstate_all(symbol, year, "11011", fs_div="OFS")
@@ -455,7 +561,8 @@ async def default_dart_fetcher(
         quarterly: list[RawQuarterlyFiling] = []
         if include_quarterly:
             annual_by_year = {a.bsns_year: a for a in annual}
-            for year in years:
+            for year_req in plan.years:
+                year = year_req.year
                 stmts_by_q: dict[int, tuple[str, pd.DataFrame]] = {}
                 for q in (1, 2, 3, 4):
                     reprt_code = _REPRT_CODE_BY_QUARTER[q]
@@ -466,7 +573,7 @@ async def default_dart_fetcher(
                                 ann_filing.rcept_no,
                                 ann_filing.income_statement,
                             )
-                    else:
+                    elif q in year_req.quarters:
                         q_stmt = client_to_use.finstate_all(
                             symbol, year, reprt_code, fs_div="CFS"
                         )
@@ -511,7 +618,7 @@ async def default_dart_fetcher(
         # Resolve filing dates via the disclosure-list endpoint (carries rcept_dt).
         listing = client_to_use.list(
             corp=symbol,
-            start=(today - dt.timedelta(days=365 * (years_back + 1))).isoformat(),
+            start=plan.listing_start.isoformat(),
             end=today.isoformat(),
             kind="A",  # 정기보고서
             final=True,

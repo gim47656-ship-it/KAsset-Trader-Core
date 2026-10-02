@@ -1,0 +1,17 @@
+host kasset-prod, image kasset-trader-core:04d62828e0..., overlay of Flow 4 files (r1; tasks test r2 = comment placement only)
+pytest tests/test_investor_flow_snapshot_tasks.py tests/test_investor_flow_snapshot_job.py: 14 passed, 12 warnings in 16.89s EXIT[pytest]=0
+ruff check (4 files): All checks passed! EXIT=0
+ty check (app/jobs/investor_flow_snapshots.py app/tasks/investor_flow_snapshot_tasks.py): All checks passed! EXIT=0
+ruff format --check r1: Would reformat tests/test_investor_flow_snapshot_tasks.py EXIT=1
+ruff format --check r2 (tasks test): 1 file already formatted EXIT=0
+smoke (throwaway pytest via db_session, fake fetcher, 230 symbols, 3 empty, all_symbols days=20 batch100, no external calls; 1 passed in 24.11s):
+SMOKE dry: 230 4540 227 3 {'wouldInsert': 4540, 'wouldUpdate': 0, 'duplicatePayloadKeys': 0} 3 [20] [100, 100, 30]
+SMOKE commit: 4540 227 db rows 4540
+SMOKE redry: {'wouldInsert': 0, 'wouldUpdate': 4540, 'duplicatePayloadKeys': 0}
+
+NOTE (r3, 코멘트 문구 수정 + cron 문자열 재고정 테스트 삭제, 동작 변경 없음; 검사 재실행 안 함):
+raw locator: 위 pytest/ruff/ty/smoke 원문은 Flow 세션의 bash 도구 결과(ssh 출력 tail)로만 존재하며 별도 spill artifact id 없음.
+  pytest/ruff check/ruff format(r1)/ty: 세션 도구 결과(첫 컨테이너 실행, "14 passed ... EXIT[pytest]=0", "EXIT[ruffc]=0", "EXIT[ruffa]=1", "EXIT[ty]=0")
+  ruff format r2: 별도 실행 "1 file already formatted EXIT=0"
+  smoke: pytest -s 출력 "SMOKE dry/commit/redry" 3줄, "1 passed in 24.11s"
+  유일한 artifact: artifact://120 (smoke 최초 실패, 비성공)

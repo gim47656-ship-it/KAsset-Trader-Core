@@ -132,6 +132,41 @@ async def test_commit_persists_and_second_dry_run_reports_would_update(
 
 
 @pytest.mark.asyncio
+async def test_symbols_with_rows_counts_only_symbols_that_produced_rows(
+    bind_job_session, monkeypatch
+):
+    async def fake_builder(**kwargs):
+        # 3 symbols requested, only the first produced rows (2 dates), others failed.
+        first = kwargs["symbols"][0]
+        return InvestorFlowBuildResult(
+            payloads=[
+                _payload(first, dt.date(2026, 5, 11)),
+                _payload(first, dt.date(2026, 5, 12)),
+            ],
+            warnings=("fetch failed",),
+        )
+
+    monkeypatch.setattr(job, "build_investor_flow_snapshots", fake_builder)
+    result = await job.run_investor_flow_snapshot_build(
+        job.InvestorFlowSnapshotBuildRequest(
+            symbols=("900321", "900322", "900323"), commit=False
+        )
+    )
+    assert result.symbols_resolved == 3
+    assert result.snapshots_built == 2
+    assert result.symbols_with_rows == 1
+
+    async def empty_builder(**kwargs):
+        return InvestorFlowBuildResult(payloads=[], warnings=("fetch failed",))
+
+    monkeypatch.setattr(job, "build_investor_flow_snapshots", empty_builder)
+    failed = await job.run_investor_flow_snapshot_build(
+        job.InvestorFlowSnapshotBuildRequest(symbols=("900321",), commit=False)
+    )
+    assert failed.symbols_with_rows == 0
+
+
+@pytest.mark.asyncio
 async def test_non_kr_market_rejected(bind_job_session):
     with pytest.raises(ValueError, match="Unsupported investor-flow snapshot market"):
         await job.run_investor_flow_snapshot_build(

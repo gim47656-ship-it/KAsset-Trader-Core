@@ -1,0 +1,23 @@
+host kasset-prod, image kasset-trader-core:04d62828e06f72ae7a4c314c796529db7e744759
+checkout /tmp/kasset-swing-20261003-01a0fead (readonly), --cpus=1.0 --network container:kasset-test-db
+overlay hashes observed before run:
+2871132f1b5e53a005553021ea57040b0d4a7a7d345d9fbfa656891360fedbc0  app/jobs/financial_fundamentals_snapshots.py
+4cf64105753389e72983bb48604e69317777ea171db87fd63da8790f1af4ba11  tests/test_financial_fundamentals_job.py
+
+== pytest -q --tb=short -p no:cacheprovider tests/test_financial_fundamentals_job.py tests/test_snapshot_commit_guard_wiring.py
+(OpenDartReader SyntaxWarning lines filtered)
+...........................                                              [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.79 database_seconds=0.19
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+27 passed in 12.33s
+PYTEST_EXIT=0
+== ruff check --no-cache app/jobs/financial_fundamentals_snapshots.py tests/test_financial_fundamentals_job.py
+All checks passed!
+RUFF_CHECK_EXIT=0
+== ruff format --check --no-cache (same 2 files)
+2 files already formatted
+RUFF_FORMAT_EXIT=0
+== ty check app/jobs/financial_fundamentals_snapshots.py
+All checks passed!
+TY_EXIT=0

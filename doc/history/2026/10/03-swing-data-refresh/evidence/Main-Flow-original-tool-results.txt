@@ -1,0 +1,94 @@
+message_id=30e58af6
+tool_call_id=toolu_018qN3QkubdVntEcEnBncsRe
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:107: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['text'\][ =]+\"(.*?)\"\;"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:108
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:108: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['id'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:109
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:109: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:110
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:110: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:111
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:111: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['eleId'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:112
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:112: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['offset'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:113
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:113: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['length'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:114
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:114: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dtd'\][ =]+\"(.*?)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:115
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:115: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['tocNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:132
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:132: SyntaxWarning: invalid escape sequence '\('
+    single_page_re = "\t\tviewDoc\('(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\S+)',''\)\;"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:184
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:184: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:185
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:185: SyntaxWarning: invalid escape sequence '\s'
+    + "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";", r.text)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.01 database_seconds=0.19
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+14 passed, 12 warnings in 16.89s
+EXIT[pytest]=0
+All checks passed!
+EXIT[ruffc]=0
+Would reformat: tests/test_investor_flow_snapshot_tasks.py
+1 file would be reformatted, 3 files already formatted
+EXIT[ruffa]=1
+All checks passed!
+EXIT[ty]=0
+
+
+Wall time: 29.80 seconds
+
+Command exited with code 0
+
+message_id=9c1b3edb
+tool_call_id=toolu_01HXVC8NgkTAwfAjoFGJ7U59
+SMOKE dry: 230 4540 227 3 {'wouldInsert': 4540, 'wouldUpdate': 0, 'duplicatePayloadKeys': 0} 3 [20] [100, 100, 30]
+SMOKE commit: 4540 227 db rows 4540
+SMOKE redry: {'wouldInsert': 0, 'wouldUpdate': 4540, 'duplicatePayloadKeys': 0}
+.
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.00 database_seconds=0.17
+1 passed in 24.11s
+
+
+
+Wall time: 35.57 seconds
+
+Command exited with code 0
+
+message_id=878d4f27
+tool_call_id=toolu_01WcxDeSMemyooETRcoQexX1
+1 file already formatted
+EXIT=0
+0
+
+
+Wall time: 3.02 seconds
+
+Command exited with code 1

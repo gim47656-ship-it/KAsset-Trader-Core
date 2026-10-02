@@ -10,6 +10,8 @@ from app.services.financial_fundamentals_snapshots.builder import (
     RawAnnualFiling,
     RawFundamentalsBundle,
     build_financial_fundamentals_for_symbols,
+    dart_fetch_plan,
+    latest_completed_period,
 )
 
 
@@ -171,7 +173,13 @@ async def test_default_dart_fetcher_quarterly(monkeypatch):
         default_dart_fetcher,
     )
 
-    bundle = await default_dart_fetcher("005930", include_quarterly=True, years_back=1)
+    bundle = await default_dart_fetcher(
+        "005930",
+        include_quarterly=True,
+        plan=dart_fetch_plan(
+            today=dt.date(2026, 1, 15), include_quarterly=True, annual_years=1
+        ),
+    )
 
     assert bundle.symbol == "005930"
     assert bundle.currency == "KRW"
@@ -191,6 +199,133 @@ async def test_default_dart_fetcher_quarterly(monkeypatch):
         c for c in fake_client.calls if c[0] == "finstate_all" and c[3] == "11011"
     ]
     assert len(calls_11011) == 1
+
+
+def test_fetch_plan_requests_only_ended_periods():
+    # 2026-10-03: Q3 ended 09-30, so 2026 Q1..Q3 are requestable; the 2026
+    # annual has not ended and the running Q4 is never requested.
+    plan = dart_fetch_plan(
+        today=dt.date(2026, 10, 3), include_quarterly=True, annual_years=5
+    )
+    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
+        (2026, False, (1, 2, 3)),
+        (2025, True, (1, 2, 3)),
+        (2024, True, (1, 2, 3)),
+        (2023, True, (1, 2, 3)),
+        (2022, True, (1, 2, 3)),
+        (2021, True, (1, 2, 3)),
+    ]
+    # 3 interim CFS+OFS + 5 x (annual CFS+OFS + 배당 + 3 interim CFS+OFS) + list
+    assert plan.max_requests == 52
+    assert plan.listing_start == dt.date(2021, 1, 1)
+    assert latest_completed_period(dt.date(2026, 10, 3), include_quarterly=True) == (
+        "2026Q3",
+        dt.date(2026, 9, 30),
+    )
+
+    # On the quarter-end day itself the quarter is still running.
+    plan = dart_fetch_plan(
+        today=dt.date(2026, 9, 30), include_quarterly=True, annual_years=1
+    )
+    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
+        (2026, False, (1, 2)),
+        (2025, True, (1, 2, 3)),
+    ]
+
+    # January: the fiscal year that just ended is the newest annual.
+    plan = dart_fetch_plan(
+        today=dt.date(2026, 1, 2), include_quarterly=True, annual_years=1
+    )
+    assert [(y.year, y.annual, y.quarters) for y in plan.years] == [
+        (2025, True, (1, 2, 3)),
+    ]
+    assert latest_completed_period(dt.date(2026, 1, 2), include_quarterly=True) == (
+        "2025A",
+        dt.date(2025, 12, 31),
+    )
+
+    annual_only = dart_fetch_plan(
+        today=dt.date(2026, 10, 3), include_quarterly=False, annual_years=5
+    )
+    assert [y.year for y in annual_only.years] == [2025, 2024, 2023, 2022, 2021]
+    assert all(not y.quarters for y in annual_only.years)
+    assert annual_only.max_requests == 16
+    assert latest_completed_period(dt.date(2026, 10, 3), include_quarterly=False) == (
+        "2025A",
+        dt.date(2025, 12, 31),
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_dart_fetcher_collects_current_year_quarters(monkeypatch):
+    class FakeCurrentYear:
+        def __init__(self):
+            self.calls = []
+
+        def finstate_all(self, symbol, year, reprt_code, fs_div="CFS"):
+            self.calls.append(("finstate_all", year, reprt_code, fs_div))
+            if year == 2026 and reprt_code == "11014":
+                return pd.DataFrame()  # 3분기보고서 not filed yet
+            cumulative = {"11013": "100", "11012": "250", "11014": "450"}
+            frame = _is_frame("1000", cumulative.get(reprt_code, "600"))
+            frame["rcept_no"] = f"r{year}{reprt_code}"
+            return frame
+
+        def report(self, *args, **kwargs):
+            self.calls.append(("report",))
+            return None
+
+        def list(self, corp, start, end, kind="A", final=True):
+            self.calls.append(("list", start))
+            return pd.DataFrame(
+                [
+                    {"rcept_no": "r202611013", "rcept_dt": "20260514"},
+                    {"rcept_no": "r202611012", "rcept_dt": "20260813"},
+                ]
+            )
+
+    fake = FakeCurrentYear()
+
+    async def mock_get_client():
+        return fake
+
+    monkeypatch.setattr("app.services.disclosures.dart._get_client", mock_get_client)
+    monkeypatch.setattr("app.core.config.settings.opendart_api_key", "dummy")
+
+    from app.services.financial_fundamentals_snapshots.builder import (
+        default_dart_fetcher,
+        reset_request_count,
+    )
+
+    plan = dart_fetch_plan(
+        today=dt.date(2026, 10, 3), include_quarterly=True, annual_years=1
+    )
+    reset_request_count()
+    result = await build_financial_fundamentals_for_symbols(
+        market="kr",
+        symbols=["005930"],
+        collected_at=dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC),
+        fetcher=default_dart_fetcher,
+        include_quarterly=True,
+        plans={"005930": plan},
+    )
+
+    finstate = [c for c in fake.calls if c[0] == "finstate_all"]
+    # The unfinished 2026 annual is never requested; an unfiled Q3 costs CFS+OFS.
+    assert not [c for c in finstate if c[1] == 2026 and c[2] == "11011"]
+    assert ("finstate_all", 2026, "11014", "OFS") in finstate
+    assert len(fake.calls) <= plan.max_requests
+    assert ("list", "2025-01-01") in fake.calls
+
+    by_period = {p.fiscal_period: p for p in result.payloads}
+    assert by_period["2026Q1"].discrete_net_income == Decimal("100")
+    assert by_period["2026Q2"].discrete_net_income == Decimal("150")  # 250 - 100
+    assert by_period["2026Q2"].filing_date == dt.date(2026, 8, 13)
+    assert by_period["2026Q2"].raw_payload["rcept_no"] == "r202611012"
+    # Unfiled quarter: no row at all rather than an empty/fake one.
+    assert "2026Q3" not in by_period
+    assert "2026A" not in by_period
+    assert by_period["2025Q4"].discrete_net_income == Decimal("150")  # 600 - 450
 
 
 @pytest.mark.asyncio
@@ -325,7 +460,13 @@ async def test_quarterly_skips_quarter_when_prior_missing(monkeypatch):
     )
 
     reset_request_count()
-    bundle = await default_dart_fetcher("005930", include_quarterly=True, years_back=1)
+    bundle = await default_dart_fetcher(
+        "005930",
+        include_quarterly=True,
+        plan=dart_fetch_plan(
+            today=dt.date(2026, 1, 15), include_quarterly=True, annual_years=1
+        ),
+    )
     quarters = {q.quarter for q in bundle.quarterly}
     assert 2 not in quarters  # Q2 frame empty -> not collected
     assert 3 not in quarters  # Q3 prior (Q2) missing -> skipped, NOT faked

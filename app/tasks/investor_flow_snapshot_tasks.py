@@ -9,6 +9,8 @@ allows DB writes (off → dry-run-on-cron). Operator flips both to activate.
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from typing import Any, Literal
 
 from app.core.config import settings
@@ -19,13 +21,16 @@ from app.jobs.investor_flow_snapshots import (
 )
 
 _KST_LABEL = "Asia/Seoul"
+logger = logging.getLogger(__name__)
 
 #: ROB-512 갭4: Naver frgn(일별 수급 확정 행)은 당일 저녁엔 부분 발행이라
 #: (2026-06-10 18:10 KST 실측 144/3,909 종목 → thin 파티션 → older_fallback)
 #: 당일 cron(구 ROB-438 "40 16")은 구조적으로 당일 데이터를 못 잡는다. 행은
 #: 익일 아침에 완성되므로 개장 전 08:30 KST에 전 거래일(D-1)을 적재한다.
 #: 휴장일 결행분은 빌더의 days=20 히스토리 upsert가 다음 run에서 백필한다.
-_KR_FLOW_CRON = "30 8 * * 1-5"
+#: 월~토: 금요일 확정분은 토요일 run이 수집 기회를 더 갖는다(토요일 원천 완성은 미검증,
+#: 다음 실행도 최근 20일을 다시 확인한다).
+_KR_FLOW_CRON = "30 8 * * 1-6"
 
 
 def _kr_flow_schedule(cron: str) -> list[dict[str, str]]:
@@ -33,6 +38,26 @@ def _kr_flow_schedule(cron: str) -> list[dict[str, str]]:
     if not settings.investor_flow_schedule_enabled:
         return []
     return [{"cron": cron, "cron_offset": _KST_LABEL}]
+
+
+def _flow_status(result: Any) -> Literal["ok", "partial", "failed"]:
+    """Report real row coverage: failed = no symbol produced rows, partial = some did not."""
+    if result.symbols_resolved and result.symbols_with_rows == 0:
+        status = "failed"
+        logger.error(
+            "investor-flow refresh produced no rows for %d symbols (%d warnings)",
+            result.symbols_resolved,
+            len(result.warnings),
+        )
+        return status
+    if result.symbols_with_rows < result.symbols_resolved:
+        logger.warning(
+            "investor-flow refresh partial: %d/%d symbols with rows",
+            result.symbols_with_rows,
+            result.symbols_resolved,
+        )
+        return "partial"
+    return "ok"
 
 
 @broker.task(task_name="build_investor_flow_snapshots")
@@ -83,6 +108,8 @@ async def build_investor_flow_snapshots(
             for sample in result.samples
         ],
         "warnings": list(result.warnings),
+        "symbolsWithRows": result.symbols_with_rows,
+        "status": _flow_status(result),
     }
 
 
@@ -95,12 +122,18 @@ async def scheduled_kr_investor_flow() -> dict[str, Any]:
 
     전 거래일(D-1) 확정 수급을 적재한다 — 당일 행은 저녁까지 부분 발행이라 당일
     cron은 thin 파티션만 만든다(ROB-512 갭4 실측, ``_KR_FLOW_CRON`` 주석 참조).
-    Holiday-gated via XKRX (skips non-trading days). Default-off; commit gated by
+    Gate: runs when today OR yesterday is an XKRX session (Mon-Sat 08:30), so
+    Friday's confirmed rows are collected Saturday and a weekday-holiday miss is
+    caught up the next day; Sunday is not scheduled. Default-off; commit gated by
     ``investor_flow_snapshots_commit_enabled`` (dry-run-on-cron until operator sets it).
     """
     from app.tasks.invest_screener_snapshot_tasks import is_market_session_today
 
-    if not is_market_session_today("kr"):
+    now = dt.datetime.now(dt.UTC)
+    if not (
+        is_market_session_today("kr", now=now)
+        or is_market_session_today("kr", now=now - dt.timedelta(days=1))
+    ):
         return {"status": "skipped_holiday", "market": "kr"}
     return await build_investor_flow_snapshots(
         market="kr",

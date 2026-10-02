@@ -1,0 +1,41 @@
+a15fee8fba774948b64469f8e4d0cf86e6e53b40726e5f8a2e0b1fda7ca9aa05  app/jobs/financial_fundamentals_snapshots.py
+30f63bc5bfe6b0ca629cf256f84deef2c4e7cdba8218ec83311b389a1db18d5f  scripts/build_financial_fundamentals_snapshots.py
+3476101110d83c2cdd19fb133f2fc85f9aac40993ca11d3db26134d1189127cc  tests/test_financial_fundamentals_job.py
+a786d48844ab6036e191d00cf9ea5a8c4f07a778f84a854b2417dfe22af1be52  tests/test_build_financial_fundamentals_cli.py
+== pytest
+........................................                                 [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.67 database_seconds=0.19
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+40 passed in 12.14s
+PYTEST_EXIT=0
+== ruff check
+C408 Unnecessary `dict()` call (rewrite as a literal)
+   --> tests/test_build_financial_fundamentals_cli.py:101:14
+    |
+100 |       now = dt.datetime(2026, 10, 3, 9, 30, tzinfo=dt.UTC)
+101 |       values = dict(
+    |  ______________^
+102 | |         market="kr",
+103 | |         symbols_resolved=0,
+104 | |         snapshots_built=0,
+105 | |         committed=False,
+106 | |         started_at=now,
+107 | |         finished_at=now,
+108 | |         projected_requests=0,
+109 | |     )
+    | |_____^
+110 |       values.update(overrides)
+111 |       return job.FinancialFundamentalsSnapshotBuildResult(**values)
+    |
+help: Rewrite as a literal
+
+Found 1 error.
+No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
+RUFF_CHECK_EXIT=1
+== ruff format --check
+4 files already formatted
+RUFF_FORMAT_EXIT=0
+== ty
+All checks passed!
+TY_EXIT=0

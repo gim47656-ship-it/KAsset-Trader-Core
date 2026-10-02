@@ -90,10 +90,10 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 
 | 스크립트 | 용도 | 실행 |
 |---|---|---|
-| `build_financial_fundamentals_snapshots` | DART 재무 (하루 400종목, API 한도 18,000건) | root cron 매일 18:30 KST (`kasset-dart-daily.sh` 1단계) |
+| `build_financial_fundamentals_snapshots` | DART 재무 지속 갱신 (최악 요청 수로 일일 18,000건 안에서 대상 선정) | root cron 매일 18:30 KST (`kasset-dart-daily.sh` 1단계) |
 | `app.jobs.dart_disclosure_ingestion` (`-m`으로 실행) | DART 공시 목록 → `news_articles`(`feed_source=dart`), 최근 N일 upsert | root cron 매일 18:30 KST (`kasset-dart-daily.sh` 2단계, `--recent-days 2`) · 백필은 `--from-date`/`--to-date` |
 | `sync_symbol_master` | 원본 KR/US universe에 있지만 검색 마스터에는 없는 보통주·ETF·미국 ADR 추가 | root cron 매일 22:00 KST, 수동 실행은 `--commit` |
-| `build_investor_flow_snapshots` | 투자자 수급 백필 | 수동 |
+| `build_investor_flow_snapshots` | 국장 전체 종목 최근 20일 수급 보충 | 승인 후 TaskIQ 월~토 08:30 KST (`investor_flow_snapshots.kr_scheduled`), 수동 백필도 가능 |
 | `backfill_daily_candles` | 일봉 백필 | 수동 |
 | `generate_symbol_search_aliases` | AI 검색 별칭 (sidecar `low`) | 수동 (`--commit`) |
 | `kasset_strategy_validation` | 전략 검증 보고서 (DB 읽기 전용) | 수동 (`--output`) |
@@ -108,13 +108,43 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 - 점검: `crontab -l`, `systemctl is-active crond`, `/var/log/kasset-symbol-master-daily.log`
 - 복구: 원본 수집 상태를 확인한 뒤 위 일회성 컨테이너 명령으로 `scripts.sync_symbol_master --commit`을 실행합니다. 중복 키는 추가하지 않습니다.
 
-DART 일일 작업은 재무 백필 뒤에 공시 목록 수집을 이어서 돌립니다. 두 단계는 같은 `OPENDART_API_KEY` 하루 한도(20,000건)를 나눠 씁니다.
+DART 일일 작업은 재무 지속 갱신 뒤에 공시 목록 수집을 이어서 돌립니다. 두 단계는 같은 `OPENDART_API_KEY` 하루 한도(20,000건)를 나눠 쓰며, 재무 자체 상한 18,000건을 유지합니다.
 
 - 실행 파일: `/usr/local/bin/kasset-dart-daily.sh` (이전 판 `/root/kasset-dart-daily.sh.bak-20260927`)
 - 예약: `30 18 * * * /usr/local/bin/kasset-dart-daily.sh >> /var/log/kasset-dart-daily.log 2>&1`
 - 중복 실행 방지: 스크립트 전체를 `/run/kasset-dart-daily.lock`에 `flock`. 재무 단계가 실패해도 공시 단계는 실행됩니다.
 - 점검: 로그의 `fundamentals exit=`·`disclosures exit=` 줄, `news_ingestion_runs`의 `feed_set=dart` 행
 - 공시 백필: 한 번에 여러 달을 넣지 말고 하루씩 나눠 실행합니다. 공시 목록만 받는 경우 약 100건당 1요청입니다.
+
+재무 cron의 수집 명령은 승인 후 아래 지속 갱신 모드로 바꿉니다.
+기존 `--skip-existing`은 최초 백필 전용이며 한 행이라도 저장된 종목을 다시 받지 않으므로 지속 갱신에 쓰지 않습니다.
+
+```bash
+python -m scripts.build_financial_fundamentals_snapshots \
+  --with-quarterly --refresh-due --all --commit --allow-partial
+```
+
+- 과거 5개 완료 회계연도와 올해 이미 끝난 분기를 대상으로 합니다. 법정 제출기한 전 조기 공시도 받을 수 있으며, 미종료 기간은 요청하지 않고 미공시 기간의 가짜 행을 만들지 않습니다.
+- 기존 종목의 최신 기간 누락·부분 자료는 7일 후 재확인 대상, 정정 확인은 30일 후 대상이 됩니다. 대상 수와 예산 때문에 실제 갱신은 여러 날에 나뉠 수 있습니다. 성공한 수집 근거 없이 갱신시각을 만들지 않습니다.
+- 자동 대상은 종목 마스터의 보통주 구분을 사용해 ETF·우선주 등을 제외합니다. 명시적 `--symbol` 수동 조회는 별개입니다.
+- `--all`도 요청 예산을 넘기지 않도록 나눠 선정하며, 결과의 `projected_requests`·선정 사유·이월 종목 수를 확인합니다.
+- 먼저 같은 옵션에 `--estimate-only`를 사용하면 외부 DART 호출·DB 저장 없이 선정 대상을 확인할 수 있습니다(`--commit`과 함께 사용하지 않음). `--dry-run` 기본 동작은 DB에 저장하지 않을 뿐 실제 DART 요청 예산을 소비합니다.
+- 요청 카운터는 수집 프로세스 단위입니다. 같은 날 전체 재무 작업을 수동으로 반복하면 다른 프로세스·공시 수집과 사용량이 합산되지 않으므로, 운영 일일 실행과 중복하지 않습니다. 배포 직후의 소수 종목 확인도 공시용 여유분 안에서 별도로 제한합니다.
+- 종료 코드는 정상·무대상 `0`, 예산 소진으로 무저장 `3`, 선택한 모든 종목이 실패하거나 빈 응답으로 끝나 무저장 `4`입니다. 일부 종목 실패를 허용한 실행은 경고와 실제 적재 범위를 함께 확인합니다.
+
+### 수급 지속 갱신
+
+기존 TaskIQ 예약을 사용하며 별도 root cron을 추가하지 않습니다. `.env.kasset`의
+`INVESTOR_FLOW_SCHEDULE_ENABLED=true`는 예약 등록,
+`INVESTOR_FLOW_SNAPSHOTS_COMMIT_ENABLED=true`는 DB 저장을 각각 허용합니다.
+둘 다 기본값은 `false`입니다. 승인 후 값을 변경하고 worker·scheduler를 재생성해야
+import 시점의 예약 라벨과 실행 설정에 반영됩니다.
+
+- 월~토 08:30 KST에 오늘 또는 전일이 KRX 거래일이면 전체 active KR universe의 최근 20일을 upsert합니다. 금요일 자료는 토요일에도 수집 기회를 얻습니다.
+- 실제 Naver 공표가 늦으면 해당 run에 최신 행이 없을 수 있습니다. 이후 run의 20일 보충이 결손을 다시 채우므로, 성공 종료뿐 아니라 `snapshot_date`별 종목 수를 확인합니다.
+- 작업 결과의 `symbolsWithRows`와 `status=ok/partial/failed`를 확인합니다. 일부·전체 누락은 경고·오류 로그로 남기며, 이 결과로 자동 재시도를 추가하지 않습니다.
+- 기존 16:40 `kasset.market_snapshots.kr.sync`는 보유·관심·추천 종목용이며, 전체 수급 갱신을 대신하지 않습니다.
+- 초기 누락 보충은 위 일회성 컨테이너에서 `scripts.build_investor_flow_snapshots --market kr --all --days 20 --batch-size 100 --commit`을 실행합니다. 1년 백필은 `--days 250 --batch-size 25`로 DB 바인드 인자 한도를 피합니다.
 
 ## 개발 규칙 (요약)
 
