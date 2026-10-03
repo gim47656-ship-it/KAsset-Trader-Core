@@ -4,7 +4,7 @@ RECORD:
 DATE: 2026-10-03
 SCOPE: 스윙 데이터, DART 재무, 전종목 수급, 순환 갱신, cron
 PATHS: app/jobs/financial_fundamentals_snapshots.py, app/services/financial_fundamentals_snapshots/builder.py, scripts/build_financial_fundamentals_snapshots.py, app/jobs/investor_flow_snapshots.py, app/tasks/investor_flow_snapshot_tasks.py, env.example, README.md, HANDOFF.md
-STATUS: partial
+STATUS: accepted
 
 ## 요구와 확인한 원인
 
@@ -53,10 +53,24 @@ STATUS: partial
 
 ## 운영 반영 경계
 
-이 기록 시점에는 소스 검수만 수용했고 운영 이미지·설정·cron은 변경하지 않았다. GitHub `Test` 결과는 해당 PR에서 확인한다. 머지는 자동 `Deploy`를 유발하므로 운영 승인 후에만 진행한다.
+초기 소스 검수 뒤 사용자에게 PR #110의 머지·자동 배포, 재무 wrapper 교체, 수급 설정 활성화와 1회 보충 범위를 제시했고 승인을 받았다. PR head `fe36762934fcf8db692c05f097c5169806387456`의 [Test](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37078025312)가 성공한 뒤 머지했다. 머지 revision `7cbb6c4804d9c0c7322bcfc29f3c3523fe0b39e7`의 [Test](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37078753029)와 [Deploy](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37079385612)가 성공했다. Test의 advisory 보안 스캐너는 Bandit 경고를 냈으며, 이를 경고 없음으로 해석하지 않았다. 변경 수집기 4파일의 Bandit finding은 0이었다.
 
-승인 후 대상은 현재 운영서버의 재무 wrapper `/usr/local/bin/kasset-dart-daily.sh`, `/opt/kasset-trader-core/.env.kasset`의 수급 두 플래그와 같은 revision의 배포다. 정확한 CLI와 기본 설정은 README 「수동·예약 데이터 작업」이 정본이다. 새 cron을 중복 등록하지 않는다.
+운영 `/usr/local/bin/kasset-dart-daily.sh`의 재무 단계를 `--with-quarterly --refresh-due --all --commit --allow-partial`로 교체했다. 기존 18:30 cron·공시 수집·flock은 유지했다. `.env.kasset`의 `INVESTOR_FLOW_SCHEDULE_ENABLED`, `INVESTOR_FLOW_SNAPSHOTS_COMMIT_ENABLED`를 켜고 같은 배포 revision의 worker·scheduler에 적용했다. 실제 scheduler 프로세스 설정에서 두 값 `True`, 예약 `30 8 * * 1-6`, `cron_offset=Asia/Seoul`을 확인했다. 새 root cron은 추가하지 않았다.
 
-수급 최근 20일은 1회 보충하고 날짜별 전체 대상 커버리지를 확인한다. 재무 요청 카운터는 프로세스 단위이므로 일일 cron과 수동 전체 실행을 같은 날 중복시키지 않는다. 초기 실제 자료 확인은 소수 종목·작은 요청 예산으로 제한하고, 전체 재무는 일일 순환을 통해 채운다. 가짜 provider 검증을 실제 OpenDART/Naver 적재 완료로 보고하지 않는다.
+### 운영 실제 실행과 저장 결과
+
+- 실제 OpenDART 호출은 삼성전자 `005930`·SK하이닉스 `000660` 두 종목, 프로세스 요청 예산 200으로 제한했다. 운영 DB에서 각 종목 `2026Q1`, `2026Q2` 총 4행과 단독 분기 순이익 존재를 확인했다. 공시일은 각각 `2026-05-15`, `2026-08-14`, `source_collected_at=2026-10-03 00:03:47.267051+00`, `data_state=fresh`다. 전체 재무 수동 실행은 하지 않았다.
+- 실제 Naver 수급 CLI는 `--market kr --all --days 20 --batch-size 100 --commit`으로 실행했다. 원문 결과: `built 78668 investor-flow snapshots for 3944 KR symbols (dry_run=False, batches=40)`, `wouldInsert: 19609`, `wouldUpdate: 59059`, `duplicatePayloadKeys: 0`, `committed 78668 rows.` 종료 코드 0, 소요 439.08초.
+- 별도 read-only transaction에서 `market='kr' AND collected_at >= '2026-10-03T00:07:00Z'`를 조회해 **78,668행·3,944종목** 저장을 대조했다. 일자별 종목 수는 9/28 **3,936**, 9/29 **3,938**, 9/30·10/1·10/2 각각 **3,939**다.
+- 대상 전부가 최신 거래일 자료를 가진 것은 아니다. `084180`의 최신 수급일은 9/30, `454180`, `464240`, `488200`, `488210`은 9/23이다. 각 종목 20행은 저장됐지만 지연 사유까지 입증한 것은 아니다. 오래된 날짜를 최신 날짜로 바꾸거나 행을 합성하지 않았다.
+- 종료 후 api·worker·scheduler 등 운영 애플리케이션 이미지가 `7cbb6c4804d9c0c7322bcfc29f3c3523fe0b39e7`임을 확인했고 `/health`는 `{"status":"ok"}`였다. 이번에 시작한 수집·검증 background job은 모두 종료됐다.
+
+**남은 관측:** 변경 이후 18:30 재무 cron과 다음 유효한 08:30 수급 예약이 실제 자동 발화한 결과는 아직 관측하지 않았다. 예약 등록·설정 적용·실제 provider 수동 실행 성공을 자동 실행 성공으로 바꿔 보고하지 않는다. 재무는 일일 순환으로 전체 최신화를 진행하며, 요청 카운터가 프로세스 단위이므로 같은 날 전체 작업을 중복 실행하지 않는다.
 
 스윙 전략 수익성 재검증·PAPER 연결은 수행하지 않았다. 그 판단은 데이터가 충분해진 뒤 별도 근거가 필요하다.
+
+## 외부 전략 검토의 결론과 비적용 경계
+
+첨부 명세와 외부 소스는 기존 단기 운영을 바꾸는 승인이 아니라 스윙·장기 연구 후보로 검토했다. 현재 공통 청산 설정과 owner promotion bypass가 기간별로 분리돼 있지 않으므로, 새 기간을 추가하기 전에 cycle별 정책 고정·기간별 승격 경계를 별도로 설계해야 한다. 완료 주봉 압축은 패턴 검출 후보이지 완성된 주문 전략이 아니다. 현 재무 upsert는 이전 값과 정정별 관측 이력을 보존하지 않으므로 현재 snapshot만으로 과거 시점 실적 연구를 완성했다고 볼 수 없다.
+
+[Hossa 원본](https://github.com/gatsjy/Project_billionaire_boys_hossa/tree/76857e4e276ed66b496d91d4859105ab17a423d4)은 ETF 포트폴리오의 이평 앙상블·히스테리시스·비대칭 재조정 아이디어만 연구 후보로 받았다. 명시적 LICENSE/COPYING/NOTICE 파일을 찾지 못했으므로 소스 복사는 하지 않았다. 원본 비용 반영·훈련/검증 분리는 확인했지만 다음 거래일 실제 주문 체결·미체결·정수 수량을 재현한 독립 성과 검증은 수행하지 않았다. ETF 거래세 0 가정을 개별주에 적용하지 않는다. 비교는 동일 진입 기록의 매도 차이와 현금·한도·미체결을 포함한 전체 포트폴리오 결과를 구분해야 한다. 새 전략 코드·주문·스케줄은 추가하지 않았다.
