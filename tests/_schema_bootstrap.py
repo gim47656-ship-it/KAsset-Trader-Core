@@ -130,10 +130,13 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v56: symbol_master.security_type CHECK가 DEPOSITARY_RECEIPT(ADR)를 허용한다.
 # mirrored ALTER는 없으므로 로컬 상시 테스트 DB는 한 번 재생성되어야 한다. 운영은
 # alembic/versions/20260926_symbol_master_depositary_receipt.py를 적용한다.
+# v57: review.kasset_swing_shadow_runs / review.kasset_swing_shadow_signals
+# (스윙 SHADOW 관측 원장)가 새 ORM 테이블로 들어온다. create_all이 만들고 mirrored
+# ALTER는 없다. 운영은 alembic/versions/20261003_kasset_swing_shadow.py를 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 56
+SCHEMA_BOOTSTRAP_VERSION = 57
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"

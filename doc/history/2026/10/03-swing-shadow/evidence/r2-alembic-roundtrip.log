@@ -1,0 +1,49 @@
+NOTICE:  database "swing_alembic_20261003_01a0fead" does not exist, skipping
+DROP DATABASE
+CREATE DATABASE
+CREATE_ALL_OK
+CREATE_ALL_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running stamp_revision  -> 20261003_kasset_swing_shadow
+STAMP_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+20261003_kasset_swing_shadow (head)
+CURRENT_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20261003_kasset_swing_shadow -> 20260926_symbol_master_adr, KRX 스윙 SHADOW 관측 run·신호 원장을 추가한다.
+DOWNGRADE_EXIT=0
+20260926_symbol_master_adr
+0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20260926_symbol_master_adr -> 20261003_kasset_swing_shadow, KRX 스윙 SHADOW 관측 run·신호 원장을 추가한다.
+UPGRADE_EXIT=0
+20261003_kasset_swing_shadow
+kasset_swing_shadow_runs
+kasset_swing_shadow_signals
+ck_kasset_swing_shadow_runs_candidate_counts_object
+ck_kasset_swing_shadow_runs_completed_complete
+ck_kasset_swing_shadow_runs_config_fingerprint
+ck_kasset_swing_shadow_runs_config_object
+ck_kasset_swing_shadow_runs_exclusions_object
+ck_kasset_swing_shadow_runs_reason_required
+ck_kasset_swing_shadow_runs_schema_version
+ck_kasset_swing_shadow_runs_status
+ck_kasset_swing_shadow_runs_trigger_source
+ck_kasset_swing_shadow_signals_anchor_not_future
+ck_kasset_swing_shadow_signals_candidate
+ck_kasset_swing_shadow_signals_config_fingerprint
+ck_kasset_swing_shadow_signals_evidence_object
+ck_kasset_swing_shadow_signals_market
+ck_kasset_swing_shadow_signals_prices_positive
+ck_kasset_swing_shadow_signals_schema_version
+ck_kasset_swing_shadow_signals_symbol_nonempty
+fk_kasset_swing_shadow_signals_run_id_kasset_swing_shadow_runs
+pk_kasset_swing_shadow_runs
+pk_kasset_swing_shadow_signals
+uq_kasset_swing_shadow_signals_identity
+DROP DATABASE
+DROP_EXIT=0

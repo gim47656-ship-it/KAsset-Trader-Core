@@ -1,0 +1,636 @@
+--- C:\Users\kkmin\AppData\Local\Temp/r2.diff	2026-10-03 10:32:21.282762100 +0900
++++ C:\Users\kkmin\AppData\Local\Temp/r3.diff	2026-10-03 10:32:21.304291100 +0900
+@@ -463,10 +463,10 @@
+ +    op.drop_table(_RUNS, schema=_SCHEMA)
+ diff --git a/app/extensions/kasset/automation/swing_shadow.py b/app/extensions/kasset/automation/swing_shadow.py
+ new file mode 100644
+-index 000000000..3fd095eac
++index 000000000..231e3a36c
+ --- /dev/null
+ +++ b/app/extensions/kasset/automation/swing_shadow.py
+-@@ -0,0 +1,908 @@
++@@ -0,0 +1,935 @@
+ +"""KRX 스윙 SHADOW 3후보 판정과 가상 성과 계산(순수 함수, DB·네트워크·시계 없음).
+ +
+ +이 모듈은 주문·추천·승격 경로와 연결되지 않는다. 판정 입력은 호출자가 이미
+@@ -541,6 +541,24 @@
+ +    BAR_MISSING = "bar_missing"
+ +    PRICE_DISCONTINUITY = "price_discontinuity"
+ +    CALENDAR_UNAVAILABLE = "calendar_unavailable"
+++    INVALID_BAR = "invalid_bar"
+++    ENTRY_UNTRADABLE = "entry_untradable"
+++    EXIT_UNTRADABLE = "exit_untradable"
+++
+++
+++def _bar_is_valid(bar: SwingBar) -> bool:
+++    """가격 양수·OHLC 정합·거래량 비음수. ``kr_candles_1d``는 NOT NULL만 보장한다."""
+++
+++    return (
+++        all(
+++            value.is_finite() and value > _ZERO
+++            for value in (bar.open, bar.high, bar.low, bar.close)
+++        )
+++        and bar.volume.is_finite()
+++        and bar.volume >= _ZERO
+++        and bar.high >= max(bar.open, bar.close, bar.low)
+++        and bar.low <= min(bar.open, bar.close)
+++    )
+ +
+ +
+ +def _decimal(value: object) -> Decimal:
+@@ -800,14 +818,8 @@
+ +    dates = [bar.session_date for bar in retained]
+ +    if len(set(dates)) != len(dates):
+ +        return excluded("duplicate_bar")
+-+    for bar in retained:
+-+        if (
+-+            any(v <= _ZERO for v in (bar.open, bar.high, bar.low, bar.close))
+-+            or bar.volume < _ZERO
+-+            or bar.high < max(bar.open, bar.close, bar.low)
+-+            or bar.low > min(bar.open, bar.close)
+-+        ):
+-+            return excluded("invalid_ohlcv")
+++    if not all(_bar_is_valid(bar) for bar in retained):
+++        return excluded("invalid_ohlcv")
+ +    if not retained or retained[-1].session_date != signal_session:
+ +        return excluded("stale_latest_bar")
+ +
+@@ -1233,6 +1245,7 @@
+ +    net_return: Decimal | None = None
+ +    mfe: Decimal | None = None
+ +    mae: Decimal | None = None
+++    zero_volume_holding_sessions: int = 0
+ +
+ +
+ +def evaluate_outcome(
+@@ -1277,16 +1290,26 @@
+ +            exit_session=exit_session,
+ +        )
+ +    path = tuple(bars_by_date[day] for day in window)
+++
+++    def blocked(status: OutcomeStatus) -> HorizonOutcome:
+++        return HorizonOutcome(
+++            horizon, status, entry_session=entry_session, exit_session=exit_session
+++        )
+++
+++    # 나눗셈·MFE/MAE 전에 원시 봉을 검사한다. 거래량 0인 진입·청산 세션은 그 가격에
+++    # 체결될 수 없으므로 실현 가능한 성과에서 뺀다. 중간 보유일의 거래량 0은
+++    # 보유 평가(mark-to-market)로 남기고 개수만 따로 센다.
+++    if not all(_bar_is_valid(bar) for bar in path):
+++        return blocked(OutcomeStatus.INVALID_BAR)
+++    if path[0].volume == _ZERO:
+++        return blocked(OutcomeStatus.ENTRY_UNTRADABLE)
+++    if path[-1].volume == _ZERO:
+++        return blocked(OutcomeStatus.EXIT_UNTRADABLE)
+ +    previous_close = signal_close
+ +    for bar in path:
+ +        for price in (bar.open, bar.close):
+ +            if abs(price / previous_close - _ONE) > config.max_abs_session_move:
+-+                return HorizonOutcome(
+-+                    horizon,
+-+                    OutcomeStatus.PRICE_DISCONTINUITY,
+-+                    entry_session=entry_session,
+-+                    exit_session=exit_session,
+-+                )
+++                return blocked(OutcomeStatus.PRICE_DISCONTINUITY)
+ +        previous_close = bar.close
+ +    entry_open = path[0].open
+ +    exit_close = path[-1].close
+@@ -1309,6 +1332,7 @@
+ +        net_return=_quantize(net),
+ +        mfe=_quantize(mfe),
+ +        mae=_quantize(mae),
+++        zero_volume_holding_sessions=sum(1 for bar in path if bar.volume == _ZERO),
+ +    )
+ +
+ +
+@@ -1325,6 +1349,9 @@
+ +        "signals": len(outcomes),
+ +        "statusCounts": counts,
+ +        "matureCount": len(mature),
+++        "matureWithZeroVolumeHolding": sum(
+++            1 for item in mature if item.zero_volume_holding_sessions > 0
+++        ),
+ +        "sampleAdvisory": (
+ +            "insufficient_sample"
+ +            if len(mature) < min_mature_sample
+@@ -1377,10 +1404,10 @@
+ +]
+ diff --git a/app/extensions/kasset/automation/swing_shadow_service.py b/app/extensions/kasset/automation/swing_shadow_service.py
+ new file mode 100644
+-index 000000000..e46b8f0a6
++index 000000000..656608eab
+ --- /dev/null
+ +++ b/app/extensions/kasset/automation/swing_shadow_service.py
+-@@ -0,0 +1,716 @@
++@@ -0,0 +1,834 @@
+ +"""KRX 스윙 SHADOW 관측 저장과 가상 성과 리포트(DB 경계).
+ +
+ +쓰기 대상은 ``review.kasset_swing_shadow_runs``·``review.kasset_swing_shadow_signals``
+@@ -1472,8 +1499,12 @@
+ +    "세션 간 시가·종가가 직전 종가 대비 35%를 넘게 움직인 표본은 "
+ +    "price_discontinuity로 성과 통계에서 뺀다(가격제한폭 30% 초과는 기업행동·자료 "
+ +    "오류로 본다).",
+-+    "가상 진입은 다음 세션 시가 전량 체결을 가정한다. 시가 상·하한가 잠김이나 호가 "
+-+    "공백으로 실제로 체결되지 않았을 수 있는 경우를 구분하지 못한다.",
+++    "가상 진입은 다음 세션 시가 전량 체결을 가정한다. kr_candles_1d는 NOT NULL만 "
+++    "보장하므로 진입~청산 봉의 가격 양수·OHLC 정합을 먼저 검사해 어긋나면 "
+++    "invalid_bar, 진입 세션 거래량 0은 entry_untradable, 청산 세션 거래량 0은 "
+++    "exit_untradable로 통계에서 뺀다. 중간 보유일 거래량 0은 보유 평가로 두고 "
+++    "zeroVolumeHoldingSessions로 센다. 거래가 있었더라도 시가 상·하한가 잠김이나 "
+++    "호가 공백으로 실제로 체결되지 않았을 수 있는 경우는 구분하지 못한다.",
+ +    "일봉은 이후 재적재될 수 있다. 관측 시점 신호봉과 현재 봉의 가격·source가 다르면 "
+ +    "signal_bar_revised로 세고 저장된 관측 시점 값은 바꾸지 않는다.",
+ +    "유니버스는 관측 시점 kr_symbol_universe 보통주 정의다. 이후 상장폐지·거래정지된 "
+@@ -1868,6 +1899,7 @@
+ +        "netReturn": text_or_none(outcome.net_return),
+ +        "mfe": text_or_none(outcome.mfe),
+ +        "mae": text_or_none(outcome.mae),
+++        "zeroVolumeHoldingSessions": outcome.zero_volume_holding_sessions,
+ +    }
+ +
+ +
+@@ -1882,6 +1914,136 @@
+ +    }
+ +
+ +
+++def _candidate_counts(run: KAssetSwingShadowRun, key: str) -> Mapping[str, object]:
+++    value = run.candidate_counts.get(key) if run.candidate_counts else None
+++    return value if isinstance(value, Mapping) else {}
+++
+++
+++def _int(value: object) -> int:
+++    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+++
+++
+++def _session_coverage(
+++    expected_sessions: Sequence[date],
+++    runs: Sequence[KAssetSwingShadowRun],
+++    records: Sequence[KAssetSwingShadowSignal],
+++) -> dict[str, object]:
+++    """조회 기간 거래일마다 관측 상태를 하나로 정한다.
+++
+++    같은 세션의 재실행은 합산하지 않고 마지막 ``completed`` run 하나를 대표로 쓴다.
+++    상태: ``not_observed``(run 없음), ``observation_failed``(rejected/failed만 있음),
+++    ``not_evaluated``(completed지만 평가 종목 0), ``evaluated_no_signal``,
+++    ``evaluated_with_signals``(대표 run이 그날 본 신호 > 0; 이전 세션과 같은 anchor라
+++    새로 저장되지 않은 중복 포함).
+++    """
+++
+++    by_session: dict[date, list[KAssetSwingShadowRun]] = defaultdict(list)
+++    for run in runs:
+++        if run.signal_session_date is not None:
+++            by_session[run.signal_session_date].append(run)
+++    stored: dict[date, Counter[str]] = defaultdict(Counter)
+++    for record in records:
+++        stored[record.signal_session_date][record.candidate] += 1
+++    expected = set(expected_sessions)
+++    days = sorted(expected | set(by_session))
+++    state_counts: Counter[str] = Counter()
+++    sessions: list[dict[str, object]] = []
+++    for day in days:
+++        day_runs = sorted(by_session.get(day, []), key=lambda item: item.observed_at)
+++        completed = [run for run in day_runs if run.status == "completed"]
+++        entry: dict[str, object] = {
+++            "session": day.isoformat(),
+++            "expected": day in expected,
+++            "runCount": len(day_runs),
+++            "runStatusCounts": dict(
+++                sorted(Counter(r.status for r in day_runs).items())
+++            ),
+++            "failureReasons": dict(
+++                sorted(
+++                    Counter(
+++                        run.reason or "unspecified"
+++                        for run in day_runs
+++                        if run.status != "completed"
+++                    ).items()
+++                )
+++            ),
+++        }
+++        if not day_runs:
+++            state = "not_observed"
+++        elif not completed:
+++            state = "observation_failed"
+++        else:
+++            representative = completed[-1]
+++            candidates: dict[str, object] = {}
+++            observed_signals = 0
+++            for candidate in SWING_CANDIDATES:
+++                counts = _candidate_counts(representative, candidate.value)
+++                signals = _int(counts.get("signals"))
+++                observed_signals += signals
+++                candidates[candidate.value] = {
+++                    "signalsObserved": signals,
+++                    "storedNewSignals": stored[day][candidate.value],
+++                    "noSignalReasons": counts.get("noSignalReasons", {}),
+++                    "notApplicable": counts.get("notApplicable", {}),
+++                }
+++            evaluated = representative.evaluated_count or 0
+++            if evaluated == 0:
+++                state = "not_evaluated"
+++            elif observed_signals == 0:
+++                state = "evaluated_no_signal"
+++            else:
+++                state = "evaluated_with_signals"
+++            entry.update(
+++                {
+++                    "representativeRunId": representative.id,
+++                    "representativeObservedAt": representative.observed_at.astimezone(
+++                        UTC
+++                    ).isoformat(),
+++                    "universeCount": representative.universe_count,
+++                    "evaluatedCount": evaluated,
+++                    "exclusions": representative.exclusions,
+++                    "candidates": candidates,
+++                }
+++            )
+++        entry["state"] = state
+++        if day in expected:
+++            state_counts[state] += 1
+++        sessions.append(entry)
+++    observed_ok = {
+++        "not_evaluated",
+++        "evaluated_no_signal",
+++        "evaluated_with_signals",
+++    }
+++    return {
+++        "expectedSessions": [day.isoformat() for day in expected_sessions],
+++        "completedSessions": [
+++            str(item["session"]) for item in sessions if item["state"] in observed_ok
+++        ],
+++        "missingSessions": [
+++            str(item["session"])
+++            for item in sessions
+++            if item["expected"] and item["state"] not in observed_ok
+++        ],
+++        "notEvaluatedSessions": [
+++            str(item["session"])
+++            for item in sessions
+++            if item["state"] == "not_evaluated"
+++        ],
+++        "stateCounts": dict(sorted(state_counts.items())),
+++        "runStatusCounts": dict(sorted(Counter(run.status for run in runs).items())),
+++        "rejectedReasons": dict(
+++            sorted(
+++                Counter(
+++                    run.reason or "unspecified"
+++                    for run in runs
+++                    if run.status != "completed"
+++                ).items()
+++            )
+++        ),
+++        "sessions": sessions,
+++    }
+++
+++
+ +async def build_swing_shadow_report(
+ +    session: AsyncSession,
+ +    *,
+@@ -1943,9 +2105,11 @@
+ +            last_session=last_needed,
+ +        )
+ +
+++    # 현재 설정 cohort는 run·신호가 0이어도 항상 낸다(미관측 세션을 숨기지 않는다).
+ +    fingerprints = sorted(
+ +        {record.config_fingerprint for record in records}
+ +        | {run.config_fingerprint for run in runs}
+++        | {config.fingerprint}
+ +    )
+ +    expected_sessions = trading_sessions_in_range(
+ +        "kr", since, min(end, last_final) if last_final else end
+@@ -1954,14 +2118,6 @@
+ +    signal_details: list[dict[str, object]] = []
+ +    for fingerprint in fingerprints:
+ +        cohort_runs = [run for run in runs if run.config_fingerprint == fingerprint]
+-+        completed_sessions = sorted(
+-+            {
+-+                run.signal_session_date
+-+                for run in cohort_runs
+-+                if run.status == "completed" and run.signal_session_date is not None
+-+            }
+-+        )
+-+        status_counts = Counter(run.status for run in cohort_runs)
+ +        candidates: dict[str, object] = {}
+ +        for candidate in SWING_CANDIDATES:
+ +            cohort_records = [
+@@ -2034,27 +2190,16 @@
+ +        cohorts.append(
+ +            {
+ +                "configFingerprint": fingerprint,
+-+                "coverage": {
+-+                    "expectedSessions": [day.isoformat() for day in expected_sessions],
+-+                    "completedSessions": [
+-+                        day.isoformat() for day in completed_sessions
+-+                    ],
+-+                    "missingSessions": [
+-+                        day.isoformat()
+-+                        for day in expected_sessions
+-+                        if day not in set(completed_sessions)
+++                "isCurrentConfig": fingerprint == config.fingerprint,
+++                "coverage": _session_coverage(
+++                    expected_sessions,
+++                    cohort_runs,
+++                    [
+++                        record
+++                        for record in records
+++                        if record.config_fingerprint == fingerprint
+ +                    ],
+-+                    "runStatusCounts": dict(sorted(status_counts.items())),
+-+                    "rejectedReasons": dict(
+-+                        sorted(
+-+                            Counter(
+-+                                run.reason or "unspecified"
+-+                                for run in cohort_runs
+-+                                if run.status != "completed"
+-+                            ).items()
+-+                        )
+-+                    ),
+-+                },
+++                ),
+ +                "candidates": candidates,
+ +            }
+ +        )
+@@ -2307,10 +2452,10 @@
+ +]
+ diff --git a/docs/runbooks/kasset-swing-shadow.md b/docs/runbooks/kasset-swing-shadow.md
+ new file mode 100644
+-index 000000000..2efad7ea3
++index 000000000..2fd4f0a1f
+ --- /dev/null
+ +++ b/docs/runbooks/kasset-swing-shadow.md
+-@@ -0,0 +1,61 @@
++@@ -0,0 +1,68 @@
+ +# KRX 스윙 SHADOW 관측·성과 조회
+ +
+ +주문·추천·승격과 연결되지 않은 KRX 스윙 후보 3종의 전향 관측 경로다. 결과는
+@@ -2361,9 +2506,16 @@
+ +- 비용: 매수 0.015%, 매도 0.015% + 거래세 0.18%, 편도 슬리피지 0.1%(왕복 약 0.41%).
+ +- MFE/MAE: 진입일~h번째 세션 고가·저가 / 진입 시가 − 1.
+ +- 상태: `mature`, `pending`(h번째 세션 미완료), `entry_missing`, `bar_missing`,
+-+  `price_discontinuity`, `calendar_unavailable`. 통계는 `mature`만 쓴다.
+++  `invalid_bar`(진입~청산 봉의 가격 0 이하·OHLC 역전 — `kr_candles_1d`는 NOT NULL만 보장),
+++  `entry_untradable`(진입 세션 거래량 0), `exit_untradable`(청산 세션 거래량 0),
+++  `price_discontinuity`, `calendar_unavailable`. 통계는 `mature`만 쓴다. 중간 보유일
+++  거래량 0은 보유 평가로 두고 `zeroVolumeHoldingSessions`·`matureWithZeroVolumeHolding`으로 센다.
+ +- `sampleAdvisory=insufficient_sample`(mature < 30)은 연구 advisory일 뿐 gate가 아니다.
+-+- `coverage.missingSessions`는 completed run이 없는 거래일이다(그날 신호 0과 구분).
+++- `coverage`는 run·신호가 0이어도 현재 설정 cohort(`isCurrentConfig`)에 항상 나온다.
+++  `coverage.sessions[].state`: `not_observed`(run 없음), `observation_failed`(rejected/failed만),
+++  `not_evaluated`(completed지만 평가 0종목), `evaluated_no_signal`, `evaluated_with_signals`.
+++  같은 날 재실행은 합산하지 않고 마지막 completed run 하나의 `universeCount`·`evaluatedCount`·
+++  `exclusions`·후보별 `noSignalReasons`를 보여 준다. `missingSessions`는 앞의 두 상태다.
+ +- `signalBarRevised`는 관측 시점에 저장한 신호봉 OHLCV·source와 현재 봉이 다른 신호 수다.
+ +  저장 값은 바꾸지 않고, 있으면 `horizonsExcludingRevised`를 함께 낸다. 적재 시각만
+ +  바뀐 경우는 세지 않는다.
+@@ -2463,10 +2615,10 @@
+ +    raise SystemExit(asyncio.run(main()))
+ diff --git a/tests/extensions/kasset/automation/test_swing_shadow.py b/tests/extensions/kasset/automation/test_swing_shadow.py
+ new file mode 100644
+-index 000000000..19af1e3ae
++index 000000000..f3ab94a06
+ --- /dev/null
+ +++ b/tests/extensions/kasset/automation/test_swing_shadow.py
+-@@ -0,0 +1,614 @@
++@@ -0,0 +1,666 @@
+ +from __future__ import annotations
+ +
+ +from dataclasses import replace
+@@ -3011,6 +3163,58 @@
+ +    assert outcome.net_return is None
+ +
+ +
+++@pytest.mark.parametrize(
+++    ("index", "bar", "status"),
+++    [
+++        # 진입 세션 거래량 0: 그 시가에 체결될 수 없다.
+++        (0, (100, 100, 100, 100, 0), OutcomeStatus.ENTRY_UNTRADABLE),
+++        # 청산 세션 거래량 0: 그 종가에 팔 수 없다.
+++        (2, (100, 100, 100, 100, 0), OutcomeStatus.EXIT_UNTRADABLE),
+++        # DB가 보장하지 않는 0 가격·OHLC 역전은 나눗셈 전에 막는다.
+++        (0, (0, 101, 99, 100, 1000), OutcomeStatus.INVALID_BAR),
+++        (1, (100, 98, 99, 100, 1000), OutcomeStatus.INVALID_BAR),
+++    ],
+++)
+++def test_untradable_or_invalid_forward_bars_are_not_mature(
+++    index: int, bar: tuple[int, int, int, int, int], status: OutcomeStatus
+++) -> None:
+++    sessions = _forward(10)
+++    bars = {day: _bar(day, 100, 102, 98, 101) for day in sessions}
+++    open_, high, low, close, volume = bar
+++    bars[sessions[index]] = _bar(sessions[index], open_, high, low, close, volume)
+++
+++    outcome = evaluate_outcome(
+++        horizon=3,
+++        signal_close=_D("100"),
+++        forward_sessions=sessions,
+++        last_final_session=sessions[-1],
+++        bars_by_date=bars,
+++    )
+++
+++    assert outcome.status is status
+++    assert outcome.net_return is None
+++    assert outcome.mfe is None and outcome.mae is None
+++
+++
+++def test_zero_volume_holding_day_is_marked_not_failed() -> None:
+++    sessions = _forward(10)
+++    bars = {day: _bar(day, 100, 102, 98, 101) for day in sessions}
+++    bars[sessions[1]] = _bar(sessions[1], 101, 101, 101, 101, 0)
+++
+++    outcome = evaluate_outcome(
+++        horizon=3,
+++        signal_close=_D("100"),
+++        forward_sessions=sessions,
+++        last_final_session=sessions[-1],
+++        bars_by_date=bars,
+++    )
+++    summary = summarize_horizon([outcome], min_mature_sample=30)
+++
+++    assert outcome.status is OutcomeStatus.MATURE
+++    assert outcome.zero_volume_holding_sessions == 1
+++    assert summary["matureWithZeroVolumeHolding"] == 1
+++
+++
+ +def test_outcome_flags_price_discontinuity() -> None:
+ +    sessions = _forward(10)
+ +    bars = {day: _bar(day, 100, 101, 99, 100) for day in sessions}
+@@ -3083,10 +3287,10 @@
+ +    )
+ diff --git a/tests/extensions/kasset/automation/test_swing_shadow_service.py b/tests/extensions/kasset/automation/test_swing_shadow_service.py
+ new file mode 100644
+-index 000000000..9a1018d46
++index 000000000..30af3ddef
+ --- /dev/null
+ +++ b/tests/extensions/kasset/automation/test_swing_shadow_service.py
+-@@ -0,0 +1,289 @@
++@@ -0,0 +1,420 @@
+ +from __future__ import annotations
+ +
+ +from collections.abc import AsyncIterator
+@@ -3099,7 +3303,11 @@
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +
+ +from app.core.timezone import KST
+-+from app.extensions.kasset.automation.swing_shadow import bar_timestamp
+++from app.extensions.kasset.automation.swing_shadow import (
+++    DEFAULT_SWING_SHADOW_CONFIG,
+++    SWING_SHADOW_SCHEMA_VERSION,
+++    bar_timestamp,
+++)
+ +from app.extensions.kasset.automation.swing_shadow_service import (
+ +    build_swing_shadow_report,
+ +    observe_swing_shadow,
+@@ -3190,17 +3398,22 @@
+ +    )
+ +
+ +
+++_RUN_WINDOW = (datetime(2026, 9, 4, tzinfo=UTC), datetime(2026, 9, 24, tzinfo=UTC))
+++
+++
+ +async def _cleanup(session: AsyncSession) -> None:
+++    window_runs = select(KAssetSwingShadowRun.id).where(
+++        KAssetSwingShadowRun.observed_at >= _RUN_WINDOW[0],
+++        KAssetSwingShadowRun.observed_at < _RUN_WINDOW[1],
+++    )
+ +    await session.execute(
+ +        delete(KAssetSwingShadowSignal).where(
+ +            KAssetSwingShadowSignal.symbol.in_(_SYMBOLS)
+++            | KAssetSwingShadowSignal.run_id.in_(window_runs)
+ +        )
+ +    )
+ +    await session.execute(
+-+        delete(KAssetSwingShadowRun).where(
+-+            KAssetSwingShadowRun.observed_at >= datetime(2026, 9, 4, tzinfo=UTC),
+-+            KAssetSwingShadowRun.observed_at < datetime(2026, 9, 12, tzinfo=UTC),
+-+        )
+++        delete(KAssetSwingShadowRun).where(KAssetSwingShadowRun.id.in_(window_runs))
+ +    )
+ +    await session.execute(
+ +        text("DELETE FROM public.kr_candles_1d WHERE symbol = ANY(:symbols)"),
+@@ -3376,3 +3589,125 @@
+ +        )
+ +    )
+ +    assert stored_close == Decimal("10650")
+++
+++
+++def _run(
+++    session_date: date,
+++    *,
+++    status: str = "completed",
+++    observed_hour: int = 17,
+++    evaluated: int | None = 100,
+++    universe: int | None = 120,
+++    box_signals: int = 0,
+++    reason: str | None = None,
+++) -> KAssetSwingShadowRun:
+++    config = DEFAULT_SWING_SHADOW_CONFIG
+++    observed = datetime.combine(session_date, datetime.min.time(), tzinfo=KST).replace(
+++        hour=observed_hour
+++    )
+++    completed = status == "completed"
+++    return KAssetSwingShadowRun(
+++        observed_at=observed,
+++        trigger_source="cli",
+++        status=status,
+++        reason=reason,
+++        signal_session_date=session_date,
+++        evaluation_as_of=bar_timestamp(session_date) if completed else None,
+++        schema_version=SWING_SHADOW_SCHEMA_VERSION,
+++        config_fingerprint=config.fingerprint,
+++        config=config.fingerprint_payload(),
+++        universe_count=universe if completed else None,
+++        evaluated_count=evaluated if completed else None,
+++        exclusions={"stale_latest_bar": 20} if completed else {},
+++        candidate_counts={
+++            "box_breakout_retest": {
+++                "signals": box_signals,
+++                "inserted": 0,
+++                "duplicates": box_signals,
+++                "noSignalReasons": {"no_recent_box_breakout": 7},
+++                "notApplicable": {},
+++            }
+++        }
+++        if completed
+++        else {},
+++    )
+++
+++
+++@pytest_asyncio.fixture
+++async def clean_runs(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
+++    await _cleanup(db_session)
+++    try:
+++        yield db_session
+++    finally:
+++        await db_session.rollback()
+++        await _cleanup(db_session)
+++
+++
+++async def test_report_coverage_separates_unobserved_failed_and_zero_signal_days(
+++    clean_runs: AsyncSession,
+++) -> None:
+++    # 2026-09-14(월)~18(금) 다섯 거래일.
+++    clean_runs.add_all(
+++        [
+++            _run(date(2026, 9, 15), status="failed", reason="OperationalError"),
+++            _run(date(2026, 9, 16), evaluated=0, universe=20),
+++            _run(date(2026, 9, 17), evaluated=100, observed_hour=16),
+++            _run(date(2026, 9, 17), evaluated=90, observed_hour=18),
+++            _run(date(2026, 9, 18), evaluated=50, box_signals=1),
+++        ]
+++    )
+++    await clean_runs.commit()
+++
+++    report = await build_swing_shadow_report(
+++        clean_runs,
+++        now=datetime(2026, 9, 18, 17, 30, tzinfo=KST),
+++        since=date(2026, 9, 14),
+++        until=date(2026, 9, 18),
+++    )
+++
+++    cohort = next(item for item in report["cohorts"] if item["isCurrentConfig"])
+++    coverage = cohort["coverage"]
+++    states = {item["session"]: item for item in coverage["sessions"]}
+++    assert {day: item["state"] for day, item in states.items()} == {
+++        "2026-09-14": "not_observed",
+++        "2026-09-15": "observation_failed",
+++        "2026-09-16": "not_evaluated",
+++        "2026-09-17": "evaluated_no_signal",
+++        "2026-09-18": "evaluated_with_signals",
+++    }
+++    assert states["2026-09-15"]["failureReasons"] == {"OperationalError": 1}
+++    assert states["2026-09-16"]["exclusions"] == {"stale_latest_bar": 20}
+++    # 재실행은 합산하지 않고 마지막 completed run 하나만 분모로 쓴다.
+++    assert states["2026-09-17"]["runCount"] == 2
+++    assert states["2026-09-17"]["evaluatedCount"] == 90
+++    assert states["2026-09-17"]["candidates"]["box_breakout_retest"][
+++        "noSignalReasons"
+++    ] == {"no_recent_box_breakout": 7}
+++    assert coverage["missingSessions"] == ["2026-09-14", "2026-09-15"]
+++    assert coverage["notEvaluatedSessions"] == ["2026-09-16"]
+++    assert coverage["stateCounts"] == {
+++        "evaluated_no_signal": 1,
+++        "evaluated_with_signals": 1,
+++        "not_evaluated": 1,
+++        "not_observed": 1,
+++        "observation_failed": 1,
+++    }
+++
+++
+++async def test_report_without_any_runs_still_lists_unobserved_sessions(
+++    clean_runs: AsyncSession,
+++) -> None:
+++    report = await build_swing_shadow_report(
+++        clean_runs,
+++        now=datetime(2026, 9, 23, 17, 0, tzinfo=KST),
+++        since=date(2026, 9, 21),
+++        until=date(2026, 9, 23),
+++    )
+++
+++    cohorts = [item for item in report["cohorts"] if item["isCurrentConfig"]]
+++    assert len(cohorts) == 1
+++    coverage = cohorts[0]["coverage"]
+++    assert coverage["expectedSessions"] == ["2026-09-21", "2026-09-22", "2026-09-23"]
+++    assert coverage["missingSessions"] == coverage["expectedSessions"]
+++    assert coverage["stateCounts"] == {"not_observed": 3}
+++    assert cohorts[0]["candidates"]["box_breakout_retest"]["signals"] == 0

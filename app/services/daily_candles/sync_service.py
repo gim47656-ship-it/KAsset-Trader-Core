@@ -149,6 +149,20 @@ TossDailyFetcher = Callable[..., Awaitable[pd.DataFrame]]
 TossKrBenchmarkFetcher = Callable[..., Awaitable[pd.DataFrame]]
 NaverKrBenchmarkFetcher = Callable[..., Awaitable[pd.DataFrame]]
 
+#: 대량 백필과 스윙 SHADOW 관측이 함께 쓰는 현재 KRX 보통주 정의.
+KR_COMMON_SHARE_UNIVERSE_SQL = """
+    SELECT symbol, exchange
+    FROM public.kr_symbol_universe
+    WHERE is_active IS TRUE
+      AND security_type = 'STOCK'
+      AND is_common_share IS TRUE
+      AND COALESCE(krx_trading_suspended, FALSE) = FALSE
+      AND delist_date IS NULL
+      AND LOWER(COALESCE(listing_status, ''))
+          NOT IN ('delisted', '상장폐지')
+    ORDER BY exchange, symbol
+"""
+
 
 class DailyCandleSyncService:
     def __init__(
@@ -542,22 +556,7 @@ class DailyCandleSyncService:
 
         session = self._repository.session
         if market == MarketKey.KR.value:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT symbol, exchange
-                    FROM public.kr_symbol_universe
-                    WHERE is_active IS TRUE
-                      AND security_type = 'STOCK'
-                      AND is_common_share IS TRUE
-                      AND COALESCE(krx_trading_suspended, FALSE) = FALSE
-                      AND delist_date IS NULL
-                      AND LOWER(COALESCE(listing_status, ''))
-                          NOT IN ('delisted', '상장폐지')
-                    ORDER BY exchange, symbol
-                    """
-                )
-            )
+            result = await session.execute(text(KR_COMMON_SHARE_UNIVERSE_SQL))
             targets = [
                 SyncTarget(
                     market=MarketKey.KR,

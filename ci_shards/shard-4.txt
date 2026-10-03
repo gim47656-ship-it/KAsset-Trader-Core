@@ -23,6 +23,7 @@ tests/extensions/kasset/automation/test_loss_streak_gate.py
 tests/extensions/kasset/automation/test_realtime_runtime.py
 tests/extensions/kasset/automation/test_realtime_tape.py
 tests/extensions/kasset/automation/test_shadow_loss_streak.py
+tests/extensions/kasset/automation/test_swing_shadow_service.py
 tests/extensions/kasset/test_fcm_push_dispatch.py
 tests/infra/test_database_guard_completeness.py
 tests/infra/test_schema_barrier.py

@@ -24,6 +24,7 @@ tests/extensions/kasset/automation/test_job.py
 tests/extensions/kasset/automation/test_market_pipeline.py
 tests/extensions/kasset/automation/test_portfolio_backtest.py
 tests/extensions/kasset/automation/test_shadow_manifest.py
+tests/extensions/kasset/automation/test_swing_shadow.py
 tests/extensions/kasset/automation/test_vertical_slice.py
 tests/extensions/kasset/test_claim_lease_migration.py
 tests/infra/test_run_owned_database.py

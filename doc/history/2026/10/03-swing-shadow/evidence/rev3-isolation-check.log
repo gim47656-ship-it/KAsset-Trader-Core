@@ -1,0 +1,13 @@
+DROP DATABASE
+DROP_EXIT=0
+0
+0
+kasset-trader-mcp-1 Up 41 minutes (healthy)
+kasset-trader-worker-1 Up 41 minutes
+kasset-trader-nh-stream-1 Up 41 minutes
+kasset-trader-scheduler-1 Up 41 minutes
+kasset-trader-ai-mcp-1 Up 41 minutes (healthy)
+kasset-trader-api-1 Up 41 minutes (healthy)
+kasset-trader-caddy-1 Up 4 weeks
+kasset-trader-db-1 Up 4 weeks (healthy)
+kasset-trader-redis-1 Up 4 weeks (healthy)

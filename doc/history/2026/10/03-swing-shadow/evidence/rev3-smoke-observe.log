@@ -1,0 +1,57 @@
+2026-10-03 01:31:00,354 - app.monitoring.sentry - INFO - Sentry disabled: SENTRY_DSN is empty
+{
+  "candidates": {
+    "box_breakout_retest": {
+      "duplicates": 0,
+      "inserted": 0,
+      "noSignalReasons": {
+        "no_recent_box_breakout": 883,
+        "no_retest_of_box_top": 2
+      },
+      "notApplicable": {},
+      "signals": 0
+    },
+    "uptrend_first_pullback": {
+      "duplicates": 0,
+      "inserted": 1,
+      "noSignalReasons": {
+        "not_first_contact": 59,
+        "pullback_not_confirmed": 825
+      },
+      "notApplicable": {},
+      "signals": 1
+    },
+    "weekly_compression_breakout": {
+      "duplicates": 0,
+      "inserted": 2,
+      "noSignalReasons": {
+        "base_too_wide": 837,
+        "no_range_contraction": 5,
+        "no_weekly_close_breakout": 40,
+        "weekly_volume_below_ratio": 1
+      },
+      "notApplicable": {},
+      "signals": 2
+    }
+  },
+  "configFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627",
+  "evaluatedCount": 885,
+  "evaluationAsOf": "2026-10-02T06:30:00+00:00",
+  "exclusions": {
+    "below_min_close": 52,
+    "below_min_turnover": 1486,
+    "halted_suspect": 23,
+    "insufficient_history": 16,
+    "price_discontinuity": 15,
+    "stale_latest_bar": 1
+  },
+  "nextSessionOpen": "2026-10-06T00:00:00+00:00",
+  "observedAt": "2026-10-03T01:31:00.356231+00:00",
+  "runId": 1,
+  "signalSession": "2026-10-02",
+  "status": "completed",
+  "triggerSource": "cli",
+  "universeCount": 2478,
+  "weekComplete": true
+}
+OBSERVE_EXIT=0

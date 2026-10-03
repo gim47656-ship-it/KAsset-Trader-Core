@@ -1,0 +1,17 @@
+일회성 검증용 스냅샷(실제 전향 성과 아님). 2026-10-03 KST 토요일, host kasset-prod.
+승인: Main 2026-10-03 (시장 OHLCV·유니버스만, 사용자/계좌/인증 데이터 금지, 고유 DB·자기 생성분만 drop)
+
+대상 DB: kasset-test-db 컨테이너의 swing_smoke_20261003_01a0fead (CREATE DATABASE, 이 Maker 생성)
+스키마: review 스키마 + kr_symbol_universe(9열) + kr_candles_1d(bootstrap DDL과 같은 열·UNIQUE(time,symbol,venue))
+복사(운영 읽기 전용 \copy ... TO STDOUT → 테스트 DB \copy FROM STDIN):
+  kr_symbol_universe: symbol,name,exchange,is_active,security_type,is_common_share,listing_status,delist_date,krx_trading_suspended → COPY 3957
+  kr_candles_1d (venue='KRX', time >= now()-220 days): time,symbol,venue,open,high,low,close,volume,value,source,ingested_at → COPY 409657
+  범위: 409657|2026-02-26 00:00:00+00|2026-10-02 00:00:00+00
+  최근 세션 행 수(KST date): 09-28 3935 / 09-29 3937 / 09-30 3938 / 10-01 3938 / 10-02 3938
+운영 DB 쓰기 0, 외부 유료 API 호출 0.
+
+운영 일봉 적재 시각 정황(운영 DB 읽기 kr_candles_1d.ingested_at, KST):
+  2026-10-02 세션 toss 3929행 10-02 16:30:00~16:44:46, toss_index 2행 10-02 16:44:46
+  2026-10-01 세션 toss 3931행 10-02 16:30:00~20:05:00 (재적재 포함), toss_regular 5행 10-02 15:05:03
+  2026-09-28~30 세션 toss 일부 10-01 16:36:23 재적재, 관심종목 toss_regular 20:05 덮어쓰기 관찰
+  worker/scheduler 240h 로그에서 candles.daily.kr.sync 문자열 미발견 → task status ok 직접 관측 안 됨
