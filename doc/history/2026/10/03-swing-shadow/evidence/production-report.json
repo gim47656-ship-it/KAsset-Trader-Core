@@ -1,0 +1,556 @@
+{
+  "basis": {
+    "costs": {
+      "buyFeeRate": "0.000150",
+      "sellFeeRate": "0.000150",
+      "sellTaxRate": "0.001800",
+      "slippageRatePerSide": "0.001000"
+    },
+    "exit": "virtual_close_of_horizon_session_entry_day_is_1",
+    "fill": "virtual_next_session_open",
+    "horizons": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "mode": "SHADOW",
+    "notice": "주문 없는 SHADOW 관측이다. 성과는 신호 관측 뒤 다음 유효 거래일 시가에 가상으로 진입했다고 가정한 가상 성과이며 실제 체결·계좌 수익이 아니다. 수익성 입증이 아니며 표본 부족 표기는 연구용 advisory일 뿐 매매·승격 gate가 아니다. 기간 단위는 달력일이 아니라 거래일이다.",
+    "orders": "none",
+    "outcomeConfigFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627"
+  },
+  "cohorts": [
+    {
+      "candidates": {
+        "box_breakout_retest": {
+          "horizons": {
+            "1": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 0,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 0,
+                "price_discontinuity": 0
+              }
+            },
+            "10": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 0,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 0,
+                "price_discontinuity": 0
+              }
+            },
+            "3": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 0,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 0,
+                "price_discontinuity": 0
+              }
+            },
+            "5": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 0,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 0,
+                "price_discontinuity": 0
+              }
+            }
+          },
+          "signalBarMissingNow": 0,
+          "signalBarRevised": 0,
+          "signals": 0
+        },
+        "uptrend_first_pullback": {
+          "horizons": {
+            "1": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 1,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 1,
+                "price_discontinuity": 0
+              }
+            },
+            "10": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 1,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 1,
+                "price_discontinuity": 0
+              }
+            },
+            "3": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 1,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 1,
+                "price_discontinuity": 0
+              }
+            },
+            "5": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 1,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 1,
+                "price_discontinuity": 0
+              }
+            }
+          },
+          "signalBarMissingNow": 0,
+          "signalBarRevised": 0,
+          "signals": 1
+        },
+        "weekly_compression_breakout": {
+          "horizons": {
+            "1": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 2,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 2,
+                "price_discontinuity": 0
+              }
+            },
+            "10": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 2,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 2,
+                "price_discontinuity": 0
+              }
+            },
+            "3": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 2,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 2,
+                "price_discontinuity": 0
+              }
+            },
+            "5": {
+              "matureCount": 0,
+              "matureWithZeroVolumeHolding": 0,
+              "minMatureSampleAdvisory": 30,
+              "sampleAdvisory": "insufficient_sample",
+              "signals": 2,
+              "stats": null,
+              "statusCounts": {
+                "bar_missing": 0,
+                "calendar_unavailable": 0,
+                "entry_missing": 0,
+                "entry_untradable": 0,
+                "exit_untradable": 0,
+                "invalid_bar": 0,
+                "mature": 0,
+                "pending": 2,
+                "price_discontinuity": 0
+              }
+            }
+          },
+          "signalBarMissingNow": 0,
+          "signalBarRevised": 0,
+          "signals": 2
+        }
+      },
+      "configFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627",
+      "coverage": {
+        "completedSessions": [
+          "2026-10-02"
+        ],
+        "expectedSessions": [
+          "2026-10-02"
+        ],
+        "missingSessions": [],
+        "notEvaluatedSessions": [],
+        "rejectedReasons": {},
+        "runStatusCounts": {
+          "completed": 1
+        },
+        "sessions": [
+          {
+            "candidates": {
+              "box_breakout_retest": {
+                "noSignalReasons": {
+                  "no_recent_box_breakout": 883,
+                  "no_retest_of_box_top": 2
+                },
+                "notApplicable": {},
+                "signalsObserved": 0,
+                "storedNewSignals": 0
+              },
+              "uptrend_first_pullback": {
+                "noSignalReasons": {
+                  "not_first_contact": 59,
+                  "pullback_not_confirmed": 825
+                },
+                "notApplicable": {},
+                "signalsObserved": 1,
+                "storedNewSignals": 1
+              },
+              "weekly_compression_breakout": {
+                "noSignalReasons": {
+                  "base_too_wide": 837,
+                  "no_range_contraction": 5,
+                  "no_weekly_close_breakout": 40,
+                  "weekly_volume_below_ratio": 1
+                },
+                "notApplicable": {},
+                "signalsObserved": 2,
+                "storedNewSignals": 2
+              }
+            },
+            "evaluatedCount": 885,
+            "exclusions": {
+              "below_min_close": 52,
+              "below_min_turnover": 1486,
+              "halted_suspect": 23,
+              "insufficient_history": 16,
+              "price_discontinuity": 15,
+              "stale_latest_bar": 1
+            },
+            "expected": true,
+            "failureReasons": {},
+            "representativeObservedAt": "2026-10-03T02:08:41.030204+00:00",
+            "representativeRunId": 1,
+            "runCount": 1,
+            "runStatusCounts": {
+              "completed": 1
+            },
+            "session": "2026-10-02",
+            "state": "evaluated_with_signals",
+            "universeCount": 2478
+          }
+        ],
+        "stateCounts": {
+          "evaluated_with_signals": 1
+        }
+      },
+      "isCurrentConfig": true
+    }
+  ],
+  "generatedAt": "2026-10-03T02:10:10.809276+00:00",
+  "limitations": [
+    "kr_candles_1d에는 KRX 수정주가·액면분할 계수가 없어 수정 여부를 판별할 수 없다. 세션 간 시가·종가가 직전 종가 대비 35%를 넘게 움직인 표본은 price_discontinuity로 성과 통계에서 뺀다(가격제한폭 30% 초과는 기업행동·자료 오류로 본다).",
+    "가상 진입은 다음 세션 시가 전량 체결을 가정한다. kr_candles_1d는 NOT NULL만 보장하므로 진입~청산 봉의 가격 양수·OHLC 정합을 먼저 검사해 어긋나면 invalid_bar, 진입 세션 거래량 0은 entry_untradable, 청산 세션 거래량 0은 exit_untradable로 통계에서 뺀다. 중간 보유일 거래량 0은 보유 평가로 두고 zeroVolumeHoldingSessions로 센다. 거래가 있었더라도 시가 상·하한가 잠김이나 호가 공백으로 실제로 체결되지 않았을 수 있는 경우는 구분하지 못한다.",
+    "일봉은 이후 재적재될 수 있다. 관측 시점 신호봉과 현재 봉의 가격·source가 다르면 signal_bar_revised로 세고 저장된 관측 시점 값은 바꾸지 않는다.",
+    "유니버스는 관측 시점 kr_symbol_universe 보통주 정의다. 이후 상장폐지·거래정지된 종목의 성과 봉이 없으면 entry_missing/bar_missing으로 남는다."
+  ],
+  "period": {
+    "lastFinalSession": "2026-10-02",
+    "since": "2026-10-02",
+    "unit": "trading_sessions",
+    "until": "2026-10-02"
+  },
+  "schemaVersion": "kasset.swing-shadow-report.v1",
+  "signals": [
+    {
+      "anchorSession": "2026-10-02",
+      "candidate": "weekly_compression_breakout",
+      "configFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627",
+      "fill": "virtual_next_session_open",
+      "horizons": {
+        "1": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-06",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "10": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-20",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "3": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-08",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "5": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-13",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        }
+      },
+      "observedAt": "2026-10-03T02:08:41.030204+00:00",
+      "signalBarMissingNow": false,
+      "signalBarRevised": false,
+      "signalClose": "2990.000000",
+      "signalSession": "2026-10-02",
+      "symbol": "001250",
+      "triggerPrice": "2785.000000"
+    },
+    {
+      "anchorSession": "2026-10-02",
+      "candidate": "weekly_compression_breakout",
+      "configFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627",
+      "fill": "virtual_next_session_open",
+      "horizons": {
+        "1": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-06",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "10": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-20",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "3": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-08",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "5": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-13",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        }
+      },
+      "observedAt": "2026-10-03T02:08:41.030204+00:00",
+      "signalBarMissingNow": false,
+      "signalBarRevised": false,
+      "signalClose": "27650.000000",
+      "signalSession": "2026-10-02",
+      "symbol": "026960",
+      "triggerPrice": "26700.000000"
+    },
+    {
+      "anchorSession": "2026-08-19",
+      "candidate": "uptrend_first_pullback",
+      "configFingerprint": "a501328cae8b00a91fe7e3b3fa6372503b6fa5c6b89be0428dfe0856dfd1f627",
+      "fill": "virtual_next_session_open",
+      "horizons": {
+        "1": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-06",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "10": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-20",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "3": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-08",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        },
+        "5": {
+          "entryOpen": null,
+          "entrySession": "2026-10-06",
+          "exitClose": null,
+          "exitSession": "2026-10-13",
+          "grossReturn": null,
+          "mae": null,
+          "mfe": null,
+          "netReturn": null,
+          "status": "pending",
+          "zeroVolumeHoldingSessions": 0
+        }
+      },
+      "observedAt": "2026-10-03T02:08:41.030204+00:00",
+      "signalBarMissingNow": false,
+      "signalBarRevised": false,
+      "signalClose": "47050.000000",
+      "signalSession": "2026-10-02",
+      "symbol": "005070",
+      "triggerPrice": "46300.000000"
+    }
+  ]
+}
