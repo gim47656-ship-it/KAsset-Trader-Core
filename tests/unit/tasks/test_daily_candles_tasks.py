@@ -108,3 +108,63 @@ async def test_kr_daily_sync_persists_both_broad_market_benchmarks(
         },
     ]
     service.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "sync_status", "expect_observer"),
+    [
+        (False, "ok", False),
+        (True, "failed", False),
+        (True, "ok", True),
+    ],
+)
+async def test_kr_daily_task_runs_swing_shadow_only_after_enabled_success(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    sync_status: str,
+    expect_observer: bool,
+) -> None:
+    from app.extensions.kasset.automation import swing_shadow_service
+    from app.tasks import daily_candles_tasks
+
+    sync_result = {"status": sync_status, "market": "kr"}
+    monkeypatch.setattr(
+        daily_candles_tasks,
+        "run_daily_candles_sync",
+        AsyncMock(return_value=dict(sync_result)),
+    )
+    observer = AsyncMock(return_value={"status": "completed", "runId": 7})
+    monkeypatch.setattr(
+        swing_shadow_service, "run_swing_shadow_after_daily_sync", observer
+    )
+    monkeypatch.setattr(
+        daily_candles_tasks.settings, "KASSET_SWING_SHADOW_ENABLED", enabled
+    )
+
+    result = await daily_candles_tasks.sync_kr_daily_task.original_func()
+
+    assert result["status"] == sync_status
+    if expect_observer:
+        observer.assert_awaited_once_with()
+        assert result["swing_shadow"] == {"status": "completed", "runId": 7}
+    else:
+        observer.assert_not_awaited()
+        assert "swing_shadow" not in result
+
+
+@pytest.mark.asyncio
+async def test_swing_shadow_observer_failure_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import db
+    from app.extensions.kasset.automation import swing_shadow_service
+
+    def broken_session() -> object:
+        raise ConnectionError("database unavailable")
+
+    monkeypatch.setattr(db, "AsyncSessionLocal", broken_session)
+
+    result = await swing_shadow_service.run_swing_shadow_after_daily_sync()
+
+    assert result == {"status": "failed", "reason": "ConnectionError"}

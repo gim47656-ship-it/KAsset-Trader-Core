@@ -28,6 +28,8 @@ PARENT_REVISION = "20260824_s257_rung_reason"
 PRE_CUTOVER_REVISION = "20260827_ai_recommendations"
 
 _BOUNDARY_TABLES = (
+    "review.kasset_swing_shadow_signals",
+    "review.kasset_swing_shadow_runs",
     "review.kasset_paper_execution_events",
     "review.kasset_automation_cycle_events",
     "review.kasset_intraday_rvol_shadow",

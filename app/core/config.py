@@ -491,6 +491,9 @@ class Settings(BaseSettings):
     # Periodic Google News RSS fetch is separately opt-in to prevent unexpected
     # outbound requests in tests and non-KAsset scheduler deployments.
     KASSET_GOOGLE_NEWS_SCHEDULE_ENABLED: bool = False
+    # KR 일봉 동기화(candles.daily.kr.sync)가 성공한 뒤 주문 없는 스윙 SHADOW
+    # 관측을 이어 실행한다. 새 예약이 아니며 기본 false다. 켜는 것은 운영 승인 대상.
+    KASSET_SWING_SHADOW_ENABLED: bool = False
     # 일반 뉴스 요약 모델 호출의 UTC 일일 상한. 배칭과 별개로 provider attempt를 센다.
     KASSET_NEWS_SUMMARY_DAILY_CALL_LIMIT: Annotated[int, Field(ge=1, le=10_000)] = 100
     # Event analysis selects provider routes by feature. The compatibility

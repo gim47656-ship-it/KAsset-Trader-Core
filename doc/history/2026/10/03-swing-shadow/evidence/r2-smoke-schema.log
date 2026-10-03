@@ -1,0 +1,20 @@
+CREATE TABLE
+DELETE 0
+INSERT 0 1
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Generating static SQL
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20260926_symbol_master_adr -> 20261003_kasset_swing_shadow, KRX 스윙 SHADOW 관측 run·신호 원장을 추가한다.
+SQL_EXIT=0
+BEGIN
+NOTICE:  schema "review" already exists, skipping
+CREATE SCHEMA
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+UPDATE 1
+COMMIT
+APPLY_EXIT=0
+20261003_kasset_swing_shadow

@@ -1,0 +1,6 @@
+...............                                                          [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=1.87 database_seconds=0.11
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+15 passed in 142.00s (0:02:22)
+PYTEST_EXIT=0

@@ -1,0 +1,18 @@
+CREATE DATABASE
+CREATE SCHEMA
+CREATE TABLE
+CREATE TABLE
+COPY 3957
+COPY 409657
+NOTICE:  schema "review" already exists, skipping
+MIGRATION_APPLY_EXIT=0
+409657|2026-10-02 00:00:00+00
+20261003_kasset_swing_shadow
+2026-10-03T10:30:48+09:00
+  "evaluatedCount": 885,
+  "runId": 1,
+  "signalSession": "2026-10-02",
+  "status": "completed",
+  "universeCount": 2478,
+OBSERVE_EXIT=0
+REPORT_EXIT=0
