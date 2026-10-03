@@ -4,7 +4,7 @@ RECORD:
 DATE: 2026-10-03
 SCOPE: 스윙 SHADOW, 주봉 압축 돌파, 첫 눌림, 박스 돌파 재지지, 전향 관측, 가상 성과
 PATHS: app/extensions/kasset/automation/swing_shadow.py, app/extensions/kasset/automation/swing_shadow_service.py, app/models/kasset_swing_shadow.py, app/tasks/daily_candles_tasks.py, scripts/kasset_swing_shadow.py, docs/runbooks/kasset-swing-shadow.md
-STATUS: partial
+STATUS: accepted
 
 ## 사용자 요구와 승인 경계
 
@@ -50,8 +50,20 @@ Main이 [r2→r3 delta](evidence/SwingShadow-r2-to-r3.delta)를 직접 검수해
 - 운영 원시 일봉은 가격 양수·OHLC 정합을 DB에서 보장하지 않으며 거래량 0인 봉이 존재한다. 후행봉 이상은 `invalid_bar`, 진입·청산일 거래량 0은 `entry_untradable`·`exit_untradable`로 구분한다. 중간 보유일 거래량 0은 별도 개수와 함께 평가값으로 유지한다.
 - 검증용 DB는 정리됐고 [격리 확인](evidence/rev3-isolation-check.log)에서 운영 SHADOW 테이블은 0개였다. 실제 운영에 기록을 쓰지 않았다.
 
-구현·격리 검증은 수용한다. GitHub CI는 이 변경 PR에서 확인하며, 운영 활성화 전 상태는 아래와 같다.
+구현·격리 검증을 수용한 뒤 [PR #112](https://github.com/gim47656-ship-it/KAsset-Trader-Core/pull/112)의 head `b2f63d16` [Test](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37086955851)와 머지 commit `d28ac2f76ce75055f6858de257cc7f9e92b5ad73` [Test](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37087542079)가 성공했다. advisory 보안 단계의 기존 Bandit 경고를 경고 없음으로 표현하지 않았다.
 
-## 운영 반영 전 남은 경계
+## 승인된 운영 배포와 최초 관측
 
-현재 운영 전향 관측은 0건이다. 신규 테이블 migration·코드 배포·플래그 활성화는 정확한 revision에 대해 사용자 승인 후 진행한다. 이 저장소의 migration 변경은 자동 배포가 멈추므로 DB 백업과 `allow_migration=true` 수동 승인 절차를 따른다. 2주 뒤 조회하더라도 아직 성숙하지 않은 신호는 별도로 표시하며, 초기 성과를 전략 우위의 확정 근거로 사용하지 않는다.
+사용자가 “배포까지해”라고 승인해 PR 머지·DB 백업·마이그레이션·서버 배포·SHADOW 활성화·최초 관측까지 진행했다. 자동 [Deploy](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37088054273)는 `ALLOW_MIGRATION=0` 안전장치로 exit 2에 멈췄고 당시 운영 서버는 기존 `f25b0858`로 정상 가동 중이었다.
+
+동일 머지 SHA를 지정한 `workflow_dispatch`, `allow_migration=true`의 [수동 Deploy](https://github.com/gim47656-ship-it/KAsset-Trader-Core/actions/runs/37088185833)가 deploy·release 모두 성공했다.
+
+- DB 백업: `/opt/kasset-trader-core/backups/kasset-pre-migration-d28ac2f7-20261003T020050Z.dump.gz`, 실파일 **831,430,895 bytes** 확인. 백업 완료 뒤 migration을 실행했다.
+- 운영 `alembic_version`: `20260926_symbol_master_adr` → `20261003_kasset_swing_shadow`.
+- API·worker·scheduler·MCP·AI MCP·NH stream 6서비스가 `d28ac2f7` 이미지로 전환됐고 `/health`는 `{"status":"ok"}`였다.
+- `.env.kasset`을 보존한 뒤 `KASSET_SWING_SHADOW_ENABLED=true`로 설정하고 worker만 재생성했다. worker의 실제 Settings에서 True, env 소유·권한 `1001:1001 / 600`을 확인했다.
+- 실제 운영 `scripts.kasset_swing_shadow observe`는 exit 0, run ID **1**, `observedAt=2026-10-03T02:08:41.030204+00:00`으로 저장됐다. 신호 세션은 10/2이며 과거 시각을 지정하거나 과거 run을 채우지 않았다.
+- 보통주 2,478개 중 885개 평가, 주봉 압축 돌파 2건(`001250` GS글로벌, `026960` 동서), 첫 눌림 1건(`005070` 코스모신소재), 박스 재지지 0건. 별도 READ ONLY SQL에서 run 1개·signal 3개를 대조했다.
+- 운영 `report --since 2026-10-02 --signals`도 exit 0. [최초 운영 report 원문](evidence/production-report.json)에서 신호 3건은 모든 horizon이 `pending`, 실제 주문은 `none`이다. 진입 세션은 10/6, 10거래일째는 10/20이다.
+
+이제 실제 전향 관측이 시작됐다. 다만 **활성화 이후 첫 자동 예약 실행은 아직 관측하지 않았다**. 기존 16:30 KR 일봉 성공 후 관측 경로와 worker 설정은 적용됐으며, 다음 유효 실행의 run을 확인해야 한다. 2주 뒤에는 누락·실패·미성숙·거래 불가·표본 부족을 함께 보고, 초기 성과를 전략 우위의 확정 근거로 사용하지 않는다. 별도 알림 예약은 추가하지 않았다.
