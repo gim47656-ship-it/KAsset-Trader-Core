@@ -46,7 +46,9 @@ _CONFIG = PortfolioBacktestConfig(
 
 
 def _breakout_bars(count: int = 330) -> tuple[PriceBar, ...]:
-    closes = [Decimal("100") + Decimal(index) / Decimal("100") for index in range(count)]
+    closes = [
+        Decimal("100") + Decimal(index) / Decimal("100") for index in range(count)
+    ]
     overrides = {
         255: Decimal("112"),
         256: Decimal("114"),

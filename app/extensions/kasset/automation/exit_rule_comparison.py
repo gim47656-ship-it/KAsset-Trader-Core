@@ -696,7 +696,9 @@ def _summarize(
             volume_capped_bars=0,
             exit_reasons=(),
         )
-    reasons = Counter(fill.reason for _, simulation in rows for fill in simulation.fills)
+    reasons = Counter(
+        fill.reason for _, simulation in rows for fill in simulation.fills
+    )
     total = sum((simulation.net_pnl for _, simulation in rows), start=_ZERO)
     return_sum = sum(
         (
