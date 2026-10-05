@@ -1,0 +1,2 @@
+# Keep this task's verification evidence; do not change global log exclusions.
+!/*.log

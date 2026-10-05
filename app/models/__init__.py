@@ -64,6 +64,7 @@ from .investment_snapshots import (
 from .investor_flow_snapshot import InvestorFlowSnapshot
 from .kasset_automation_cycle_events import KAssetAutomationCycleEvent
 from .kasset_intraday_rvol_shadow import KAssetIntradayRvolShadow
+from .kasset_longterm_shadow import KAssetLongtermShadowRun, KAssetLongtermShadowSignal
 from .kasset_paper_execution_events import KAssetPaperExecutionEvent
 from .kasset_research_cohorts import (
     KAssetResearchCohort,
@@ -277,6 +278,8 @@ __all__ = [
     "InvestMomentumEventSnapshot",
     "KAssetAutomationCycleEvent",
     "KAssetIntradayRvolShadow",
+    "KAssetLongtermShadowRun",
+    "KAssetLongtermShadowSignal",
     "KAssetPaperExecutionEvent",
     "KAssetCorporateActionFetchCoverage",
     "KAssetResearchCohort",

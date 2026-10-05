@@ -284,6 +284,8 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # Current metadata materializes them, so let their migrations rebuild
             # both tables during each round trip.
             for table in (
+                "kasset_longterm_shadow_signals",
+                "kasset_longterm_shadow_runs",
                 "kasset_swing_shadow_signals",
                 "kasset_swing_shadow_runs",
                 "kasset_intraday_rvol_shadow",

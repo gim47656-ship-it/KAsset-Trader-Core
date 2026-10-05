@@ -1,0 +1,7 @@
+run.sh pytest tests/extensions/kasset/test_multi_user_migration_guards.py tests/services/order_proposals/callback_inbox/test_migration_chain.py tests/services/paper_cohort/test_migration.py tests/services/paper_evaluation/test_migration.py tests/infra/test_database_guard_completeness.py tests/infra/test_schema_barrier.py
+........................                                                 [100%]
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.03 database_seconds=0.11
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+24 passed in 199.10s (0:03:19)
+PYTEST_EXIT=0

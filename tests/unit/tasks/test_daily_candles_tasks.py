@@ -168,3 +168,74 @@ async def test_swing_shadow_observer_failure_is_reported_not_raised(
     result = await swing_shadow_service.run_swing_shadow_after_daily_sync()
 
     assert result == {"status": "failed", "reason": "ConnectionError"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "sync_status", "expect_observer"),
+    [
+        (False, "ok", False),
+        (True, "failed", False),
+        (True, "ok", True),
+    ],
+)
+async def test_kr_daily_task_runs_longterm_shadow_only_after_enabled_success(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    sync_status: str,
+    expect_observer: bool,
+) -> None:
+    from app.extensions.kasset.automation import (
+        longterm_shadow_service,
+        swing_shadow_service,
+    )
+    from app.tasks import daily_candles_tasks
+
+    monkeypatch.setattr(
+        daily_candles_tasks,
+        "run_daily_candles_sync",
+        AsyncMock(return_value={"status": sync_status, "market": "kr"}),
+    )
+    # 스윙 observer가 실패 결과를 돌려줘도 장기 observer와 일봉 결과는 영향을 받지 않는다.
+    swing = AsyncMock(return_value={"status": "failed", "reason": "OperationalError"})
+    monkeypatch.setattr(
+        swing_shadow_service, "run_swing_shadow_after_daily_sync", swing
+    )
+    longterm = AsyncMock(return_value={"status": "completed", "runId": 9})
+    monkeypatch.setattr(
+        longterm_shadow_service, "run_longterm_shadow_after_daily_sync", longterm
+    )
+    monkeypatch.setattr(
+        daily_candles_tasks.settings, "KASSET_SWING_SHADOW_ENABLED", True
+    )
+    monkeypatch.setattr(
+        daily_candles_tasks.settings, "KASSET_LONGTERM_SHADOW_ENABLED", enabled
+    )
+
+    result = await daily_candles_tasks.sync_kr_daily_task.original_func()
+
+    assert result["status"] == sync_status
+    if expect_observer:
+        longterm.assert_awaited_once_with()
+        assert result["longterm_shadow"] == {"status": "completed", "runId": 9}
+        assert result["swing_shadow"]["status"] == "failed"
+    else:
+        longterm.assert_not_awaited()
+        assert "longterm_shadow" not in result
+
+
+@pytest.mark.asyncio
+async def test_longterm_shadow_observer_failure_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import db
+    from app.extensions.kasset.automation import longterm_shadow_service
+
+    def broken_session() -> object:
+        raise ConnectionError("database unavailable")
+
+    monkeypatch.setattr(db, "AsyncSessionLocal", broken_session)
+
+    result = await longterm_shadow_service.run_longterm_shadow_after_daily_sync()
+
+    assert result == {"status": "failed", "reason": "ConnectionError"}

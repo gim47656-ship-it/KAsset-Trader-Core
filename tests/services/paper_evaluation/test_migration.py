@@ -243,6 +243,8 @@ async def test_real_postgresql_upgrade_downgrade_upgrade_single_head() -> None:
             # observability, lifecycle, AI, and shadow-risk tables. Remove
             # dependents first so the later migration chain creates them.
             for table in (
+                "review.kasset_longterm_shadow_signals",
+                "review.kasset_longterm_shadow_runs",
                 "review.kasset_swing_shadow_signals",
                 "review.kasset_swing_shadow_runs",
                 "kasset_research_cohort_members",

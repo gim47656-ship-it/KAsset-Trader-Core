@@ -53,6 +53,7 @@ STATUS: accepted | pending-user-device-check | partial | superseded-by <path>
 
 | 날짜 | 주제 | 기록 |
 |---|---|---|
+| 05 | 장기 추세·재무성장 SHADOW 2후보 주간 코호트·20/60/120거래일 가상 성과 | [05-longterm-shadow](history/2026/10/05-longterm-shadow/main.md) |
 | 03 | 스윙 SHADOW 3후보 관측·2주 가상 성과 조회 | [03-swing-shadow](history/2026/10/03-swing-shadow/main.md) |
 | 03 | 스윙 자료 지속 수집(올해 분기·재무 순환 갱신·전종목 수급) 보완 | [03-swing-data-refresh](history/2026/10/03-swing-data-refresh/main.md) |
 

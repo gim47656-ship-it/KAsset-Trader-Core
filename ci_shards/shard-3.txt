@@ -21,6 +21,7 @@ tests/extensions/kasset/automation/test_feature_engine.py
 tests/extensions/kasset/automation/test_hard_risk_ai_review.py
 tests/extensions/kasset/automation/test_intraday_data.py
 tests/extensions/kasset/automation/test_job.py
+tests/extensions/kasset/automation/test_longterm_shadow.py
 tests/extensions/kasset/automation/test_market_pipeline.py
 tests/extensions/kasset/automation/test_portfolio_backtest.py
 tests/extensions/kasset/automation/test_shadow_manifest.py

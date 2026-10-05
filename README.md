@@ -103,6 +103,8 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 
 스윙 SHADOW의 판정 규칙·활성화 순서·2주 성적 조회 방법은 [스윙 SHADOW 런북](docs/runbooks/kasset-swing-shadow.md)에 있습니다. 기본 off이며 단기 매매·주문·승격에는 연결하지 않습니다. 성과는 다음 거래일 시가 가상 진입에 대한 거래일별 관찰값으로, 실제 체결·계좌 수익이 아닙니다.
 
+장기 추세·재무성장 SHADOW의 규칙·코호트 성과·벤치마크 해석은 [장기 SHADOW 런북](docs/runbooks/kasset-longterm-shadow.md)에 있습니다. 기본 off이며 주문·추천·승격에 연결하지 않습니다.
+
 종목 동기화는 기존 `kr_symbol_universe`·`us_symbol_universe`에서 `symbol_master`로 **누락 행만** 보충합니다. 기존 이름 수정·상장폐지 반영·우선주 추가는 하지 않습니다. 원본 universe 수집과 검색 마스터 보충은 별개의 단계입니다.
 
 - 실행 파일: `/usr/local/bin/kasset-symbol-master-daily.sh`

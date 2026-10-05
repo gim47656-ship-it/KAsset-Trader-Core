@@ -1,0 +1,63 @@
+2026-10-05T11:45:24+09:00
+2026-10-05 02:45:34,636 - app.monitoring.sentry - INFO - Sentry disabled: SENTRY_DSN is empty
+{
+  "candidates": {
+    "quality_growth_trend": {
+      "duplicates": 20,
+      "inserted": 0,
+      "noSignalReasons": {
+        "below_sma200": 508,
+        "fundamentals_discrete_missing": 5,
+        "fundamentals_insufficient_quarters": 1,
+        "fundamentals_missing": 6,
+        "fundamentals_net_income_growth_below_minimum": 22,
+        "fundamentals_prior_ttm_net_income_not_positive": 16,
+        "fundamentals_quarter_gap": 6,
+        "fundamentals_revenue_growth_below_minimum": 24,
+        "fundamentals_stale": 36,
+        "fundamentals_ttm_net_income_not_positive": 18,
+        "momentum_not_positive": 9,
+        "outside_top_n": 24,
+        "sma200_not_rising": 50,
+        "sma50_not_above_sma200": 107
+      },
+      "notApplicable": {},
+      "passedFilter": 44,
+      "signals": 20
+    },
+    "trend_momentum": {
+      "duplicates": 20,
+      "inserted": 0,
+      "noSignalReasons": {
+        "below_sma200": 508,
+        "momentum_not_positive": 9,
+        "outside_top_n": 158,
+        "sma200_not_rising": 50,
+        "sma50_not_above_sma200": 107
+      },
+      "notApplicable": {},
+      "passedFilter": 178,
+      "signals": 20
+    }
+  },
+  "configFingerprint": "766c159dd595c0a621fa1c36e1e54e497d08c50e576b3f38411bcfd6e92ff7b3",
+  "evaluatedCount": 852,
+  "evaluationAsOf": "2026-10-02T06:30:00+00:00",
+  "exclusions": {
+    "below_min_close": 52,
+    "below_min_turnover": 1451,
+    "halted_suspect": 23,
+    "insufficient_history": 84,
+    "price_discontinuity": 15,
+    "stale_latest_bar": 1
+  },
+  "nextSessionOpen": "2026-10-06T00:00:00+00:00",
+  "observedAt": "2026-10-05T02:45:34.637668+00:00",
+  "runId": 2,
+  "signalSession": "2026-10-02",
+  "status": "completed",
+  "triggerSource": "cli",
+  "universeCount": 2478,
+  "weekComplete": true
+}
+OBSERVE_EXIT=0

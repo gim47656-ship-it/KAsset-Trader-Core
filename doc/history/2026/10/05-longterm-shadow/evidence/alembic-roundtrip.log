@@ -1,0 +1,59 @@
+DROP DATABASE
+NOTICE:  database "longterm_alembic_20261005_5e7c1a3d" does not exist, skipping
+CREATE DATABASE
+CREATE_ALL_OK 181
+CREATE_ALL_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running stamp_revision  -> 20261003_kasset_swing_shadow
+STAMP_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261003_kasset_swing_shadow -> 20261005_kasset_longterm_shadow, KRX 장기 추세·재무성장 SHADOW 관측 run·신호 원장을 추가한다.
+UPGRADE1_EXIT=0
+20261005_kasset_longterm_shadow
+kasset_longterm_shadow_runs
+kasset_longterm_shadow_signals
+24
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20261005_kasset_longterm_shadow -> 20261003_kasset_swing_shadow, KRX 장기 추세·재무성장 SHADOW 관측 run·신호 원장을 추가한다.
+DOWNGRADE_EXIT=0
+20261003_kasset_swing_shadow
+0
+2
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261003_kasset_swing_shadow -> 20261005_kasset_longterm_shadow, KRX 장기 추세·재무성장 SHADOW 관측 run·신호 원장을 추가한다.
+UPGRADE2_EXIT=0
+20261005_kasset_longterm_shadow
+kasset_longterm_shadow_runs
+kasset_longterm_shadow_signals
+ck_kasset_longterm_shadow_runs_candidate_counts_object
+ck_kasset_longterm_shadow_runs_completed_complete
+ck_kasset_longterm_shadow_runs_config_fingerprint
+ck_kasset_longterm_shadow_runs_config_object
+ck_kasset_longterm_shadow_runs_evaluated_symbols_array
+ck_kasset_longterm_shadow_runs_exclusions_object
+ck_kasset_longterm_shadow_runs_not_applicable_complete
+ck_kasset_longterm_shadow_runs_reason_required
+ck_kasset_longterm_shadow_runs_schema_version
+ck_kasset_longterm_shadow_runs_status
+ck_kasset_longterm_shadow_runs_trigger_source
+ck_kasset_longterm_shadow_signals_candidate
+ck_kasset_longterm_shadow_signals_config_fingerprint
+ck_kasset_longterm_shadow_signals_evidence_object
+ck_kasset_longterm_shadow_signals_market
+ck_kasset_longterm_shadow_signals_momentum_positive
+ck_kasset_longterm_shadow_signals_prices_positive
+ck_kasset_longterm_shadow_signals_rank_positive
+ck_kasset_longterm_shadow_signals_schema_version
+ck_kasset_longterm_shadow_signals_symbol_nonempty
+fk_kasset_longterm_shadow_signals_run_id_kasset_longter_2122
+pk_kasset_longterm_shadow_runs
+pk_kasset_longterm_shadow_signals
+uq_kasset_longterm_shadow_signals_identity
+20261005_kasset_longterm_shadow (head)
+HEADS_EXIT=0
+DROP DATABASE
+DROP_EXIT=0

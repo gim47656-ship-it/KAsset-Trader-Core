@@ -133,10 +133,14 @@ from app.models.rung_reason_vocabulary import RUNG_VOID_REASON_GROUPS, sql_in_li
 # v57: review.kasset_swing_shadow_runs / review.kasset_swing_shadow_signals
 # (스윙 SHADOW 관측 원장)가 새 ORM 테이블로 들어온다. create_all이 만들고 mirrored
 # ALTER는 없다. 운영은 alembic/versions/20261003_kasset_swing_shadow.py를 적용한다.
+# v58: review.kasset_longterm_shadow_runs / review.kasset_longterm_shadow_signals
+# (장기 추세·재무성장 SHADOW 관측 원장)가 새 ORM 테이블로 들어온다. create_all이 만들고
+# mirrored ALTER는 없다. 운영은 alembic/versions/20261005_kasset_longterm_shadow.py를
+# 적용한다.
 #
 # Production applies the corresponding Alembic revisions; the version bump
 # makes persistent local test databases rebuild the complete ORM shape.
-SCHEMA_BOOTSTRAP_VERSION = 57
+SCHEMA_BOOTSTRAP_VERSION = 58
 
 # ---- constraints + enums (moved verbatim from conftest.py) ----
 MARKET_VALUATION_SOURCE_CHECK_NAME = "ck_market_valuation_snapshots_source"
