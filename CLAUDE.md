@@ -682,13 +682,17 @@ chore/<설명>                 # 유지보수
 ### 워크플로우와 작업 경계
 1. 최신 `origin/main` 기준 새 feature/fix/docs 브랜치를 만듭니다.
 2. 브랜치가 `origin/main`을 upstream으로 물려받지 않도록 설정하고, 변경 파일만 커밋·push합니다.
-3. PR(base: `main`)의 해당 revision CI를 확인한 뒤 머지합니다.
-4. main의 Test 성공 후 Deploy가 self-hosted `kasset-prod`에서 실행됩니다. 마이그레이션 포함 배포는 운영자 승인과 `allow_migration=true`가 필요합니다.
+3. PR(base: `main`)의 해당 revision CI(`Test`의 `ci-required`)가 성공하면 `gh pr merge --squash`로 머지합니다.
+4. main의 Test 성공 후 Deploy가 self-hosted `kasset-prod`에서 실행됩니다. alembic 변경이 있으면 자동 Deploy가 exit 2로 멈추므로 같은 머지 SHA로 `workflow_dispatch`(`sha`, `allow_migration=true`)를 실행합니다. `deploy.sh`가 DB를 백업한 뒤 migration을 돌립니다.
+
+**PR 자동 배포 (2026-10-05 사용자 결정)**: PR로 올린 변경은 위 3·4단계를 사용자에게 다시 묻지 않고 배포까지 진행합니다("PR로 올렸으면 일단 다 배포하도록해 앞으로"). migration 포함 배포도 이 결정에 들어갑니다. PR 목적이 새 기능 플래그 활성화라면 서버 `.env.kasset` 설정(기존 파일 백업)과 해당 서비스 재생성까지 포함합니다. 다음은 여전히 별도 승인 대상입니다.
+- `AGENTS.md` 하드룰에 걸리는 변경: 브로커 게이트 완화, 스케줄러 등록, 레저 직접 쓰기, Telegram 콜백 게이트 등
+- 롤백·삭제·비용이 발생하는 작업
 
 - 이 PC의 Core 프로젝트는 `E:/KAsset-Trader-Core`입니다. Android 앱은 별도 HANSE 저장소의 `KAsset-Trader/android`이며, Core와 앱의 커밋·빌드를 혼동하지 않습니다.
 - 병렬 편집이나 다른 작업의 변경과 겹치는 경우 별도 worktree로 격리합니다. 기존 사용자 변경과 다른 owner의 파일을 덮어쓰지 않습니다.
 - 머지된 브랜치 위에 계속 커밋하지 않습니다. follow-up은 최신 `origin/main`에서 새 브랜치를 만듭니다.
-- CI 대기·머지·배포를 하나의 무인 명령으로 묶지 않습니다. 새 커밋이 생기면 기존 CI 결과가 그 커밋을 검증했다고 간주하지 않습니다.
+- 질문 없이 진행하더라도 CI 확인·머지·배포는 단계마다 실제 결과를 확인하며 진행합니다. `gh pr merge --auto` 같은 하나의 무인 명령으로 묶지 않습니다. 새 커밋이 생기면 기존 CI 결과가 그 커밋을 검증했다고 간주하지 않습니다.
 - 자동 커밋·push는 Main의 `git_finalize`를 사용하고 정확한 파일 목록을 넘깁니다. `main`·`production` 직접 push 금지는 유지합니다.
 
 ### CI required check — `ci-required` 집계와 HANDOFF-only fast path
