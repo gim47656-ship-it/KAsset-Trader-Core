@@ -1,0 +1,29 @@
+prod longterm tables:
+0
+prod swing tables (unchanged expected 2):
+2
+prod public tables:
+110
+test-db longterm dbs:
+test_db_pytest_03d036bdb7b3_main
+test_db_pytest_a0f63d0b503e_main
+test_db_pytest_2e5380f25136_main
+longterm_smoke_20261005_5e7c1a3d
+test_db_pytest_ff58c47963e2_main
+test_db_pytest_483d58799e4c_main
+test_db_pytest_581862d79a95_main
+test_db_pytest_3a32c86b8815_main
+DROP DATABASE
+NOTICE:  database "longterm_alembic_20261005_5e7c1a3d" does not exist, skipping
+DROP DATABASE
+CLEANUP_EXIT=0
+/tmp/kasset-longterm-shadow-20261005-5e7c1a3d-base
+---after
+test_db_pytest_03d036bdb7b3_main
+test_db_pytest_a0f63d0b503e_main
+test_db_pytest_2e5380f25136_main
+test_db_pytest_ff58c47963e2_main
+test_db_pytest_483d58799e4c_main
+test_db_pytest_581862d79a95_main
+test_db_pytest_3a32c86b8815_main
+0

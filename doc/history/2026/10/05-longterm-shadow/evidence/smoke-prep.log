@@ -1,0 +1,21 @@
+DROP DATABASE
+NOTICE:  database "longterm_smoke_20261005_5e7c1a3d" does not exist, skipping
+CREATE DATABASE
+CREATE_ALL_OK 181
+CREATE_ALL_EXIT=0
+CREATE TABLE
+COPY 3957
+COPY 744063
+COPY 47232
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running stamp_revision  -> 20261003_kasset_swing_shadow
+STAMP_EXIT=0
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261003_kasset_swing_shadow -> 20261005_kasset_longterm_shadow, KRX 장기 추세·재무성장 SHADOW 관측 run·신호 원장을 추가한다.
+UPGRADE_EXIT=0
+20261005_kasset_longterm_shadow
+744063|2025-08-01 00:00:00+00|2026-10-02 00:00:00+00
+3957
+47232

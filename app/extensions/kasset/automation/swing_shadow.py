@@ -29,7 +29,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
 from hashlib import sha256
 from statistics import median
-from typing import Literal
+from typing import Literal, Protocol
 
 from app.extensions.kasset.automation.contracts import PriceBar
 from app.extensions.kasset.automation.shadow_setups import (
@@ -309,25 +309,46 @@ def bar_timestamp(session_date: date) -> datetime:
     return datetime.combine(session_date, time.min, tzinfo=UTC)
 
 
-def evaluate_swing_symbol(
+class BarScreenConfig(Protocol):
+    """``screen_bars``가 읽는 설정 값. 스윙·장기 SHADOW 설정이 같은 이름으로 만족한다."""
+
+    @property
+    def lookback_sessions(self) -> int: ...
+    @property
+    def max_abs_session_move(self) -> Decimal: ...
+    @property
+    def min_close(self) -> Decimal: ...
+    @property
+    def turnover_sessions(self) -> int: ...
+    @property
+    def min_average_turnover(self) -> Decimal: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BarScreen:
+    """품질 제외 결과. ``excluded_reason``이 없으면 ``window``는 오름차순 검증 완료 봉이다."""
+
+    window: tuple[SwingBar, ...]
+    excluded_reason: str | None
+    future_bars_ignored: int
+
+
+def screen_bars(
     bars: Sequence[SwingBar],
     *,
-    symbol: str,
     signal_session: date,
     calendar_sessions: Sequence[date],
-    week_complete: bool,
-    evaluation_as_of: datetime,
-    config: SwingShadowConfig = DEFAULT_SWING_SHADOW_CONFIG,
-) -> SymbolEvaluation:
-    """완료 세션 ``signal_session``까지의 일봉으로 세 후보를 판정한다.
+    config: BarScreenConfig,
+    min_history_sessions: int | None = None,
+) -> BarScreen:
+    """대상·품질 제외(봉 정합·누락·calendar·35% 변동·정지 의심·가격·거래대금)를 판정한다.
 
-    ``calendar_sessions``는 ``signal_session``으로 끝나는 오름차순 거래소 세션이며
-    ``lookback_sessions``보다 길어야 첫 주가 잘렸는지 판단할 수 있다.
-    ``week_complete``는 calendar 기준으로 ``signal_session``이 그 ISO 주의 마지막
-    거래일인지다. ``evaluation_as_of``는 그 세션의 정규장 종료 시각이다.
+    스윙 SHADOW와 장기 SHADOW가 같은 기준을 쓰도록 한 곳에 둔다.
+    ``min_history_sessions``가 ``None``이면 lookback 전체가 필요하다. 값이 있으면 상장
+    직후처럼 lookback 앞쪽만 비어 있어도 그 개수 이상의 연속 봉이 있으면 통과하고,
+    ``window``는 존재하는 봉만 담는다. lookback 중간 누락은 항상 ``data_gap``이다.
     """
 
-    normalized = symbol.strip().upper()
     sessions = tuple(calendar_sessions)
     if not sessions or sessions[-1] != signal_session:
         raise ValueError("calendar_sessions must end at signal_session")
@@ -337,13 +358,8 @@ def evaluate_swing_symbol(
     retained = [bar for bar in bars if bar.session_date <= signal_session]
     future_ignored = len(bars) - len(retained)
 
-    def excluded(reason: str) -> SymbolEvaluation:
-        return SymbolEvaluation(
-            symbol=normalized,
-            excluded_reason=reason,
-            candidates=(),
-            future_bars_ignored=future_ignored,
-        )
+    def excluded(reason: str) -> BarScreen:
+        return BarScreen((), reason, future_ignored)
 
     retained.sort(key=lambda item: item.session_date)
     dates = [bar.session_date for bar in retained]
@@ -365,10 +381,12 @@ def evaluate_swing_symbol(
     missing = [day for day in covered if day not in by_date]
     if missing:
         first_bar = retained[0].session_date
-        if all(day < first_bar for day in missing):
+        if not all(day < first_bar for day in missing):
+            return excluded("data_gap")
+        required = min_history_sessions or config.lookback_sessions
+        if len(covered) - len(missing) < required:
             return excluded("insufficient_history")
-        return excluded("data_gap")
-    window = tuple(by_date[day] for day in covered)
+    window = tuple(by_date[day] for day in covered if day in by_date)
 
     if _has_discontinuity(window, config.max_abs_session_move):
         return excluded("price_discontinuity")
@@ -386,8 +404,7 @@ def evaluate_swing_symbol(
     )
     if halt.suspected:
         return excluded("halted_suspect")
-    latest = window[-1]
-    if latest.close < config.min_close:
+    if window[-1].close < config.min_close:
         return excluded("below_min_close")
     turnover = window[-config.turnover_sessions :]
     if any(bar.value is None for bar in turnover):
@@ -395,6 +412,42 @@ def evaluate_swing_symbol(
     average_turnover = _mean(tuple(_decimal(bar.value) for bar in turnover))
     if average_turnover < config.min_average_turnover:
         return excluded("below_min_turnover")
+    return BarScreen(window, None, future_ignored)
+
+
+def evaluate_swing_symbol(
+    bars: Sequence[SwingBar],
+    *,
+    symbol: str,
+    signal_session: date,
+    calendar_sessions: Sequence[date],
+    week_complete: bool,
+    evaluation_as_of: datetime,
+    config: SwingShadowConfig = DEFAULT_SWING_SHADOW_CONFIG,
+) -> SymbolEvaluation:
+    """완료 세션 ``signal_session``까지의 일봉으로 세 후보를 판정한다.
+
+    ``calendar_sessions``는 ``signal_session``으로 끝나는 오름차순 거래소 세션이며
+    ``lookback_sessions``보다 길어야 첫 주가 잘렸는지 판단할 수 있다.
+    ``week_complete``는 calendar 기준으로 ``signal_session``이 그 ISO 주의 마지막
+    거래일인지다. ``evaluation_as_of``는 그 세션의 정규장 종료 시각이다.
+    """
+
+    normalized = symbol.strip().upper()
+    sessions = tuple(calendar_sessions)
+    screen = screen_bars(
+        bars, signal_session=signal_session, calendar_sessions=sessions, config=config
+    )
+    future_ignored = screen.future_bars_ignored
+    if screen.excluded_reason is not None:
+        return SymbolEvaluation(
+            symbol=normalized,
+            excluded_reason=screen.excluded_reason,
+            candidates=(),
+            future_bars_ignored=future_ignored,
+        )
+    window = screen.window
+    covered = sessions[-config.lookback_sessions :]
 
     weekly_first_partial = sessions[0] >= covered[0] or _same_week(
         sessions[-config.lookback_sessions - 1], covered[0]
@@ -764,6 +817,21 @@ def _box_breakout_retest(
     )
 
 
+class OutcomeConfig(Protocol):
+    """``evaluate_outcome``이 읽는 비용·변동 한도. 스윙·장기 SHADOW 설정이 만족한다."""
+
+    @property
+    def max_abs_session_move(self) -> Decimal: ...
+    @property
+    def buy_fee_rate(self) -> Decimal: ...
+    @property
+    def sell_fee_rate(self) -> Decimal: ...
+    @property
+    def sell_tax_rate(self) -> Decimal: ...
+    @property
+    def slippage_rate(self) -> Decimal: ...
+
+
 @dataclass(frozen=True, slots=True)
 class HorizonOutcome:
     horizon: int
@@ -786,7 +854,7 @@ def evaluate_outcome(
     forward_sessions: Sequence[date],
     last_final_session: date | None,
     bars_by_date: Mapping[date, SwingBar],
-    config: SwingShadowConfig = DEFAULT_SWING_SHADOW_CONFIG,
+    config: OutcomeConfig = DEFAULT_SWING_SHADOW_CONFIG,
 ) -> HorizonOutcome:
     """다음 세션 시가 가상 진입 → ``horizon``번째 세션(진입일=1) 종가 가상 청산.
 
@@ -918,9 +986,12 @@ __all__ = [
     "SWING_SHADOW_MARKET",
     "SWING_SHADOW_REPORT_SCHEMA_VERSION",
     "SWING_SHADOW_SCHEMA_VERSION",
+    "BarScreen",
+    "BarScreenConfig",
     "CandidateResult",
     "CandidateStatus",
     "HorizonOutcome",
+    "OutcomeConfig",
     "OutcomeStatus",
     "SwingBar",
     "SwingCandidate",
@@ -931,5 +1002,6 @@ __all__ = [
     "decimal_text",
     "evaluate_outcome",
     "evaluate_swing_symbol",
+    "screen_bars",
     "summarize_horizon",
 ]

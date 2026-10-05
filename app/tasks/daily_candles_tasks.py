@@ -34,6 +34,15 @@ async def sync_kr_daily_task() -> dict[str, object]:
         )
 
         result["swing_shadow"] = await run_swing_shadow_after_daily_sync()
+
+    # 장기 추세·재무성장 SHADOW도 같은 조건에서 스윙 다음에 한 번 돈다. 스윙 결과와
+    # 서로 독립이라 어느 한쪽 실패가 다른 쪽·일봉 결과를 바꾸지 않는다.
+    if result.get("status") == "ok" and settings.KASSET_LONGTERM_SHADOW_ENABLED:
+        from app.extensions.kasset.automation.longterm_shadow_service import (
+            run_longterm_shadow_after_daily_sync,
+        )
+
+        result["longterm_shadow"] = await run_longterm_shadow_after_daily_sync()
     return result
 
 

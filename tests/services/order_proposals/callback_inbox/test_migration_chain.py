@@ -94,6 +94,8 @@ def _admin_kwargs(url, *, database: str) -> dict[str, object]:
 #: schema -- otherwise the migration collides with what create_all already
 #: made. Same maintenance point the sibling roundtrip tests carry.
 _POST_PARENT_TABLES: tuple[str, ...] = (
+    "review.kasset_longterm_shadow_signals",
+    "review.kasset_longterm_shadow_runs",
     "review.kasset_swing_shadow_signals",
     "review.kasset_swing_shadow_runs",
     "kasset_research_cohort_members",

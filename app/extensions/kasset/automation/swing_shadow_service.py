@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -64,6 +64,8 @@ TriggerSource = Literal["cli", "daily_candles_task"]
 _SYMBOL_CHUNK = 500
 _INSERT_CHUNK = 500
 _SIGNAL_IDENTITY = "uq_kasset_swing_shadow_signals_identity"
+# 실패가 아닌 run 상태. ``not_applicable``은 장기 SHADOW의 비코호트 세션 기록이다.
+_NOT_FAILURES = ("completed", "not_applicable")
 
 _BARS_SQL = text(
     """
@@ -103,7 +105,7 @@ REPORT_LIMITATIONS = (
 
 
 @dataclass(frozen=True, slots=True)
-class _ObservationPlan:
+class ObservationPlan:
     signal_session: date
     evaluation_as_of: datetime
     next_session_open: datetime
@@ -111,15 +113,15 @@ class _ObservationPlan:
     calendar_sessions: tuple[date, ...]
 
 
-def _aware_utc(value: datetime) -> datetime:
+def aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     return value.astimezone(UTC)
 
 
-def _plan_observation(
-    observed_at: datetime, config: SwingShadowConfig
-) -> _ObservationPlan | str:
+def plan_observation(
+    observed_at: datetime, lookback_sessions: int
+) -> ObservationPlan | str:
     signal_session = last_final_session_kr(observed_at)
     if signal_session is None:
         return "no_final_session"
@@ -135,15 +137,15 @@ def _plan_observation(
     sessions = tuple(
         trading_sessions_in_range(
             "kr",
-            signal_session - timedelta(days=config.lookback_sessions * 2 + 30),
+            signal_session - timedelta(days=lookback_sessions * 2 + 30),
             signal_session,
         )
     )
-    if len(sessions) <= config.lookback_sessions or sessions[-1] != signal_session:
+    if len(sessions) <= lookback_sessions or sessions[-1] != signal_session:
         return "calendar_unavailable"
     monday = signal_session - timedelta(days=signal_session.weekday())
     week = trading_sessions_in_range("kr", monday, monday + timedelta(days=6))
-    return _ObservationPlan(
+    return ObservationPlan(
         signal_session=signal_session,
         evaluation_as_of=bounds[1],
         next_session_open=following_bounds[0],
@@ -152,7 +154,7 @@ def _plan_observation(
     )
 
 
-async def _load_universe(session: AsyncSession) -> list[str]:
+async def load_universe(session: AsyncSession) -> list[str]:
     result = await session.execute(text(KR_COMMON_SHARE_UNIVERSE_SQL))
     symbols = [str(row.symbol).strip().upper() for row in result]
     return sorted({symbol for symbol in symbols if symbol})
@@ -178,7 +180,7 @@ def _bar_from_row(row: Any) -> SwingBar:
     )
 
 
-async def _load_bars(
+async def load_bars(
     session: AsyncSession,
     symbols: Sequence[str],
     *,
@@ -273,8 +275,8 @@ async def observe_swing_shadow(
 ) -> dict[str, object]:
     """마지막 완료 세션의 세 후보 신호를 판정해 run과 신규 신호를 저장한다."""
 
-    observed_at = _aware_utc(now)
-    plan = _plan_observation(observed_at, config)
+    observed_at = aware_utc(now)
+    plan = plan_observation(observed_at, config.lookback_sessions)
     if isinstance(plan, str):
         run_id = await _record_terminal_run(
             session,
@@ -324,13 +326,13 @@ async def observe_swing_shadow(
 async def _observe_planned(
     session: AsyncSession,
     *,
-    plan: _ObservationPlan,
+    plan: ObservationPlan,
     observed_at: datetime,
     trigger_source: TriggerSource,
     config: SwingShadowConfig,
 ) -> dict[str, object]:
-    universe = await _load_universe(session)
-    bars = await _load_bars(
+    universe = await load_universe(session)
+    bars = await load_bars(
         session,
         universe,
         first_session=plan.calendar_sessions[0],
@@ -471,7 +473,7 @@ def _signal_bar_from_record(record: KAssetSwingShadowSignal) -> SwingBar:
     )
 
 
-def _outcome_json(outcome: HorizonOutcome) -> dict[str, object]:
+def outcome_to_json(outcome: HorizonOutcome) -> dict[str, object]:
     def text_or_none(value: Decimal | None) -> str | None:
         return decimal_text(value) if value is not None else None
 
@@ -504,7 +506,37 @@ def _horizon_summaries(
     }
 
 
-def _candidate_counts(run: KAssetSwingShadowRun, key: str) -> Mapping[str, object]:
+class CoverageRun(Protocol):
+    """``session_coverage``가 읽는 run 필드. 스윙·장기 run 모델이 만족한다."""
+
+    @property
+    def id(self) -> int: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def reason(self) -> str | None: ...
+    @property
+    def signal_session_date(self) -> date | None: ...
+    @property
+    def observed_at(self) -> datetime: ...
+    @property
+    def universe_count(self) -> int | None: ...
+    @property
+    def evaluated_count(self) -> int | None: ...
+    @property
+    def exclusions(self) -> dict[str, object]: ...
+    @property
+    def candidate_counts(self) -> dict[str, object]: ...
+
+
+class CoverageRecord(Protocol):
+    @property
+    def signal_session_date(self) -> date: ...
+    @property
+    def candidate(self) -> str: ...
+
+
+def _candidate_counts(run: CoverageRun, key: str) -> Mapping[str, object]:
     value = run.candidate_counts.get(key) if run.candidate_counts else None
     return value if isinstance(value, Mapping) else {}
 
@@ -513,10 +545,11 @@ def _int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def _session_coverage(
+def session_coverage(
     expected_sessions: Sequence[date],
-    runs: Sequence[KAssetSwingShadowRun],
-    records: Sequence[KAssetSwingShadowSignal],
+    runs: Sequence[CoverageRun],
+    records: Sequence[CoverageRecord],
+    candidate_keys: Sequence[str],
 ) -> dict[str, object]:
     """조회 기간 거래일마다 관측 상태를 하나로 정한다.
 
@@ -527,7 +560,7 @@ def _session_coverage(
     새로 저장되지 않은 중복 포함).
     """
 
-    by_session: dict[date, list[KAssetSwingShadowRun]] = defaultdict(list)
+    by_session: dict[date, list[CoverageRun]] = defaultdict(list)
     for run in runs:
         if run.signal_session_date is not None:
             by_session[run.signal_session_date].append(run)
@@ -553,26 +586,28 @@ def _session_coverage(
                     Counter(
                         run.reason or "unspecified"
                         for run in day_runs
-                        if run.status != "completed"
+                        if run.status not in _NOT_FAILURES
                     ).items()
                 )
             ),
         }
         if not day_runs:
             state = "not_observed"
+        elif not completed and all(run.status == "not_applicable" for run in day_runs):
+            state = "not_applicable"
         elif not completed:
             state = "observation_failed"
         else:
             representative = completed[-1]
             candidates: dict[str, object] = {}
             observed_signals = 0
-            for candidate in SWING_CANDIDATES:
-                counts = _candidate_counts(representative, candidate.value)
+            for key in candidate_keys:
+                counts = _candidate_counts(representative, key)
                 signals = _int(counts.get("signals"))
                 observed_signals += signals
-                candidates[candidate.value] = {
+                candidates[key] = {
                     "signalsObserved": signals,
-                    "storedNewSignals": stored[day][candidate.value],
+                    "storedNewSignals": stored[day][key],
                     "noSignalReasons": counts.get("noSignalReasons", {}),
                     "notApplicable": counts.get("notApplicable", {}),
                 }
@@ -626,7 +661,7 @@ def _session_coverage(
                 Counter(
                     run.reason or "unspecified"
                     for run in runs
-                    if run.status != "completed"
+                    if run.status not in _NOT_FAILURES
                 ).items()
             )
         ),
@@ -645,7 +680,7 @@ async def build_swing_shadow_report(
 ) -> dict[str, object]:
     """저장된 신호의 1/3/5/10거래일 가상 성과와 관측 커버리지를 읽기 전용으로 만든다."""
 
-    generated_at = _aware_utc(now)
+    generated_at = aware_utc(now)
     last_final = last_final_session_kr(generated_at)
     end = until or last_final or since
     records = list(
@@ -688,7 +723,7 @@ async def build_swing_shadow_report(
             [record.signal_session_date for record in records]
             + [day for days in forward.values() for day in days]
         )
-        bars = await _load_bars(
+        bars = await load_bars(
             session,
             sorted({record.symbol for record in records}),
             first_session=min(record.signal_session_date for record in records),
@@ -746,7 +781,7 @@ async def build_swing_shadow_report(
                     outcomes[horizon].append(outcome)
                     if not revised:
                         unrevised[horizon].append(outcome)
-                    per_horizon[str(horizon)] = _outcome_json(outcome)
+                    per_horizon[str(horizon)] = outcome_to_json(outcome)
                 if include_signals:
                     signal_details.append(
                         {
@@ -781,7 +816,7 @@ async def build_swing_shadow_report(
             {
                 "configFingerprint": fingerprint,
                 "isCurrentConfig": fingerprint == config.fingerprint,
-                "coverage": _session_coverage(
+                "coverage": session_coverage(
                     expected_sessions,
                     cohort_runs,
                     [
@@ -789,6 +824,7 @@ async def build_swing_shadow_report(
                         for record in records
                         if record.config_fingerprint == fingerprint
                     ],
+                    [item.value for item in SWING_CANDIDATES],
                 ),
                 "candidates": candidates,
             }
@@ -828,7 +864,16 @@ async def build_swing_shadow_report(
 __all__ = [
     "REPORT_LIMITATIONS",
     "REPORT_NOTICE",
+    "CoverageRecord",
+    "CoverageRun",
+    "ObservationPlan",
+    "aware_utc",
     "build_swing_shadow_report",
+    "load_bars",
+    "load_universe",
     "observe_swing_shadow",
+    "outcome_to_json",
+    "plan_observation",
     "run_swing_shadow_after_daily_sync",
+    "session_coverage",
 ]

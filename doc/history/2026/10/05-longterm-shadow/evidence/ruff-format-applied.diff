@@ -1,0 +1,227 @@
+--- app/extensions/kasset/automation/longterm_shadow.py
++++ app/extensions/kasset/automation/longterm_shadow.py
+@@ -127,7 +127,9 @@
+             raise ValueError("momentum skip must be shorter than momentum base")
+         if self.min_history_sessions < self.required_history_sessions:
+             raise ValueError("min_history_sessions does not cover every indicator")
+-        if self.lookback_sessions < max(self.min_history_sessions, self.turnover_sessions):
++        if self.lookback_sessions < max(
++            self.min_history_sessions, self.turnover_sessions
++        ):
+             raise ValueError("lookback_sessions must cover min_history_sessions")
+         if not self.horizons or any(h < 1 for h in self.horizons):
+             raise ValueError("horizons must be positive trading-session counts")
+@@ -401,7 +403,9 @@
+         }
+     )
+     if ttm_income <= _ZERO:
+-        return FundamentalsEvaluation("fundamentals_ttm_net_income_not_positive", evidence)
++        return FundamentalsEvaluation(
++            "fundamentals_ttm_net_income_not_positive", evidence
++        )
+     if prior_income <= _ZERO:
+         return FundamentalsEvaluation(
+             "fundamentals_prior_ttm_net_income_not_positive", evidence
+@@ -519,7 +523,9 @@
+     quality: list[tuple[LongtermSymbolEvaluation, dict[str, object]]] = []
+     for item in passing:
+         result = evaluate_fundamentals(
+-            fundamentals.get(item.symbol, ()), signal_session=signal_session, config=config
++            fundamentals.get(item.symbol, ()),
++            signal_session=signal_session,
++            config=config,
+         )
+         if result.reason is not None:
+             quality_reasons[result.reason] += 1
+
+--- app/extensions/kasset/automation/longterm_shadow_service.py
++++ app/extensions/kasset/automation/longterm_shadow_service.py
+@@ -523,7 +523,9 @@
+             and run.evaluated_symbols is not None
+         ):
+             benchmark_symbols[run.signal_session_date] = list(run.evaluated_symbols)
+-    sessions = sorted(benchmark_symbols.keys() | {r.signal_session_date for r in records})
++    sessions = sorted(
++        benchmark_symbols.keys() | {r.signal_session_date for r in records}
++    )
+     max_horizon = config.horizons[-1]
+ 
+     pairs: dict[str, dict[int, list[CohortPair]]] = {
+@@ -589,7 +591,9 @@
+             for record in cohort_records:
+                 stored = _signal_bar_from_record(record)
+                 current = by_symbol.get(record.symbol, {}).get(signal_session)
+-                revised = current is not None and current.price_key() != stored.price_key()
++                revised = (
++                    current is not None and current.price_key() != stored.price_key()
++                )
+                 if current is None:
+                     missing_now[key] += 1
+                 if revised:
+@@ -714,7 +718,9 @@
+         | {run.config_fingerprint for run in runs}
+         | {config.fingerprint}
+     )
+-    expected_sessions = _cohort_sessions(since, min(end, last_final) if last_final else end)
++    expected_sessions = _cohort_sessions(
++        since, min(end, last_final) if last_final else end
++    )
+     cohorts: list[dict[str, object]] = []
+     signal_details: list[dict[str, object]] = []
+     cohort_details: list[dict[str, object]] = []
+
+--- tests/extensions/kasset/automation/test_longterm_shadow.py
++++ tests/extensions/kasset/automation/test_longterm_shadow.py
+@@ -210,7 +210,11 @@
+     recent: tuple[str, str] = ("120", "12"),
+ ) -> list[QuarterFact]:
+     return [
+-        _fact(end, revenue=(prior if index < 4 else recent)[0], net_income=(prior if index < 4 else recent)[1])
++        _fact(
++            end,
++            revenue=(prior if index < 4 else recent)[0],
++            net_income=(prior if index < 4 else recent)[1],
++        )
+         for index, end in enumerate(_QUARTER_ENDS)
+     ]
+ 
+@@ -271,9 +275,7 @@
+         == "fundamentals_prior_ttm_net_income_not_positive"
+     )
+     loss_now = _growth_facts(recent=("120", "-1"))
+-    assert (
+-        _fundamentals(loss_now).reason == "fundamentals_ttm_net_income_not_positive"
+-    )
++    assert _fundamentals(loss_now).reason == "fundamentals_ttm_net_income_not_positive"
+ 
+ 
+ @pytest.mark.parametrize(
+@@ -314,9 +316,9 @@
+     )
+ 
+     assert _fundamentals([*facts, revised]).reason is None
+-    assert _fundamentals([*facts, revised], _SIGNAL_SESSION + timedelta(days=5)).reason == (
+-        "fundamentals_ttm_net_income_not_positive"
+-    )
++    assert _fundamentals(
++        [*facts, revised], _SIGNAL_SESSION + timedelta(days=5)
++    ).reason == ("fundamentals_ttm_net_income_not_positive")
+ 
+ 
+ # ---- 코호트 선정 ------------------------------------------------------------
+@@ -365,14 +367,18 @@
+ ):
+     evaluations = [_passing(f"{index:06d}", f"0.{90 - index}") for index in range(18)]
+     # 18개의 뚜렷한 상위 뒤에 같은 모멘텀 3종목이 남은 2칸을 두고 경쟁한다.
+-    evaluations += [_passing(symbol, "0.5") for symbol in ("000300", "000200", "000250")]
++    evaluations += [
++        _passing(symbol, "0.5") for symbol in ("000300", "000200", "000250")
++    ]
+     evaluations.append(_passing("000500", "0.1"))
+     evaluations.append(
+         LongtermSymbolEvaluation(
+             symbol="000999", excluded_reason=None, trend_reason="below_sma200"
+         )
+     )
+-    evaluations.append(LongtermSymbolEvaluation(symbol="000998", excluded_reason="data_gap"))
++    evaluations.append(
++        LongtermSymbolEvaluation(symbol="000998", excluded_reason="data_gap")
++    )
+ 
+     selection = _select(evaluations)[LongtermCandidate.TREND_MOMENTUM]
+ 
+@@ -407,7 +413,9 @@
+         _passing("000004", "0.4"),  # 통과
+     ]
+     future_only = _growth_facts()
+-    future_only[-1] = _fact(date(2026, 6, 30), filing=_SIGNAL_SESSION + timedelta(days=1))
++    future_only[-1] = _fact(
++        date(2026, 6, 30), filing=_SIGNAL_SESSION + timedelta(days=1)
++    )
+     facts = {
+         "000002": future_only,
+         "000003": _growth_facts(),
+
+--- tests/extensions/kasset/automation/test_longterm_shadow_service.py
++++ tests/extensions/kasset/automation/test_longterm_shadow_service.py
+@@ -81,7 +81,9 @@
+         index = 260 + offset
+         opened, closed = _price(symbol, index - 1), _price(symbol, index)
+         rows.append(
+-            _row(day, opened, max(opened, closed) + 10, min(opened, closed) - 10, closed)
++            _row(
++                day, opened, max(opened, closed) + 10, min(opened, closed) - 10, closed
++            )
+         )
+     return rows
+ 
+@@ -221,7 +223,9 @@
+     await _insert_bars(db_session, _SHORT, _history_rows(_B, days[-200:], 60))
+     await _insert_quarters(db_session, _A)
+     # F의 최신 분기(2026Q2)는 S 다음 날 공시되어 S 시점에는 알 수 없다.
+-    await _insert_quarters(db_session, _F, last_filing=_SIGNAL_SESSION + timedelta(days=1))
++    await _insert_quarters(
++        db_session, _F, last_filing=_SIGNAL_SESSION + timedelta(days=1)
++    )
+     await db_session.commit()
+     try:
+         yield db_session
+@@ -304,7 +308,9 @@
+     assert fundamentals["quarters"][0]["fiscalPeriod"] == "2026Q2"
+     assert fundamentals["quarters"][0]["filingDate"] == "2026-08-14"
+     assert "fundamentals" not in stored[1].evidence
+-    assert stored[1].evidence["trend"]["close"] == decimal_text(Decimal(_price(_A, 259)))
++    assert stored[1].evidence["trend"]["close"] == decimal_text(
++        Decimal(_price(_A, 259))
++    )
+ 
+     # 토요일 실제 시각 재실행: 같은 완료 세션을 다시 평가하지만 신호는 늘지 않는다.
+     saturday = await observe_longterm_shadow(
+@@ -413,7 +419,10 @@
+     assert coverage["missingSessions"] == []
+     assert coverage["stateCounts"] == {"evaluated_with_signals": 1}
+     states = {item["session"]: item["state"] for item in coverage["sessions"]}
+-    assert states == {"2026-09-02": "not_applicable", "2026-09-04": "evaluated_with_signals"}
++    assert states == {
++        "2026-09-02": "not_applicable",
++        "2026-09-04": "evaluated_with_signals",
++    }
+     assert coverage["rejectedReasons"] == {}
+ 
+     trend = _detail(report, "trend_momentum", 20)
+@@ -456,7 +465,9 @@
+     assert a_signal["signalBarRevised"] is False
+     assert a_signal["rank"] == 1
+     assert a_signal["horizons"]["20"]["status"] == "mature"
+-    assert a_signal["horizons"]["20"]["entrySession"] == _forward_sessions()[0].isoformat()
++    assert (
++        a_signal["horizons"]["20"]["entrySession"] == _forward_sessions()[0].isoformat()
++    )
+     assert a_signal["horizons"]["60"]["status"] == "pending"
+ 
+ 
+
+--- tests/unit/tasks/test_daily_candles_tasks.py
++++ tests/unit/tasks/test_daily_candles_tasks.py
+@@ -198,13 +198,17 @@
+     )
+     # 스윙 observer가 실패 결과를 돌려줘도 장기 observer와 일봉 결과는 영향을 받지 않는다.
+     swing = AsyncMock(return_value={"status": "failed", "reason": "OperationalError"})
+-    monkeypatch.setattr(swing_shadow_service, "run_swing_shadow_after_daily_sync", swing)
++    monkeypatch.setattr(
++        swing_shadow_service, "run_swing_shadow_after_daily_sync", swing
++    )
+     longterm = AsyncMock(return_value={"status": "completed", "runId": 9})
+     monkeypatch.setattr(
+         longterm_shadow_service, "run_longterm_shadow_after_daily_sync", longterm
+     )
+-    monkeypatch.setattr(daily_candles_tasks.settings, "KASSET_SWING_SHADOW_ENABLED", True)
+     monkeypatch.setattr(
++        daily_candles_tasks.settings, "KASSET_SWING_SHADOW_ENABLED", True
++    )
++    monkeypatch.setattr(
+         daily_candles_tasks.settings, "KASSET_LONGTERM_SHADOW_ENABLED", enabled
+     )
+ 
+
+5 files would be reformatted, 13 files already formatted

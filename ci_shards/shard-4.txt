@@ -19,6 +19,7 @@ tests/extensions/kasset/automation/test_ai_shadow.py
 tests/extensions/kasset/automation/test_benchmark_relative_strength.py
 tests/extensions/kasset/automation/test_candidate_ranker.py
 tests/extensions/kasset/automation/test_event_detector.py
+tests/extensions/kasset/automation/test_longterm_shadow_service.py
 tests/extensions/kasset/automation/test_loss_streak_gate.py
 tests/extensions/kasset/automation/test_realtime_runtime.py
 tests/extensions/kasset/automation/test_realtime_tape.py
