@@ -4,7 +4,7 @@ RECORD:
 DATE: 2026-10-05
 SCOPE: 장기 SHADOW 2후보, 주간 코호트, 20/60/120거래일 가상 성과, 벤치마크 초과수익
 PATHS: app/extensions/kasset/automation/longterm_shadow.py, app/extensions/kasset/automation/longterm_shadow_service.py, app/models/kasset_longterm_shadow.py, alembic/versions/20261005_kasset_longterm_shadow.py, app/tasks/daily_candles_tasks.py, scripts/kasset_longterm_shadow.py, docs/runbooks/kasset-longterm-shadow.md
-STATUS: accepted (미배포)
+STATUS: accepted (2026-10-05 운영 배포·활성화)
 
 ## 사용자 요구와 선택 근거
 
@@ -37,3 +37,17 @@ Main이 직접 확인한 diff 범위:
 - [격리 확인](evidence/isolation-cleanup.log): 운영 DB에 longterm 테이블 0개, 검증 DB·임시 디렉터리 정리.
 
 서버 test 이미지에 git이 없어 `tests/ci`의 `test_cli_*` 9건은 서버에서 실행하지 못했다. GitHub Actions 결과로 확인한다. mature 코호트 집계는 합성 일봉 테스트로만 검증했다.
+
+## 승인된 운영 배포와 최초 관측
+
+사용자가 "배포해"로 승인하고, 이후 "PR로 올렸으면 일단 다 배포하도록해 앞으로"라고 지시했다. 같은 요청으로 오래된 충돌 문서 PR #65·#63(HANDOFF.md 전용, 이후 갱신으로 대체)을 머지 없이 닫았다.
+
+- PR #114 Test run `37257438901` 성공 후 squash 머지 `7ea105461639d101327066a33926c52f4c97deeb`. main Test run `37259466330` 성공.
+- 자동 Deploy run `37259922546`은 `ALLOW_MIGRATION: 0` 안전장치로 exit 2에 멈췄고 운영은 기존 `b22c1eac`로 가동 중이었다. 같은 SHA로 `workflow_dispatch`, `allow_migration=true`의 수동 Deploy run `37259974621`이 deploy·release 모두 성공했다.
+- DB 백업 `/opt/kasset-trader-core/backups/kasset-pre-migration-7ea10546-20261005T033546Z.dump.gz`(861,955,166 bytes) 생성 뒤 `alembic_version`이 `20261003_kasset_swing_shadow` → `20261005_kasset_longterm_shadow`로 바뀌었고 `review.kasset_longterm_shadow_runs`·`_signals`가 생겼다. 6서비스가 `7ea10546` 이미지로 전환됐고 `/health`는 `{"status":"ok"}`였다.
+- `.env.kasset`을 `.env.kasset.pre-longterm-shadow-20261005124119`로 보존(`ghrunner:ghrunner 600` 유지)한 뒤 `KASSET_LONGTERM_SHADOW_ENABLED=true`를 추가하고 worker만 재생성했다. worker Settings에서 스윙·장기 모두 True를 확인했다.
+- 운영 `scripts.kasset_longterm_shadow observe` exit 0, run ID 1, `observedAt=2026-10-05T03:41:49Z`, S=2026-10-02(`weekComplete=true`), fingerprint `766c159d…ff7b3`. 대상 2,478 중 852 평가, `trend_momentum` 통과 178·저장 20, `quality_growth_trend` 통과 44·저장 20(`fundamentals_stale` 36). 격리 smoke와 같은 값이다.
+- READ ONLY SQL로 run 1개(벤치마크 852종목)·후보별 signal 20개를 대조했다. 상위: `trend_momentum` 대한광통신·삼성전기·가온전선·주성엔지니어링·RF머트리얼즈, `quality_growth_trend` 삼성전기·가온전선·티에스이·SK하이닉스·대원전선.
+- 운영 `report --since 2026-10-02` exit 0. 두 후보 20/60/120 모두 코호트·벤치마크 `pending`, `sampleAdvisory=insufficient_sample`이며 실제 주문은 없다.
+
+활성화 뒤 첫 자동 예약 실행은 아직 관측하지 않았다. 10/6(화)은 주 마지막 거래일이 아니므로 `not_applicable` run만 남아야 하고, 첫 자동 코호트는 10/9(금)이다. 초기 성과를 전략 우위의 근거로 쓰지 않는다.
