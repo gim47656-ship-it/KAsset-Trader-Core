@@ -180,22 +180,30 @@ bootstrap한다. Android 자동매매 소유자 계정을 admin으로 바꾸지 
 다음 설정이 모두 유효할 때만 메일을 보내며, 응답은 계정 존재 여부와 관계없이 동일하다.
 
 ```dotenv
-AUTH_SMTP_HOST=smtp.fmcity.com
+AUTH_SMTP_HOST=smtp.gmail.com
 AUTH_SMTP_PORT=587
-AUTH_SMTP_USERNAME=<mailbox>
-AUTH_SMTP_PASSWORD=<server-only secret>
-AUTH_SMTP_FROM_EMAIL=<mailbox>
+AUTH_SMTP_USERNAME=<gmail address>
+AUTH_SMTP_PASSWORD=<server-only Gmail app password>
+AUTH_SMTP_FROM_EMAIL=<gmail address>
 AUTH_SMTP_SECURITY=starttls
-AUTH_SMTP_ALLOW_LEGACY_TLS=true
+AUTH_SMTP_ALLOW_LEGACY_TLS=false
 AUTH_PASSWORD_RESET_BASE_URL=https://vm-naver-kasset.tail624c43.ts.net
 AUTH_PASSWORD_RESET_TTL_MINUTES=30
 WEB_REGISTRATION_ENABLED=false
 ```
 
-`smtp.fmcity.com:587`은 2026-08-30 실측에서 STARTTLS를 광고했지만 TLS 1.2 협상은
-실패하고 TLS 1.0만 성공했다. 따라서 이 공급자에 한해
-`AUTH_SMTP_ALLOW_LEGACY_TLS=true`가 필요하다. 기본값은 `false`이며, 현대 TLS를 지원하는
-공급자로 바꾸면 즉시 `false`로 되돌린다. SMTP 비밀번호는 Git, 명령행 인자, 로그에 남기지
+운영 발신 공급자는 Gmail(`smtp.gmail.com:587`, STARTTLS, TLS 1.3)이다. 이전 공급자
+`smtp.fmcity.com:587`은 2026-08-30 실측에서 TLS 1.0만 협상돼
+`AUTH_SMTP_ALLOW_LEGACY_TLS=true`가 필요했지만, Gmail에서는 기본값 `false`를 유지한다.
+`AUTH_SMTP_PASSWORD`는 계정 비밀번호가 아니라 2단계 인증이 켜진 계정의 16자리 앱
+비밀번호다. 계정 비밀번호 변경·2단계 인증 해제·앱 비밀번호 삭제 시 앱 비밀번호는 즉시
+무효가 된다. 이때 api 로그에는 `Auth email delivery failed: event=password_reset
+error_type=SMTPServerDisconnected`만 남는다. 2026-10-06 실측에서 같은 자격 증명으로 AUTH
+LOGIN·PLAIN을 직접 보내면 둘 다 `535 5.7.8 BadCredentials`였다. 복구는 같은 계정에서 앱 비밀번호를
+새로 발급하고, `.env.kasset`을 `cp -p`로 백업한 뒤 해당 줄만 교체하고 `docker compose
+--env-file .env.kasset -f docker-compose.kasset.yml up -d --no-deps api`로 api만 재생성한다.
+재생성 후 컨테이너 안에서 `settings` 값으로 `smtplib` STARTTLS·`login`이 `235`인지 확인한다.
+SMTP 비밀번호는 Git, 명령행 인자, 로그에 남기지
 않고 서버 `.env.kasset`에만 저장한다. 복구 링크의 원문 코드는 URL fragment에만 있고
 PostgreSQL에는 SHA-256 해시만 저장된다. 성공한 복구는 refresh token과 DB-backed web
 session generation을 함께 폐기한다.
