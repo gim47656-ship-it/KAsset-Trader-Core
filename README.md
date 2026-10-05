@@ -97,6 +97,7 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm -T \
 | `backfill_daily_candles` | 일봉 백필 | 수동 |
 | `generate_symbol_search_aliases` | AI 검색 별칭 (sidecar `low`) | 수동 (`--commit`) |
 | `kasset_strategy_validation` | 전략 검증 보고서 (DB 읽기 전용) | 수동 (`--output`) |
+| `kasset_exit_rule_comparison` | 기준 백테스트의 진입을 고정하고 사전 고정 청산 변형(`PRESET_EXIT_VARIANTS`)만 비교. KRX 매도세·하한가 잠김 이월·체결 봉 거래량 1% 상한 반영, 끝까지 청산되지 않은 진입은 모든 변형에서 제외 (DB 읽기 전용) | 수동 (`--variants`, `--signal-start-at`·`--end-at`) |
 | `kasset_swing_shadow` | KRX 스윙 3후보의 주문 없는 관측·가상 성과 조회 | `observe`는 저장, `report --since YYYY-MM-DD --signals`는 읽기 전용. 승인·마이그레이션 후 활성화하면 기존 평일 16:30 일봉 수집 성공 뒤 관측 |
 
 `sync_symbol_master`와 AI 별칭 CLI는 기본 dry-run이며 `--commit`일 때 저장합니다. 나머지 수집기는 각 `--help`의 쓰기 옵션을 확인하세요. 새 스케줄 등록은 운영자 승인이 필요합니다.
