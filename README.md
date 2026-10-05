@@ -11,7 +11,7 @@
 - **Android 앱 API**: `app/extensions/kasset/api/` — 로그인(Google), 관심종목·종목 검색, 시세·차트·호가 스트림, 추천 승인/거절, PAPER 주문·체결, 푸시(FCM).
 - **데이터 적재**: KR/US 일봉, 투자자 수급(네이버 모바일 API), DART 재무, 종목 마스터, 뉴스·공시.
 
-앱 소스는 [HANSE의 `KAsset-Trader/android`](https://github.com/gim47656-ship-it/HANSE/tree/main/KAsset-Trader/android)에 있습니다. 앱 APK 빌드는 HANSE에서, 서버 테스트·배포는 이 저장소에서 관리합니다.
+앱 소스와 APK 빌드는 별도 앱 저장소에서 관리합니다. 이 저장소는 서버 테스트·배포를 담당합니다.
 
 ## 운영 구성
 

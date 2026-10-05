@@ -78,9 +78,9 @@ STATUS: superseded-by doc/history/2026/09/16-stop-floor-removal/main.md
 - **롤백 주의(유효)**: 운영에 nullable 컬럼이 적용됐다. 이후 문제가 생기면 구버전 이미지로 되돌리지 않는다. `initial_atr IS NULL` 행이 0건일 때만 `alembic downgrade` 후 이전 이미지가 가능하고, 1건 이상이면 nullable을 이해하는 버전으로 roll-forward한다(migration downgrade 자체도 NULL 행이 있으면 `RuntimeError`로 거부한다). 백업은 `backups/pre-stoploss-9fefab61/database.dump`다.
 - 임시 시연물 `.worktrees/paper_stop_floor_demo.py`, `.worktrees/_baseline_pr60/`, `.worktrees/paper_stop_floor.diff`는 Main 승인으로 제거했다(결과 원문은 위 항목들에 보존). task worktree·branch 정리는 Main이 수행한다.
 
-### 재현 명령 (cwd `V:/HANSE/KAsset-Trader-Core/.worktrees/paper-auto-stoploss`, Main이 실행 완료)
+### 재현 명령 (cwd: Core checkout의 `.worktrees/paper-auto-stoploss`, Main이 실행 완료)
 - 이 PC에는 로컬 PostgreSQL이 없다(`localhost:5432` 연결 실패, `*postgre*` 서비스 없음, docker CLI 없음). `db_session`이 필요한 테스트는 이 환경에서 실행할 수 없다.
-- 공통 env(값은 형식 검사만 통과하면 되고 접속하지 않는다): `PYTHONPATH=.`, `DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/test_db`, `SECRET_KEY=Aa1TestSecretKeyForLocalOnly12345`, `UPBIT_ACCESS_KEY=x`, `UPBIT_SECRET_KEY=x`, `OPENDART_API_KEY=x`. 인터프리터는 기본 checkout의 `V:/HANSE/KAsset-Trader-Core/.venv/Scripts/python.exe`(worktree에는 venv가 없다).
+- 공통 env(값은 형식 검사만 통과하면 되고 접속하지 않는다): `PYTHONPATH=.`, `DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/test_db`, `SECRET_KEY=Aa1TestSecretKeyForLocalOnly12345`, `UPBIT_ACCESS_KEY=x`, `UPBIT_SECRET_KEY=x`, `OPENDART_API_KEY=x`. 인터프리터는 기본 checkout의 `.venv/Scripts/python.exe`(worktree에는 venv가 없다).
 - 집중(DB 불필요): `python -m pytest tests/extensions/kasset/automation/test_position_manager.py -q --tb=short --deselect tests/extensions/kasset/automation/test_position_manager.py::test_closed_cycle_survives_position_delete_as_audit`
 - 인접 계약: `python -m pytest tests/extensions/kasset/automation/test_portfolio_backtest.py tests/extensions/kasset/automation/test_job.py tests/extensions/kasset/automation/test_vertical_slice.py tests/extensions/kasset/automation/test_p0_cycle_trace.py -q --tb=short`
 - `ruff check` / `ruff format --check`를 변경 6파일에, `ty check --error-on-warning`을 실행코드 3파일(`position_manager.py`, `position_manager_service.py`, `models.py`)에 적용.

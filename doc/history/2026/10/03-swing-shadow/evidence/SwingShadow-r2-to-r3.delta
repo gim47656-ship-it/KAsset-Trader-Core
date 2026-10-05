@@ -1,5 +1,5 @@
---- C:\Users\kkmin\AppData\Local\Temp/r2.diff	2026-10-03 10:32:21.282762100 +0900
-+++ C:\Users\kkmin\AppData\Local\Temp/r3.diff	2026-10-03 10:32:21.304291100 +0900
+--- r2.diff	2026-10-03 10:32:21.282762100 +0900
++++ r3.diff	2026-10-03 10:32:21.304291100 +0900
 @@ -463,10 +463,10 @@
  +    op.drop_table(_RUNS, schema=_SCHEMA)
  diff --git a/app/extensions/kasset/automation/swing_shadow.py b/app/extensions/kasset/automation/swing_shadow.py
