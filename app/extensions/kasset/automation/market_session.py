@@ -136,6 +136,39 @@ def completed_bar_cutoff(market: str, as_of: datetime) -> datetime | None:
     return session.closes_at if session is not None else None
 
 
+def regular_sessions_opened_since(
+    market: str,
+    price_at: datetime,
+    as_of: datetime,
+) -> int | None:
+    """``price_at``이 속한 정규장 이후 ``as_of``까지 이미 열린 정규장 세션 수.
+
+    가격의 세션은 그 timestamp보다 **뒤에 닫히는 첫 정규장**이다. 일봉 timestamp
+    규약(KIS는 UTC 자정, Toss는 현지 자정)이 달라도 timestamp가 자기 세션 종료
+    시각보다 앞선다는 성질은 같으므로 날짜 산술을 쓰지 않는다. 직전 완료 봉을
+    장중에 평가하면 1이고, 주말·휴장일은 세지 않는다. ``as_of``가 가격과 같거나
+    앞서면 0이다(미래 가격 판정은 호출자 몫).
+
+    달력이 가격의 세션을 확정하지 못하면 ``None``이다. 조회 창(±12일)보다 오래된
+    가격도 여기에 든다. 호출자는 이를 STALE로 취급해 fail-closed해야 한다.
+    """
+
+    resolved_market = calendar_market(market)
+    price = aware_utc(price_at, "price_at")
+    moment = aware_utc(as_of, "as_of")
+    if price >= moment:
+        return 0
+    sessions = _sessions_around(resolved_market, moment)
+    owning = next(
+        (index for index, session in enumerate(sessions) if session.closes_at > price),
+        None,
+    )
+    if owning is None or owning == 0:
+        # 첫 세션이 이미 가격 뒤에 닫히면 가격의 세션이 조회 창 밖일 수 있다.
+        return None
+    return sum(1 for session in sessions[owning + 1 :] if session.opens_at <= moment)
+
+
 def completed_daily_bars(
     bars: Sequence[PriceBar],
     *,
@@ -178,4 +211,5 @@ __all__ = [
     "completed_daily_bars",
     "current_regular_session",
     "latest_completed_session",
+    "regular_sessions_opened_since",
 ]

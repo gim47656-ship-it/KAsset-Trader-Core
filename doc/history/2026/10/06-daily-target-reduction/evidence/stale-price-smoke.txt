@@ -1,0 +1,28 @@
+STALE_PRICE 세션 수 기준 전후 비교 (오프라인 컨테이너, `--network none`, 실제 exchange_calendars XKRX/XNYS, 2026-10-06 KST 16:0x).
+입력 공통: BUY, 진입가 26,150, 손절 25,000, ATR 575, 예산 1억, 종목비중 20%, 위험 0.75%. 가격 시각은 일봉 UTC 자정(KST 09:00) 규약.
+
+명령(cwd 저장소 checkout, 원격 서버 `kasset-server`):
+
+```sh
+docker run --rm --network none --cpus=0.3 --memory=1g \
+  --mount type=bind,src=<SRC>,dst=/work,readonly \
+  --mount type=bind,src=/tmp/kasset-dtr-smoke.py,dst=/smoke.py,readonly \
+  -e PYTHONPATH=/work -e PYTHONDONTWRITEBYTECODE=1 -e OPENDART_API_KEY=offline \
+  -e DATABASE_URL=postgresql+asyncpg://offline:offline@127.0.0.1:5432/offline \
+  -e SECRET_KEY=OfflineResearchOnly1234567890abcdefghijklmno \
+  -w /work --entrypoint /app/.venv/bin/python \
+  kasset-trader-core:f1d8bf4ba1046001717e8d5fd3562491f31a3dc0 /smoke.py
+```
+
+`<SRC>`: 전(운영 배포 `f1d8bf4b` checkout) `/tmp/kasset-daily-target-20261006/repo`, 후(이 작업 변경 overlay) `/tmp/kasset-dtr-src`. 둘 다 exit 0.
+
+| 입력 | 전(4일 규칙) | 후(N=3 정규장) |
+|---|---|---|
+| 금 10/02 봉 → 화 10/06 09:00:17 KST (월 대체휴장) | quantity 0, STALE_PRICE | quantity 489, 사유 없음 |
+| 수 9/23 봉 → 월 9/28 09:00:17 (추석 연휴) | quantity 0, STALE_PRICE | quantity 489, 사유 없음 |
+| 수 9/30 봉 → 금 10/02 14:00 KST (2세션) | quantity 489 | quantity 489 |
+| 월 9/28 봉 → 금 10/02 14:00 KST (4세션) | quantity 0, STALE_PRICE | quantity 0, STALE_PRICE |
+| 월 9/21 봉 → 금 10/02 14:00 KST (오래됨) | quantity 0, STALE_PRICE | quantity 0, STALE_PRICE |
+| US 금 10/02 봉 → 월 10/05 15:00Z | quantity 489.1304 | quantity 489.1304 |
+
+스모크 스크립트 `/tmp/kasset-dtr-smoke.py`는 서버 임시 파일이며 저장소에 넣지 않았다. 입력 6행은 위 표의 첫 열과 같다.

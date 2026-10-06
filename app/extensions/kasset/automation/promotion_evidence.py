@@ -1112,9 +1112,7 @@ def _entry_path_comparison_payload(
             "portfolio": _json_config(config),
             "costSlippage": _cost_slippage_config(config),
             "positionSizing": {
-                "maxPriceAgeSeconds": int(
-                    config.position_sizing.max_price_age.total_seconds()
-                ),
+                "maxPriceAgeSessions": config.position_sizing.max_price_age_sessions,
                 "krxLotSize": str(config.position_sizing.krx_lot_size),
                 "maxAverageVolumeParticipation": str(
                     config.position_sizing.max_average_volume_participation

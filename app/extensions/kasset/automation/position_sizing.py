@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import ROUND_DOWN, Decimal, DecimalException
 from enum import StrEnum
 from typing import Literal
 
+from app.extensions.kasset.automation.market_session import (
+    MarketSessionError,
+    regular_sessions_opened_since,
+)
 from app.extensions.kasset.automation.regime import MarketRegime
 
 _ZERO = Decimal("0")
@@ -68,7 +72,9 @@ class PositionSizeCapCode(StrEnum):
 class PositionSizingConfig:
     """Central policy parameters that are not supplied by an AI response."""
 
-    max_price_age: timedelta = timedelta(days=4)
+    #: 가격 timestamp가 속한 정규장 이후 이미 열린 정규장 세션이 이 수를 넘으면
+    #: STALE이다. 직전 완료 봉은 1세션이다. 주말·휴장일은 세지 않는다.
+    max_price_age_sessions: int = 3
     krx_lot_size: Decimal = Decimal("1")
     us_lot_size: Decimal = Decimal("0.0001")
     max_average_volume_participation: Decimal = Decimal("0.01")
@@ -79,8 +85,9 @@ class PositionSizingConfig:
     volatile_risk_multiplier: Decimal = Decimal("0.50")
 
     def __post_init__(self) -> None:
-        if self.max_price_age <= timedelta(0):
-            raise ValueError("max_price_age must be positive")
+        sessions = self.max_price_age_sessions
+        if type(sessions) is not int or sessions < 1:
+            raise ValueError("max_price_age_sessions must be a positive integer")
         for field_name in (
             "krx_lot_size",
             "us_lot_size",
@@ -346,15 +353,51 @@ def _base_reasons(
                 "price timestamp is later than evaluation time",
             )
         )
-    elif evaluation_time - price_time >= config.max_price_age:
-        reasons.append(
-            _reason(
-                PositionSizingZeroCode.STALE_PRICE,
-                "price_as_of",
-                f"price age exceeds {config.max_price_age}",
-            )
+    else:
+        stale = _stale_price_reason(
+            market,
+            price_time=price_time,
+            evaluation_time=evaluation_time,
+            config=config,
         )
+        if stale is not None:
+            reasons.append(stale)
     return reasons
+
+
+def _stale_price_reason(
+    market: str,
+    *,
+    price_time: datetime,
+    evaluation_time: datetime,
+    config: PositionSizingConfig,
+) -> PositionSizingReason | None:
+    """가격 나이를 달력 시간이 아니라 이미 열린 정규장 세션 수로 판정한다.
+
+    주말·휴장일은 세지 않아서 연휴 다음 거래일에도 직전 완료 봉은 1세션이다.
+    달력이 가격의 세션을 확정하지 못하면 STALE로 둔다(fail-closed).
+    """
+
+    if market not in {"KRX", "US"}:
+        return None  # UNSUPPORTED_MARKET이 이미 기록된다.
+    try:
+        elapsed = regular_sessions_opened_since(market, price_time, evaluation_time)
+    except MarketSessionError:
+        elapsed = None
+    if elapsed is None:
+        return _reason(
+            PositionSizingZeroCode.STALE_PRICE,
+            "price_as_of",
+            "trading calendar could not confirm the price session",
+        )
+    if elapsed > config.max_price_age_sessions:
+        return _reason(
+            PositionSizingZeroCode.STALE_PRICE,
+            "price_as_of",
+            f"price is {elapsed} regular sessions old; "
+            f"limit {config.max_price_age_sessions}",
+        )
+    return None
 
 
 def _buy_reasons(
