@@ -136,6 +136,24 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml \
   자체에 없는 분이므로 다시 돌려도 채워지지 않는다.
 - 결과 확인은 같은 날짜로 dry-run을 다시 돌려 `missing_minutes`가 줄었는지 본다.
 
+### GitHub Actions로 실행 (서버 셸 없이)
+
+운영서버의 self-hosted 러너(`kasset-prod`)에서 같은 명령을 도는 수동 워크플로
+`.github/workflows/toss-minute-gap-repair.yml`(이름 `Toss Minute Gap Repair`)이 있다.
+스케줄·자동 트리거는 없고 `workflow_dispatch`로만 돈다. 기본은 dry-run이다.
+
+```bash
+# dry-run
+gh workflow run toss-minute-gap-repair.yml -f session_date=2026-09-30
+# commit (사용자 승인 후)
+gh workflow run toss-minute-gap-repair.yml -f session_date=2026-09-30 -f commit=true -f max_calls=5000
+gh run list --workflow toss-minute-gap-repair.yml --limit 1   # run id 확인 후 gh run view <id> --log
+```
+
+- `commit=true`는 평일 08:00~20:04 KST에 거부된다(1분 작업 마지막 실행 20:00과 겹치지 않게).
+- Deploy와 같은 `production-deploy` concurrency 그룹이라 배포 중이면 끝난 뒤에 돈다.
+- 실행 이미지는 운영 `.env.kasset`의 `CORE_IMAGE_TAG`(현재 배포본)다.
+
 ## 4. 대상 세션이 압축 청크에 있을 때
 
 `research.kr_candles_1m_toss`는 청크 끝이 7일 넘게 지나면 매일 02:30 KST에 압축된다
