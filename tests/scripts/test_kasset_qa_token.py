@@ -16,7 +16,9 @@ from scripts import kasset_qa_token
 
 @pytest.mark.parametrize("args", [[], ["--seed-refresh", "test-refresh"], ["--base", ""]])
 def test_missing_base_rejects_before_credential_access(
-    args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("KASSET_QA_BASE", raising=False)
     monkeypatch.setattr(sys, "argv", ["kasset_qa_token.py", *args])
