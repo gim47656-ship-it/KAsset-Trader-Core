@@ -39,9 +39,7 @@ def test_missing_base_rejects_before_credential_access(
 
 
 @pytest.mark.parametrize("source", ["argument", "environment"])
-def test_explicit_server_keeps_offline_cached_token_cli(
-    source: str, tmp_path: Path
-) -> None:
+def test_explicit_server_keeps_offline_cached_token_cli(source: str, tmp_path: Path) -> None:
     payload = base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode())
     token = f"test.{payload.decode().rstrip('=')}.unsigned"
     cache = tmp_path / "qa-token.json"
