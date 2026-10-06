@@ -1,0 +1,61 @@
+ruff-0.15.9.dist-info
+ty-0.0.29.dist-info
+All checks passed!
+ruff_check_exit=0
+Would reformat: app/services/research_candles/toss_minute_gap_repair.py
+Would reformat: tests/services/research_candles/test_toss_minute_persistence.py
+2 files would be reformatted, 4 files already formatted
+ruff_format_exit=1
+--- app/services/research_candles/toss_minute_gap_repair.py
++++ app/services/research_candles/toss_minute_gap_repair.py
+@@ -449,9 +449,7 @@
+                 remaining = [minute for minute in remaining if minute < oldest]
+         except Exception as exc:  # one symbol's provider failure does not stop the run
+             outcome.failed_symbols[gap.symbol] = f"{type(exc).__name__}: {exc}"
+-            logger.warning(
+-                "Toss minute repair failed symbol=%s: %s", gap.symbol, exc
+-            )
++            logger.warning("Toss minute repair failed symbol=%s: %s", gap.symbol, exc)
+         if rows:
+             outcome.rows_upserted += await repository.upsert(rows)
+             await commit()
+
+--- tests/services/research_candles/test_toss_minute_persistence.py
++++ tests/services/research_candles/test_toss_minute_persistence.py
+@@ -460,9 +460,7 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_failed_and_skipped_minute_symbols_are_selected_on_the_next_run() -> (
+-    None
+-):
++async def test_failed_and_skipped_minute_symbols_are_selected_on_the_next_run() -> None:
+     symbols = ["000010", "000020", "000030", "000040", "000050"]
+     repository = _MemoryRepository(symbols)
+     backoff = job._RetryBackoff()
+@@ -565,9 +563,7 @@
+     assert result["toss_calls"] == 2
+     assert result["gap_fill_pages"] == 1
+     assert result["unfilled_gaps"] == {}
+-    assert repository.stored_minutes("005930") == [
+-        at.astimezone(UTC) for at in history
+-    ]
++    assert repository.stored_minutes("005930") == [at.astimezone(UTC) for at in history]
+     # The bar that was in progress at 09:40 is rewritten with the final value.
+     revised = repository.rows[(history[39].astimezone(UTC), "005930")]
+     assert revised.close == Decimal("101")
+@@ -719,9 +715,7 @@
+         [
+             _row(symbol=fresh, time_utc=bar - timedelta(minutes=1), retrieved_at=bar),
+             # The newest bar of a closed session keeps advancing its fetch time.
+-            _row(
+-                symbol=fresh, time_utc=bar, retrieved_at=bar + timedelta(minutes=50)
+-            ),
++            _row(symbol=fresh, time_utc=bar, retrieved_at=bar + timedelta(minutes=50)),
+             _row(symbol=older, time_utc=bar, retrieved_at=bar + timedelta(minutes=5)),
+             _row(symbol=excluded, time_utc=bar, retrieved_at=bar),
+             _row(
+
+2 files would be reformatted, 4 files already formatted
+All checks passed!
+ty_exit=0

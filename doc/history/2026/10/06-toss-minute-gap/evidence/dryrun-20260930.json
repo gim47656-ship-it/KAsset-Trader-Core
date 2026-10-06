@@ -1,0 +1,131 @@
+{
+  "mode": "dry-run",
+  "session_date": "2026-09-30",
+  "neighbour_session_dates": [
+    "2026-09-29",
+    "2026-10-01"
+  ],
+  "symbol_classes": [
+    {
+      "segments": [
+        "KRX_REGULAR",
+        "NXT_POST"
+      ],
+      "symbols": 1894,
+      "grid_minutes": {
+        "KRX_REGULAR": 390,
+        "NXT_POST": 270
+      }
+    },
+    {
+      "segments": [
+        "KRX_REGULAR"
+      ],
+      "symbols": 1441,
+      "grid_minutes": {
+        "KRX_REGULAR": 390
+      }
+    },
+    {
+      "segments": [
+        "KRX_REGULAR",
+        "NXT_POST",
+        "NXT_PRE"
+      ],
+      "symbols": 601,
+      "grid_minutes": {
+        "KRX_REGULAR": 391,
+        "NXT_POST": 270,
+        "NXT_PRE": 59
+      }
+    }
+  ],
+  "symbols_expected": 3936,
+  "symbols_without_rows": 0,
+  "symbols_with_gaps": 3230,
+  "missing_minutes": 608270,
+  "gap_runs": 3721,
+  "estimated_calls": 4091,
+  "largest_gaps": [
+    {
+      "symbol": "290650",
+      "missing_minutes": 451,
+      "gap_runs": 2,
+      "estimated_calls": 3,
+      "first_missing_kst": "2026-09-30T08:01:00+09:00",
+      "last_missing_kst": "2026-09-30T18:51:00+09:00"
+    },
+    {
+      "symbol": "005930",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:15:00+09:00",
+      "last_missing_kst": "2026-09-30T14:46:00+09:00"
+    },
+    {
+      "symbol": "005940",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:15:00+09:00",
+      "last_missing_kst": "2026-09-30T14:46:00+09:00"
+    },
+    {
+      "symbol": "006040",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:16:00+09:00",
+      "last_missing_kst": "2026-09-30T14:47:00+09:00"
+    },
+    {
+      "symbol": "012450",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:30:00+09:00",
+      "last_missing_kst": "2026-09-30T15:01:00+09:00"
+    },
+    {
+      "symbol": "012630",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:30:00+09:00",
+      "last_missing_kst": "2026-09-30T15:01:00+09:00"
+    },
+    {
+      "symbol": "013030",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:31:00+09:00",
+      "last_missing_kst": "2026-09-30T15:02:00+09:00"
+    },
+    {
+      "symbol": "014680",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:33:00+09:00",
+      "last_missing_kst": "2026-09-30T15:04:00+09:00"
+    },
+    {
+      "symbol": "015750",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:35:00+09:00",
+      "last_missing_kst": "2026-09-30T15:06:00+09:00"
+    },
+    {
+      "symbol": "015760",
+      "missing_minutes": 392,
+      "gap_runs": 1,
+      "estimated_calls": 2,
+      "first_missing_kst": "2026-09-30T08:35:00+09:00",
+      "last_missing_kst": "2026-09-30T15:06:00+09:00"
+    }
+  ]
+}

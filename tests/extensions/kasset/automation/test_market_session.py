@@ -9,6 +9,7 @@ from app.extensions.kasset.automation.market_session import (
     completed_daily_bars,
     current_regular_session,
     latest_completed_session,
+    regular_sessions_opened_since,
 )
 
 # KST 12:00 on a KRX trading day: the 2026-09-01 session is in progress.
@@ -104,3 +105,60 @@ def test_after_the_close_todays_session_becomes_completed() -> None:
     assert completed is not None
     assert completed.session_date.isoformat() == "2026-09-01"
     assert current_regular_session("KRX", after_close) is None
+
+
+def test_sessions_opened_since_is_one_for_the_previous_bar_of_either_convention() -> (
+    None
+):
+    friday_kis = datetime(2026, 7, 10, 0, 0, tzinfo=UTC)
+    friday_toss = datetime(2026, 7, 9, 15, 0, tzinfo=UTC)
+    monday_open = datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC)
+
+    assert regular_sessions_opened_since("KRX", friday_kis, monday_open) == 1
+    assert regular_sessions_opened_since("KRX", friday_toss, monday_open) == 1
+    # 같은 세션 안의 봉이나 같은 시각이면 0이다.
+    assert regular_sessions_opened_since("KRX", friday_kis, friday_kis) == 0
+    assert (
+        regular_sessions_opened_since(
+            "KRX", monday_open, monday_open + timedelta(hours=1)
+        )
+        == 0
+    )
+
+
+def test_sessions_opened_since_skips_weekends_and_exchange_holidays() -> None:
+    # 추석(9/24~26 휴장, 일요일 9/27): 수요일 봉 뒤 열린 세션은 월요일 하나다.
+    wednesday = datetime(2026, 9, 23, 0, 0, tzinfo=UTC)
+
+    assert (
+        regular_sessions_opened_since(
+            "KRX", wednesday, datetime(2026, 9, 28, 0, 0, 17, tzinfo=UTC)
+        )
+        == 1
+    )
+    # 개장 전에는 그날 세션을 세지 않는다.
+    assert (
+        regular_sessions_opened_since(
+            "KRX", wednesday, datetime(2026, 9, 27, 23, 50, tzinfo=UTC)
+        )
+        == 0
+    )
+
+
+def test_sessions_opened_since_is_none_outside_the_calendar_window() -> None:
+    assert (
+        regular_sessions_opened_since(
+            "KRX",
+            datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC),
+        )
+        is None
+    )
+    assert (
+        regular_sessions_opened_since(
+            "KRX",
+            datetime(1900, 1, 14, 0, 0, tzinfo=UTC),
+            datetime(1900, 1, 15, 3, 0, tzinfo=UTC),
+        )
+        is None
+    )

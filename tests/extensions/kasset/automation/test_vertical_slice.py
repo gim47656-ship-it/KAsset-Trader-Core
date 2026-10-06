@@ -106,6 +106,7 @@ from app.models.ai_recommendations import AIRecommendation
 from app.models.paper_trading import PaperAccount
 from app.models.trading import User, UserRole
 from app.schemas.ai_recommendations import RecommendationRanking
+from app.services.kasset_automation_audit import build_automation_cycle_event
 from app.services.market_events.session_calendar import (
     next_trading_session,
     regular_session_bounds,
@@ -623,6 +624,17 @@ def _affordable_plan() -> PortfolioPlan:
         note="Deterministic ATR risk sizing; limitingCaps=RISK_BUDGET.",
         position_sizing=_sizing_result(Decimal("3")),
     )
+
+
+def _audit_exclusions(result: dict[str, object]) -> list[dict[str, object]]:
+    """감사 원장 투영이 실제로 저장하는 제외 행. `exclusionReason`이 없는 행은 버려진다."""
+
+    return build_automation_cycle_event(
+        owner_user_id=7,
+        observed_at=_NOW,
+        finished_at=_NOW,
+        result=result,
+    ).candidate_exclusions
 
 
 def _stub_review_cycle(
@@ -1698,7 +1710,15 @@ async def test_exit_only_is_counted_before_sizing(
     exclusion = result["candidateExclusions"][0]
     assert exclusion["source"] == "account_state_gate"
     assert exclusion["symbol"] == "000111"
-    assert exclusion["reason"] == "exit_only"
+    assert exclusion["exclusionReason"] == "exit_only"
+    assert _audit_exclusions(result) == [
+        {
+            "symbol": "000111",
+            "market": "KR",
+            "reason": "exit_only",
+            "source": "account_state_gate",
+        }
+    ]
     portfolio_plan.assert_not_awaited()
     analyze_for_owner.assert_not_awaited()
     persist_recommendation.assert_not_awaited()
@@ -2981,7 +3001,15 @@ async def test_exhausted_reentry_symbol_produces_no_new_buy_recommendation(
     assert result["preAiExclusions"] == {"same_symbol_reentry_exhausted": 1}
     exclusion = result["candidateExclusions"][0]
     assert exclusion["symbol"] == "005930"
-    assert exclusion["reason"] == "same_symbol_reentry_exhausted"
+    assert exclusion["exclusionReason"] == "same_symbol_reentry_exhausted"
+    assert _audit_exclusions(result) == [
+        {
+            "symbol": "005930",
+            "market": "KR",
+            "reason": "same_symbol_reentry_exhausted",
+            "source": "same_symbol_reentry",
+        }
+    ]
     assert exclusion["detail"].startswith("openSameSymbolBuys=1/1")
     persist_recommendation.assert_awaited_once()
 
@@ -3009,4 +3037,15 @@ async def test_unlimited_reentry_level_only_dedupes_pending_buy_recommendations(
     assert result["recommendationIds"] == ["rec:005935"]
     assert result["preAiExclusions"] == {"same_symbol_pending_recommendation": 1}
     assert result["candidateExclusions"][0]["symbol"] == "005930"
+    assert result["candidateExclusions"][0]["exclusionReason"] == (
+        "same_symbol_pending_recommendation"
+    )
+    assert _audit_exclusions(result) == [
+        {
+            "symbol": "005930",
+            "market": "KR",
+            "reason": "same_symbol_pending_recommendation",
+            "source": "same_symbol_reentry",
+        }
+    ]
     persist_recommendation.assert_awaited_once()

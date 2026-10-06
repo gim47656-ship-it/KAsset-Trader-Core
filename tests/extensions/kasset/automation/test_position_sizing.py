@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.extensions.kasset.automation import market_session
 from app.extensions.kasset.automation.policy import (
     AITradingLimits,
     AITradingPolicyService,
@@ -18,6 +19,7 @@ from app.extensions.kasset.automation.position_sizing import (
     PositionSizeCapCode,
     PositionSizingConfig,
     PositionSizingInput,
+    PositionSizingResult,
     PositionSizingZeroCode,
     calculate_position_size,
 )
@@ -222,7 +224,7 @@ def test_sell_needs_no_atr_and_is_capped_to_actual_paper_holding() -> None:
             PositionSizingZeroCode.MISSING_LIQUIDITY,
         ),
         (
-            {"price_as_of": _NOW - timedelta(days=5)},
+            {"price_as_of": _NOW - timedelta(days=9)},
             PositionSizingZeroCode.STALE_PRICE,
         ),
         (
@@ -249,6 +251,148 @@ def test_invalid_buy_inputs_fail_closed_with_structured_zero_reason(
     assert reason in {item.code for item in result.zero_reasons}
     evidence = result.as_evidence()
     assert reason.value in {item["code"] for item in evidence["zeroReasons"]}
+
+
+def _stale_codes(result: PositionSizingResult) -> set[PositionSizingZeroCode]:
+    return {item.code for item in result.zero_reasons}
+
+
+@pytest.mark.parametrize(
+    ("market", "price_as_of", "evaluated_at"),
+    [
+        # 2026-10-05(월)은 대체 휴장이라 금요일 봉이 화요일 09:00:17 KST에 1세션이다.
+        (
+            "KRX",
+            datetime(2026, 10, 2, 0, 0, tzinfo=UTC),
+            datetime(2026, 10, 6, 0, 0, 17, tzinfo=UTC),
+        ),
+        # Toss 규약(현지 자정)의 같은 금요일 봉.
+        (
+            "KRX",
+            datetime(2026, 10, 1, 15, 0, tzinfo=UTC),
+            datetime(2026, 10, 6, 0, 0, 17, tzinfo=UTC),
+        ),
+        # 추석 연휴(9/24~26)와 일요일을 건너뛴 수요일 봉이 월요일에 1세션이다.
+        (
+            "KRX",
+            datetime(2026, 9, 23, 0, 0, tzinfo=UTC),
+            datetime(2026, 9, 28, 0, 0, 17, tzinfo=UTC),
+        ),
+        # 금요일 봉은 평범한 주말 뒤 월요일에도 1세션이다.
+        (
+            "KRX",
+            datetime(2026, 7, 10, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC),
+        ),
+        # 월→목은 정확히 3세션(허용 한도).
+        (
+            "KRX",
+            datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 9, 0, 0, 17, tzinfo=UTC),
+        ),
+        # 금요일 개장 전(08:50 KST)에는 금요일 세션을 세지 않아 여전히 3세션이다.
+        (
+            "KRX",
+            datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 9, 23, 50, tzinfo=UTC),
+        ),
+        # 미국: 추수감사절(목)은 휴장이고 금요일 단축장·월요일만 센다(2세션).
+        (
+            "US",
+            datetime(2026, 11, 25, 0, 0, tzinfo=UTC),
+            datetime(2026, 11, 30, 15, 0, tzinfo=UTC),
+        ),
+    ],
+)
+def test_price_age_counts_opened_regular_sessions_not_calendar_time(
+    market: str,
+    price_as_of: datetime,
+    evaluated_at: datetime,
+) -> None:
+    result = calculate_position_size(
+        _buy_input(market=market, price_as_of=price_as_of, evaluated_at=evaluated_at)
+    )
+
+    assert PositionSizingZeroCode.STALE_PRICE not in _stale_codes(result)
+    assert result.actionable is True
+
+
+@pytest.mark.parametrize(
+    ("market", "price_as_of", "evaluated_at"),
+    [
+        # 월→금은 4세션이다. 지금까지의 4일 규칙도 같은 결과였다.
+        (
+            "KRX",
+            datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 10, 0, 0, 17, tzinfo=UTC),
+        ),
+        # 실제로 오래된 봉: 휴장 없이 5세션.
+        (
+            "KRX",
+            datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC),
+        ),
+        (
+            "US",
+            datetime(2026, 10, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+        ),
+        # 조회 창(±12일)보다 오래된 가격은 세션을 확정할 수 없어 STALE이다.
+        (
+            "KRX",
+            datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC),
+        ),
+    ],
+)
+def test_price_older_than_allowed_sessions_is_stale(
+    market: str,
+    price_as_of: datetime,
+    evaluated_at: datetime,
+) -> None:
+    result = calculate_position_size(
+        _buy_input(market=market, price_as_of=price_as_of, evaluated_at=evaluated_at)
+    )
+
+    assert PositionSizingZeroCode.STALE_PRICE in _stale_codes(result)
+    assert result.quantity == Decimal("0")
+    assert result.actionable is False
+
+
+def test_unconfirmed_session_calendar_fails_closed_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        market_session, "trading_sessions_in_range", lambda *_args, **_kwargs: []
+    )
+
+    result = calculate_position_size(
+        _buy_input(
+            price_as_of=datetime(2026, 7, 10, 0, 0, tzinfo=UTC),
+            evaluated_at=datetime(2026, 7, 13, 0, 0, 17, tzinfo=UTC),
+        )
+    )
+
+    assert PositionSizingZeroCode.STALE_PRICE in _stale_codes(result)
+    assert any("calendar" in item.detail for item in result.zero_reasons)
+
+
+def test_future_and_naive_timestamps_keep_their_own_reasons() -> None:
+    future = calculate_position_size(
+        _buy_input(price_as_of=_NOW + timedelta(seconds=1))
+    )
+    naive = calculate_position_size(
+        _buy_input(price_as_of=datetime(2026, 8, 29, 11, 0))
+    )
+
+    assert _stale_codes(future) == {PositionSizingZeroCode.FUTURE_PRICE}
+    assert _stale_codes(naive) == {PositionSizingZeroCode.INVALID_PRICE_TIMESTAMP}
+
+
+@pytest.mark.parametrize("sessions", [0, -1, True, 2.5])
+def test_price_age_sessions_must_be_a_positive_integer(sessions: object) -> None:
+    with pytest.raises(ValueError, match="max_price_age_sessions"):
+        PositionSizingConfig(max_price_age_sessions=sessions)  # type: ignore[arg-type]
 
 
 def test_nonfinite_sell_quantity_fails_closed() -> None:

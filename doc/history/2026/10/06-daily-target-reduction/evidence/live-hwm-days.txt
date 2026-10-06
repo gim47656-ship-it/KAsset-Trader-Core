@@ -1,0 +1,49 @@
+운영 DB 읽기 전용 조회(2026-10-06 15:1x KST, `SET default_transaction_read_only=on`).
+테이블 `public.kasset_shadow_daily_high_watermarks`, market='KRX'. goal_pct는 행 evidence의
+`thresholdConfig.config.profitTargetStages[0].triggerRatio`(= 목표율/2)의 2배다.
+peak_pct = (peak_equity - reference_equity) / reference_equity, reference_equity는 그 거래일 첫 가치평가 자산이다.
+이 표는 사이클마다 갱신되는 일별 상태의 최종값이라 목표 도달 시각은 담지 않는다.
+
+```sql
+SELECT owner_user_id o, trading_date d,
+  round(2*((evidence->'thresholdConfig'->'config'->'profitTargetStages'->0->>'triggerRatio')::numeric)*100,2) goal_pct,
+  round(((peak_equity-reference_equity)/reference_equity*100)::numeric,3) peak_pct,
+  round(((current_equity-reference_equity)/reference_equity*100)::numeric,3) last_pct,
+  (valuation_at at time zone 'Asia/Seoul')::time last_at,
+  CASE WHEN (peak_equity-reference_equity)/reference_equity >= 2*((evidence->'thresholdConfig'->'config'->'profitTargetStages'->0->>'triggerRatio')::numeric) THEN 'PEAK>=GOAL' ELSE '' END flag
+FROM kasset_shadow_daily_high_watermarks WHERE market='KRX' ORDER BY owner_user_id, trading_date;
+```
+
+```
+ o |     d      | goal_pct | peak_pct | last_pct | last_at  |    flag
+---+------------+----------+----------+----------+----------+------------
+ 4 | 2026-09-07 |     3.00 |    0.000 |   -0.015 | 15:20:00 |
+ 4 | 2026-09-08 |     3.00 |    0.056 |   -0.057 | 15:20:00 |
+ 4 | 2026-09-09 |     3.00 |    0.000 |    0.000 | 15:00:00 |
+ 4 | 2026-09-10 |     3.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-11 |     5.00 |    0.000 |    0.000 | 15:25:00 |
+ 4 | 2026-09-14 |     5.00 |    0.000 |   -0.238 | 15:20:00 |
+ 4 | 2026-09-15 |     5.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-16 |     5.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-17 |     5.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-18 |     5.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-21 |     5.00 |    0.000 |    0.000 | 15:20:00 |
+ 4 | 2026-09-22 |     5.00 |    1.008 |    0.130 | 14:55:00 |
+ 4 | 2026-09-23 |     5.00 |    0.817 |   -0.602 | 15:25:00 |
+ 4 | 2026-09-28 |     2.00 |    0.397 |   -0.341 | 15:20:00 |
+ 4 | 2026-09-29 |     2.00 |    0.318 |    0.318 | 15:20:00 |
+ 4 | 2026-09-30 |     2.00 |    0.362 |   -0.622 | 15:20:00 |
+ 4 | 2026-10-01 |     2.00 |    1.750 |    1.750 | 15:20:00 |
+ 4 | 2026-10-02 |     2.00 |    0.322 |   -0.100 | 15:20:00 |
+ 4 | 2026-10-06 |     2.00 |    2.649 |    2.649 | 15:10:00 | PEAK>=GOAL
+ 7 | 2026-09-28 |     0.80 |    0.000 |   -0.105 | 15:20:00 |
+ 7 | 2026-09-29 |     0.80 |    0.244 |    0.187 | 15:15:00 |
+ 7 | 2026-09-30 |     0.80 |    0.000 |   -0.672 | 15:20:00 |
+ 7 | 2026-10-01 |     0.80 |    1.290 |    1.290 | 15:20:00 | PEAK>=GOAL
+ 7 | 2026-10-02 |     0.80 |    0.880 |    0.796 | 15:20:00 | PEAK>=GOAL
+ 7 | 2026-10-06 |     0.80 |    1.414 |    1.414 | 15:10:00 | PEAK>=GOAL
+(25 rows)
+```
+
+해석 한계: 계좌 4의 목표율이 9/7~10일 3%, 9/11~23일 5%, 9/28 이후 2%로 바뀌었다(행 evidence 기준). 목표 도달 표시는
+그 날의 목표율 기준이다. 행은 마지막 사이클 시점 값이며 장중 최대·시각 순서를 담지 않는다. 2026-10-06 두 행은 15:10 KST 시점이다.

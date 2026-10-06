@@ -1,0 +1,313 @@
+run_utc=2026-10-06T07:21:46Z
+commit=f1d8bf4ba1046001717e8d5fd3562491f31a3dc0
+== volume dist-info
+aiosqlite-0.22.1.dist-info coverage-7.13.5.dist-info execnet-2.1.2.dist-info fakeredis-2.34.1.dist-info iniconfig-2.3.0.dist-info packaging-26.0.dist-info pluggy-1.6.0.dist-info pygments-2.20.0.dist-info pytest-9.1.1.dist-info pytest_asyncio-1.3.0.dist-info pytest_cov-7.1.0.dist-info pytest_mock-3.15.1.dist-info pytest_split-0.11.0.dist-info pytest_xdist-3.8.0.dist-info redis-7.4.0.dist-info ruff-0.15.9.dist-info sortedcontainers-2.4.0.dist-info ty-0.0.29.dist-info 
+== import resolution
+/work/app/__init__.py
+== pytest
+ 16:21:51 up 40 days,  6:57,  0 users,  load average: 4.60, 3.04, 2.13
+NAME                    CPU %     MEM USAGE / LIMIT
+kasset-pytest-tossgap   91.41%    75.58MiB / 15.39GiB
+..............................                                           [100%]
+=============================== warnings summary ===============================
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:107
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:107: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['text'\][ =]+\"(.*?)\"\;"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:108
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:108: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['id'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:109
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:109: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:110
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:110: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:111
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:111: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['eleId'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:112
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:112: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['offset'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:113
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:113: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['length'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:114
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:114: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['dtd'\][ =]+\"(.*?)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:115
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:115: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['tocNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:132
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:132: SyntaxWarning: invalid escape sequence '\('
+    single_page_re = "\t\tviewDoc\('(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\d+)', '(\S+)',''\)\;"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:184
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:184: SyntaxWarning: invalid escape sequence '\s'
+    "\s+node[12]\['rcpNo'\][ =]+\"(\d+)\";"
+
+../app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:185
+  /app/.venv/lib/python3.13/site-packages/OpenDartReader/dart_utils.py:185: SyntaxWarning: invalid escape sequence '\s'
+    + "\s+node[12]\['dcmNo'\][ =]+\"(\d+)\";", r.text)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+_______________ test_source_rejects_only_the_unclassifiable_row ________________
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.research_candles.toss_minute_source:toss_minute_source.py:214 Rejected an unclassifiable Toss minute: symbol=005930 timestamp=2026-09-01T07:59:00+09:00
+_______________ test_provider_failure_isolated_as_partial_batch ________________
+------------------------------ Captured log call -------------------------------
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:223 Toss minute fetch failed symbol=005930 batch_id=toss-1m-20260901T0105Z: provider unavailable
+Traceback (most recent call last):
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 201, in fetch
+    raise value
+RuntimeError: provider unavailable
+_____ test_failed_and_skipped_minute_symbols_are_selected_on_the_next_run ______
+------------------------------ Captured log call -------------------------------
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:223 Toss minute fetch failed symbol=000020 batch_id=toss-1m-20260901T0100Z: toss
+Traceback (most recent call last):
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 201, in fetch
+    raise value
+TimeoutError: toss
+____ test_symbol_that_keeps_failing_backs_off_instead_of_taking_every_slot _____
+------------------------------ Captured log call -------------------------------
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:223 Toss minute fetch failed symbol=000001 batch_id=toss-1m-20260901T0100Z: Toss API error status=404 code='stock-not-found'
+Traceback (most recent call last):
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+RuntimeError: Toss API error status=404 code='stock-not-found'
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:223 Toss minute fetch failed symbol=000001 batch_id=toss-1m-20260901T0101Z: Toss API error status=404 code='stock-not-found'
+Traceback (most recent call last):
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+RuntimeError: Toss API error status=404 code='stock-not-found'
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:223 Toss minute fetch failed symbol=000001 batch_id=toss-1m-20260901T0103Z: Toss API error status=404 code='stock-not-found'
+Traceback (most recent call last):
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+  File "/work/app/jobs/toss_minute_candles.py", line 213, in _collect_batch
+    fetched, gap = await _fetch_symbol(
+                   ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/app/jobs/toss_minute_candles.py", line 139, in _fetch_symbol
+    page = await source.fetch(
+           ^^^^^^^^^^^^^^^^^^^
+        symbol=coverage.symbol, retrieved_at=retrieved_at, batch_id=batch_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/work/app/services/research_candles/toss_minute_source.py", line 183, in fetch
+    page = await self._client.candles(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/work/tests/services/research_candles/test_toss_minute_persistence.py", line 116, in candles
+    raise history
+RuntimeError: Toss API error status=404 code='stock-not-found'
+________ test_gap_wider_than_the_symbol_page_cap_is_reported_for_repair ________
+------------------------------ Captured log call -------------------------------
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=005930 stored_through=2026-08-31T23:30:00+00:00 fetched_from=2026-09-01T09:41:00+00:00 reason=symbol_page_cap
+_______________ test_run_page_budget_caps_toss_calls_per_minute ________________
+------------------------------ Captured log call -------------------------------
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000011 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000012 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000013 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000014 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000015 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000016 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000017 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000018 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000019 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+WARNING  app.jobs.toss_minute_candles:toss_minute_candles.py:238 Toss minute gap left for the repair CLI symbol=000020 stored_through=2026-08-31T23:10:00+00:00 fetched_from=2026-09-01T05:41:00+00:00 reason=run_page_budget
+ROB-1296 external HTTP boundary: 0 blocked requests
+test schema bootstrap: databases=1 applied=1 schema_seconds=2.38 database_seconds=0.21
+ROB-1880 socket guard: active=True blocked_attempts=0 workers=0
+=========================== short test summary info ============================
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_source_preserves_current_partial_timezone_segment_and_value_semantics
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_source_forwards_before_cursor_and_returns_next_cursor
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_source_accepts_the_in_progress_bar_when_the_batch_crosses_a_minute
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_source_still_rejects_a_bar_beyond_the_response_minute
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_source_rejects_only_the_unclassifiable_row
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock0-NXT_PRE]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock1-NXT_PRE]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock2-KRX_REGULAR]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock3-KRX_REGULAR]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock4-NXT_POST]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_segment_boundaries_are_kst_clock_labels[clock5-NXT_POST]
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_regular_tick_upserts_rows_idempotently_and_updates_partial_revision
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_tick_selects_one_bounded_batch_of_never_collected_symbols
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_provider_failure_isolated_as_partial_batch
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_failed_and_skipped_minute_symbols_are_selected_on_the_next_run
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_symbol_that_keeps_failing_backs_off_instead_of_taking_every_slot
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_gap_beyond_the_latest_page_is_filled_with_before_cursor
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_gap_wider_than_the_symbol_page_cap_is_reported_for_repair
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_run_page_budget_caps_toss_calls_per_minute
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_repository_uses_target_unique_key_for_idempotent_upsert
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_stalest_active_symbols_orders_by_last_fetch_on_postgres
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_non_market_tick_is_noop_before_database_or_provider
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_weekday_after_session_is_noop_before_dependencies
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_taskiq_schedule_is_registered_and_discovered
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_kasset_worker_and_scheduler_discover_toss_minute_task
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_gap_plan_finds_missing_minutes_and_backward_page_calls
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_gap_plan_keeps_minutes_most_symbols_lost_together
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_repair_walks_before_cursor_and_writes_only_that_session
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_repair_stops_at_the_call_cap_and_keeps_what_it_fetched
+PASSED tests/services/research_candles/test_toss_minute_persistence.py::test_repair_cli_defaults_to_dry_run_without_toss_or_writes
+30 passed, 12 warnings in 14.74s
+pytest_exit=0
+== static
+All checks passed!
+ruff_check_exit=0
+6 files already formatted
+ruff_format_exit=0
+6 files already formatted
+All checks passed!
+ty_exit=0
+== isolation
+110
+NAMES                       STATUS
+kasset-trader-mcp-1         Up 3 hours (healthy)
+kasset-trader-worker-1      Up 3 hours
+kasset-trader-scheduler-1   Up 3 hours
+kasset-trader-ai-mcp-1      Up 3 hours (healthy)
+kasset-trader-nh-stream-1   Up 3 hours
+kasset-trader-api-1         Up 3 hours (healthy)
+kasset-trader-caddy-1       Up 4 weeks
+kasset-trader-db-1          Up 5 weeks (healthy)
+kasset-trader-redis-1       Up 5 weeks (healthy)

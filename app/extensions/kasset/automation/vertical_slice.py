@@ -951,7 +951,7 @@ class AIRecommendationVerticalSlice:
                             "source": "same_symbol_reentry",
                             "symbol": candidate.symbol,
                             "market": candidate.ranker_market,
-                            "reason": _SAME_SYMBOL_PENDING_RECOMMENDATION,
+                            "exclusionReason": _SAME_SYMBOL_PENDING_RECOMMENDATION,
                             "detail": (
                                 f"pendingSameSymbolBuys={open_buys}; "
                                 "counts unexpired pending or claimed "
@@ -967,7 +967,7 @@ class AIRecommendationVerticalSlice:
                         "source": "same_symbol_reentry",
                         "symbol": candidate.symbol,
                         "market": candidate.ranker_market,
-                        "reason": _SAME_SYMBOL_REENTRY_EXHAUSTED,
+                        "exclusionReason": _SAME_SYMBOL_REENTRY_EXHAUSTED,
                         "detail": (
                             f"openSameSymbolBuys={open_buys}/{reentry_limit}; "
                             "counts filled orders and unexpired pending "
@@ -1010,7 +1010,7 @@ class AIRecommendationVerticalSlice:
                         "symbol": candidate.symbol,
                         "market": candidate.ranker_market,
                         "code": account_state_gate.code,
-                        "reason": reason,
+                        "exclusionReason": reason,
                         "detail": account_state_gate.detail,
                         "accountState": account_state_gate.evidence,
                     }

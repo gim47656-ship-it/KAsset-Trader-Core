@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -130,15 +131,37 @@ def _normalize_candle(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TossMinutePage:
+    """One Toss ``/candles`` response normalised for persistence.
+
+    ``oldest_time_utc`` is the earliest accepted bar and ``next_before`` is the
+    provider's cursor for the next older page (``None`` on the last page).
+    """
+
+    rows: list[TossMinuteCandleRow]
+    next_before: str | None
+
+    @property
+    def oldest_time_utc(self) -> datetime | None:
+        return self.rows[0].time_utc if self.rows else None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class TossMinuteCandleSource:
     def __init__(
         self,
         client: TossMinuteClient,
         *,
         fetch_count: int = TOSS_MINUTE_FETCH_COUNT,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._client = client
         self._fetch_count = max(1, min(int(fetch_count), 200))
+        self._clock = clock
 
     @classmethod
     def from_settings(cls) -> TossMinuteCandleSource:
@@ -153,12 +176,15 @@ class TossMinuteCandleSource:
         symbol: str,
         retrieved_at: datetime,
         batch_id: str,
-    ) -> list[TossMinuteCandleRow]:
+        before: str | None = None,
+    ) -> TossMinutePage:
+        """Fetch one page; ``before`` is Toss's inclusive upper-bound cursor."""
+
         page = await self._client.candles(
             symbol,
             interval="1m",
             count=self._fetch_count,
-            before=None,
+            before=before,
             adjusted=None,
         )
         retrieved_utc = (
@@ -166,11 +192,15 @@ class TossMinuteCandleSource:
             if retrieved_at.tzinfo is None
             else retrieved_at.astimezone(UTC)
         )
-        current_minute_utc = retrieved_utc.replace(second=0, microsecond=0)
-        # A bounded batch can cross a minute boundary while Toss requests are
-        # in flight. Accept only that immediately following minute; anything
+        # A 1m timestamp is the bar's end time, so the bar still in progress
+        # is labelled with the minute after the response. A batch can cross a
+        # minute boundary while Toss requests are in flight, so measure that
+        # bound against the response time, not the batch start. Anything
         # farther ahead is still clock/data corruption and fails the symbol.
-        latest_acceptable_minute = current_minute_utc + timedelta(minutes=1)
+        observed_utc = max(retrieved_utc, self._clock().astimezone(UTC))
+        latest_acceptable_minute = observed_utc.replace(
+            second=0, microsecond=0
+        ) + timedelta(minutes=1)
         rows: dict[datetime, TossMinuteCandleRow] = {}
         for candle in page.candles:
             try:
@@ -192,4 +222,7 @@ class TossMinuteCandleSource:
                     f"future_minute:{symbol}:{row.time_utc.isoformat()}"
                 )
             rows.setdefault(row.time_utc, row)
-        return [rows[key] for key in sorted(rows)]
+        return TossMinutePage(
+            rows=[rows[key] for key in sorted(rows)],
+            next_before=page.next_before,
+        )
