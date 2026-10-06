@@ -164,6 +164,7 @@ tests/services/research/test_rob984_cp4_replay_state_machine.py
 tests/services/research/test_rob984_cp8_actual_integration.py
 tests/services/research_candles/test_promotion.py
 tests/services/research_candles/test_same_time_volume_profile.py
+tests/services/research_candles/test_toss_minute_compression_migration.py
 tests/services/research_candles/test_toss_minute_persistence.py
 tests/services/social_sentiment_probe/test_models.py
 tests/services/test_downside_watch_service.py

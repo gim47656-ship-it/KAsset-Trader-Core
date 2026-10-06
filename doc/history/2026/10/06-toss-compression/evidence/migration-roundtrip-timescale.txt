@@ -1,0 +1,47 @@
+=== stamp parent
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running stamp_revision  -> 20261005_kasset_longterm_shadow
+=== upgrade head (1st)
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+upgrade seconds: 5
+--- state: after upgrade #1
+alembic_version | 20261006_toss_minute_compression
+compression_enabled | true
+compressed_chunks | 0/2
+policy | 1000 | 1 day | t | 2026-10-07 02:30:00 | 2026-10-07 02:30:00 | 3 | 00:30:00 | {"hypertable_id": 1, "compress_after": "7 days"}
+rows | 1402083 | 8872373523103970555160
+segmentby/orderby | symbol:1/-, time_utc:-/1DESC
+=== run policy job 1000 now (stands in for the 02:30 KST run)
+policy run ms: 3534
+--- state: after policy run
+alembic_version | 20261006_toss_minute_compression
+compression_enabled | true
+compressed_chunks | 2/2
+policy | 1000 | 1 day | t | 2026-10-07 02:30:00 | 2026-10-07 02:30:00 | 3 | 00:30:00 | {"hypertable_id": 1, "compress_after": "7 days"}
+rows | 1402083 | 8872373523103970555160
+segmentby/orderby | symbol:1/-, time_utc:-/1DESC
+=== downgrade -1
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20261006_toss_minute_compression -> 20261005_kasset_longterm_shadow, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+downgrade seconds: 29
+--- state: after downgrade
+alembic_version | 20261005_kasset_longterm_shadow
+compression_enabled | false
+compressed_chunks | 0/2
+rows | 1402083 | 8872373523103970555160
+segmentby/orderby | 
+=== upgrade head (2nd)
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+--- state: after upgrade #2
+alembic_version | 20261006_toss_minute_compression
+compression_enabled | true
+compressed_chunks | 0/2
+policy | 1001 | 1 day | t | 2026-10-07 02:30:00 | 2026-10-07 02:30:00 | 3 | 00:30:00 | {"hypertable_id": 1, "compress_after": "7 days"}
+rows | 1402083 | 8872373523103970555160
+segmentby/orderby | symbol:1/-, time_utc:-/1DESC

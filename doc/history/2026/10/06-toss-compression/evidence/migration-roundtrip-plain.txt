@@ -1,0 +1,23 @@
+extension present? 0  (0 = plain PostgreSQL like CI)
+=== A. plain DB, no table
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running stamp_revision  -> 20261005_kasset_longterm_shadow
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+version: 20261006_toss_minute_compression
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20261006_toss_minute_compression -> 20261005_kasset_longterm_shadow, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+=== B. plain DB with an ordinary research.kr_candles_1m_toss table
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 20261006_toss_minute_compression -> 20261005_kasset_longterm_shadow, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+version: 20261006_toss_minute_compression
+=== C. same migration with NOTICE output (psql, plain DB): 
+=== D. timescaledb installed, research.kr_candles_1m_toss is an ordinary table (not a hypertable)
+extension: 2.29.2 hypertables: 0
+INFO  [alembic.runtime.migration] Running downgrade 20261006_toss_minute_compression -> 20261005_kasset_longterm_shadow, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+INFO  [alembic.runtime.migration] Running upgrade 20261005_kasset_longterm_shadow -> 20261006_toss_minute_compression, Compress old Toss 1-minute candle chunks (TimescaleDB compression policy).
+version: 20261006_toss_minute_compression; jobs of policy_compression: 0
