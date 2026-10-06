@@ -79,7 +79,7 @@ STATUS: accepted
 ## 검증
 
 저장소 규약 14에 따라 로컬 Windows에서 Python test/lint/type을 돌리지 않았다. 서버
-`kasset-server`(`root@100.73.186.78`)의 격리 checkout `/tmp/kasset-symbolname-20260923`
+(비공개 SSH 별칭 `kasset-server`)의 격리 checkout `/tmp/kasset-symbolname-20260923`
 (base `c1dad9060ada`, GitHub에서 clone) + 일회성 container + 운영과 분리된 `kasset-test-db`의
 run-owned DB에서 실행했다. 운영 checkout `/opt/kasset-trader-core`, `.env.kasset`, 운영 DB/볼륨은
 사용하지 않았고 운영 DB는 SELECT만 했다.

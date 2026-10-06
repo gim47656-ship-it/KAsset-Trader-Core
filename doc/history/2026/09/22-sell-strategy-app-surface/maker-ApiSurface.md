@@ -76,7 +76,7 @@ Main에 정정 보고했고 "코드 변경 없이 회귀 테스트로 닫아라"
 ## 검증
 
 저장소 규약 14에 따라 로컬 Windows에서 Python test/lint/type을 돌리지 않았다. 서버
-`root@100.73.186.78`의 격리 checkout `/tmp/kasset-apisurface-20260923`과 일회성 컨테이너
+(접속 식별자 비공개)의 격리 checkout `/tmp/kasset-apisurface-20260923`과 일회성 컨테이너
 (2 CPU / 3 GiB, `ghcr.io/astral-sh/uv:python3.13-bookworm`), 운영과 분리된 `kasset-test-db`의
 실행별 DB를 썼다. 운영 checkout `/opt/kasset-trader-core`, `.env.kasset`, 운영 DB/볼륨은
 사용하거나 수정하지 않았다.

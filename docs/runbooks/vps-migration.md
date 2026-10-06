@@ -1,14 +1,19 @@
 # KAsset Trader 서버 구조와 VPS 이전 런북
 
-갱신: 2026-08-30. 현재 서버는 Naver Cloud(모두의 AI 실험실) Rocky Linux 8.8,
-`root@100.73.186.78`(Tailscale) / 공인 `175.45.201.51`이다. 3개월 뒤 일반 VPS(Ubuntu)로
-이전을 전제로 정리한다. 이 문서와 저장소의 `docker-compose.kasset.yml`이 기준이며,
+갱신: 2026-10-05. Naver Cloud의 Rocky Linux 8.8 서버에서 일반 VPS(Ubuntu)로
+이전하는 절차다. 이 문서와 저장소의 `docker-compose.kasset.yml`이 기준이며,
 Naver 전용 서비스 종속은 없다.
+
+공개 문서의 IP·도메인은 예시다. `203.0.113.10`은 공인 서버, `100.64.0.10`은
+tailnet 서버, `kasset-origin.example.net`은 직접 origin, `api.example.net`은
+터널 공개 도메인, `kasset-tailnet.example.net`은 MagicDNS host를 대신한다.
+명령 실행 전 비공개 운영 설정의 실제 값으로 바꾼다. MagicDNS에는 실제 `*.ts.net`
+이름을 사용한다. 아래 과거 관측 결과도 접속 식별자만 일반화했다.
 
 ## 1. 현재 구조
 
 ```text
-인터넷 ──> Cloudflare Tunnel(api.hsps-portal.xyz) ──> cloudflared ──> 127.0.0.1:8000
+인터넷 ──> Cloudflare Tunnel(api.example.net) ──> cloudflared ──> 127.0.0.1:8000
            (public/mobile 전용; production API가 /admin*·/web-auth*를 403 차단)
 허용된 tailnet/사무실 IP ──> host-network Caddy ──[공유 edge key 덮어쓰기]──> 127.0.0.1:8000
 
@@ -56,13 +61,13 @@ DB·Redis 데이터는 named volume(`postgres_data`, `redis_data`)로 영속화�
 
 ## 3. 외부 종속(이전 시 반드시 갱신)
 
-1. **Toss Open API 허용 IP** — 현재 `175.45.201.51` 등록. 새 VPS 공인 IP로 재등록해야
+1. **Toss Open API 허용 IP** — 기존 서버 공인 IP가 등록돼 있다. 새 VPS 공인 IP로 재등록해야
    캔들 수집이 동작한다.
-2. **Cloudflare Tunnel** — 커넥터 위치와 무관하게 `api.hsps-portal.xyz`가 따라온다.
+2. **Cloudflare Tunnel** — 커넥터 위치와 무관하게 설정한 public/mobile 도메인이 따라온다.
    DNS·인증서 작업 0. (`TUNNEL_TOKEN`은 `.env.kasset`에 있음. 토큰 회전 시
    Cloudflare One > 네트워크 > 커넥터 > kasset-trader에서 재발급.)
 3. **Tailscale** — 새 VPS에 설치·로그인하면 SSH 경로 유지. 기존 노드는 tailnet에서 제거.
-4. **기존 HANSE_ERP 터널은 별개다. 건드리지 않는다.**
+4. **다른 프로젝트의 기존 터널은 별개다. 건드리지 않는다.**
 
 ## 4. VPS 이전 절차 (다운타임 ≈ 복원 시간 몇 분)
 
@@ -95,7 +100,7 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d db redi
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d api worker scheduler mcp caddy
 
 # 5) 검증
-curl -sS https://175-45-201-51.sslip.io/health     # Caddy 경유 200
+curl -sS https://kasset-origin.example.net/health    # Caddy 경유 200
 docker compose ... ps                              # 전 서비스 healthy
 docker logs kasset-trader-caddy-1                  # 기동 오류 없음(키 값 출력 금지)
 # Toss 허용 IP 갱신 후: 캔들 수집 태스크 수동 1회 실행 확인
@@ -128,7 +133,7 @@ docker logs kasset-trader-caddy-1                  # 기동 오류 없음(키 �
 ```bash
 new$ systemctl stop cloudflared   # 실제 별도 connector 관리 방식에 맞춰 정지
 old$ docker compose --env-file .env.kasset -f docker-compose.kasset.yml up -d   # 전 서비스 재기동
-curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 200
+curl -sS https://api.example.net/health   # 구 서버 커넥터로 다시 200
 ```
 
 - 같은 `TUNNEL_TOKEN`을 쓰는 커넥터가 살아 있는 쪽으로 Cloudflare가 라우팅한다.
@@ -141,7 +146,7 @@ curl -sS https://api.hsps-portal.xyz/health   # 구 서버 커넥터로 다시 2
 
 | # | 확인 | 명령/방법 | 기대 |
 |---|---|---|---|
-| 1 | 터널 경유 API | `curl -sS https://api.hsps-portal.xyz/health` | 200 |
+| 1 | 터널 경유 API | `curl -sS https://api.example.net/health` | 200 |
 | 2 | 컨테이너 상태 | `docker compose ... ps` | api/db/redis/mcp healthy, worker/scheduler Up |
 | 3 | 커넥터 등록 | Cloudflare Tunnel 대시보드 또는 별도 connector 로그 | 커넥션 4개 |
 | 4 | DB 복원 무결성 | `psql -tAc "SELECT count(*) FROM users; SELECT max(time) FROM kr_candles_1d"` | 이전 전과 동일 |
@@ -187,7 +192,7 @@ AUTH_SMTP_PASSWORD=<server-only secret>
 AUTH_SMTP_FROM_EMAIL=<mailbox>
 AUTH_SMTP_SECURITY=starttls
 AUTH_SMTP_ALLOW_LEGACY_TLS=true
-AUTH_PASSWORD_RESET_BASE_URL=https://vm-naver-kasset.tail624c43.ts.net
+AUTH_PASSWORD_RESET_BASE_URL=https://kasset-tailnet.example.net
 AUTH_PASSWORD_RESET_TTL_MINUTES=30
 WEB_REGISTRATION_ENABLED=false
 ```
@@ -280,17 +285,17 @@ IPv6 사무실 주소를 허용할 때는 단일 주소면 `/128`, 사무실 대
 사용자가 집·사무실에서 접속할 기본 URL은 다음이다.
 
 ```text
-https://vm-naver-kasset.tail624c43.ts.net/admin/ops
+https://kasset-tailnet.example.net/admin/ops
 ```
 
-`175-45-201-51.sslip.io`는 공인 IP로 연결되므로 집에서 접속하면 Caddy의 immediate peer가
+`kasset-origin.example.net`은 공인 IP로 연결되므로 집에서 접속하면 Caddy의 immediate peer가
 집 공인 IP이고 기본 tailnet allowlist를 통과하지 못한다. 반면 MagicDNS host는
-`100.73.186.78`로 연결되어 peer가 tailnet IP가 된다. Google Cloud Console의 같은 web
+`100.64.0.10`으로 연결되어 peer가 tailnet IP가 된다. Google Cloud Console의 같은 web
 client에서 **Authorized JavaScript origins**에 아래 origin을 등록한다. Google Identity
 Services credential POST 방식이므로 redirect URI는 추가하지 않는다.
 
 ```text
-https://vm-naver-kasset.tail624c43.ts.net
+https://kasset-tailnet.example.net
 ```
 
 `.env.kasset`의 `KASSET_TAILNET_DOMAIN`은 기본적으로 빈 값이다. 비어 있으면 optional site
@@ -310,15 +315,15 @@ install -d -m 700 /opt/kasset-tailnet-certs
 tailscale cert \
   --cert-file=/opt/kasset-tailnet-certs/cert.pem \
   --key-file=/opt/kasset-tailnet-certs/key.pem \
-  vm-naver-kasset.tail624c43.ts.net
+  kasset-tailnet.example.net
 chmod 600 /opt/kasset-tailnet-certs/cert.pem /opt/kasset-tailnet-certs/key.pem
 
 cd /opt/kasset-trader-core
 cp -p .env.kasset .env.kasset.before-tailnet-domain
 if grep -q '^KASSET_TAILNET_DOMAIN=' .env.kasset; then
-  sed -i 's|^KASSET_TAILNET_DOMAIN=.*|KASSET_TAILNET_DOMAIN=vm-naver-kasset.tail624c43.ts.net|' .env.kasset
+  sed -i 's|^KASSET_TAILNET_DOMAIN=.*|KASSET_TAILNET_DOMAIN=kasset-tailnet.example.net|' .env.kasset
 else
-  printf '\nKASSET_TAILNET_DOMAIN=vm-naver-kasset.tail624c43.ts.net\n' >> .env.kasset
+  printf '\nKASSET_TAILNET_DOMAIN=kasset-tailnet.example.net\n' >> .env.kasset
 fi
 docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm --no-deps caddy \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -331,7 +336,7 @@ Tailscale 공식 문서상 파일로 받은 인증서는 90일 만료이며 `tai
 
 ```bash
 cat >/etc/cron.d/kasset-tailnet-cert <<'EOF'
-17 4 * * 1 root /usr/bin/tailscale cert --min-validity=720h --cert-file=/opt/kasset-tailnet-certs/cert.pem --key-file=/opt/kasset-tailnet-certs/key.pem vm-naver-kasset.tail624c43.ts.net && cd /opt/kasset-trader-core && /usr/bin/docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && /usr/bin/docker compose --env-file .env.kasset -f docker-compose.kasset.yml restart caddy
+17 4 * * 1 root /usr/bin/tailscale cert --min-validity=720h --cert-file=/opt/kasset-tailnet-certs/cert.pem --key-file=/opt/kasset-tailnet-certs/key.pem kasset-tailnet.example.net && cd /opt/kasset-trader-core && /usr/bin/docker compose --env-file .env.kasset -f docker-compose.kasset.yml run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && /usr/bin/docker compose --env-file .env.kasset -f docker-compose.kasset.yml restart caddy
 EOF
 chmod 644 /etc/cron.d/kasset-tailnet-cert
 ```
@@ -352,7 +357,7 @@ journalctl -u cron --since '8 days ago' | grep kasset-tailnet-cert
   <https://caddyserver.com/docs/caddyfile/directives/tls>
 
 사무실 공인 IP가 나중에 `KASSET_ADMIN_ALLOWED_IPS`에 `/32`로 추가되면 사무실에서는
-`https://175-45-201-51.sslip.io/admin/ops`도 사용할 수 있다. 값이 확인되기 전에는
+`https://kasset-origin.example.net/admin/ops`도 사용할 수 있다. 값이 확인되기 전에는
 tailnet URL만 사용한다.
 
 ### 9.3 적용, 검증, 복구
@@ -387,7 +392,7 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml exec caddy \
 경로를 잡은 것이므로 적용을 중단한다.
 
 ```bash
-curl -H 'Host: 175-45-201-51.sslip.io' -sS -o /dev/null \
+curl -H 'Host: kasset-origin.example.net' -sS -o /dev/null \
   -w "unclaimed ACME HTTP-01 probe => %{http_code}\n" \
   http://127.0.0.1/.well-known/acme-challenge/kasset-unclaimed-probe
 ```
@@ -406,13 +411,13 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml exec caddy \
 
 ### 9.4 실제 진입점, 우회 방지, Cloudflare Tunnel 주의
 
-운영 `KASSET_DOMAIN`은 `175-45-201-51.sslip.io` 하나다. 최근 Caddy 로그의 실사용
+운영 `KASSET_DOMAIN`은 직접 origin 도메인 하나다(예시: `kasset-origin.example.net`). 최근 Caddy 로그의 실사용
 HTTPS Host도 이 값이었고 Android 앱을 포함한 API 호출은 이 origin으로 들어온다.
 HTTPS site block은 관리자 guard를 health/web-terminal/catch-all보다 먼저 실행한다.
 관리자 접두어가 아닌 `/health`, `/api/v1/*`, WebSocket 등은 기존 catch-all로 계속
 전달되므로 Android/public API 계약은 바뀌지 않는다.
 
-평문 80에는 `175.45.201.51:80`, `175.45.201.51`, `175.045.201.051` 같은 Host도
+평문 80에는 `203.0.113.10:80`, `203.0.113.10`, `203.000.113.010` 같은 Host도
 들어온다. 이 값들은 `KASSET_DOMAIN` host matcher와 일치하지 않는다. 그래서 Caddyfile은
 host-agnostic `http://` site block에서 같은 관리자 guard를 먼저 실행하고, 허용된 요청만
 명시적 `308` HTTPS redirect로 보낸다. zero-padded 변형도 이 catch-all에 흡수된다.
@@ -430,9 +435,9 @@ host-agnostic `http://` site block에서 같은 관리자 guard를 먼저 실행
   <https://github.com/caddyserver/caddy/blob/v2.11.4/modules/caddyhttp/server.go#L390-L394>
 
 현재 `docker-compose.kasset.yml`에는 `cloudflared` 서비스가 없고 Caddy에도
-`api.hsps-portal.xyz` site가 없다. 따라서 이 공개 도메인은 실사용 경로가 아니며
-`https://api.hsps-portal.xyz/health`는 Cloudflare 530(error 1033), 직접 origin의
-`https://175-45-201-51.sslip.io/health`는 200이다. Tunnel 복구는 이 변경의 범위 밖이고,
+터널 공개 도메인(예시: `api.example.net`) site가 없다. 따라서 이 공개 도메인은 실사용 경로가 아니며
+`https://api.example.net/health`는 Cloudflare 530(error 1033), 직접 origin의
+`https://kasset-origin.example.net/health`는 200이었다. Tunnel 복구는 이 변경의 범위 밖이고,
 530은 관리자 경계가 차단했다는 증거가 아니다.
 
 Tunnel을 복구해 connector를 `127.0.0.1:8000`으로 직접 보내는 경우에도 그 경로는 public/mobile
@@ -456,7 +461,7 @@ tailnet에 연결된 PC에서 MagicDNS HTTPS origin을 직접 검사한다. 로�
 증거다.
 
 ```bash
-TAILNET_HOST=vm-naver-kasset.tail624c43.ts.net
+TAILNET_HOST=kasset-tailnet.example.net
 curl -sS -o /dev/null -w "tailnet web-auth login => %{http_code}\n" \
   "https://${TAILNET_HOST}/web-auth/login"
 curl -sS -o /dev/null -w "tailnet admin smoke => %{http_code}\n" \
@@ -470,8 +475,8 @@ curl -sS -o /dev/null -w "tailnet admin smoke => %{http_code}\n" \
 HTTPS redirect 단계까지 가는지 확인한다.
 
 ```bash
-TAILNET_ORIGIN=100.73.186.78
-for HOST in '175.45.201.51:80' '175.45.201.51' '175.045.201.051'; do
+TAILNET_ORIGIN=100.64.0.10
+for HOST in '203.0.113.10:80' '203.0.113.10' '203.000.113.010'; do
   curl -H "Host: ${HOST}" -sS -o /dev/null \
     -w "${HOST} tailnet admin => %{http_code}\n" \
     "http://${TAILNET_ORIGIN}/admin/__network_smoke_not_found__"
@@ -486,7 +491,7 @@ tailnet을 끈 외부 회선에서 직접 origin을 검사한다. 위조한 `X-F
 
 
 ```bash
-DIRECT_HOST=175-45-201-51.sslip.io
+DIRECT_HOST=kasset-origin.example.net
 curl -sS -o /dev/null -w "direct admin => %{http_code}\n" \
   "https://${DIRECT_HOST}/admin/__network_smoke_not_found__"
 curl -H 'X-Forwarded-For: 100.64.0.1' -sS -o /dev/null \
@@ -500,13 +505,13 @@ curl -sS -o /dev/null -w "direct health => %{http_code}\n" \
 redirect 전에 차단되고, 비관리자 경로만 기존 `308`을 유지해야 한다.
 
 ```bash
-for HOST in '175.45.201.51:80' '175.45.201.51' '175.045.201.051'; do
+for HOST in '203.0.113.10:80' '203.0.113.10' '203.000.113.010'; do
   curl -H "Host: ${HOST}" -sS -o /dev/null \
     -w "${HOST} external admin => %{http_code}\n" \
-    "http://175.45.201.51/admin/__network_smoke_not_found__"
+    "http://203.0.113.10/admin/__network_smoke_not_found__"
 done
 curl -sS -o /dev/null -w "direct-IP health redirect => %{http_code}\n" \
-  "http://175.45.201.51/health"
+  "http://203.0.113.10/health"
 ```
 
 기대값은 admin 3건 모두 `403`, health는 `308`이다.
@@ -533,7 +538,7 @@ curl -sS -o /dev/null -w "direct-api health => %{http_code}\n" \
 요청이 모두 `403`, health가 `200`이어야 한다.
 
 ```bash
-PUBLIC_HOST=api.hsps-portal.xyz
+PUBLIC_HOST=api.example.net
 curl -sS -o /dev/null -w "public admin => %{http_code}\n" \
   "https://${PUBLIC_HOST}/admin/__network_smoke_not_found__"
 curl -sS -o /dev/null -w "public login => %{http_code}\n" \

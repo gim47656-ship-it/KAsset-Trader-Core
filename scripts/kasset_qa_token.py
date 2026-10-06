@@ -4,8 +4,12 @@
 ``POST /auth/refresh`` 로 갱신한 뒤 낸다. 실측 중 401 이 떠서 손으로 다시
 발급하는 왕복을 없애는 것이 목적이다.
 
+    export KASSET_QA_BASE="https://your-api.example.net/api/v1"
     export TOK=$(python scripts/kasset_qa_token.py)
     curl -H "Authorization: Bearer $TOK" "$BASE/market/quotes?..."
+
+서버 주소는 ``--base`` 또는 ``KASSET_QA_BASE``로 명시한다.
+공개 코드에는 운영 서버 기본 주소를 두지 않는다.
 
 앱 의존성과 DB 가 필요 없다. 표준 라이브러리만 쓰므로 집 PC 에서 그대로 돈다.
 서버 SSH 는 최초 1회 refresh token 을 심을 때만 필요하다:
@@ -36,7 +40,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-_DEFAULT_BASE = "https://175-45-201-51.sslip.io/api/v1"
 _DEFAULT_CACHE = Path.home() / ".kasset-qa-token.json"
 # access 가 30분이므로 2분 여유면 한 번의 실측 명령이 도중에 만료되지 않는다.
 _REFRESH_MARGIN_SECONDS = 120
@@ -108,9 +111,7 @@ def _refresh(base: str, refresh_token: str) -> dict[str, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--base", default=os.environ.get("KASSET_QA_BASE", _DEFAULT_BASE)
-    )
+    parser.add_argument("--base", default=os.environ.get("KASSET_QA_BASE"))
     parser.add_argument(
         "--seed-refresh",
         metavar="TOKEN",
@@ -122,6 +123,8 @@ def main() -> None:
         help="만료가 남아 있어도 갱신한다.",
     )
     args = parser.parse_args()
+    if not args.base:
+        parser.error("--base 또는 KASSET_QA_BASE로 서버 주소를 지정해야 한다.")
 
     if args.seed_refresh:
         _save({"refreshToken": args.seed_refresh})

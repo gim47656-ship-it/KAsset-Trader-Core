@@ -16,7 +16,7 @@ STATUS: accepted
 
 ## 조사 결과 — 둘 다 서버, 앱 수정 불필요
 
-운영 서버 `kasset-server`(`root@100.73.186.78`), 운영 SHA `c1dad9060ada`, 읽기 전용 조회로 확인했다.
+운영 서버(비공개 SSH 별칭 `kasset-server`), 운영 SHA `c1dad9060ada`, 읽기 전용 조회로 확인했다.
 
 ### 1. 종목코드 노출 — 이름 출처 테이블에 우선주가 없다
 

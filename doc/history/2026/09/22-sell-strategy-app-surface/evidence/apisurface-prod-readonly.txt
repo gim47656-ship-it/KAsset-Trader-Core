@@ -1,5 +1,5 @@
 운영 서버 읽기 전용 조회(쓰기 없음). 2026-09-22 15:14:55+00 기준.
-접속: root@100.73.186.78 → docker exec kasset-trader-db-1 psql -U kasset -d kasset
+접속: 운영 서버(접속 식별자 비공개) → docker exec kasset-trader-db-1 psql -U kasset -d kasset
 쓰기·UPDATE·DELETE·sweep·주문은 실행하지 않았다.
 
 [1] 운영 배포 SHA

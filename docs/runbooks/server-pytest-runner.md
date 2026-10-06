@@ -51,7 +51,7 @@ Every tag below is derived, not hardcoded. The deployed image tag is the full
 commit SHA that `deploy.sh` built.
 
 ```bash
-ssh kasset-server   # root@100.73.186.78
+ssh kasset-server   # Private SSH alias configured by the operator
 set -eu
 
 export KASSET_TEST_COMMIT="$(git -C /opt/kasset-trader-core rev-parse HEAD)"

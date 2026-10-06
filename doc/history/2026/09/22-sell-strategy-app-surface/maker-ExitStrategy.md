@@ -178,7 +178,7 @@ Main의 지시는 "1차 익절 + 잔여는 기존 +3 ATR과 trailing"이었다. 
 ## 8. 검증
 
 저장소 규약 14에 따라 로컬 Windows에서는 아무것도 실행하지 않았다. 서버
-`root@100.73.186.78`의 전용 checkout `/tmp/kasset-exit-20260922`와 일회성 container
+(접속 식별자 비공개)의 전용 checkout `/tmp/kasset-exit-20260922`와 일회성 container
 (`--network none`, 1~2 CPU, 3 GiB)에서 실행했다. 운영 checkout `/opt/kasset-trader-core`,
 `.env.kasset`, 운영 DB/볼륨은 쓰지 않았다.
 

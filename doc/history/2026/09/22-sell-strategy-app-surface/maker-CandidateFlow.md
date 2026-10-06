@@ -187,7 +187,7 @@ owner의 기존 `same_symbol_reentry_limit`를 쓴다. 세는 것은 **체결(SU
 
 ## 7. 검증
 
-서버(`root@100.73.186.78`)의 격리 checkout `/tmp/kv-candidateflow`(base `a2d0b1517` tar + 내 소유 파일만
+서버(접속 식별자 비공개)의 격리 checkout `/tmp/kv-candidateflow`(base `a2d0b1517` tar + 내 소유 파일만
 덮어씀)에서 일회성 container로 실행했다. DB는 운영과 분리된 `kasset-test-db`의 실행별 DB다.
 운영 checkout `/opt/kasset-trader-core`, `.env.kasset`, 운영 DB/볼륨은 사용하지 않았다. 운영 DB는 SELECT만 했다.
 형제 maker가 동시에 편집 중이므로 작업 트리 전체가 아니라 **base + 내 delta**만 올려서 검증했다.

@@ -73,6 +73,7 @@ tests/scripts/test_forecast_legacy_rule_migration.py
 tests/scripts/test_haproxy_switch.py
 tests/scripts/test_hermes_roundtrip_smoke_cli.py
 tests/scripts/test_kasset_paper_ops.py
+tests/scripts/test_kasset_qa_token.py
 tests/scripts/test_native_bundle_completeness.py
 tests/scripts/test_native_run_wrappers.py
 tests/scripts/test_news_relevance_judge_smoke.py
