@@ -135,3 +135,37 @@ docker compose --env-file .env.kasset -f docker-compose.kasset.yml \
 - `repair.minutes_not_returned`는 요청 범위 안이었는데 Toss가 주지 않은 분이다. Toss
   자체에 없는 분이므로 다시 돌려도 채워지지 않는다.
 - 결과 확인은 같은 날짜로 dry-run을 다시 돌려 `missing_minutes`가 줄었는지 본다.
+
+## 4. 대상 세션이 압축 청크에 있을 때
+
+`research.kr_candles_1m_toss`는 청크 끝이 7일 넘게 지나면 매일 02:30 KST에 압축된다
+([toss-minute-compression.md](toss-minute-compression.md)). 7일 안쪽 세션은 영향이 없고,
+가능하면 압축 전에 복구한다(예: 2026-09-30은 청크 `09-24~10-01`이라 2026-10-08 02:30 KST 전).
+
+세션이 압축 청크에 있는지:
+
+```sql
+SELECT c.chunk_name, c.range_start::date, c.range_end::date,
+       _timescaledb_functions.chunk_status_text(
+         format('%I.%I', c.chunk_schema, c.chunk_name)::regclass) AS status
+  FROM timescaledb_information.chunks c
+ WHERE c.hypertable_name = 'kr_candles_1m_toss' ORDER BY c.range_start;
+```
+
+`{COMPRESSED}`이면 압축 청크다. 절차는 그대로이고 CLI(`--commit`)를 같은 명령으로 돌리면 된다.
+청크를 미리 decompress할 필요가 없다. 격리 DB 실측(TimescaleDB 2.29.2, 압축 청크 2개 270만 행):
+
+| 작업 | 결과 |
+|---|---|
+| 한 종목 한 세션 720행(500+220행 `ON CONFLICT ... DO UPDATE`) 한 트랜잭션 | 41ms + 9ms. 배치 2개(튜플 2,000개)만 decompress, 중복 키 0 |
+| 구멍 메우기(100분 삭제 뒤 같은 100행 INSERT, 충돌 없음) | DELETE 15ms, INSERT 5ms |
+| 종목별 커밋 100종목 x 1세션(CLI 방식) | 합계 5.5초(종목당 약 55ms) |
+| 한 트랜잭션 300종목 x 1세션(165,790행) | 53400 `tuple decompression limit exceeded by operation`(한도 10만, 101,000튜플에서 2.6초 뒤 실패). `SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0`이면 16.9초에 성공 |
+
+- CLI는 종목마다 커밋하므로 한도에 닿지 않는다. 한 트랜잭션에 여러 종목을 모아 SQL로 직접 upsert하지 않는다.
+  어쩔 수 없으면 트랜잭션 안에서만 `SET LOCAL ... = 0`을 쓰고 롤백하지 않는다(롤백된 대량 DML은 죽은 튜플로 청크를 부풀린다).
+- upsert한 청크는 `{COMPRESSED,PARTIAL}`이 된다. 조회는 정상이고, 다음 02:30 KST 정책 실행이 재압축한다(실측 0.9초,
+  행 해시 불변). 바로 합치려면 02:30 밖이라도 장외에 `CALL run_job(<job_id>)`(job id는 압축 런북 2절).
+- dry-run은 `neighbour_session_dates`의 `max/min(session_date_kst)` 조회가 압축 청크에서 인덱스 끝점을 못 써서 느려진다
+  (표본 0.0ms -> 86/187ms). 운영 규모는 **미측정**이다.
+- 복구 직후 검증은 3절과 같다: 같은 날짜 dry-run의 `missing_minutes`가 줄었는지 본다.

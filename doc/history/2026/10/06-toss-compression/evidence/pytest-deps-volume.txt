@@ -1,0 +1,5 @@
+kasset-pytest-deps-48c3a57a
+
+Successfully installed aiosqlite-0.22.1 coverage-7.13.5 execnet-2.1.2 fakeredis-2.34.1 iniconfig-2.3.0 packaging-26.0 pluggy-1.6.0 pygments-2.20.0 pytest-9.1.1 pytest-asyncio-1.3.0 pytest-cov-7.1.0 pytest-mock-3.15.1 pytest-split-0.11.0 pytest-xdist-3.8.0 redis-7.4.0 ruff-0.15.9 sortedcontainers-2.4.0 ty-0.0.29
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+aiosqlite-0.22.1.dist-info coverage-7.13.5.dist-info execnet-2.1.2.dist-info fakeredis-2.34.1.dist-info iniconfig-2.3.0.dist-info packaging-26.0.dist-info pluggy-1.6.0.dist-info pygments-2.20.0.dist-info pytest-9.1.1.dist-info pytest_asyncio-1.3.0.dist-info pytest_cov-7.1.0.dist-info pytest_mock-3.15.1.dist-info pytest_split-0.11.0.dist-info pytest_xdist-3.8.0.dist-info redis-7.4.0.dist-info ruff-0.15.9.dist-info sortedcontainers-2.4.0.dist-info ty-0.0.29.dist-info 

@@ -1,0 +1,40 @@
+== 운영 실행 중 api 이미지: kasset-trader-core:48c3a57a874562d10b4bf5a7c2a81aa48c922d2d
+== 현재 kasset-trader-core 이미지(생성 시각 내림차순):
+48c3a57a874562d10b4bf5a7c2a81aa48c922d2d  2026-10-06 16:54:36 +0900 KST
+f1d8bf4ba1046001717e8d5fd3562491f31a3dc0  2026-10-06 13:44:36 +0900 KST
+90e70733511e35743a4232ec7788b98163d3bad9  2026-10-05 18:24:05 +0900 KST
+588672dc45abe3e3ace0860a1f6a02b0ad60b1a0  2026-10-05 18:03:23 +0900 KST
+
+---- 시나리오: 다음 배포(새 SHA가 target, 지금 실행 중인 SHA가 직전 배포)
+  TARGET_SHA=deadbeef CURRENT_SHA=48c3a57a IMAGE_KEEP=3
+[deploy 08:20:56] 이미지 정리: kasset-trader-core 4개 중 유지 deadbeef00000000000000000000000000000000 48c3a57a874562d10b4bf5a7c2a81aa48c922d2d f1d8bf4ba1046001717e8d5fd3562491f31a3dc0
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:90e70733511e35743a4232ec7788b98163d3bad9
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:90e70733511e35743a4232ec7788b98163d3bad9 삭제
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0 삭제
+[deploy 08:20:56] 이미지 정리: 2개 삭제, 빌드 캐시는 최근 3GB 만 남김
+  DRY-RUN(실행 안 함): docker builder prune -f --keep-storage 3GB
+  -> exit 0
+
+---- 시나리오: target=현재 실행 SHA, 직전=두 번째 이미지(재배포)
+  TARGET_SHA=48c3a57a CURRENT_SHA=f1d8bf4b IMAGE_KEEP=3
+[deploy 08:20:56] 이미지 정리: kasset-trader-core 4개 중 유지 48c3a57a874562d10b4bf5a7c2a81aa48c922d2d f1d8bf4ba1046001717e8d5fd3562491f31a3dc0 90e70733511e35743a4232ec7788b98163d3bad9
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0 삭제
+[deploy 08:20:56] 이미지 정리: 1개 삭제, 빌드 캐시는 최근 3GB 만 남김
+  -> exit 0
+
+---- 시나리오: 실행 중 이미지 보호(KEEP=1, 직전 SHA 없음)
+  TARGET_SHA=deadbeef CURRENT_SHA= IMAGE_KEEP=1
+  DRY-RUN(실행 안 함): docker builder prune -f --keep-storage 3GB
+[deploy 08:20:56] 이미지 정리: kasset-trader-core 4개 중 유지 deadbeef00000000000000000000000000000000
+[deploy 08:20:56] 이미지 정리: 컨테이너가 쓰는 kasset-trader-core:48c3a57a874562d10b4bf5a7c2a81aa48c922d2d 는 건너뜀
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:f1d8bf4ba1046001717e8d5fd3562491f31a3dc0
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:f1d8bf4ba1046001717e8d5fd3562491f31a3dc0 삭제
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:90e70733511e35743a4232ec7788b98163d3bad9
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:90e70733511e35743a4232ec7788b98163d3bad9 삭제
+  DRY-RUN(실행 안 함): docker rmi kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0
+[deploy 08:20:56] 이미지 정리: kasset-trader-core:588672dc45abe3e3ace0860a1f6a02b0ad60b1a0 삭제
+[deploy 08:20:56] 이미지 정리: 3개 삭제, 빌드 캐시는 최근 3GB 만 남김
+  DRY-RUN(실행 안 함): docker builder prune -f --keep-storage 3GB
+  -> exit 0

@@ -86,6 +86,62 @@ rollback() {
   log "롤백 완료(이미지 $(env_value CORE_IMAGE_TAG)). DB migration은 자동으로 되돌리지 않는다."
 }
 
+# ── 옛 이미지·빌드 캐시 정리 ────────────────────────────────────────────────────
+# health 200과 새 이미지 컨테이너 수 확인이 끝난 뒤에만 호출한다(롤백 경로에서는 호출하지
+# 않는다). kasset-trader-core 이미지를 현재(TARGET_SHA) + 직전 2개(생성 시각 순)만 남긴다.
+# 직전에 배포돼 있던 CURRENT_SHA 이미지(롤백 대상)와 컨테이너가 쓰는 이미지는 개수와
+# 무관하게 지우지 않는다. db·redis·caddy 등 다른 이미지와 볼륨은 건드리지 않는다.
+# 호출부가 실패를 경고로만 처리하므로 여기서는 실패를 return 1로 알린다.
+IMAGE_REPO="kasset-trader-core"
+IMAGE_KEEP="${IMAGE_KEEP:-3}"
+BUILD_CACHE_KEEP="${BUILD_CACHE_KEEP:-3GB}"
+
+prune_old_images() {
+  local in_use rows row epoch id tag created removed=0
+  local -a ranked=() keep_tags=()
+
+  # 컨테이너(정지 포함)가 참조하는 이미지 ID. 순위와 무관하게 남긴다.
+  in_use="$(docker ps -aq | xargs -r docker inspect --format '{{.Image}}')" || return 1
+
+  rows="$(docker image ls "$IMAGE_REPO" --no-trunc --format '{{.ID}} {{.Tag}}')" || return 1
+  while read -r id tag; do
+    [ -n "$id" ] && [ "$tag" != "<none>" ] || continue
+    created="$(docker image inspect --format '{{.Created}}' "$id")" || return 1
+    epoch="$(date -u -d "$created" +%s%N)" || return 1
+    ranked+=("$epoch $id $tag")
+  done <<< "$rows"
+  [ "${#ranked[@]}" -gt 0 ] || return 0
+  mapfile -t ranked < <(printf '%s\n' "${ranked[@]}" | sort -rn)
+
+  keep_tags=("$TARGET_SHA")
+  if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" != "$TARGET_SHA" ]; then
+    keep_tags+=("$CURRENT_SHA")
+  fi
+  for row in "${ranked[@]}"; do
+    [ "${#keep_tags[@]}" -lt "$IMAGE_KEEP" ] || break
+    tag="${row##* }"
+    case " ${keep_tags[*]} " in *" $tag "*) ;; *) keep_tags+=("$tag") ;; esac
+  done
+  log "이미지 정리: $IMAGE_REPO ${#ranked[@]}개 중 유지 ${keep_tags[*]}"
+
+  for row in "${ranked[@]}"; do
+    read -r _ id tag <<< "$row"
+    case " ${keep_tags[*]} " in *" $tag "*) continue ;; esac
+    if grep -qxF "$id" <<< "$in_use"; then
+      log "이미지 정리: 컨테이너가 쓰는 $IMAGE_REPO:$tag 는 건너뜀"
+      continue
+    fi
+    if docker rmi "$IMAGE_REPO:$tag" >/dev/null; then
+      removed=$((removed + 1))
+      log "이미지 정리: $IMAGE_REPO:$tag 삭제"
+    else
+      log "이미지 정리: $IMAGE_REPO:$tag 삭제 실패(계속)"
+    fi
+  done
+  log "이미지 정리: ${removed}개 삭제, 빌드 캐시는 최근 $BUILD_CACHE_KEEP 만 남김"
+  docker builder prune -f --keep-storage "$BUILD_CACHE_KEEP" | tail -n 1 || return 1
+}
+
 # ── build ──────────────────────────────────────────────────────────────────────
 log "docker compose build api"
 compose build api
@@ -136,3 +192,7 @@ fi
 log "OK: $TARGET_SHA 배포 완료, /health 200, 컨테이너 ${#SERVICES[@]}개 새 이미지"
 docker ps --format '{{.Names}}\t{{.Status}}' | grep kasset-trader-core >/dev/null || true
 docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "kasset-trader-(api|worker|scheduler|mcp|ai-mcp|nh-stream)" | sed "s/kasset-trader-core://"
+
+if ! prune_old_images; then
+  log "경고: 옛 이미지·빌드 캐시 정리가 끝까지 되지 않았다(배포 결과에는 영향 없음)"
+fi
