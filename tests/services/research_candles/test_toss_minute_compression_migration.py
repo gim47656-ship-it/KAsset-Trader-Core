@@ -28,6 +28,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.core.config import settings
+from tests._run_owned_database import validate_run_owned_database_url
 
 pytestmark = pytest.mark.integration
 
@@ -85,6 +86,7 @@ async def hypertable_engine() -> AsyncIterator[AsyncEngine]:
     base = make_url(settings.DATABASE_URL)
     if base.get_backend_name() != "postgresql":
         pytest.skip("Toss compression migration needs PostgreSQL")
+    validate_run_owned_database_url(base)
     name = f"toss_compression_{uuid4().hex}"
     admin = await asyncpg.connect(
         user=base.username,
