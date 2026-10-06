@@ -1,0 +1,65 @@
+name: Toss Minute Gap Repair
+
+# docs/runbooks/toss-minute-gap-repair.md 3절의 일회성 복구 CLI(scripts/repair_toss_minute_gaps.py)를
+# 운영서버 self-hosted 러너(kasset-prod)에서 수동으로만 실행한다. 스케줄·자동 트리거는 두지 않는다.
+# 기본은 dry-run(운영 DB 읽기만, Toss 호출 없음). commit=true는 Toss를 부르고 그 세션 날짜의 봉을
+# upsert하므로 사용자 승인 뒤에만 실행한다(2026-10-06 워크플로 추가 승인).
+# commit=true는 1분 수집 작업(`* 8-19 * * 1-5`·`0 20 * * 1-5` KST)과 MARKET_DATA_CHART 예산이 겹치는
+# 평일 08:00~20:04 KST에는 거부한다. 배포와 겹치지 않도록 Deploy와 같은 concurrency 그룹을 쓴다.
+# 실행 이미지는 운영 .env.kasset의 CORE_IMAGE_TAG(현재 배포본)이며 코드를 checkout하지 않는다.
+on:
+  workflow_dispatch:
+    inputs:
+      session_date:
+        description: "복구할 KST 세션 날짜 (YYYY-MM-DD)"
+        required: true
+      commit:
+        description: "Toss 호출 + upsert 실행 (끄면 dry-run)"
+        type: boolean
+        required: false
+        default: false
+      max_calls:
+        description: "commit 실행의 Toss 호출 상한"
+        required: false
+        default: "5000"
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    name: repair toss minute gaps
+    runs-on: [self-hosted, kasset-prod]
+    timeout-minutes: 60
+    steps:
+      - name: Run repair CLI
+        shell: bash
+        env:
+          SESSION_DATE: ${{ inputs.session_date }}
+          COMMIT: ${{ inputs.commit == true && '1' || '0' }}
+          MAX_CALLS: ${{ inputs.max_calls }}
+          REPO_DIR: ${{ vars.KASSET_REPO_DIR || '/opt/kasset-trader-core' }}
+        run: |
+          set -euo pipefail
+          [[ "$SESSION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::session_date 형식 오류: YYYY-MM-DD"; exit 2; }
+          [[ "$MAX_CALLS" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "::error::max_calls는 1~999999 정수"; exit 2; }
+
+          args=(--session-date "$SESSION_DATE")
+          if [ "$COMMIT" = "1" ]; then
+            h=$(TZ=Asia/Seoul date +%H%M); dow=$(TZ=Asia/Seoul date +%u)
+            if [ "$dow" -le 5 ] && [ "$((10#$h))" -ge 800 ] && [ "$((10#$h))" -le 2004 ]; then
+              echo "::error::평일 08:00~20:04 KST(현재 $h)에는 commit을 거부한다. 20:05 이후나 장 시작 전에 다시 실행하라."
+              exit 2
+            fi
+            args+=(--commit --max-calls "$MAX_CALLS")
+          fi
+
+          cd "$REPO_DIR"
+          echo "mode=$([ "$COMMIT" = "1" ] && echo commit || echo dry-run) session_date=$SESSION_DATE"
+          docker compose --env-file .env.kasset -f docker-compose.kasset.yml \
+            run --rm --no-deps -T --entrypoint /app/.venv/bin/python worker \
+            -m scripts.repair_toss_minute_gaps "${args[@]}"
