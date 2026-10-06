@@ -1,0 +1,107 @@
+Timing is on.
+                                                                                                           QUERY PLAN                                                                                                           
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=6401.76..6401.81 rows=20 width=23) (actual time=5748.415..5748.421 rows=20 loops=1)
+   Buffers: shared hit=15419 read=544 dirtied=18
+   ->  Sort  (cost=6401.76..6411.59 rows=3934 width=23) (actual time=5748.414..5748.417 rows=20 loops=1)
+         Sort Key: t.retrieved_at NULLS FIRST, u.symbol
+         Sort Method: top-N heapsort  Memory: 27kB
+         Buffers: shared hit=15419 read=544 dirtied=18
+         ->  Nested Loop Left Join  (cost=0.43..6297.07 rows=3934 width=23) (actual time=0.111..5746.111 rows=3944 loops=1)
+               Buffers: shared hit=15413 read=544 dirtied=18
+               ->  Seq Scan on kr_symbol_universe u  (cost=0.00..154.34 rows=3934 width=7) (actual time=0.029..2.365 rows=3944 loops=1)
+                     Filter: (is_active IS TRUE)
+                     Rows Removed by Filter: 13
+                     Buffers: shared hit=115
+               ->  Limit  (cost=0.43..1.55 rows=1 width=16) (actual time=1.456..1.456 rows=1 loops=3944)
+                     Buffers: shared hit=15298 read=544 dirtied=18
+                     ->  Custom Scan (ChunkAppend) on kr_candles_1m_toss t  (cost=0.43..1584.86 rows=1416 width=16) (actual time=1.449..1.449 rows=1 loops=3944)
+                           Order: t.time_utc DESC
+                           Hypertables excluded during runtime: 0
+                           Buffers: shared hit=15280 read=544
+                           ->  Index Scan using _hyper_20_35_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_35_chunk t_1  (cost=0.43..1584.86 rows=1416 width=16) (actual time=1.263..1.263 rows=1 loops=3944)
+                                 Index Cond: (symbol = (u.symbol)::text)
+                                 Buffers: shared hit=15265 read=522
+                           ->  Index Scan using _hyper_20_34_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_34_chunk t_2  (cost=0.43..1757.75 rows=1576 width=16) (actual time=84.373..84.373 rows=1 loops=7)
+                                 Index Cond: (symbol = (u.symbol)::text)
+                                 Buffers: shared hit=11 read=14
+                           ->  Index Scan using _hyper_20_27_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_27_chunk t_3  (cost=0.56..776.56 rows=688 width=16) (actual time=44.539..44.539 rows=0 loops=3)
+                                 Index Cond: ((symbol = (u.symbol)::text) AND (time_utc >= '2026-09-22 07:00:00+00'::timestamp with time zone))
+                                 Buffers: shared hit=4 read=8
+ Planning:
+   Buffers: shared hit=1045
+ Planning Time: 3.752 ms
+ Execution Time: 5748.646 ms
+(31 rows)
+
+Time: 5799.346 ms (00:05.799)
+BEGIN
+Time: 0.101 ms
+SET
+Time: 0.122 ms
+PREPARE
+Time: 0.262 ms
+                                                                                                          QUERY PLAN                                                                                                          
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=6572.36..6573.34 rows=393 width=23) (actual time=97.126..97.133 rows=20 loops=1)
+   Buffers: shared hit=15921
+   ->  Sort  (cost=6572.36..6582.20 rows=3934 width=23) (actual time=97.125..97.129 rows=20 loops=1)
+         Sort Key: t.retrieved_at NULLS FIRST, u.symbol
+         Sort Method: top-N heapsort  Memory: 27kB
+         Buffers: shared hit=15921
+         ->  Nested Loop Left Join  (cost=0.43..6337.47 rows=3934 width=23) (actual time=0.091..95.995 rows=3944 loops=1)
+               Buffers: shared hit=15921
+               ->  Seq Scan on kr_symbol_universe u  (cost=0.00..154.34 rows=3934 width=7) (actual time=0.029..1.529 rows=3944 loops=1)
+                     Filter: (is_active IS TRUE)
+                     Rows Removed by Filter: 13
+                     Buffers: shared hit=115
+               ->  Limit  (cost=0.43..1.56 rows=1 width=16) (actual time=0.024..0.024 rows=1 loops=3944)
+                     Buffers: shared hit=15806
+                     ->  Custom Scan (ChunkAppend) on kr_candles_1m_toss t  (cost=0.43..533.42 rows=472 width=16) (actual time=0.023..0.023 rows=1 loops=3944)
+                           Order: t.time_utc DESC
+                           Chunks excluded during startup: 3
+                           Hypertables excluded during runtime: 0
+                           Buffers: shared hit=15806
+                           ->  Index Scan using _hyper_20_35_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_35_chunk t_1  (cost=0.43..533.42 rows=472 width=16) (actual time=0.022..0.022 rows=1 loops=3944)
+                                 Index Cond: ((symbol = (u.symbol)::text) AND (time_utc >= $1))
+                                 Buffers: shared hit=15769
+                           ->  Index Scan using _hyper_20_34_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_34_chunk t_2  (cost=0.43..590.07 rows=525 width=16) (actual time=0.021..0.021 rows=1 loops=7)
+                                 Index Cond: ((symbol = (u.symbol)::text) AND (time_utc >= $1))
+                                 Buffers: shared hit=25
+                           ->  Index Scan using _hyper_20_27_chunk_ix_research_kr_candles_1m_toss_symbol_time_d on _hyper_20_27_chunk t_3  (cost=0.56..1078.92 rows=957 width=16) (actual time=0.014..0.014 rows=0 loops=3)
+                                 Index Cond: ((symbol = (u.symbol)::text) AND (time_utc >= $1))
+                                 Buffers: shared hit=12
+ Planning:
+   Buffers: shared hit=375
+ Planning Time: 1.872 ms
+ Execution Time: 97.322 ms
+(32 rows)
+
+Time: 99.604 ms
+ symbol |        time_utc        |         retrieved_at          
+--------+------------------------+-------------------------------
+ 0106J0 |                        | 
+ 0120X0 |                        | 
+ 094800 |                        | 
+ 454180 | 2026-09-28 06:30:00+00 | 2026-09-28 08:03:25.004774+00
+ 464240 | 2026-09-28 06:30:00+00 | 2026-09-28 08:08:25.003895+00
+ 488200 | 2026-09-28 06:30:00+00 | 2026-09-28 08:19:25.003789+00
+ 488210 | 2026-09-28 06:30:00+00 | 2026-09-28 08:19:25.003789+00
+ 000660 | 2026-10-06 00:31:00+00 | 2026-10-06 00:30:00.098886+00
+ 000670 | 2026-10-06 00:31:00+00 | 2026-10-06 00:30:00.098886+00
+ 000680 | 2026-10-06 00:31:00+00 | 2026-10-06 00:30:00.098886+00
+ 000700 | 2026-10-06 00:31:00+00 | 2026-10-06 00:30:00.098886+00
+ 000720 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 000725 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 000760 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 0007C0 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 0007F0 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 0007G0 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 0007J0 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 0007N0 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+ 000810 | 2026-10-06 00:32:00+00 | 2026-10-06 00:31:00.006433+00
+(20 rows)
+
+Time: 90.482 ms
+ROLLBACK
+Time: 0.171 ms

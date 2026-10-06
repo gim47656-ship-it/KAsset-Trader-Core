@@ -1,0 +1,68 @@
+Timing is on.
+    q    | session_segment | minutes |      first_kst      |      last_kst       
+---------+-----------------+---------+---------------------+---------------------
+ Q1 grid | KRX_REGULAR     |     391 | 2026-09-30 09:00:00 | 2026-09-30 15:30:00
+ Q1 grid | NXT_POST        |     270 | 2026-09-30 15:31:00 | 2026-09-30 20:00:00
+ Q1 grid | NXT_PRE         |      59 | 2026-09-30 08:01:00 | 2026-09-30 08:59:00
+(3 rows)
+
+Time: 3847.942 ms (00:03.848)
+          q          |  n  | symbols 
+---------------------+-----+---------
+ Q2 per-symbol count | 466 |     392
+ Q2 per-symbol count | 390 |     330
+ Q2 per-symbol count | 402 |     325
+ Q2 per-symbol count | 465 |     314
+ Q2 per-symbol count | 660 |     280
+ Q2 per-symbol count | 597 |     207
+ Q2 per-symbol count | 403 |     155
+ Q2 per-symbol count | 526 |     140
+ Q2 per-symbol count | 525 |     120
+ Q2 per-symbol count | 268 |     119
+ Q2 per-symbol count | 200 |     106
+ Q2 per-symbol count | 720 |      96
+ Q2 per-symbol count | 328 |      82
+ Q2 per-symbol count | 269 |      42
+ Q2 per-symbol count | 329 |      36
+(15 rows)
+
+Time: 453.307 ms
+        q         | nxt_eligible |             segs             | symbols 
+------------------+--------------+------------------------------+---------
+ Q3 participation | f            | KRX_REGULAR,NXT_POST         |    1881
+ Q3 participation | f            | KRX_REGULAR                  |    1440
+ Q3 participation | t            | KRX_REGULAR,NXT_POST,NXT_PRE |     595
+ Q3 participation | f            | NXT_POST                     |      13
+ Q3 participation | t            | NXT_POST,NXT_PRE             |       5
+ Q3 participation | t            | KRX_REGULAR                  |       1
+ Q3 participation | t            | KRX_REGULAR,NXT_POST         |       1
+(7 rows)
+
+Time: 1339.277 ms (00:01.339)
+           q            | symbols 
+------------------------+---------
+ Q4 active without rows |       8
+(1 row)
+
+Time: 1413.940 ms (00:01.414)
+               q                | nxt_eligible | session_segment | min_n | max_n | earliest_first | latest_first | earliest_last | latest_last 
+--------------------------------+--------------+-----------------+-------+-------+----------------+--------------+---------------+-------------
+ Q5 per-segment bounds by class | f            | KRX_REGULAR     |     1 |   390 | 09:01:00       | 15:30:00     | 09:01:00      | 15:30:00
+ Q5 per-segment bounds by class | f            | NXT_POST        |   206 |   270 | 15:31:00       | 16:24:00     | 20:00:00      | 20:00:00
+ Q5 per-segment bounds by class | t            | KRX_REGULAR     |     1 |   391 | 09:00:00       | 15:30:00     | 09:00:00      | 15:30:00
+ Q5 per-segment bounds by class | t            | NXT_POST        |   146 |   270 | 15:31:00       | 16:23:00     | 20:00:00      | 20:00:00
+ Q5 per-segment bounds by class | t            | NXT_PRE         |    14 |    59 | 08:01:00       | 08:01:00     | 08:14:00      | 08:59:00
+(5 rows)
+
+Time: 1322.136 ms (00:01.322)
+    q    | session_date_kst |  rows   | symbols 
+---------+------------------+---------+---------
+ Q6 days | 2026-09-28       | 2193602 |    3940
+ Q6 days | 2026-09-29       | 2193590 |    3935
+ Q6 days | 2026-09-30       | 1636480 |    3936
+ Q6 days | 2026-10-01       | 2214456 |    3937
+ Q6 days | 2026-10-02       | 2180803 |    3937
+ Q6 days | 2026-10-06       | 1185477 |    3937
+(6 rows)
+
+Time: 9533.761 ms (00:09.534)
