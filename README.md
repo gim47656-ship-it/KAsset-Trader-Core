@@ -82,7 +82,7 @@ feature branch → PR → GitHub Actions Test 통과 → squash merge → Deploy
 
 같은 서버의 별도 스택(Compose project `cuelo-cloud`, 파일 `/opt/cuelo/compose.yaml`, 서비스 `cuelo`)인 CUELO를 교체하는 수동 workflow `CUELO Cloud`(`.github/workflows/cuelo-cloud.yml`, `deploy/cuelo/host.sh`)입니다. KAsset Deploy와 별개이며 KAsset app·DB·컨테이너·`deploy/kasset`을 건드리지 않습니다. `workflow_dispatch`만 있고 자동 트리거·스케줄은 없습니다.
 
-입력은 `mode`(`inspect` 기본 / `deploy`), 공개 CUELO(`gim47656-ship-it/CUELO`) commit의 40자 전체 `cuelo_sha`, `expected_version`, `expected_core`뿐입니다. 임의 경로·저장소·명령 입력은 없습니다.
+입력은 `mode`(`inspect` 기본 / `deploy`), 공개 CUELO commit의 40자 전체 `cuelo_sha`, `expected_version`, `expected_core`, 기본 꺼짐인 `grant_runner_access`입니다. 사용자 권한 승인 뒤 `inspect`에만 `grant_runner_access=true`를 주면 기존 이미지의 격리된 Linux helper로 runner의 이름 있는 ACL을 추가합니다: 운영 폴더는 읽기·탐색, `compose.yaml`·`.env`는 읽기만, `/opt/cuelo/deploy`는 runner 전용 쓰기입니다. 기존 ACL과 충돌하면 중단하며 인증·대화·작업 폴더 권한을 재귀 변경하지 않습니다. 임의 경로·저장소·명령 입력은 없습니다.
 
 1. **`inspect` 먼저.** ubuntu에서 그 commit이 공개 `main`의 조상이고 `package.json`이 기대 버전·core와 같은지 확인하고, 운영 서버(`self-hosted, kasset-prod`)에서 읽기 전용으로 Docker·`/opt/cuelo` 접근권한(내용은 읽지 않음), 현재 이미지·mount·사용자·health·버전, 프로필 존재와 `modelRoles` 해시를 출력합니다. 문제가 하나라도 있으면 실패하며, `deploy`도 같은 조건에서 교체 전에 멈춥니다. 권한은 자동으로 바꾸지 않습니다.
 2. **`deploy`.** ubuntu-latest에서 공개 commit을 기존 Dockerfile(UID/GID 1000)로 build하고 이미지 안에서 package·core 버전, `native-runtime-patch --check`, `prepare-runtime --check`를 검사한 뒤 Actions artifact(보존 1일)로 넘깁니다. 운영 서버는 build하지 않고 `docker load`만 합니다. 이미지가 준비될 때까지 기존 CUELO는 계속 돕니다.
@@ -91,9 +91,9 @@ feature branch → PR → GitHub Actions Test 통과 → squash merge → Deploy
 
 범위와 제한:
 
-- 쓰는 파일은 새 `/opt/cuelo/compose.image.yaml`(+ 재교체 때 `.prev-<run>` 복사본)뿐입니다. `compose.yaml`·`.env`·`config.yml`·인증 DB·`APPEND_SYSTEM.md`는 수정하지 않습니다. `/opt/cuelo`를 runner가 읽고 쓸 수 없으면 inspect가 근거를 보이고 deploy는 교체 전에 실패합니다.
+- 이미지 지정은 `/opt/cuelo/deploy/compose.image.yaml`(+ 재교체 때 `.prev-<run>` 복사본)에만 씁니다. `compose.yaml`·`.env`·`config.yml`·인증 DB·`APPEND_SYSTEM.md` 내용은 수정하지 않습니다. 권한 설정은 별도 명시 입력에서만 실행하며 일반 inspect/deploy는 권한을 바꾸지 않습니다.
 - `down`·`rm`·`prune`·볼륨 삭제와 자동 rollback은 없습니다. 실패하면 복구 근거(이전 이미지 태그·이전 override)와 수동 명령을 로그에 남기고 멈춥니다. 이전 이미지·artifact 정리는 별도 승인 후 수동으로 합니다.
-- 이후 수동 `docker compose`는 `-f /opt/cuelo/compose.yaml -f /opt/cuelo/compose.image.yaml`을 함께 써야 새 이미지가 유지됩니다(`compose.yaml`만 쓰면 이전 image로 되돌아갑니다).
+- 이후 수동 `docker compose`는 `-f /opt/cuelo/compose.yaml -f /opt/cuelo/deploy/compose.image.yaml`을 함께 써야 새 이미지가 유지됩니다(`compose.yaml`만 쓰면 이전 image로 되돌아갑니다).
 - 교체 중에는 CUELO가 재시작되어 진행 중이던 세션이 중단됩니다. 로그의 재개 대기열 `pending` 건수는 파일에서 읽은 관측값일 뿐입니다. 서버는 대기열을 쓴 프로세스의 PID가 새 프로세스와 같으면(컨테이너 PID 재사용) 그 대기열을 재개하지 않으므로 자동 재개를 보장하지 않습니다. 새 컨테이너에서 대화를 직접 이어 가며, 배포 결과는 이 Actions 실행의 요약·로그로 확인합니다.
 - `cancel-in-progress: false`인 전용 concurrency 그룹 `cuelo-cloud-deploy`로 host job끼리 직렬화합니다. KAsset의 `production-deploy` 그룹과 공유하지 않으며 같은 runner 슬롯에서는 KAsset 배포와 번갈아 실행됩니다.
 

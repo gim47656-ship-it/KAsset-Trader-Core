@@ -18,7 +18,7 @@ ROOT="${CUELO_ROOT:-/opt/cuelo}"
 PROJECT="cuelo-cloud"
 SERVICE="cuelo"
 BASE_FILE="$ROOT/compose.yaml"
-OVERRIDE_FILE="$ROOT/compose.image.yaml"
+OVERRIDE_FILE="$ROOT/deploy/compose.image.yaml"
 APP_UID="1000"
 APP_GID="1000"
 DRAIN_TIMEOUT_SEC="${DRAIN_TIMEOUT_SEC:-40}"
@@ -118,7 +118,7 @@ access_report() {
   [ -d "$ROOT" ] && [ -x "$ROOT" ] || problem "$ROOT 에 접근할 수 없다"
   [ -r "$BASE_FILE" ] || problem "runner가 $BASE_FILE 을 읽을 수 없다"
   if [ -e "$ROOT/.env" ] && [ ! -r "$ROOT/.env" ]; then problem "runner가 $ROOT/.env 를 읽을 수 없다(compose 보간 불가). 권한은 자동으로 바꾸지 않는다"; fi
-  [ -w "$ROOT" ] || problem "runner가 $ROOT 에 새 파일(compose.image.yaml)을 쓸 수 없다. 권한은 자동으로 바꾸지 않는다"
+  [ -w "$ROOT/deploy" ] || problem "runner가 $ROOT/deploy 에 이미지 지정 파일을 쓸 수 없다. 승인된 권한 설정이 필요하다"
   if [ -e "$OVERRIDE_FILE" ] && [ ! -w "$OVERRIDE_FILE" ]; then problem "기존 $OVERRIDE_FILE 을 쓸 수 없다"; fi
   local root_dir free
   root_dir="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
@@ -224,7 +224,7 @@ do_inspect() {
 # ── deploy ─────────────────────────────────────────────────────────────────────
 prepare_override() {
   WORK="$(mktemp -d)"
-  NEW_OVERRIDE="$ROOT/compose.image.yaml.new-$RUN_TAG"
+  NEW_OVERRIDE="$OVERRIDE_FILE.new-$RUN_TAG"
   printf 'services:\n  %s:\n    image: %s\n' "$SERVICE" "$IMAGE" > "$NEW_OVERRIDE" || { problem "override 임시 파일을 쓸 수 없다"; return; }
   local err
   if ! compose config > "$WORK/base.cfg" 2> "$WORK/err"; then
