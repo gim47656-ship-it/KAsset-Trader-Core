@@ -18,6 +18,11 @@ on:
         required: true
         default: inspect
         options: [inspect, deploy]
+      grant_runner_access:
+        description: "명시 승인 후 1회: runner에 설정 읽기와 전용 배포 폴더 쓰기 권한 부여"
+        type: boolean
+        required: false
+        default: false
       cuelo_sha:
         description: "공개 CUELO(gim47656-ship-it/CUELO) commit의 40자 전체 SHA"
         type: string
@@ -157,6 +162,19 @@ jobs:
         with:
           sparse-checkout: deploy/cuelo
           fetch-depth: 1
+
+      - name: Grant explicitly approved CUELO deployment access
+        if: ${{ inputs.grant_runner_access && inputs.mode == 'inspect' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t containers < <(docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo)
+          [ "${#containers[@]}" = 1 ] || exit 1
+          image="$(docker inspect -f '{{.Image}}' "${containers[0]}")"
+          # No Docker socket, host root, profile or other service mount.
+          docker run --rm -i --network none --user 0 --read-only \
+            --mount type=bind,src=/opt/cuelo,dst=/target \
+            --entrypoint python3 "$image" - "$(id -u)" < deploy/cuelo/grant-runner.py
 
       - name: Download image
         if: ${{ inputs.mode == 'deploy' }}
