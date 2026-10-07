@@ -1,0 +1,874 @@
+################ SCEN=ok MODE=inspect
+[cuelo-cloud 01:44:15] 점검 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444728KB
+[cuelo-cloud 01:44:15] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:15] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:15] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:15] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:15] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:15] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+[cuelo-cloud 01:44:15] 점검 통과: deploy 선행 조건을 모두 만족한다(교체는 하지 않았다).
+---- exit=0
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+---- summary: up=0 tag=0 drain=0 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=badbind MODE=inspect
+[cuelo-cloud 01:44:15] 점검 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444728KB
+[cuelo-cloud 01:44:15] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:15] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:15] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+  mount volume /var/lib/docker/volumes/anon /home/omp/.cache rw=true
+::error::bind가 아닌 마운트가 있다(volume → /home/omp/.cache). 익명 볼륨/볼륨은 허용하지 않는다
+::error::마운트 /home/omp/.cache 의 원본이 <tmp>/opt 하위가 아니다
+[cuelo-cloud 01:44:15] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:15] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:15] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+::error::점검에서 문제 2 건. deploy는 이 문제가 풀리기 전에는 교체하지 않는다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+---- summary: up=0 tag=0 drain=0 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=ok MODE=deploy
+[cuelo-cloud 01:44:15] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444724KB
+[cuelo-cloud 01:44:15] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:15] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:15] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:15] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:15] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:15] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:15] 이미지 검사 완료: cuelo-cloud:772554adc16e
+[cuelo-cloud 01:44:15] override 검증: compose config 차이는 image 줄뿐이다
+[cuelo-cloud 01:44:15] drain 요청 id=cuelo-cloud-123-1 (excludeSessionIds 없음: 현재 세션도 pending-resume에 기록된다)
+[cuelo-cloud 01:44:15] drain ack: aborted=1 failed=0 unsettled=0
+[cuelo-cloud 01:44:15] drain 후 재개 대기열: pending=1 failures=0
+[cuelo-cloud 01:44:15] 교체: cuelo 서비스만 --no-deps --no-build (이전 이미지 cuelo:local → 태그 cuelo-cloud-rollback:123-1 보존)
+up
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+[cuelo-cloud 01:44:15] Docker health=healthy
+[cuelo-cloud 01:44:15] 실행 버전: cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:15] 마운트 교체 전과 동일(bind 3개, 익명 볼륨 0)
+[cuelo-cloud 01:44:15] 프로필 보존 확인: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] 재개 대기열(관측값, 자동 재개는 보장하지 않는다): pending=1 failures=0
+[cuelo-cloud 01:44:15] 완료: cuelo-cloud:772554adc16e 로 교체·검증했다.
+---- exit=0
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+docker exec abc123 bun /app/install.mjs health
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 -e DRAIN_REASON=CUELO cloud image replacement (123-1) abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+fs.mkdirSync(root,{recursive:true});
+const f=path.join(root,"request.json"),t=f+"."+process.pid+".tmp";
+fs.writeFileSync(t,JSON.stringify({id:process.env.DRAIN_ID,reason:process.env.DRAIN_REASON,atUtc:new Date().toISOString()},null,2)+"\n");
+fs.renameSync(t,f);
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+docker exec abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let p={};try{p=JSON.parse(fs.readFileSync(path.join(root,"pending-resume.json"),"utf8"))}catch{}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("pending="+n(p.sessionIds)+" failures="+n(p.failures));
+docker tag sha256:old cuelo-cloud-rollback:123-1
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml up -d --no-deps --no-build --pull never cuelo
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} def456
+docker inspect -f {{.Config.Image}} def456
+docker exec def456 bun /app/install.mjs health
+docker inspect -f {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} def456
+docker exec -e EXPECTED_VERSION -e EXPECTED_CORE def456 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} def456
+docker exec def456 id -u
+docker exec def456 id -g
+docker exec -i def456 sh -s
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}} def456
+docker exec def456 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let p={};try{p=JSON.parse(fs.readFileSync(path.join(root,"pending-resume.json"),"utf8"))}catch{}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("pending="+n(p.sessionIds)+" failures="+n(p.failures));
+---- summary: up=1 tag=1 drain=1 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.image.yaml compose.yaml 
+################ SCEN=multi MODE=deploy
+[cuelo-cloud 01:44:15] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444712KB
+::error::project cuelo-cloud / service cuelo 실행 컨테이너가 정확히 1개가 아니다(2)
+::error::교체 전 점검 실패 1 건. 아무것도 바꾸지 않았다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+---- summary: up=0 tag=0 drain=0 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=badbind MODE=deploy
+[cuelo-cloud 01:44:15] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444712KB
+[cuelo-cloud 01:44:15] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:15] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:15] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+  mount volume /var/lib/docker/volumes/anon /home/omp/.cache rw=true
+::error::bind가 아닌 마운트가 있다(volume → /home/omp/.cache). 익명 볼륨/볼륨은 허용하지 않는다
+::error::마운트 /home/omp/.cache 의 원본이 <tmp>/opt 하위가 아니다
+[cuelo-cloud 01:44:15] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:15] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:15] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+::error::교체 전 점검 실패 2 건. 아무것도 바꾸지 않았다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+---- summary: up=0 tag=0 drain=0 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=noack MODE=deploy
+[cuelo-cloud 01:44:15] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:15] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:15] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:15] Docker 저장소 여유 47444708KB
+[cuelo-cloud 01:44:15] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:15] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:15] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:15] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:15] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:15] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:15] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:15] 이미지 검사 완료: cuelo-cloud:772554adc16e
+[cuelo-cloud 01:44:15] override 검증: compose config 차이는 image 줄뿐이다
+[cuelo-cloud 01:44:15] drain 요청 id=cuelo-cloud-123-1 (excludeSessionIds 없음: 현재 세션도 pending-resume에 기록된다)
+::error::drain ack가 4초 안에 없다. 세션은 중단됐을 수 있고 교체하지 않았다. 다시 실행하면 새 요청 id로 재시도한다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+docker exec abc123 bun /app/install.mjs health
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 -e DRAIN_REASON=CUELO cloud image replacement (123-1) abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+fs.mkdirSync(root,{recursive:true});
+const f=path.join(root,"request.json"),t=f+"."+process.pid+".tmp";
+fs.writeFileSync(t,JSON.stringify({id:process.env.DRAIN_ID,reason:process.env.DRAIN_REASON,atUtc:new Date().toISOString()},null,2)+"\n");
+fs.renameSync(t,f);
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+---- summary: up=0 tag=0 drain=1 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=unsettled MODE=deploy
+[cuelo-cloud 01:44:20] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:20] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:20] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] Docker 저장소 여유 47453572KB
+[cuelo-cloud 01:44:20] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:20] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:20] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:20] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:20] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:20] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:20] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:20] 이미지 검사 완료: cuelo-cloud:772554adc16e
+[cuelo-cloud 01:44:20] override 검증: compose config 차이는 image 줄뿐이다
+[cuelo-cloud 01:44:20] drain 요청 id=cuelo-cloud-123-1 (excludeSessionIds 없음: 현재 세션도 pending-resume에 기록된다)
+[cuelo-cloud 01:44:20] drain ack: aborted=1 failed=0 unsettled=1
+::error::drain에서 정리되지 않은 작업이 있다(aborted=1 failed=0 unsettled=1). 데이터 보존을 위해 교체하지 않았다. 해당 세션은 중단된 상태일 수 있다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+docker exec abc123 bun /app/install.mjs health
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 -e DRAIN_REASON=CUELO cloud image replacement (123-1) abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+fs.mkdirSync(root,{recursive:true});
+const f=path.join(root,"request.json"),t=f+"."+process.pid+".tmp";
+fs.writeFileSync(t,JSON.stringify({id:process.env.DRAIN_ID,reason:process.env.DRAIN_REASON,atUtc:new Date().toISOString()},null,2)+"\n");
+fs.renameSync(t,f);
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+---- summary: up=0 tag=0 drain=1 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=idmismatch MODE=deploy
+[cuelo-cloud 01:44:20] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:20] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:20] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] Docker 저장소 여유 47453224KB
+[cuelo-cloud 01:44:20] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:20] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:20] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:20] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:20] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:20] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:20] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+::error::이미지 ID 불일치(build job과 다르다)
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:20] override 검증: compose config 차이는 image 줄뿐이다
+::error::새 이미지·override 검증 실패 1 건. 실행 중 컨테이너는 그대로다.
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+---- summary: up=0 tag=0 drain=0 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.yaml 
+################ SCEN=healthfail MODE=deploy
+[cuelo-cloud 01:44:20] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:20] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:20] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:20] Docker 저장소 여유 47453252KB
+[cuelo-cloud 01:44:20] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:20] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:20] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:20] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:20] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:20] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:20] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:20] 이미지 검사 완료: cuelo-cloud:772554adc16e
+[cuelo-cloud 01:44:20] override 검증: compose config 차이는 image 줄뿐이다
+[cuelo-cloud 01:44:20] drain 요청 id=cuelo-cloud-123-1 (excludeSessionIds 없음: 현재 세션도 pending-resume에 기록된다)
+[cuelo-cloud 01:44:20] drain ack: aborted=1 failed=0 unsettled=0
+[cuelo-cloud 01:44:20] drain 후 재개 대기열: pending=1 failures=0
+[cuelo-cloud 01:44:20] 교체: cuelo 서비스만 --no-deps --no-build (이전 이미지 cuelo:local → 태그 cuelo-cloud-rollback:123-1 보존)
+up
+  health FAIL web
+::error::새 컨테이너 install.mjs health 4개가 6초 안에 OK가 되지 않았다
+[cuelo-cloud 01:44:30] 자동 rollback은 하지 않는다. 복구 근거: 이전 이미지 태그 cuelo-cloud-rollback:123-1, 이전 override <tmp>/opt/compose.image.yaml.prev-123-1(있을 때).
+[cuelo-cloud 01:44:30] 수동 복구: override의 image를 rollback 태그로 바꾼 뒤 docker compose -p cuelo-cloud -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml up -d --no-deps --no-build cuelo
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+docker exec abc123 bun /app/install.mjs health
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 -e DRAIN_REASON=CUELO cloud image replacement (123-1) abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+fs.mkdirSync(root,{recursive:true});
+const f=path.join(root,"request.json"),t=f+"."+process.pid+".tmp";
+fs.writeFileSync(t,JSON.stringify({id:process.env.DRAIN_ID,reason:process.env.DRAIN_REASON,atUtc:new Date().toISOString()},null,2)+"\n");
+fs.renameSync(t,f);
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+docker exec abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let p={};try{p=JSON.parse(fs.readFileSync(path.join(root,"pending-resume.json"),"utf8"))}catch{}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("pending="+n(p.sessionIds)+" failures="+n(p.failures));
+docker tag sha256:old cuelo-cloud-rollback:123-1
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml up -d --no-deps --no-build --pull never cuelo
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} def456
+docker inspect -f {{.Config.Image}} def456
+docker exec def456 bun /app/install.mjs health
+docker exec def456 bun /app/install.mjs health
+docker exec def456 bun /app/install.mjs health
+---- summary: up=1 tag=1 drain=1 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.image.yaml compose.yaml 
+################ SCEN=badversion MODE=deploy
+[cuelo-cloud 01:44:30] 교체 대상 공개 CUELO 772554adc16ea7993d94e13c44e43cfa45c028f6 → cuelo-cloud:772554adc16e (기대 0.9.9 / core 18.7.0)
+[cuelo-cloud 01:44:30] runner: omp uid=1000 groups=node
+[cuelo-cloud 01:44:30] docker server 26.1.0, compose 2.30.0
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt: owner=omp:node mode=755 runner=rwx
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt/compose.yaml: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt/.env: owner=omp:node mode=644 runner=rw-
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt/home: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt/workspace: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:30] 경로 <tmp>/opt/compose.image.yaml: stat 불가/없음 runner=---
+[cuelo-cloud 01:44:30] Docker 저장소 여유 47452852KB
+[cuelo-cloud 01:44:30] 컨테이너 /cuelo-cloud-cuelo-1 state=running health=healthy started=2026-10-07T00:00:00Z
+[cuelo-cloud 01:44:30] image ref=cuelo:local id=sha256:old
+[cuelo-cloud 01:44:30] compose config_files=<tmp>/opt/compose.yaml working_dir=<tmp>/opt
+  mount bind <tmp>/opt/home /home/omp rw=true
+  mount bind <tmp>/opt/home/.omp /home/omp/.omp rw=true
+  mount bind <tmp>/opt/workspace /workspace rw=true
+[cuelo-cloud 01:44:30] 컨테이너 사용자 1000:1000
+[cuelo-cloud 01:44:30] 현재 버전: cuelo 0.9.6 core 18.6.1
+[cuelo-cloud 01:44:30] 프로필: config.yml=ok agent.db=ok APPEND_SYSTEM.md=ok modelRoles=abc123 lines=7
+[cuelo-cloud 01:44:30] install.mjs health 4/4
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+cuelo 0.9.9 core 18.7.0
+CHECK OK
+cuelo 0.9.9 core 18.7.0
+[cuelo-cloud 01:44:30] 이미지 검사 완료: cuelo-cloud:772554adc16e
+[cuelo-cloud 01:44:30] override 검증: compose config 차이는 image 줄뿐이다
+[cuelo-cloud 01:44:30] drain 요청 id=cuelo-cloud-123-1 (excludeSessionIds 없음: 현재 세션도 pending-resume에 기록된다)
+[cuelo-cloud 01:44:30] drain ack: aborted=1 failed=0 unsettled=0
+[cuelo-cloud 01:44:30] drain 후 재개 대기열: pending=1 failures=0
+[cuelo-cloud 01:44:30] 교체: cuelo 서비스만 --no-deps --no-build (이전 이미지 cuelo:local → 태그 cuelo-cloud-rollback:123-1 보존)
+up
+  health OK   web
+  health OK   usage
+  health OK   btw
+  health OK   subagent
+[cuelo-cloud 01:44:30] Docker health=healthy
+::error::실행 중 컨테이너의 package/core 버전이 기대(0.9.9 / 18.7.0)와 다르다: cuelo 0.9.6 core 18.6.1 version 0.9.6; cueloBuild.coreVersion 18.6.1
+[cuelo-cloud 01:44:30] 자동 rollback은 하지 않는다. 복구 근거: 이전 이미지 태그 cuelo-cloud-rollback:123-1, 이전 override <tmp>/opt/compose.image.yaml.prev-123-1(있을 때).
+[cuelo-cloud 01:44:30] 수동 복구: override의 image를 rollback 태그로 바꾼 뒤 docker compose -p cuelo-cloud -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml up -d --no-deps --no-build cuelo
+---- exit=1
+---- docker calls (<tmp> 치환):
+docker version -f server={{.Server.Version}}
+docker compose version --short
+docker version -f {{.Server.Version}}
+docker compose version --short
+docker info -f {{.DockerRootDir}}
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} abc123
+docker inspect -f {{.Config.Image}} abc123
+docker inspect -f {{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}} abc123
+docker inspect -f {{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} started={{.State.StartedAt}} abc123
+docker inspect -f {{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} rw={{.RW}}{{"\n"}}{{end}} abc123
+docker exec abc123 id -u
+docker exec abc123 id -g
+docker exec abc123 sh -c test -w /home/omp/.omp/agent && test -w /workspace
+docker exec -e EXPECTED_VERSION=- -e EXPECTED_CORE=- abc123 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker exec -i abc123 sh -s
+docker exec abc123 bun /app/install.mjs health
+docker load -i <tmp>/img.tar.gz
+docker image inspect -f {{.Id}} cuelo-cloud:772554adc16e
+docker run --rm --network none -e EXPECTED_VERSION -e EXPECTED_CORE --entrypoint bun cuelo-cloud:772554adc16e -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+docker run --rm --network none --entrypoint node cuelo-cloud:772554adc16e /app/Tools/CUELO_Setup/files/native-runtime-patch.js --check --target /app
+docker run --rm --network none --entrypoint bun cuelo-cloud:772554adc16e /app/bin/prepare-runtime.js --check
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -u
+docker run --rm --network none --entrypoint id cuelo-cloud:772554adc16e -g
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml config
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml.new-123-1 config
+docker exec abc123 bun /app/install.mjs health
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 -e DRAIN_REASON=CUELO cloud image replacement (123-1) abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+fs.mkdirSync(root,{recursive:true});
+const f=path.join(root,"request.json"),t=f+"."+process.pid+".tmp";
+fs.writeFileSync(t,JSON.stringify({id:process.env.DRAIN_ID,reason:process.env.DRAIN_REASON,atUtc:new Date().toISOString()},null,2)+"\n");
+fs.renameSync(t,f);
+docker exec -e DRAIN_ID=cuelo-cloud-123-1 abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let a;try{a=JSON.parse(fs.readFileSync(path.join(root,process.env.DRAIN_ID+".ack.json"),"utf8"))}catch{process.exit(3)}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("aborted="+n(a.aborted)+" failed="+n(a.failed)+" unsettled="+n(a.unsettled));
+docker exec abc123 bun -e const fs=require("fs"),os=require("os"),path=require("path");
+const root=path.join(path.resolve((process.env.CUELO_EXTERNAL_UPDATE_ROOT||"").trim()||path.join(os.homedir(),".omp","external-update")),"interrupts");
+let p={};try{p=JSON.parse(fs.readFileSync(path.join(root,"pending-resume.json"),"utf8"))}catch{}
+const n=x=>Array.isArray(x)?x.length:0;
+console.log("pending="+n(p.sessionIds)+" failures="+n(p.failures));
+docker tag sha256:old cuelo-cloud-rollback:123-1
+docker compose -p cuelo-cloud --project-directory <tmp>/opt -f <tmp>/opt/compose.yaml -f <tmp>/opt/compose.image.yaml up -d --no-deps --no-build --pull never cuelo
+docker ps -q --filter label=com.docker.compose.project=cuelo-cloud --filter label=com.docker.compose.service=cuelo
+docker inspect -f {{.Image}} def456
+docker inspect -f {{.Config.Image}} def456
+docker exec def456 bun /app/install.mjs health
+docker inspect -f {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} def456
+docker exec -e EXPECTED_VERSION -e EXPECTED_CORE def456 bun -e const p=require("/app/package.json"),c=p.cueloBuild||{},d=p.dependencies||{};
+const core=process.env.EXPECTED_CORE,errs=[];
+if(p.name!=="cuelo")errs.push("name "+p.name);
+if(p.version!==process.env.EXPECTED_VERSION)errs.push("version "+p.version);
+if(c.coreVersion!==core)errs.push("cueloBuild.coreVersion "+c.coreVersion);
+for(const n of ["pi-agent-core","pi-ai","pi-coding-agent","pi-tui","pi-utils"]){
+  if(d["@oh-my-pi/"+n]!==core)errs.push("dependency "+n+" "+d["@oh-my-pi/"+n]);
+  let v="missing";try{v=require("/app/node_modules/@oh-my-pi/"+n+"/package.json").version}catch{}
+  if(v!==core)errs.push("installed "+n+" "+v);
+}
+console.log("cuelo "+p.version+" core "+c.coreVersion);
+if(errs.length){console.error(errs.join("; "));process.exit(1)}
+---- summary: up=1 tag=1 drain=1 forbidden_nonexec=0 secret_leaked=0
+---- files in opt: .env compose.image.yaml compose.yaml 

@@ -1,0 +1,197 @@
+diff --git a/.github/workflows/cuelo-cloud.yml b/.github/workflows/cuelo-cloud.yml
+new file mode 100644
+index 0000000..1c295f7
+--- /dev/null
++++ b/.github/workflows/cuelo-cloud.yml
+@@ -0,0 +1,191 @@
++name: CUELO Cloud
++
++# 순수 Linux Docker로 도는 CUELO 클라우드(project cuelo-cloud, service cuelo)의 수동 점검·교체다.
++# KAsset 배포(Deploy)와 별개이며 KAsset app/DB/컨테이너는 건드리지 않는다. 자동 트리거와 스케줄이 없다.
++#
++#   mode=inspect(기본): 공개 CUELO commit의 version/core를 확인하고, host에서 Docker·/opt/cuelo 접근권한과
++#                       현재 image/mount/사용자/health/버전/프로필 요약을 읽기 전용으로 출력한다.
++#   mode=deploy       : ubuntu-latest에서 공개 commit을 기존 Dockerfile로 build·검증해 artifact로 넘기고,
++#                       host는 그 이미지를 load한 뒤 cuelo 서비스 하나만 교체한다(compose.yaml·.env·프로필 불변).
++#
++# 입력은 정규식으로 검증하고 환경 변수로만 shell에 전달한다. 상세 계약·복구는 README의 "CUELO 클라우드 수동 교체".
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: "inspect=읽기 전용 점검, deploy=이미지 교체"
++        type: choice
++        required: true
++        default: inspect
++        options: [inspect, deploy]
++      cuelo_sha:
++        description: "공개 CUELO(gim47656-ship-it/CUELO) commit의 40자 전체 SHA"
++        type: string
++        required: true
++      expected_version:
++        description: "그 commit의 package.json 버전"
++        type: string
++        required: true
++        default: "0.9.9"
++      expected_core:
++        description: "그 commit이 내장하는 OMP core 버전"
++        type: string
++        required: true
++        default: "18.7.0"
++
++permissions:
++  contents: read
++
++jobs:
++  target:
++    name: verify public target
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    outputs:
++      image: ${{ steps.check.outputs.image }}
++    steps:
++      - name: Validate inputs
++        shell: bash
++        env:
++          SHA: ${{ inputs.cuelo_sha }}
++          VERSION: ${{ inputs.expected_version }}
++          CORE: ${{ inputs.expected_core }}
++        run: |
++          set -euo pipefail
++          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cuelo_sha는 소문자 40자 전체 SHA여야 한다"; exit 1; }
++          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::expected_version 형식 오류"; exit 1; }
++          [[ "$CORE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::expected_core 형식 오류"; exit 1; }
++
++      - name: Checkout public CUELO
++        uses: actions/checkout@v4
++        with:
++          repository: gim47656-ship-it/CUELO
++          ref: ${{ inputs.cuelo_sha }}
++          path: cuelo-src
++          fetch-depth: 1
++          persist-credentials: false
++
++      - name: Check version, core and ancestry
++        id: check
++        shell: bash
++        env:
++          GH_TOKEN: ${{ github.token }}
++          SHA: ${{ inputs.cuelo_sha }}
++          VERSION: ${{ inputs.expected_version }}
++          CORE: ${{ inputs.expected_core }}
++        run: |
++          set -euo pipefail
++          status="$(gh api "repos/gim47656-ship-it/CUELO/compare/${SHA}...main" --jq .status)"
++          case "$status" in
++            ahead|identical) ;;
++            *) echo "::error::$SHA 는 공개 CUELO main의 조상이 아니다(status=$status)"; exit 1 ;;
++          esac
++          [ -f cuelo-src/Dockerfile ] || { echo "::error::Dockerfile이 없다"; exit 1; }
++          jq -e --arg v "$VERSION" --arg c "$CORE" '
++            .name == "cuelo" and .version == $v and .cueloBuild.coreVersion == $c and
++            ([.dependencies["@oh-my-pi/pi-agent-core"], .dependencies["@oh-my-pi/pi-ai"], .dependencies["@oh-my-pi/pi-coding-agent"],
++              .dependencies["@oh-my-pi/pi-tui"], .dependencies["@oh-my-pi/pi-utils"]] | all(. == $c))
++          ' cuelo-src/package.json >/dev/null \
++            || { echo "::error::package.json이 cuelo $VERSION / core $CORE 와 다르다"; exit 1; }
++          echo "image=cuelo-cloud:${SHA:0:12}" >> "$GITHUB_OUTPUT"
++          echo "공개 CUELO $SHA = cuelo $VERSION / core $CORE (main $status)"
++
++  build:
++    name: build and verify image
++    needs: target
++    if: ${{ inputs.mode == 'deploy' }}
++    runs-on: ubuntu-latest
++    timeout-minutes: 60
++    outputs:
++      image_id: ${{ steps.build.outputs.image_id }}
++    steps:
++      - name: Checkout public CUELO
++        uses: actions/checkout@v4
++        with:
++          repository: gim47656-ship-it/CUELO
++          ref: ${{ inputs.cuelo_sha }}
++          path: cuelo-src
++          fetch-depth: 1
++          persist-credentials: false
++
++      - name: Checkout deploy script
++        uses: actions/checkout@v4
++        with:
++          path: ops
++          sparse-checkout: deploy/cuelo
++          fetch-depth: 1
++
++      - name: Build and verify
++        id: build
++        shell: bash
++        env:
++          IMAGE: ${{ needs.target.outputs.image }}
++          EXPECTED_VERSION: ${{ inputs.expected_version }}
++          EXPECTED_CORE: ${{ inputs.expected_core }}
++        run: |
++          set -euo pipefail
++          # 클라우드 컨테이너는 UID/GID 1000으로 실행하고 프로필·workspace bind도 같은 소유다.
++          docker build --build-arg UID=1000 --build-arg GID=1000 -t "$IMAGE" cuelo-src
++          bash ops/deploy/cuelo/host.sh verify-image
++          echo "image_id=$(docker image inspect -f '{{.Id}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
++          docker save "$IMAGE" | gzip -1 > cuelo-image.tar.gz
++          ls -l cuelo-image.tar.gz
++
++      - name: Upload image
++        uses: actions/upload-artifact@v4
++        with:
++          name: cuelo-image-${{ github.run_id }}-${{ github.run_attempt }}
++          path: cuelo-image.tar.gz
++          retention-days: 1
++          compression-level: 0
++          if-no-files-found: error
++
++  host:
++    name: ${{ inputs.mode }} on host
++    needs: [target, build]
++    if: ${{ !cancelled() && needs.target.result == 'success' && (inputs.mode == 'inspect' || needs.build.result == 'success') }}
++    runs-on: [self-hosted, kasset-prod]
++    # KAsset Deploy의 production-deploy 그룹과 공유하지 않는다(그 pending 실행을 대체·취소하지 않기 위해).
++    # host job끼리는 이 그룹과 runner 한 슬롯으로 직렬화된다.
++    concurrency:
++      group: cuelo-cloud-deploy
++      cancel-in-progress: false
++    timeout-minutes: 30
++    steps:
++      - name: Checkout deploy script
++        uses: actions/checkout@v4
++        with:
++          sparse-checkout: deploy/cuelo
++          fetch-depth: 1
++
++      - name: Download image
++        if: ${{ inputs.mode == 'deploy' }}
++        uses: actions/download-artifact@v4
++        with:
++          name: cuelo-image-${{ github.run_id }}-${{ github.run_attempt }}
++          path: ${{ runner.temp }}/cuelo-image
++
++      - name: Run host script
++        shell: bash
++        env:
++          MODE: ${{ inputs.mode }}
++          CUELO_SHA: ${{ inputs.cuelo_sha }}
++          EXPECTED_VERSION: ${{ inputs.expected_version }}
++          EXPECTED_CORE: ${{ inputs.expected_core }}
++          IMAGE: ${{ needs.target.outputs.image }}
++          IMAGE_ID: ${{ needs.build.outputs.image_id }}
++          IMAGE_TAR: ${{ runner.temp }}/cuelo-image/cuelo-image.tar.gz
++          RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
++        run: |
++          set -euo pipefail
++          bash deploy/cuelo/host.sh "$MODE" 2>&1 | tee "$RUNNER_TEMP/cuelo-host.log"
++
++      - name: Record result and remove image file
++        if: ${{ always() }}
++        shell: bash
++        run: |
++          # 결과는 컨테이너 종료와 무관하게 Actions 요약·로그에 남는다. 컨테이너·이미지는 지우지 않는다.
++          if [ -f "$RUNNER_TEMP/cuelo-host.log" ]; then
++            { echo '### CUELO Cloud host'; echo '```'; tail -n 200 "$RUNNER_TEMP/cuelo-host.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
++          fi
++          rm -rf "$RUNNER_TEMP/cuelo-image" "$RUNNER_TEMP/cuelo-host.log"
