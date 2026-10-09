@@ -20,8 +20,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOST_SH = REPO_ROOT / "deploy" / "cuelo" / "host.sh"
+FORBIDDEN_VERBS = "rm rmi stop kill restart run exec load tag".split()
+CURRENT_NAME = "/cuelo-cloud-cuelo-1"
+ROLLBACK_PREFIX = "cuelo-cloud-rollback:"
+DEFAULT_SIZE = 1_500_000_000
 
-FAKE_DOCKER = r'''import json, os, sys
+FAKE_DOCKER = r"""import json, os, sys
 
 STATE = os.environ["FAKE_DOCKER_STATE"]
 args = sys.argv[1:]
@@ -143,53 +147,100 @@ elif args[:1] == ["compose"] and args[-2:] == ["config", "--images"]:
         print(r)
 else:
     die("unhandled fake docker call: " + " ".join(args), 9)
-'''
+"""
 
 
 def sid(name: str) -> str:
     return "sha256:" + hashlib.sha256(name.encode()).hexdigest()
 
 
-def img(tags: list[str], created: str, size: int = 1_500_000_000) -> dict:
+def img(tags: list[str], created: str, size: int = DEFAULT_SIZE) -> dict:
     return {"tags": tags, "created": created, "size": size}
 
 
-IDS = {n: sid(n) for n in (
-    "current", "rollback", "old96", "old95", "held", "shared", "newer", "manual", "ovr", "redis", "dangling"
-)}
+def container(cid: str, image: str, name: str, state: str, labels=None) -> dict:
+    return {
+        "id": cid * 64,
+        "image": image,
+        "name": name,
+        "state": state,
+        "labels": labels or {},
+    }
+
+
+NAMES = (
+    "current",
+    "rollback",
+    "old96",
+    "old95",
+    "held",
+    "shared",
+    "newer",
+    "manual",
+    "ovr",
+    "redis",
+    "dangling",
+)
+IDS = {name: sid(name) for name in NAMES}
+SIZES = {"redis": 100_000_000, "dangling": 50_000_000}
+IMAGE_ROWS = (
+    ("current", ["cuelo-cloud:0d135bf4fd8b"], "2026-10-09T00:10:00.123456789Z"),
+    (
+        "rollback",
+        ["cuelo-cloud-rollback:37904014962-1", "cuelo-cloud:772554adc16e"],
+        "2026-10-07T01:00:00Z",
+    ),
+    (
+        "old96",
+        ["cuelo:cloud-20261006-sticker", "cuelo-cloud-rollback:37560801155-1"],
+        "2026-10-06T00:00:00Z",
+    ),
+    ("old95", ["cuelo:cloud-20261006-final"], "2026-10-05T00:00:00Z"),
+    ("held", ["cuelo:cloud-20261001-held"], "2026-10-01T00:00:00Z"),
+    (
+        "shared",
+        ["cuelo-cloud:aaaaaaaaaaaa", "kasset-trader-core:f1d8bf4b"],
+        "2026-10-02T00:00:00Z",
+    ),
+    ("newer", ["cuelo-cloud:bbbbbbbbbbbb"], "2026-10-08T00:00:00Z"),
+    ("manual", ["cuelo-cloud-rollback:manual-backup"], "2026-10-03T00:00:00Z"),
+    ("ovr", ["cuelo-cloud:cccccccccccc"], "2026-10-04T00:00:00Z"),
+    ("redis", ["redis:7-alpine"], "2026-09-01T00:00:00Z"),
+    ("dangling", [], "2026-09-02T00:00:00Z"),
+)
 
 
 def make_state(root_dir: str) -> dict:
-    cur_labels = {
+    labels = {
         "com.docker.compose.project": "cuelo-cloud",
         "com.docker.compose.service": "cuelo",
     }
+    images = {
+        IDS[name]: img(tags, created, SIZES.get(name, DEFAULT_SIZE))
+        for name, tags, created in IMAGE_ROWS
+    }
     return {
         "root_dir": root_dir,
-        "compose_images": {"1": ["cuelo:cloud-20261006-sticker"], "2": ["cuelo-cloud:0d135bf4fd8b"]},
-        "images": {
-            IDS["current"]: img(["cuelo-cloud:0d135bf4fd8b"], "2026-10-09T00:10:00.123456789Z"),
-            IDS["rollback"]: img(["cuelo-cloud-rollback:37904014962-1", "cuelo-cloud:772554adc16e"], "2026-10-07T01:00:00Z"),
-            IDS["old96"]: img(["cuelo:cloud-20261006-sticker", "cuelo-cloud-rollback:37560801155-1"], "2026-10-06T00:00:00Z"),
-            IDS["old95"]: img(["cuelo:cloud-20261006-final"], "2026-10-05T00:00:00Z"),
-            IDS["held"]: img(["cuelo:cloud-20261001-held"], "2026-10-01T00:00:00Z"),
-            IDS["shared"]: img(["cuelo-cloud:aaaaaaaaaaaa", "kasset-trader-core:f1d8bf4b"], "2026-10-02T00:00:00Z"),
-            IDS["newer"]: img(["cuelo-cloud:bbbbbbbbbbbb"], "2026-10-08T00:00:00Z"),
-            IDS["manual"]: img(["cuelo-cloud-rollback:manual-backup"], "2026-10-03T00:00:00Z"),
-            IDS["ovr"]: img(["cuelo-cloud:cccccccccccc"], "2026-10-04T00:00:00Z"),
-            IDS["redis"]: img(["redis:7-alpine"], "2026-09-01T00:00:00Z", 100_000_000),
-            IDS["dangling"]: img([], "2026-09-02T00:00:00Z", 50_000_000),
+        "compose_images": {
+            "1": ["cuelo:cloud-20261006-sticker"],
+            "2": ["cuelo-cloud:0d135bf4fd8b"],
         },
+        "images": images,
         "containers": [
-            {"id": "c" * 64, "image": IDS["current"], "name": "/cuelo-cloud-cuelo-1", "state": "running", "labels": cur_labels},
-            {"id": "d" * 64, "image": IDS["held"], "name": "/held-run", "state": "exited", "labels": {}},
-            {"id": "e" * 64, "image": IDS["redis"], "name": "/kasset-private-redis", "state": "running", "labels": {}},
+            container("c", IDS["current"], CURRENT_NAME, "running", labels),
+            container("d", IDS["held"], "/held-run", "exited"),
+            container("e", IDS["redis"], "/kasset-private-redis", "running"),
         ],
     }
 
 
 class Result:
-    def __init__(self, proc: subprocess.CompletedProcess, calls: list[list[str]], state: dict):
+    def __init__(
+        self,
+        proc: subprocess.CompletedProcess,
+        calls: list[list[str]],
+        state: dict,
+    ):
         self.rc = proc.returncode
         self.out = proc.stdout + proc.stderr
         self.calls = calls
@@ -199,8 +250,8 @@ class Result:
         return [c for c in self.calls if c[:2] == ["image", "rm"]]
 
     def verdicts(self) -> dict[str, tuple[str, str]]:
-        found = re.findall(r"IMAGE (sha256:[0-9a-f]{64}) (PROTECT|CANDIDATE) reasons=(\S+)", self.out)
-        return {i: (v, r) for i, v, r in found}
+        pattern = r"IMAGE (sha256:[0-9a-f]{64}) (PROTECT|CANDIDATE) reasons=(\S+)"
+        return {i: (v, r) for i, v, r in re.findall(pattern, self.out)}
 
 
 class CueloImageCleanupTest(unittest.TestCase):
@@ -208,10 +259,15 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="cuelo-cleanup-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         (self.tmp / "bin").mkdir()
-        # fake는 격리 모드(-I)의 Python으로 돌려 pytest의 자식 프로세스 가드(PYTHONPATH 시작 훅)를 타지 않게 한다.
-        (self.tmp / "fake_docker.py").write_text(FAKE_DOCKER)
+        # fake는 격리 모드(-I)의 Python으로 돌려 pytest의 자식 프로세스 가드를 타지 않게 한다.
+        script = self.tmp / "fake_docker.py"
+        script.write_text(FAKE_DOCKER)
+        wrapper = [
+            "#!/usr/bin/env bash",
+            f'exec "{sys.executable}" -I "{script}" "$@"',
+        ]
         fake = self.tmp / "bin" / "docker"
-        fake.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" -I "{self.tmp / "fake_docker.py"}" "$@"\n')
+        fake.write_text("\n".join(wrapper) + "\n")
         fake.chmod(0o755)
         self.root = self.tmp / "opt"
         (self.root / "deploy").mkdir(parents=True)
@@ -221,17 +277,18 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.state = make_state(str(self.tmp))
 
     def set_override(self, ref: str) -> None:
-        (self.root / "deploy" / "compose.image.yaml").write_text(
-            f"services:\n  cuelo:\n    image: {ref}\n"
-        )
+        path = self.root / "deploy" / "compose.image.yaml"
+        path.write_text(f"services:\n  cuelo:\n    image: {ref}\n")
 
     def run_host(self, mode: str, ids=(), apply: str | None = None) -> Result:
         state_file = self.tmp / "state.json"
         log_file = self.tmp / "calls.log"
         state_file.write_text(json.dumps(self.state))
         log_file.write_text("")
+        bin_dir = self.tmp / "bin"
+        base_path = os.environ["PATH"]
         env = {
-            "PATH": f"{self.tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{bin_dir}{os.pathsep}{base_path}",
             "HOME": str(self.tmp),
             "CUELO_ROOT": str(self.root),
             "FAKE_DOCKER_STATE": str(state_file),
@@ -243,9 +300,15 @@ class CueloImageCleanupTest(unittest.TestCase):
             env["APPLY_CLEANUP"] = apply
         proc = subprocess.run(
             ["bash", str(HOST_SH), mode],
-            capture_output=True, text=True, env=env, cwd=self.tmp, check=False, timeout=60,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=self.tmp,
+            check=False,
+            timeout=60,
         )
-        calls = [json.loads(line) for line in log_file.read_text().splitlines() if line]
+        lines = log_file.read_text().splitlines()
+        calls = [json.loads(line) for line in lines if line]
         return Result(proc, calls, json.loads(state_file.read_text()))
 
     def assert_unchanged(self, result: Result) -> None:
@@ -253,13 +316,13 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.assertEqual(result.state["containers"], self.state["containers"])
 
     def assert_no_unsafe_docker(self, result: Result, allow_rm: bool = False) -> None:
-        """어떤 시나리오에서도 -f/prune/컨테이너·볼륨 삭제/compose 변경 호출이 없어야 한다."""
+        # 어떤 시나리오에서도 -f/prune/컨테이너·볼륨 삭제/compose 변경 호출이 없어야 한다.
         for c in result.calls:
             joined = " ".join(c)
             self.assertNotIn("prune", joined)
             self.assertNotIn("volume", joined)
             self.assertNotIn("--force", joined)
-            self.assertFalse(c[:1] in (["rm"], ["rmi"], ["stop"], ["kill"], ["restart"], ["run"], ["exec"], ["load"], ["tag"]), joined)
+            self.assertNotIn(c[0], FORBIDDEN_VERBS, joined)
             if c[:1] == ["compose"]:
                 self.assertEqual(c[-2:], ["config", "--images"], joined)
             if c[:2] == ["image", "rm"]:
@@ -279,19 +342,37 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.assert_no_unsafe_docker(r)
         v = r.verdicts()
         # 비CUELO·dangling 이미지는 목록에 나오지 않는다.
-        self.assertEqual(set(v), {IDS[n] for n in ("current", "rollback", "old96", "old95", "held", "shared", "newer", "manual", "ovr")})
+        listed = set(NAMES) - {"redis", "dangling"}
+        self.assertEqual(set(v), {IDS[n] for n in listed})
+        why = {name: v[IDS[name]][1] for name in listed}
         self.assertEqual(v[IDS["current"]][0], "PROTECT")
-        self.assertIn("current", v[IDS["current"]][1])
-        self.assertIn("rollback-latest:cuelo-cloud-rollback:37904014962-1", v[IDS["rollback"]][1])
-        self.assertIn("container-ref:held-run(exited)", v[IDS["held"]][1])
-        self.assertIn("foreign-tag:kasset-trader-core:f1d8bf4b", v[IDS["shared"]][1])
-        self.assertIn("not-older-than-rollback", v[IDS["newer"]][1])
-        self.assertIn("rollback-unrecognized:cuelo-cloud-rollback:manual-backup", v[IDS["manual"]][1])
+        self.assertIn("current", why["current"])
+        self.assertIn(
+            "rollback-latest:cuelo-cloud-rollback:37904014962-1",
+            why["rollback"],
+        )
+        self.assertIn("container-ref:held-run(exited)", why["held"])
+        self.assertIn("foreign-tag:kasset-trader-core:f1d8bf4b", why["shared"])
+        self.assertIn("not-older-than-rollback", why["newer"])
+        self.assertIn(
+            "rollback-unrecognized:cuelo-cloud-rollback:manual-backup",
+            why["manual"],
+        )
         for name in ("old96", "old95", "ovr"):
-            self.assertEqual(v[IDS[name]], ("CANDIDATE", "unreferenced,older-than-rollback"), name)
+            self.assertEqual(
+                v[IDS[name]],
+                ("CANDIDATE", "unreferenced,older-than-rollback"),
+                name,
+            )
         # 다중 태그, 컨테이너 참조, 용량 합산 금지 안내, compose 기본 image 참조 안내가 출력에 있다.
-        self.assertIn("cuelo-cloud-rollback:37560801155-1 cuelo:cloud-20261006-sticker", r.out)
-        self.assertIn("compose.yaml 기본 image가 cuelo:cloud-20261006-sticker", r.out)
+        self.assertIn(
+            "cuelo-cloud-rollback:37560801155-1 cuelo:cloud-20261006-sticker",
+            r.out,
+        )
+        self.assertIn(
+            "compose.yaml 기본 image가 cuelo:cloud-20261006-sticker",
+            r.out,
+        )
         self.assertIn("합산해도 회수량이 아니다", r.out)
         self.assertRegex(r.out, r"docker system df Images.*Images\|11\|")
 
@@ -299,43 +380,57 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.set_override("cuelo-cloud:cccccccccccc")
         r = self.run_host("images")
         self.assertEqual(r.rc, 0, r.out)
-        self.assertEqual(r.verdicts()[IDS["ovr"]][0], "PROTECT")
-        self.assertIn("override-ref:cuelo-cloud:cccccccccccc", r.verdicts()[IDS["ovr"]][1])
+        verdict, why = r.verdicts()[IDS["ovr"]]
+        self.assertEqual(verdict, "PROTECT")
+        self.assertIn("override-ref:cuelo-cloud:cccccccccccc", why)
 
     def test_cleanup_defaults_to_dry_run(self) -> None:
+        old96, old95 = IDS["old96"], IDS["old95"]
+        tags = "cuelo-cloud-rollback:37560801155-1 cuelo:cloud-20261006-sticker"
+        plan = f"PLAN {old96}: 태그 전체 {tags}"
         for apply in (None, "false"):
-            r = self.run_host("cleanup-images", ids=[IDS["old96"], IDS["old95"]], apply=apply)
+            r = self.run_host("cleanup-images", ids=[old96, old95], apply=apply)
             self.assertEqual(r.rc, 0, r.out)
             self.assertEqual(r.rm_calls(), [])
             self.assert_unchanged(r)
             self.assertIn("DRY-RUN 완료", r.out)
             # 다중 태그 전체가 계획에 보인다.
-            self.assertIn(f"PLAN {IDS['old96']}: 태그 전체 cuelo-cloud-rollback:37560801155-1 cuelo:cloud-20261006-sticker", r.out)
+            self.assertIn(plan, r.out)
             self.assert_no_unsafe_docker(r)
 
     def test_apply_removes_only_explicit_candidates_tag_by_tag(self) -> None:
-        r = self.run_host("cleanup-images", ids=[IDS["old96"], IDS["old95"]], apply="true")
+        old96, old95 = IDS["old96"], IDS["old95"]
+        r = self.run_host("cleanup-images", ids=[old96, old95], apply="true")
         self.assertEqual(r.rc, 0, r.out)
         self.assert_no_unsafe_docker(r, allow_rm=True)
-        self.assertEqual(
-            [c[2] for c in r.rm_calls()],
-            ["cuelo-cloud-rollback:37560801155-1", "cuelo:cloud-20261006-sticker", "cuelo:cloud-20261006-final"],
-        )
-        self.assertEqual(set(self.state["images"]) - set(r.state["images"]), {IDS["old96"], IDS["old95"]})
+        removed_tags = [c[2] for c in r.rm_calls()]
+        expected = [
+            "cuelo-cloud-rollback:37560801155-1",
+            "cuelo:cloud-20261006-sticker",
+            "cuelo:cloud-20261006-final",
+        ]
+        self.assertEqual(removed_tags, expected)
+        gone = set(self.state["images"]) - set(r.state["images"])
+        self.assertEqual(gone, {old96, old95})
         # 보호 대상·후보가 아닌 것은 그대로다.
         self.assertEqual(r.state["containers"], self.state["containers"])
         self.assertIn(IDS["ovr"], r.state["images"])
-        self.assertEqual(r.state["images"][IDS["rollback"]], self.state["images"][IDS["rollback"]])
+        rollback_before = self.state["images"][IDS["rollback"]]
+        self.assertEqual(r.state["images"][IDS["rollback"]], rollback_before)
         # receipt와 전후 저장소 값.
-        self.assertIn("삭제 receipt: 삭제 완료 2개, 실패·중단 0개, 미시도 0개", r.out)
-        self.assertIn(f"RECEIPT removed {IDS['old95']}", r.out)
+        self.assertIn(
+            "삭제 receipt: 삭제 완료 2개, 실패·중단 0개, 미시도 0개",
+            r.out,
+        )
+        self.assertIn(f"RECEIPT removed {old95}", r.out)
         self.assertIn("Untagged: cuelo:cloud-20261006-final", r.out)
-        self.assertIn("Deleted: " + IDS["old95"], r.out)
+        self.assertIn("Deleted: " + old95, r.out)
         self.assertIn("[삭제 전] docker system df Images", r.out)
         self.assertIn("[삭제 후] docker system df Images", r.out)
         self.assertRegex(r.out, r"Docker 저장소 여유 변화: -?\d+KB")
 
     def test_protected_or_out_of_scope_ids_are_refused_all_or_nothing(self) -> None:
+        old95 = IDS["old95"]
         refused = {
             "current": IDS["current"],
             "rollback": IDS["rollback"],
@@ -350,7 +445,7 @@ class CueloImageCleanupTest(unittest.TestCase):
         for label, bad in refused.items():
             with self.subTest(label):
                 # 정상 후보와 같이 요청해도 하나라도 거부되면 아무것도 지우지 않는다.
-                r = self.run_host("cleanup-images", ids=[IDS["old95"], bad], apply="true")
+                r = self.run_host("cleanup-images", ids=[old95, bad], apply="true")
                 self.assertNotEqual(r.rc, 0, r.out)
                 self.assertEqual(r.rm_calls(), [])
                 self.assert_unchanged(r)
@@ -365,27 +460,31 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.assertIn("override-ref", r.out)
 
     def test_override_location_that_cannot_be_read_refuses_everything(self) -> None:
+        old95 = IDS["old95"]
+        msg = "override 이미지 보호 기준을 세울 수 없다"
         (self.root / "deploy" / "compose.image.yaml").write_text("services: {}\n")
-        r = self.run_host("cleanup-images", ids=[IDS["old95"]], apply="true")
+        r = self.run_host("cleanup-images", ids=[old95], apply="true")
         self.assertNotEqual(r.rc, 0, r.out)
         self.assertEqual(r.rm_calls(), [])
-        self.assertIn("override 이미지 보호 기준을 세울 수 없다", r.out)
+        self.assertIn(msg, r.out)
         shutil.rmtree(self.root / "deploy")
-        r = self.run_host("cleanup-images", ids=[IDS["old95"]], apply="true")
+        r = self.run_host("cleanup-images", ids=[old95], apply="true")
         self.assertNotEqual(r.rc, 0, r.out)
         self.assertEqual(r.rm_calls(), [])
-        self.assertIn("override 이미지 보호 기준을 세울 수 없다", r.out)
+        self.assertIn(msg, r.out)
 
     def test_invalid_input_stops_before_any_docker_call(self) -> None:
-        short = IDS["old95"][: len("sha256:") + 12]
+        old95 = IDS["old95"]
+        short = old95[:19]
+        upper = old95.upper().replace("SHA256", "sha256")
         cases = {
             "empty": ([], "true"),
             "short id": ([short], "true"),
             "tag": (["cuelo:cloud-20261006-final"], "true"),
             "glob": (["sha256:*"], "true"),
-            "uppercase": ([IDS["old95"].upper().replace("SHA256", "sha256")], "true"),
+            "uppercase": ([upper], "true"),
             "too many": ([sid(f"x{i}") for i in range(21)], "true"),
-            "bad apply": ([IDS["old95"]], "yes"),
+            "bad apply": ([old95], "yes"),
         }
         for label, (ids, apply) in cases.items():
             with self.subTest(label):
@@ -394,18 +493,21 @@ class CueloImageCleanupTest(unittest.TestCase):
                 self.assertEqual(r.calls, [], r.out)
 
     def test_missing_baselines_refuse_everything(self) -> None:
+        old95 = IDS["old95"]
         # 현재 cuelo 컨테이너가 없으면 현재 이미지 보호 기준이 없다.
-        self.state["containers"] = [c for c in self.state["containers"] if c["name"] != "/cuelo-cloud-cuelo-1"]
-        r = self.run_host("cleanup-images", ids=[IDS["old95"]], apply="true")
+        keep = [c for c in self.state["containers"] if c["name"] != CURRENT_NAME]
+        self.state["containers"] = keep
+        r = self.run_host("cleanup-images", ids=[old95], apply="true")
         self.assertNotEqual(r.rc, 0, r.out)
         self.assertEqual(r.rm_calls(), [])
         self.assertIn("현재 이미지 보호 기준을 세울 수 없다", r.out)
         self.assertEqual({v for v, _ in r.verdicts().values()}, {"PROTECT"})
         # 직전 복구 태그가 없으면 같은 결과다.
         self.setUp()
-        for iid, image in self.state["images"].items():
-            image["tags"] = [t for t in image["tags"] if not t.startswith("cuelo-cloud-rollback:")]
-        r = self.run_host("cleanup-images", ids=[IDS["old95"]], apply="true")
+        for image in self.state["images"].values():
+            tags = image["tags"]
+            image["tags"] = [t for t in tags if not t.startswith(ROLLBACK_PREFIX)]
+        r = self.run_host("cleanup-images", ids=[old95], apply="true")
         self.assertNotEqual(r.rc, 0, r.out)
         self.assertEqual(r.rm_calls(), [])
         self.assertIn("직전 복구본 보호 기준을 세울 수 없다", r.out)
@@ -414,37 +516,47 @@ class CueloImageCleanupTest(unittest.TestCase):
         self.assertEqual({v for v, _ in r.verdicts().values()}, {"PROTECT"})
 
     def test_change_between_preflight_and_removal_stops_without_deleting(self) -> None:
+        old95, old96 = IDS["old95"], IDS["old96"]
+        late_container = container("f", old95, "/late-run", "created")
+        late_tag = {"id": old95, "tag": "cuelo-cloud:late"}
         # preflight는 image ls 1번째 호출이고, 삭제 직전 재조회는 2번째 호출이다.
         scenarios = {
-            "container appears": {"call": 2, "container": {"id": "f" * 64, "image": IDS["old95"], "name": "/late-run", "state": "created", "labels": {}}},
-            "tag appears": {"call": 2, "add_tag": {"id": IDS["old95"], "tag": "cuelo-cloud:late"}},
+            "container appears": {"call": 2, "container": late_container},
+            "tag appears": {"call": 2, "add_tag": late_tag},
         }
         for label, inject in scenarios.items():
             with self.subTest(label):
                 self.setUp()
                 self.state["inject_on_ls"] = inject
-                r = self.run_host("cleanup-images", ids=[IDS["old95"], IDS["old96"]], apply="true")
+                r = self.run_host("cleanup-images", ids=[old95, old96], apply="true")
                 self.assertNotEqual(r.rc, 0, r.out)
                 self.assertEqual(r.rm_calls(), [])
-                self.assertIn(IDS["old95"], r.state["images"])
-                self.assertIn(IDS["old96"], r.state["images"])
+                self.assertIn(old95, r.state["images"])
+                self.assertIn(old96, r.state["images"])
                 self.assertIn("RM-STOP", r.out)
-                self.assertIn(f"RECEIPT failed {IDS['old95']}", r.out)
-                self.assertIn(f"RECEIPT not-attempted {IDS['old96']}", r.out)
+                self.assertIn(f"RECEIPT failed {old95}", r.out)
+                self.assertIn(f"RECEIPT not-attempted {old96}", r.out)
 
     def test_rm_failure_stops_and_reports_partial_receipt(self) -> None:
-        self.state["rm_fail"] = ["cuelo:cloud-20261006-sticker"]
-        r = self.run_host("cleanup-images", ids=[IDS["old96"], IDS["old95"]], apply="true")
+        old96, old95 = IDS["old96"], IDS["old95"]
+        first = "cuelo-cloud-rollback:37560801155-1"
+        second = "cuelo:cloud-20261006-sticker"
+        self.state["rm_fail"] = [second]
+        r = self.run_host("cleanup-images", ids=[old96, old95], apply="true")
         self.assertNotEqual(r.rc, 0, r.out)
         self.assert_no_unsafe_docker(r, allow_rm=True)
         # old96의 첫 태그는 지워졌지만 둘째 태그 삭제가 실패해 old95는 시도하지 않는다.
-        self.assertEqual([c[2] for c in r.rm_calls()], ["cuelo-cloud-rollback:37560801155-1", "cuelo:cloud-20261006-sticker"])
-        self.assertIn(IDS["old96"], r.state["images"])
-        self.assertEqual(r.state["images"][IDS["old96"]]["tags"], ["cuelo:cloud-20261006-sticker"])
-        self.assertIn(IDS["old95"], r.state["images"])
+        tried = [c[2] for c in r.rm_calls()]
+        self.assertEqual(tried, [first, second])
+        self.assertIn(old96, r.state["images"])
+        self.assertEqual(r.state["images"][old96]["tags"], [second])
+        self.assertIn(old95, r.state["images"])
         self.assertIn("RM-FAIL", r.out)
-        self.assertIn("삭제 receipt: 삭제 완료 0개, 실패·중단 1개, 미시도 1개", r.out)
-        self.assertIn(f"RECEIPT not-attempted {IDS['old95']}", r.out)
+        self.assertIn(
+            "삭제 receipt: 삭제 완료 0개, 실패·중단 1개, 미시도 1개",
+            r.out,
+        )
+        self.assertIn(f"RECEIPT not-attempted {old95}", r.out)
 
 
 if __name__ == "__main__":

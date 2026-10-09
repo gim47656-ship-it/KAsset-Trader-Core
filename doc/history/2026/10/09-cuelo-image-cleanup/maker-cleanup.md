@@ -92,6 +92,14 @@ KAsset-Trader-Core의 workflow `CUELO Cloud`(`cuelo-cloud.yml`)를, host.sh와 w
 
 각 실행은 같은 concurrency 그룹이라 deploy와 겹치지 않는다. 컨테이너는 재시작하지 않는다. 어느 단계든 `::error::`나 `RM-STOP`·`RM-FAIL`이 나오면 중단하고 로그를 보고한다(자동 재시도·강제 삭제 없음).
 
+## 재작업 r2: CI lint B007 (CLEANUP-CI-01)
+
+- 원인(제품 결함 아님, 내 테스트 파일의 lint 위반): PR128 lint job이 `uv run ruff check app/ tests/ research/ scripts/`에서 `B007 Loop control variable 'iid' not used`(`tests/test_cuelo_cloud_cleanup.py:406`)로 실패했다(원문 로그 `local://cleanup-ci-lint.log` 418~432행). 같은 job의 다음 단계는 `uv run ruff format --check app/ tests/ research/ scripts/`(`.github/workflows/test.yml:48,51`)라서 B007만 고치면 format 단계가 다음 실패 지점일 수 있었다. 내 파일에는 88자 초과 코드 줄이 많았다.
+- 변경: `tests/test_cuelo_cloud_cleanup.py`만 수정했다. `for iid, image in ...items()`를 `for image in ....values()`로 바꿔 B007을 없앴고, 같은 파일을 기존 `pyproject.toml`의 ruff 설정(line-length 88, 규칙 E·W·F·I·B·C4·UP, py313)에 맞게 직접 정리했다: 긴 호출은 한 줄에 하나씩 넣고 trailing comma를 달아 펼침(magic trailing comma로 포매터가 다시 접지 않음), f-string 안의 중첩 따옴표 제거, `IDS`·이미지 행·컨테이너를 표·헬퍼(`IMAGE_ROWS`, `container()`)로 분리, `'''`를 `"""`로(FAKE_DOCKER 본문은 바이트 동일). 검증 의미(시나리오·단언)는 그대로다. `host.sh`·workflow·README는 바꾸지 않았다.
+- ruff 검증: 처음에는 환경에 `ruff`가 없어 수동 점검만 했으나, Main이 lockfile의 Ruff 0.15.9 공식 wheel 실행파일을 `.omp/ruff-check/ruff`에 준비해 줘서 실제로 돌렸다(cwd `.omp/cloud-cleanup`, `--no-cache`, 원문 `local://cleanup-ci-r3-ruff.log`). `ruff check` 통과, `ruff format --check` 통과(`1 file already formatted`), `ruff format`은 `1 file left unchanged`(전후 diff 0줄, sha256 `0276a732f0a22c48…` 그대로), 적용 후 `ruff check`·`ruff format --check` 재통과. 수동 정리가 포매터 출력과 같았다.
+- 재검증(cwd `.omp/cloud-cleanup`, 리비전 test sha256 `0276a732f0a22c48…`, host.sh·workflow·README 불변): `python3 -m unittest tests.test_cuelo_cloud_cleanup -v` exit 0, 11개 통과(약 21초, 원문 `local://cleanup-ci-r2-unittest.log`). 정리한 파일이 여전히 안전 회귀를 잡는지 규칙 변이 5개로 다시 확인했다(원문 `local://cleanup-ci-r2-mutation.log`). 테스트 diff는 `local://cleanup-ci-r2-test.diff`.
+- 교훈 후보: 조건: CI가 `ruff check`와 `ruff format --check`를 순서대로 돌리는 저장소에 새 `.py`를 넣을 때. 원인: 첫 lint가 한 단계에서 끝나 다음 단계(format)가 가려진다. 바꾼 행동: ruff가 없으면 88칸(전각 2칸) 초과 줄과 AST 근사 점검으로 사전 확인하고 magic trailing comma 형태로 펼쳐 쓴다.
+
 ## 교훈 후보(Main이 learn 여부 결정)
 
 - 조건: pytest 아래에서 bash 스크립트를 fake 바이너리(Python)로 검증할 때. 원인: socket guard가 자식 Python 시작 훅을 주입한다. 바꾼 행동: fake를 `python -I`로 실행하는 bash 래퍼로 둔다. 근거: 이 문서 「실행 환경 주의」의 두 실측.
