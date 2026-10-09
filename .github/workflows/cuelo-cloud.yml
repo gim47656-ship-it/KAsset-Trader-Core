@@ -1,32 +1,37 @@
 name: CUELO Cloud
 
-# 순수 Linux Docker로 도는 CUELO 클라우드(project cuelo-cloud, service cuelo)의 수동 점검·교체다.
+# 순수 Linux Docker로 도는 CUELO 클라우드(project cuelo-cloud, service cuelo)의 수동 점검·교체·이미지 정리다.
 # KAsset 배포(Deploy)와 별개이며 KAsset app/DB/컨테이너는 건드리지 않는다. 자동 트리거와 스케줄이 없다.
 #
 #   mode=inspect(기본): 공개 CUELO commit의 version/core를 확인하고, host에서 Docker·/opt/cuelo 접근권한과
 #                       현재 image/mount/사용자/health/버전/프로필 요약을 읽기 전용으로 출력한다.
 #   mode=deploy       : ubuntu-latest에서 공개 commit을 기존 Dockerfile로 build·검증해 artifact로 넘기고,
 #                       host는 그 이미지를 load한 뒤 cuelo 서비스 하나만 교체한다(compose.yaml·.env·프로필 불변).
+#   mode=images       : host에서 CUELO 이미지 inventory(ID·태그·컨테이너 참조·size, 보호/후보 이유)만 읽기 전용으로 출력한다.
+#                       공개 commit 확인(target)과 build는 건너뛴다.
+#   mode=cleanup-images: cleanup_image_ids에 명시한 전체 image ID만 지운다. apply_cleanup=false(기본)는 dry-run이다.
+#                       현재·직전 복구·컨테이너 참조·다른 repo 태그·새 이미지는 host.sh가 거부한다. 자동 deploy 뒤에 실행되지 않는다.
 #
 # 입력은 정규식으로 검증하고 환경 변수로만 shell에 전달한다. 상세 계약·복구는 README의 "CUELO 클라우드 수동 교체".
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "inspect=읽기 전용 점검, deploy=이미지 교체"
+        description: "inspect=읽기 전용 점검, deploy=이미지 교체, images=이미지 inventory(읽기 전용), cleanup-images=명시한 오래된 CUELO 이미지 삭제"
         type: choice
         required: true
         default: inspect
-        options: [inspect, deploy]
+        options: [inspect, deploy, images, cleanup-images]
       grant_runner_access:
         description: "명시 승인 후 1회: runner에 설정 읽기와 전용 배포 폴더 쓰기 권한 부여"
         type: boolean
         required: false
         default: false
       cuelo_sha:
-        description: "공개 CUELO(gim47656-ship-it/CUELO) commit의 40자 전체 SHA"
+        description: "공개 CUELO(gim47656-ship-it/CUELO) commit의 40자 전체 SHA (inspect·deploy 필수, images·cleanup-images는 쓰지 않음)"
         type: string
-        required: true
+        required: false
+        default: ""
       expected_version:
         description: "그 commit의 package.json 버전"
         type: string
@@ -37,6 +42,16 @@ on:
         type: string
         required: true
         default: "18.7.0"
+      cleanup_image_ids:
+        description: "cleanup-images 전용: 삭제할 CUELO 이미지의 전체 ID(sha256:64hex), 공백·쉼표로 구분, 최대 20개. images 결과의 CANDIDATE만 가능"
+        type: string
+        required: false
+        default: ""
+      apply_cleanup:
+        description: "cleanup-images 전용: false(기본)=dry-run으로 판정·계획만 출력, true=삭제 직전 재판정 뒤 실제 삭제"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -45,6 +60,7 @@ jobs:
   target:
     name: verify public target
     runs-on: ubuntu-latest
+    if: ${{ inputs.mode == 'inspect' || inputs.mode == 'deploy' }}
     timeout-minutes: 10
     outputs:
       image: ${{ steps.check.outputs.image }}
@@ -148,7 +164,7 @@ jobs:
   host:
     name: ${{ inputs.mode }} on host
     needs: [target, build]
-    if: ${{ !cancelled() && needs.target.result == 'success' && (inputs.mode == 'inspect' || needs.build.result == 'success') }}
+    if: ${{ !cancelled() && (inputs.mode == 'images' || inputs.mode == 'cleanup-images' || (needs.target.result == 'success' && (inputs.mode == 'inspect' || needs.build.result == 'success'))) }}
     runs-on: [self-hosted, kasset-prod]
     # KAsset Deploy의 production-deploy 그룹과 공유하지 않는다(그 pending 실행을 대체·취소하지 않기 위해).
     # host job끼리는 이 그룹과 runner 한 슬롯으로 직렬화된다.
@@ -194,6 +210,8 @@ jobs:
           IMAGE_ID: ${{ needs.build.outputs.image_id }}
           IMAGE_TAR: ${{ runner.temp }}/cuelo-image/cuelo-image.tar.gz
           RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+          CLEANUP_IMAGE_IDS: ${{ inputs.cleanup_image_ids }}
+          APPLY_CLEANUP: ${{ inputs.apply_cleanup }}
         run: |
           set -euo pipefail
           bash deploy/cuelo/host.sh "$MODE" 2>&1 | tee "$RUNNER_TEMP/cuelo-host.log"
@@ -202,7 +220,7 @@ jobs:
         if: ${{ always() }}
         shell: bash
         run: |
-          # 결과는 컨테이너 종료와 무관하게 Actions 요약·로그에 남는다. 컨테이너·이미지는 지우지 않는다.
+          # 결과는 컨테이너 종료와 무관하게 Actions 요약·로그에 남는다. 컨테이너는 지우지 않고, 이미지는 cleanup-images 모드만 지운다.
           if [ -f "$RUNNER_TEMP/cuelo-host.log" ]; then
             { echo '### CUELO Cloud host'; echo '```'; tail -n 200 "$RUNNER_TEMP/cuelo-host.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi

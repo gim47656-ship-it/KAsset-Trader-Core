@@ -208,6 +208,7 @@ tests/test_crypto_alert_triage_command.py
 tests/test_crypto_insight_snapshot_model.py
 tests/test_crypto_market_regime_tool.py
 tests/test_crypto_order_flow_social.py
+tests/test_cuelo_cloud_cleanup.py
 tests/test_daily_scan_tasks.py
 tests/test_diagnose_research_reports_cli.py
 tests/test_dockerfile_api_frontend_paths.py
