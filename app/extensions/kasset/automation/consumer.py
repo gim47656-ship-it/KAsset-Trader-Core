@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from app.extensions.kasset.api.errors import MobileApiError
 from app.extensions.kasset.api.paper_schemas import OrderRequest
+from app.extensions.kasset.automation.chase_guard import (
+    entry_sizing_from_evidence,
+    evaluate_chase_guard,
+)
 from app.extensions.kasset.automation.contracts import (
     ClaimedRecommendation,
     ExecutionSafetyGate,
@@ -24,7 +28,8 @@ class PaperAutomationConsumer:
 
     Claim selection and completion are owned by ``RecommendationService``.
     Order mutation is available only through ``PaperOrderFacade``.  This class
-    does not contain a LIVE provider path and never derives a quantity.
+    does not contain a LIVE provider path and never derives a quantity; with
+    ``chase_guard`` (AUTO_PAPER only) it may only shrink or block a BUY.
     """
 
     def __init__(
@@ -35,6 +40,7 @@ class PaperAutomationConsumer:
         recommendation_service: RecommendationService,
         paper_orders: PaperOrderFacade,
         db: Any,
+        chase_guard: bool = False,
     ) -> None:
         owner = owner_user_id.strip()
         if not owner:
@@ -44,6 +50,7 @@ class PaperAutomationConsumer:
         self._recommendations = recommendation_service
         self._paper_orders = paper_orders
         self._db = db
+        self._chase_guard = chase_guard
 
     async def run_once(self, *, now: datetime) -> PaperExecutionOutcome:
         current = utc_datetime(now, field_name="now").replace(microsecond=0)
@@ -149,6 +156,35 @@ class PaperAutomationConsumer:
         if found:
             assert existing_outcome is not None
             return existing_outcome
+
+        if self._chase_guard and request.side == "BUY":
+            # 제출 직전, 이 주문이 실제로 체결될 가격(preview의 PAPER 시세)으로
+            # 추격 상한과 계획 위험을 다시 판정한다. 수량은 줄이기만 한다.
+            sizing = entry_sizing_from_evidence(getattr(claim, "evidence", None))
+            try:
+                executable_price = (
+                    Decimal(str(assessment.reference_price))
+                    if assessment.reference_price is not None
+                    else None
+                )
+            except (InvalidOperation, ValueError):
+                executable_price = None
+            guard = evaluate_chase_guard(
+                sizing,
+                executable_price=executable_price,
+                quantity=request.quantity,
+            )
+            if not guard.allowed:
+                assert guard.reason is not None
+                return await self._finish_failure(
+                    claim,
+                    current,
+                    guard.reason,
+                    status="BLOCKED",
+                )
+            assert guard.quantity is not None
+            if guard.quantity != request.quantity:
+                request = request.model_copy(update={"quantity": guard.quantity})
 
         try:
             envelope, replayed = await self._paper_orders.submit(
@@ -447,6 +483,8 @@ class PaperAutomationConsumer:
         claim: ClaimedRecommendation,
         completed_at: datetime,
         detail: str,
+        *,
+        status: Literal["REJECTED", "BLOCKED"] = "REJECTED",
     ) -> PaperExecutionOutcome:
         try:
             await self._recommendations.fail_paper_execution(
@@ -463,7 +501,7 @@ class PaperAutomationConsumer:
                 recommendation_id=claim.id,
             )
         return PaperExecutionOutcome(
-            status="REJECTED",
+            status=status,
             reason=detail,
             recommendation_id=claim.id,
         )

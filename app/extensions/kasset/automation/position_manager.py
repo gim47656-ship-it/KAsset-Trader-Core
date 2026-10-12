@@ -273,9 +273,15 @@ def initialize_position(
     strategy_version: str,
     position_cycle_id: int | None = None,
     exit_levels_effective_at: datetime | None = None,
+    strategy_stop: Decimal | None = None,
     config: PositionManagerConfig = PositionManagerConfig(),
 ) -> ManagedPositionState:
-    """ATR 근거로 초기 손절선(진입가 - ``initial_stop_atr`` ATR)을 세운다.
+    """초기 손절선을 세운다: ATR 손절선과 전략 손절가 중 더 높은(타이트한) 쪽.
+
+    ATR 손절선은 ``진입가 - initial_stop_atr * ATR``다. ``strategy_stop``은 그
+    진입의 수량을 정할 때 쓴 전략 손절가로, 체결가보다 낮은 유한 양수일 때만
+    반영한다. 둘 다 같은 계획 위험을 가리켜야 하므로 더 타이트한 쪽을 택하고
+    손절선을 느슨하게 만들지 않는다. 없거나 쓸 수 없으면 ATR 손절선만 쓴다.
 
     ATR이 없으면 손절선을 발명하지 않는다. 호출자는 ATR을 만들 근거가 없을 때
     이 함수를 부르지 않고 그 보유분을 관리하지 않는 쪽을 택한다.
@@ -286,8 +292,14 @@ def initialize_position(
     if not initial_atr.is_finite() or initial_atr <= _ZERO:
         raise ValueError("initial_atr must be positive and finite")
     initial_stop = entry_price - config.initial_stop_atr * initial_atr
+    if (
+        strategy_stop is not None
+        and strategy_stop.is_finite()
+        and _ZERO < strategy_stop < entry_price
+    ):
+        initial_stop = max(initial_stop, strategy_stop)
     if initial_stop <= _ZERO:
-        raise ValueError("initial ATR stop must stay above zero")
+        raise ValueError("initial stop must stay above zero")
     return ManagedPositionState(
         market=market,
         symbol=symbol,

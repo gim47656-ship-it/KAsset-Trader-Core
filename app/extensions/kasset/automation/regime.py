@@ -114,12 +114,16 @@ def assess_market_regime(
         breadth = Decimal(above_sma) / Decimal(contributors)
         return20 = Decimal(str(median(returns))) if returns else Decimal("0")
         atr_ratio = Decimal(str(median(atr_ratios))) if atr_ratios else Decimal("0")
-        if atr_ratio >= Decimal("0.035"):
+        # BEAR is checked before VOLATILE: a falling, wide-range market (weak
+        # breadth and negative median return) must stop new buys even though its
+        # ATR is high. Checking VOLATILE first let the 2026-10-07/08 sell-off
+        # (breadth 0.37, return20 -0.048, ATR 0.042) keep buying at half size.
+        if breadth <= Decimal("0.40") and return20 < Decimal("-0.02"):
+            regime = MarketRegime.BEAR
+        elif atr_ratio >= Decimal("0.035"):
             regime = MarketRegime.VOLATILE
         elif breadth >= Decimal("0.60") and return20 > Decimal("0.02"):
             regime = MarketRegime.BULL
-        elif breadth <= Decimal("0.40") and return20 < Decimal("-0.02"):
-            regime = MarketRegime.BEAR
         else:
             regime = MarketRegime.SIDEWAYS
 

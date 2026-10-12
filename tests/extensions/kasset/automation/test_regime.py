@@ -60,6 +60,11 @@ def _bars(*, start: Decimal, daily_move: Decimal, spread: Decimal) -> list[Price
             _bars(start=Decimal("100"), daily_move=Decimal("0.1"), spread=Decimal("5")),
             MarketRegime.VOLATILE,
         ),
+        (
+            # Falling and wide-range: BEAR must win over VOLATILE so new buys stop.
+            _bars(start=Decimal("200"), daily_move=Decimal("-2"), spread=Decimal("10")),
+            MarketRegime.BEAR,
+        ),
     ],
 )
 def test_regime_classifier_selects_expected_weight_table(

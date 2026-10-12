@@ -16,10 +16,12 @@ tests/extensions/kasset/api/test_market_warmup.py
 tests/extensions/kasset/api/test_toss_market_data_regular_close.py
 tests/extensions/kasset/api/test_watchlist.py
 tests/extensions/kasset/automation/test_backtest.py
+tests/extensions/kasset/automation/test_chase_guard.py
 tests/extensions/kasset/automation/test_consumer.py
 tests/extensions/kasset/automation/test_feature_engine.py
 tests/extensions/kasset/automation/test_hard_risk_ai_review.py
 tests/extensions/kasset/automation/test_intraday_data.py
+tests/extensions/kasset/automation/test_issuer_buy_limits.py
 tests/extensions/kasset/automation/test_job.py
 tests/extensions/kasset/automation/test_longterm_shadow.py
 tests/extensions/kasset/automation/test_market_pipeline.py

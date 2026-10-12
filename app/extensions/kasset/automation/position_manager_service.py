@@ -9,9 +9,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal, DecimalException
 from typing import Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extensions.kasset.automation.chase_guard import strategy_stop_from_evidence
 from app.extensions.kasset.automation.intraday_data import (
     CompletedIntradayBars,
     load_completed_session_bars,
@@ -46,13 +47,14 @@ from app.extensions.kasset.automation.strategy_promotion import (
 )
 from app.extensions.kasset.models import (
     AndroidPaperAccount,
+    AndroidPaperOrder,
     KAssetPaperPositionState,
 )
 from app.models.ai_recommendations import (
     AIRecommendation,
     RecommendationDecision,
 )
-from app.models.paper_trading import PaperPosition
+from app.models.paper_trading import PaperPosition, PaperTrade
 from app.models.trading import InstrumentType
 from app.services.daily_candles.repository import (
     DailyCandleRow,
@@ -75,6 +77,11 @@ _REALTIME_TAPE_CONDITIONS = frozenset(
     {"volume_power_weak", "price_falling", "below_session_vwap"}
 )
 _ZERO = Decimal("0")
+#: AI 주문의 clientOrderId 접두사(``ai-rec:<recommendation id>``).
+_AI_ORDER_PREFIX = "ai-rec:"
+#: 포지션 생성과 첫 BUY 체결은 같은 트랜잭션이라 시각이 같다. 그 차이를 흡수하는
+#: 여유일 뿐이며, 이전 사이클의 체결을 끌어오지 않을 만큼 짧다.
+_OPENING_TRADE_TOLERANCE = timedelta(seconds=30)
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -540,6 +547,60 @@ class PaperPositionManagerService:
                 )
         return loaded
 
+    async def _entry_strategy_stop(
+        self,
+        *,
+        owner_user_id: int,
+        position: PaperPosition,
+    ) -> Decimal | None:
+        """사이클을 연 AI BUY 추천이 수량 산정에 쓴 전략 손절가. 없으면 ``None``.
+
+        PaperPosition에는 추천 연결이 없으므로 포지션 생성 시각에 가장 가까운 BUY
+        체결(PaperTrade)에 연결된 주문의 ``ai-rec:<id>`` clientOrderId로 추천을
+        찾는다. 포지션과 첫 체결은 같은 트랜잭션에서 만들어져 ``executed_at``이
+        같으므로, 양쪽으로 ``_OPENING_TRADE_TOLERANCE``만 열어 두고 가장 가까운
+        체결을 고른다(같은 거리면 나중 체결). 직전 사이클의 BUY가 허용 범위 안에
+        있어도 이 사이클을 연 체결이 이긴다. 연결이 없거나 근거가 없으면 호출자는
+        ATR 손절선만 쓴다.
+        """
+
+        created_at = _aware_utc(position.created_at)
+        opening_order = await self._db.scalar(
+            select(AndroidPaperOrder)
+            .join(PaperTrade, PaperTrade.id == AndroidPaperOrder.paper_trade_id)
+            .where(
+                AndroidPaperOrder.owner_user_id == owner_user_id,
+                AndroidPaperOrder.paper_account_id == position.account_id,
+                AndroidPaperOrder.symbol == position.symbol,
+                AndroidPaperOrder.side == "BUY",
+                AndroidPaperOrder.client_order_id.like(f"{_AI_ORDER_PREFIX}%"),
+                PaperTrade.executed_at >= created_at - _OPENING_TRADE_TOLERANCE,
+                PaperTrade.executed_at <= created_at + _OPENING_TRADE_TOLERANCE,
+            )
+            .order_by(
+                func.abs(
+                    func.extract("epoch", PaperTrade.executed_at)
+                    - created_at.timestamp()
+                ),
+                PaperTrade.id.desc(),
+            )
+            .limit(1)
+        )
+        client_order_id = getattr(opening_order, "client_order_id", None)
+        if not isinstance(client_order_id, str):
+            return None
+        recommendation = await self._db.get(
+            AIRecommendation,
+            client_order_id[len(_AI_ORDER_PREFIX) :],
+        )
+        if (
+            recommendation is None
+            or recommendation.owner_user_id != owner_user_id
+            or recommendation.action != "BUY"
+        ):
+            return None
+        return strategy_stop_from_evidence(recommendation.evidence)
+
     async def _manage_position(
         self,
         *,
@@ -617,6 +678,10 @@ class PaperPositionManagerService:
                 strategy_version=self._strategy_version,
                 position_cycle_id=position_id,
                 exit_levels_effective_at=self._now,
+                strategy_stop=await self._entry_strategy_stop(
+                    owner_user_id=owner_user_id,
+                    position=position,
+                ),
                 config=self._config,
             )
             if state_row is None:

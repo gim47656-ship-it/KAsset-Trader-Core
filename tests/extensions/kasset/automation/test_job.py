@@ -82,7 +82,22 @@ def _approved_recommendation(
                 "status": "agrees",
                 "action": "BUY",
                 "confidence": "0.9",
-            }
+            },
+            # AUTO_PAPER 매수 추격 상한 관문이 읽는 수량 산정 근거. 기준 시세
+            # (70000)에서 정확히 체결되는 계획이다.
+            {
+                "kind": "ai_vertical_slice",
+                "entryPrice": "70000",
+                "stopPrice": "68000",
+                "portfolio": {
+                    "positionSizing": {
+                        "entryPrice": "70000",
+                        "strategyStop": "68000",
+                        "riskBudget": "100000",
+                        "lotSize": "1",
+                    }
+                },
+            },
         ],
         confidence="0.28",
         suggested_quantity="1",
@@ -1127,6 +1142,54 @@ async def test_in_session_fresh_reference_quote_still_places_the_order(
             )
         )
         assert stored == "SUCCEEDED"
+    finally:
+        await _cleanup_paper_wiring(db_session, owner_id)
+        await _cleanup_owner(db_session, username)
+
+
+@pytest.mark.asyncio
+async def test_auto_paper_buy_chasing_above_the_sized_entry_is_blocked(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """계획 진입가(70000)보다 0.5R(1000) 넘게 높은 시세에서는 주문하지 않는다."""
+    owner_id, username = await _seed_owner(db_session)
+    recommendation = _approved_recommendation(owner_id, now=_NOW_IN_SESSION)
+    recommendation.reference_price = "70000"
+    recommendation_id = recommendation.id
+    try:
+        db_session.add(recommendation)
+        await db_session.commit()
+        await _set_auto_policy(db_session, owner_id, now=_NOW_IN_SESSION)
+        await _enable_promotion_bypass(db_session, owner_id, now=_NOW_IN_SESSION)
+        monkeypatch.setattr(settings, "AI_PAPER_AUTO_EXECUTION_ENABLED", True)
+        monkeypatch.setattr(settings, "TRADING_ENABLED", True)
+        _record_quote_for_market(
+            monkeypatch,
+            krx_quotes.build_quote(
+                market="KRX",
+                symbol="005930",
+                name="삼성전자",
+                currency="KRW",
+                price=Decimal("72000"),
+                previous_close=Decimal("69000"),
+                as_of=_NOW_IN_SESSION,
+                source=TOSS_QUOTE_SOURCE,
+            ),
+        )
+
+        outcome = await _outcome_for_owner(owner_id, now=_NOW_IN_SESSION)
+
+        assert outcome["status"] == "BLOCKED"
+        assert outcome["reason"] == "chase_limit_exceeded"
+        assert outcome["recommendation_id"] == recommendation_id
+        assert await _owner_order_count(db_session, owner_id) == 0
+        stored = await db_session.scalar(
+            select(AIRecommendation.paper_execution_status).where(
+                AIRecommendation.id == recommendation_id
+            )
+        )
+        assert stored == "FAILED"
     finally:
         await _cleanup_paper_wiring(db_session, owner_id)
         await _cleanup_owner(db_session, username)

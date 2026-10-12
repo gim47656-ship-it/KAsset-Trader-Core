@@ -216,6 +216,8 @@ class PaperExecutionClaim:
     symbol: str
     suggested_quantity: Decimal | str | None
     valid_until: datetime
+    # 추천 evidence(positionSizing 등). AUTO_PAPER 매수 추격 상한 관문이 읽는다.
+    evidence: Sequence[Mapping[str, object]] = ()
 
 
 @runtime_checkable
