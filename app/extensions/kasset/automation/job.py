@@ -552,6 +552,7 @@ class OwnerScopedRecommendationService:
             symbol=row.symbol,
             suggested_quantity=row.suggested_quantity,
             valid_until=row.valid_until,
+            evidence=tuple(row.evidence or ()),
         )
 
     async def complete_paper_execution(
@@ -1167,6 +1168,7 @@ async def _run_owner_sweep(
                 realtime_gate=realtime_gate,
             ),
             db=db,
+            chase_guard=True,
         )
         outcome = await consumer.run_once(now=current)
         if promotion_bypassed:

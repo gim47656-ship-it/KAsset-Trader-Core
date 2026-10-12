@@ -54,10 +54,11 @@ from app.extensions.kasset.automation.strategy_promotion_service import (
 )
 from app.extensions.kasset.models import (
     AndroidPaperAccount,
+    AndroidPaperOrder,
     KAssetPaperPositionState,
 )
 from app.models.ai_recommendations import AIRecommendation
-from app.models.paper_trading import PaperAccount, PaperPosition
+from app.models.paper_trading import PaperAccount, PaperPosition, PaperTrade
 from app.models.trading import InstrumentType, User
 from app.services.market_events.session_calendar import regular_session_bounds
 
@@ -301,6 +302,64 @@ def test_low_volatility_atr_stop_is_used_as_stored() -> None:
     assert signal is not None
     assert signal.kind is ExitKind.STOP
     assert signal.reference_price == D("99")
+
+
+@pytest.mark.unit
+def test_strategy_stop_tightens_a_chased_fill_to_the_sized_stop() -> None:
+    """009155: 체결 542500의 ATR 손절선(496285.72)이 아니라 계획 손절 515000."""
+
+    state = initialize_position(
+        market="KRX",
+        symbol="009155",
+        entry_price=D("542500"),
+        initial_atr=D("23107.14"),
+        entry_at=ENTRY_AT,
+        strategy_version="breakout-portfolio-v1",
+        strategy_stop=D("515000"),
+    )
+
+    assert state.initial_stop == D("515000")
+    assert state.current_stop == D("515000")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("strategy_stop", [D("80"), D("100"), D("120"), D("0"), None])
+def test_strategy_stop_never_loosens_and_unusable_stops_are_ignored(
+    strategy_stop: Decimal | None,
+) -> None:
+    # ATR 손절선은 100 - 2*4 = 92. 더 낮거나 체결가 이상이거나 0 이하인 값은 무시한다.
+    state = initialize_position(
+        market="KRX",
+        symbol="005930",
+        entry_price=D("100"),
+        initial_atr=D("4"),
+        entry_at=ENTRY_AT,
+        strategy_version="breakout-portfolio-v1",
+        strategy_stop=strategy_stop,
+    )
+
+    assert state.initial_stop == D("92")
+
+
+def _wide_atr_state(strategy_stop: Decimal | None) -> ManagedPositionState:
+    return initialize_position(
+        market="KRX",
+        symbol="005930",
+        entry_price=D("100"),
+        initial_atr=D("60"),
+        entry_at=ENTRY_AT,
+        strategy_version="breakout-portfolio-v1",
+        strategy_stop=strategy_stop,
+    )
+
+
+@pytest.mark.unit
+def test_valid_strategy_stop_rescues_a_wide_atr_stop_below_zero() -> None:
+    """ATR 손절선(100 - 2*60 < 0)이 0 이하라도 쓸 수 있는 전략 손절가가 이긴다."""
+
+    assert _wide_atr_state(D("90")).initial_stop == D("90")
+    with pytest.raises(ValueError, match="stop must stay above zero"):
+        _wide_atr_state(None)
 
 
 @pytest.mark.unit
@@ -1014,6 +1073,164 @@ async def test_new_buy_creates_fresh_state_from_position_average_price() -> None
     assert state_row.strategy_key == "qullamaggie_breakout_portfolio"
     assert state_row.strategy_version == "1.0.0"
     assert state_row.strategy_fingerprint == _ARTIFACT_FINGERPRINT
+
+
+def _sized_buy_recommendation(*, owner_user_id: int, strategy_stop: str) -> object:
+    return SimpleNamespace(
+        owner_user_id=owner_user_id,
+        action="BUY",
+        evidence=[
+            {
+                "kind": "ai_vertical_slice",
+                "stopPrice": strategy_stop,
+                "portfolio": {"positionSizing": {"strategyStop": strategy_stop}},
+            }
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recommendation_owner", "expected_stop"),
+    [(23, D("95")), (99, D("92"))],
+)
+async def test_new_state_takes_the_sized_stop_of_the_opening_ai_buy(
+    recommendation_owner: int, expected_stop: Decimal
+) -> None:
+    """ATR 손절선(92)보다 타이트한 계획 손절(95)을 새 사이클이 물려받는다.
+
+    다른 소유자의 추천에는 연결하지 않아 ATR 손절선으로 남는다.
+    """
+
+    recommendation = _sized_buy_recommendation(
+        owner_user_id=recommendation_owner, strategy_stop="95"
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(
+        side_effect=[None, SimpleNamespace(client_order_id="ai-rec:rec-1"), None, None]
+    )
+    db.get = AsyncMock(
+        side_effect=lambda _model, key: recommendation if key == "rec-1" else None
+    )
+    db.flush = AsyncMock()
+    db.add = MagicMock()
+    service = _manager(db, now=ENTRY_AT + timedelta(days=1, hours=8))
+
+    await service._manage_position(
+        owner_user_id=23,
+        account_id=17,
+        market="KRX",
+        position=_paper_position(avg_price="100"),
+        rows=_atr_candles(),
+    )
+
+    state_row = next(
+        call_.args[0]
+        for call_ in db.add.call_args_list
+        if isinstance(call_.args[0], KAssetPaperPositionState)
+    )
+    assert state_row.initial_stop == expected_stop
+    assert state_row.current_stop == expected_stop
+
+
+@pytest.mark.asyncio
+async def test_entry_stop_lookup_prefers_the_opening_buy_over_a_previous_cycle(
+    db_session: AsyncSession,
+    user: User,
+) -> None:
+    """직전 사이클 BUY가 10초 전에 있어도 포지션 생성 시각의 BUY가 이긴다."""
+
+    user_id = int(user.id)
+    account_id = 8_500_000_000 + user_id
+    account = PaperAccount(
+        id=account_id,
+        name=f"entry-stop-{user_id}",
+        initial_capital=D("1000000"),
+        cash_krw=D("999000"),
+        cash_usd=D("0"),
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.flush()
+    db_session.add(
+        AndroidPaperAccount(owner_user_id=user_id, paper_account_id=account_id)
+    )
+    position = _paper_position(
+        position_id=8_600_000_000 + user_id,
+        account_id=account_id,
+    )
+    db_session.add(position)
+
+    async def _buy(label: str, stop: str, executed_at: datetime) -> None:
+        recommendation_id = f"rec-entry-stop-{user_id}-{label}"
+        db_session.add(
+            AIRecommendation(
+                id=recommendation_id,
+                owner_user_id=user_id,
+                action="BUY",
+                decision="PENDING",
+                market="KRX",
+                symbol="005930",
+                currency="KRW",
+                rationale=[],
+                risks=[],
+                evidence=[
+                    {
+                        "kind": "ai_vertical_slice",
+                        "portfolio": {"positionSizing": {"strategyStop": stop}},
+                    }
+                ],
+                source="kasset-automation",
+                created_at=ENTRY_AT - timedelta(hours=1),
+                updated_at=ENTRY_AT - timedelta(hours=1),
+            )
+        )
+        trade = PaperTrade(
+            account_id=account_id,
+            symbol="005930",
+            instrument_type=InstrumentType.equity_kr,
+            side="buy",
+            order_type="market",
+            quantity=D("1"),
+            price=D("100"),
+            total_amount=D("100"),
+            fee=D("0"),
+            currency="KRW",
+            executed_at=executed_at,
+        )
+        db_session.add(trade)
+        await db_session.flush()
+        db_session.add(
+            AndroidPaperOrder(
+                id=f"order-entry-stop-{user_id}-{label}",
+                owner_user_id=user_id,
+                client_order_id=f"ai-rec:{recommendation_id}",
+                paper_account_id=account_id,
+                broker_order_id=f"PAPER-ENTRY-STOP-{user_id}-{label}",
+                market="KRX",
+                symbol="005930",
+                currency="KRW",
+                side="BUY",
+                order_type="MARKET",
+                quantity=D("1"),
+                status="FILLED",
+                filled_quantity=D("1"),
+                paper_trade_id=trade.id,
+            )
+        )
+
+    await _buy("previous", "80", ENTRY_AT - timedelta(seconds=10))
+    await _buy("opening", "95", ENTRY_AT)
+    await db_session.flush()
+    service = PaperPositionManagerService(
+        db_session,
+        now=ENTRY_AT + timedelta(minutes=1),
+        strategy_fingerprint=_ARTIFACT_FINGERPRINT,
+    )
+
+    stop = await service._entry_strategy_stop(owner_user_id=user_id, position=position)
+
+    assert stop == D("95")
 
 
 @pytest.mark.asyncio

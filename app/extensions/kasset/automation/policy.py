@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.kasset.api.runtime_state import runtime_state
@@ -155,6 +155,8 @@ _LEGACY_PRESET_LIMITS = {
     },
 }
 _DEFAULT_RISK_LEVEL = 2
+# 위험등급과 무관한 발행사 묶음당 하루 BUY 주문 수(2026-10-12 사용자 승인).
+_SAME_ISSUER_DAILY_BUY_LIMIT = 1
 
 
 class OperatingMode(StrEnum):
@@ -257,7 +259,8 @@ class AITradingLimits:
         if preset.max_buys_per_day is None or preset.max_sells_per_day is None:
             # 3~5단계 PAPER는 하루 매수·매도·전체 주문 횟수, 같은 종목 재진입 횟수,
             # 동시 보유 종목 수를 제한하지 않는다. 사용자 횟수는 적용할 곳이 없어
-            # 저장하지 않는다. 예산·종목 비중이 노출을 계속 제한한다.
+            # 저장하지 않는다. 예산·종목 비중이 노출을 계속 제한하고, 같은 발행사
+            # 보유 중 BUY와 하루 두 번째 BUY는 등급과 무관하게 Hard Risk가 막는다.
             custom_max_buys_per_day = None
             custom_max_sells_per_day = None
             effective_buys = effective_sells = None
@@ -821,6 +824,45 @@ class AITradingPolicyService:
                 )
                 or 0
             )
+        # 같은 발행사(보통주·우선주 묶음) 보유 중 추가 BUY와 하루 두 번째 BUY를
+        # 막는다. SELL은 조회하지 않고 두 관문 모두 통과로 남긴다.
+        issuer_key = issuer_group_key(market, symbol)
+        same_issuer_held = 0
+        same_issuer_buys = 0
+        if action == "BUY" and currency is not None:
+            if account_id is not None:
+                same_issuer_held = int(
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(PaperPosition)
+                        .where(
+                            PaperPosition.account_id == account_id,
+                            PaperPosition.instrument_type == instrument_type,
+                            PaperPosition.quantity > 0,
+                            _issuer_symbol_filter(
+                                PaperPosition.symbol, market, symbol
+                            ),
+                        )
+                    )
+                    or 0
+                )
+            day_start = trading_day_start(now, currency)
+            same_issuer_buys = int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(AndroidPaperOrder)
+                    .where(
+                        AndroidPaperOrder.owner_user_id == owner_user_id,
+                        AndroidPaperOrder.currency == currency,
+                        _issuer_symbol_filter(
+                            AndroidPaperOrder.symbol, market, symbol
+                        ),
+                        AndroidPaperOrder.side == "BUY",
+                        AndroidPaperOrder.created_at >= day_start,
+                    )
+                )
+                or 0
+            )
 
         is_buy = action == "BUY"
         valid_shape = (
@@ -968,6 +1010,25 @@ class AITradingPolicyService:
                     f"hardMaxOrders={_limit_text(limits.max_custom_orders_per_day)}; "
                     "sameSymbolBuys="
                     f"{same_symbol_buys}/{_limit_text(limits.same_symbol_reentry_limit)}"
+                ),
+            ),
+            HardRiskCheck(
+                # 같은 종목·같은 발행사(보통주·우선주)를 들고 있는 동안 물타기·추가
+                # 매수를 막는다. 위험등급과 무관하다.
+                "SAME_ISSUER_HELD",
+                (not is_buy) or same_issuer_held == 0,
+                (
+                    f"action={action}; issuer={issuer_key}; "
+                    f"issuerHeld={same_issuer_held}/0"
+                ),
+            ),
+            HardRiskCheck(
+                # 발행사 묶음당 하루 BUY 주문 1건. 오늘 청산한 종목의 재진입도 막는다.
+                "SAME_ISSUER_DAILY_BUY_LIMIT",
+                (not is_buy) or same_issuer_buys < _SAME_ISSUER_DAILY_BUY_LIMIT,
+                (
+                    f"action={action}; issuer={issuer_key}; "
+                    f"sameIssuerBuys={same_issuer_buys}/{_SAME_ISSUER_DAILY_BUY_LIMIT}"
                 ),
             ),
             HardRiskCheck(
@@ -1391,6 +1452,25 @@ def _limit_text(limit: int | None) -> str:
     return "unlimited" if limit is None else str(limit)
 
 
+def issuer_group_key(market: str, symbol: str) -> str:
+    """같은 발행사 종목을 묶는 키. KRX 6자리 코드는 앞 5자리, 그 밖은 종목 그대로다.
+
+    KRX 단축코드 앞 5자리는 발행회사, 끝자리는 주식 종류다(예: 009150 보통주와
+    009155 우선주는 ``00915``). symbol master에 발행사 식별자가 없어 코드 규칙을 쓴다.
+    """
+
+    if market == "KRX" and len(symbol) == 6:
+        return symbol[:5]
+    return symbol
+
+
+def _issuer_symbol_filter(column: Any, market: str, symbol: str) -> Any:
+    key = issuer_group_key(market, symbol)
+    if key == symbol:
+        return column == symbol
+    return and_(func.length(column) == 6, func.substr(column, 1, 5) == key)
+
+
 def _strict_bool(value: object, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
@@ -1407,5 +1487,6 @@ __all__ = [
     "OperatingMode",
     "PaperExecutionView",
     "PortfolioPlan",
+    "issuer_group_key",
     "settlement_book",
 ]
