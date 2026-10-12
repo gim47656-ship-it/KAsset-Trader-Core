@@ -26,6 +26,8 @@
 - cross_review(OpenAI gpt-6-astra) 1회차 major 2건: ATR 손절 0 이하 시 전략 손절가 적용 전 예외(R1-OAI-1), 이전 사이클 BUY 오선택(R1-OAI-2). 수정 후 2회차 지적 0, resolve pass.
 - 로컬 테스트 금지(하드룰 14). 테스트는 PR CI에서 실행한다.
 - 하네스 한계: `git.exe`로 만든 worktree는 cross_review 경로 확인(Linux `git rev-parse`)이 읽지 못한다. 사용자 선택으로 본 체크아웃을 기능 브랜치로 잠시 전환해 진행했다. autocrlf CRLF 작업본은 리뷰 diff를 부풀리므로 리뷰 대상 8개 파일을 LF로 맞췄다(커밋 blob은 동일).
+- PR #129 첫 CI(run 38249658961)는 `ruff format` 2파일과 새 테스트 2파일의 `ci_shards` 미등록(exact-cover)으로 실패했다. 포맷을 맞추고 shard-3에 등록한 `0a640578`(포맷 변경은 cross_review `xr-20261012124120-d90b15` 지적 0)에서 run 38250638680이 전부 성공했다. 4개 shard 모두 실패 0이고, shard-3 수집은 4,400→4,433개로 새 테스트가 포함됐다.
+- squash 머지 `eccc2986` → main Test run 38251730746 성공 → Deploy run 38252507159 성공(릴리즈 `deploy-20261012-2201-eccc298`). 서버 checkout·`.env.kasset` `CORE_IMAGE_TAG`=`eccc2986…`이고 앱 컨테이너 6개(api·worker·scheduler·mcp·ai-mcp·nh-stream)가 새 이미지다. worker에서 `regime` BEAR 우선 순서와 `CHASE_LIMIT_RISK_FRACTION=0.5`가 로드되는 것을 확인했다. `kasset-kr-dart-cron`은 배포 대상이 아니라 이전 이미지 그대로다.
 
 ## 남은 확인
 배포 뒤 첫 정규장 관찰 항목은 HANDOFF 「PAPER 진입 위험 관문 4종」.
