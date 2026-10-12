@@ -839,9 +839,7 @@ class AITradingPolicyService:
                             PaperPosition.account_id == account_id,
                             PaperPosition.instrument_type == instrument_type,
                             PaperPosition.quantity > 0,
-                            _issuer_symbol_filter(
-                                PaperPosition.symbol, market, symbol
-                            ),
+                            _issuer_symbol_filter(PaperPosition.symbol, market, symbol),
                         )
                     )
                     or 0
@@ -854,9 +852,7 @@ class AITradingPolicyService:
                     .where(
                         AndroidPaperOrder.owner_user_id == owner_user_id,
                         AndroidPaperOrder.currency == currency,
-                        _issuer_symbol_filter(
-                            AndroidPaperOrder.symbol, market, symbol
-                        ),
+                        _issuer_symbol_filter(AndroidPaperOrder.symbol, market, symbol),
                         AndroidPaperOrder.side == "BUY",
                         AndroidPaperOrder.created_at >= day_start,
                     )

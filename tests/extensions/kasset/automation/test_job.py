@@ -1195,7 +1195,6 @@ async def test_auto_paper_buy_chasing_above_the_sized_entry_is_blocked(
         await _cleanup_owner(db_session, username)
 
 
-
 @pytest.mark.asyncio
 async def test_after_hours_sweep_is_blocked_out_of_regular_session(
     db_session: AsyncSession,
