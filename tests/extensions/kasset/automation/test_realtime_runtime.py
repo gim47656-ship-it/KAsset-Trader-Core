@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
+import signal
 import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -24,6 +27,7 @@ from app.extensions.kasset.automation.realtime_tape import (
     evaluate_realtime_entry,
 )
 from app.extensions.kasset.nhplug import protocol
+from app.extensions.kasset.nhplug import runner as runner_module
 from app.extensions.kasset.nhplug.runner import NhStreamRunner
 from app.extensions.kasset.nhplug.tape_store import (
     RealtimeEntryGate,
@@ -366,6 +370,40 @@ async def test_tape_store_ignores_malformed_snapshots() -> None:
         await client.set(snapshot_key("005930"), "{broken")
         await client.set(snapshot_key("000660"), json.dumps({"schemaVersion": "x"}))
         assert await store.read_many(["005930", "000660", "035420"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_runner_main_hides_httpx_request_lines_that_carry_nh_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 컨테이너처럼 root INFO에서 시작한다. httpx INFO 줄에는 토큰 발급 URL의
+    # appkey·appsecretkey 쿼리가 그대로 들어간다.
+    root = logging.getLogger()
+    httpx_logger = logging.getLogger("httpx")
+    previous = (root.level, httpx_logger.level)
+    root.setLevel(logging.INFO)
+    httpx_logger.setLevel(logging.NOTSET)
+
+    class _StopAtIdle(Exception):
+        pass
+
+    def _stop_at_idle(*args: object, **kwargs: object) -> None:
+        raise _StopAtIdle
+
+    # 비활성 분기의 안내 로그에서 멈춘다. 그 전에 로그 정책이 끝나 있어야 한다.
+    monkeypatch.setattr(runner_module, "stream_enabled", lambda: False)
+    monkeypatch.setattr(runner_module.logger, "info", _stop_at_idle)
+    try:
+        with pytest.raises(_StopAtIdle):
+            await runner_module.main()
+        assert not httpx_logger.isEnabledFor(logging.INFO)
+    finally:
+        root.setLevel(previous[0])
+        httpx_logger.setLevel(previous[1])
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(NotImplementedError):
+                loop.remove_signal_handler(stop_signal)
 
 
 # ---------------------------------------------------------------- minute cycle
