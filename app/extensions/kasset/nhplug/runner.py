@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal
+from app.core.logging_config import configure_dependency_log_levels
 from app.extensions.kasset.automation.market_session import current_regular_session
 from app.extensions.kasset.automation.realtime_tape import (
     BookTick,
@@ -499,6 +500,9 @@ def stream_enabled(environ: dict[str, str] | None = None) -> bool:
 async def main() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO)
+    # httpx INFO 요청 줄에는 NH PLUG 토큰 발급 URL의 appkey·appsecretkey 쿼리가
+    # 그대로 찍힌다. 다른 진입점과 같은 의존성 로그 정책을 적용해 막는다.
+    configure_dependency_log_levels()
     # docker stop(SIGTERM)을 받으면 main task를 취소해 구독 해제와 lease 반납을
     # 거친다. 그냥 죽으면 lease가 만료될 때까지 새 프로세스가 연결하지 못한다.
     main_task = asyncio.current_task()

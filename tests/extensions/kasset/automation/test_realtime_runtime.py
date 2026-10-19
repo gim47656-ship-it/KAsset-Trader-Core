@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
-import signal
 import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -384,26 +382,22 @@ async def test_runner_main_hides_httpx_request_lines_that_carry_nh_secrets(
     root.setLevel(logging.INFO)
     httpx_logger.setLevel(logging.NOTSET)
 
-    class _StopAtIdle(Exception):
+    class _StopAfterLoggingSetup(Exception):
         pass
 
-    def _stop_at_idle(*args: object, **kwargs: object) -> None:
-        raise _StopAtIdle
+    def _stop(*args: object, **kwargs: object) -> None:
+        raise _StopAfterLoggingSetup
 
-    # 비활성 분기의 안내 로그에서 멈춘다. 그 전에 로그 정책이 끝나 있어야 한다.
-    monkeypatch.setattr(runner_module, "stream_enabled", lambda: False)
-    monkeypatch.setattr(runner_module.logger, "info", _stop_at_idle)
+    # signal 핸들러를 걸기 전에 멈춘다. runner 모듈의 asyncio 이름만 바꾸므로
+    # 이벤트 루프·signal 같은 프로세스 전역 상태는 건드리지 않는다.
+    monkeypatch.setattr(runner_module, "asyncio", SimpleNamespace(current_task=_stop))
     try:
-        with pytest.raises(_StopAtIdle):
+        with pytest.raises(_StopAfterLoggingSetup):
             await runner_module.main()
         assert not httpx_logger.isEnabledFor(logging.INFO)
     finally:
         root.setLevel(previous[0])
         httpx_logger.setLevel(previous[1])
-        loop = asyncio.get_running_loop()
-        for stop_signal in (signal.SIGTERM, signal.SIGINT):
-            with contextlib.suppress(NotImplementedError):
-                loop.remove_signal_handler(stop_signal)
 
 
 # ---------------------------------------------------------------- minute cycle

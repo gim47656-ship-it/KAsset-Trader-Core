@@ -53,6 +53,7 @@ STATUS: accepted | pending-user-device-check | partial | superseded-by <path>
 
 | 날짜 | 주제 | 기록 |
 |---|---|---|
+| 19 | nh-stream 로그 NH secret 노출 차단·Toss GET 429 재시도 보완·장중 점검 | [19-nh-log-secret-toss-429](history/2026/10/19-nh-log-secret-toss-429/main.md) |
 | 06 | 토스 1분봉 결측 자동 메우기·과거 결측 복구 CLI | [06-toss-minute-gap](history/2026/10/06-toss-minute-gap/maker-TossMinuteGapRepair.md) |
 | 06 | 일일 목표 잠금 백테스트(현행 유지 결정)·연휴 다음 날 STALE_PRICE 세션 수 기준·제외 증거 키 통일 | [06-daily-target-reduction](history/2026/10/06-daily-target-reduction/maker-DailyTargetReduction.md) |
 | 05 | 장기 추세·재무성장 SHADOW 2후보 주간 코호트·20/60/120거래일 가상 성과 | [05-longterm-shadow](history/2026/10/05-longterm-shadow/main.md) |
