@@ -44,6 +44,12 @@ from app.services.brokers.toss.transport import DEFAULT_TOSS_BASE_URL, build_tos
 
 _TOKEN_CODES = {"invalid-token", "expired-token"}
 _GET_REISSUABLE_NON_JSON_STATUSES = {403}
+# Toss는 X-RateLimit-Remaining이 남아 있어도 429를 돌려줄 때가 있다(2026-10-19
+# 운영 관측: limit=20, remaining=14인 429 뒤 재시도 성공). 공식 권장인 지수
+# 백오프+jitter를 따라 조회(GET)는 두 번까지 다시 시도한다. 주문 등 다른
+# 메서드는 기존처럼 한 번만 재시도한다.
+_429_RETRIES_BY_METHOD = {"GET": 2}
+_DEFAULT_429_RETRIES = 1
 PreSendHook = Callable[[], Awaitable[None]]
 ResponseObserver = Callable[[TossApiGroup, int, TossRateLimitHeaders], None]
 
@@ -174,10 +180,21 @@ class TossReadClient:
                 status_code=response.status_code,
                 error_type="http_response",
             )
-        if response.status_code == 429 and self._retry_on_429:
+        allowed_retries = (
+            _429_RETRIES_BY_METHOD.get(method.upper(), _DEFAULT_429_RETRIES)
+            if self._retry_on_429
+            else 0
+        )
+        attempt = 0
+        while response.status_code == 429 and attempt < allowed_retries:
             await asyncio.sleep(
-                retry_delay_seconds(response.headers.get("Retry-After"), attempt=0)
+                retry_delay_seconds(
+                    response.headers.get("Retry-After"), attempt=attempt
+                )
             )
+            attempt += 1
+            # 재시도도 서버 토큰을 쓰므로 로컬 그룹 한도를 다시 거친다.
+            await self._rate_limiter.acquire(group)
             try:
                 response, _rate_limit_headers = await send()
             except httpx.HTTPError as exc:

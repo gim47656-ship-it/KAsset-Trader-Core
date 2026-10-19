@@ -725,6 +725,156 @@ async def test_get_order_429_non_json_backs_off_without_token_reissue(
     assert seen_authorizations == ["Bearer token-1", "Bearer token-1"]
 
 
+def _rate_limited(request: httpx.Request) -> httpx.Response:
+    # 2026-10-19 운영에서 본 429처럼 Retry-After 없이 온다.
+    return httpx.Response(
+        429,
+        json={
+            "error": {
+                "requestId": "rate-1",
+                "code": "rate-limit-exceeded",
+                "message": "slow down",
+            }
+        },
+        request=request,
+    )
+
+
+class _CountingLimiter(rate_limiter_module.TossRateLimiter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.groups: list[TossApiGroup] = []
+
+    async def acquire(self, group: TossApiGroup) -> None:
+        self.groups.append(group)
+        await super().acquire(group)
+
+
+@pytest.mark.asyncio
+async def test_get_recovers_from_two_429s_with_backoff_through_the_limiter(
+    monkeypatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(rate_limiter_module.random, "uniform", lambda a, b: 0.0)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return _rate_limited(request)
+        return httpx.Response(
+            200,
+            json=_json(
+                {
+                    "candles": [
+                        {
+                            "timestamp": "2026-10-19T09:20:00.000+09:00",
+                            "openPrice": "191000",
+                            "highPrice": "191500",
+                            "lowPrice": "190900",
+                            "closePrice": "191400",
+                            "volume": "1200",
+                            "currency": "KRW",
+                        }
+                    ],
+                    "nextBefore": None,
+                }
+            ),
+            request=request,
+        )
+
+    limiter = _CountingLimiter()
+    client = TossReadClient(
+        token_manager=_TokenManager(),
+        transport=httpx.MockTransport(handler),
+        rate_limiter=limiter,
+        publish_error_signals=False,
+    )
+    try:
+        page = await client.candles("068270", interval="1m", count=1)
+    finally:
+        await client.aclose()
+
+    assert page.candles[0].close_price == Decimal("191400")
+    assert calls == 3
+    assert sleeps == [1.0, 2.0]
+    assert limiter.groups == [TossApiGroup.MARKET_DATA_CHART] * 3
+
+
+@pytest.mark.asyncio
+async def test_get_gives_up_after_two_429_retries(monkeypatch) -> None:
+    calls = 0
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _rate_limited(request)
+
+    client = TossReadClient(
+        token_manager=_TokenManager(),
+        transport=httpx.MockTransport(handler),
+        publish_error_signals=False,
+    )
+    try:
+        with pytest.raises(TossApiResponseError) as exc_info:
+            await client.candles("068270", interval="1m", count=1)
+    finally:
+        await client.aclose()
+
+    assert exc_info.value.status_code == 429
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_order_post_still_retries_429_only_once(monkeypatch) -> None:
+    calls = 0
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _rate_limited(request)
+
+    client = TossReadClient(
+        token_manager=_TokenManager(),
+        account_seq=999,
+        transport=httpx.MockTransport(handler),
+        publish_error_signals=False,
+    )
+    try:
+        with pytest.raises(TossApiResponseError) as exc_info:
+            await client.place_order(
+                {
+                    "symbol": "AAPL",
+                    "side": "BUY",
+                    "orderType": "LIMIT",
+                    "quantity": "1",
+                    "price": "150",
+                    "clientOrderId": "proposal-id",
+                }
+            )
+    finally:
+        await client.aclose()
+
+    assert exc_info.value.status_code == 429
+    assert calls == 2
+
+
 @pytest.mark.asyncio
 async def test_candles_returns_typed_page_and_sends_query_params() -> None:
     seen: dict[str, str] = {}

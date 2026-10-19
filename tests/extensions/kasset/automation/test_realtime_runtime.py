@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -24,6 +25,7 @@ from app.extensions.kasset.automation.realtime_tape import (
     evaluate_realtime_entry,
 )
 from app.extensions.kasset.nhplug import protocol
+from app.extensions.kasset.nhplug import runner as runner_module
 from app.extensions.kasset.nhplug.runner import NhStreamRunner
 from app.extensions.kasset.nhplug.tape_store import (
     RealtimeEntryGate,
@@ -366,6 +368,36 @@ async def test_tape_store_ignores_malformed_snapshots() -> None:
         await client.set(snapshot_key("005930"), "{broken")
         await client.set(snapshot_key("000660"), json.dumps({"schemaVersion": "x"}))
         assert await store.read_many(["005930", "000660", "035420"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_runner_main_hides_httpx_request_lines_that_carry_nh_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 컨테이너처럼 root INFO에서 시작한다. httpx INFO 줄에는 토큰 발급 URL의
+    # appkey·appsecretkey 쿼리가 그대로 들어간다.
+    root = logging.getLogger()
+    httpx_logger = logging.getLogger("httpx")
+    previous = (root.level, httpx_logger.level)
+    root.setLevel(logging.INFO)
+    httpx_logger.setLevel(logging.NOTSET)
+
+    class _StopAfterLoggingSetup(Exception):
+        pass
+
+    def _stop(*args: object, **kwargs: object) -> None:
+        raise _StopAfterLoggingSetup
+
+    # signal 핸들러를 걸기 전에 멈춘다. runner 모듈의 asyncio 이름만 바꾸므로
+    # 이벤트 루프·signal 같은 프로세스 전역 상태는 건드리지 않는다.
+    monkeypatch.setattr(runner_module, "asyncio", SimpleNamespace(current_task=_stop))
+    try:
+        with pytest.raises(_StopAfterLoggingSetup):
+            await runner_module.main()
+        assert not httpx_logger.isEnabledFor(logging.INFO)
+    finally:
+        root.setLevel(previous[0])
+        httpx_logger.setLevel(previous[1])
 
 
 # ---------------------------------------------------------------- minute cycle
